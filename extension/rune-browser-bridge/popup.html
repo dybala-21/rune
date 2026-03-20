@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      width: 280px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      padding: 16px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+    .header h1 {
+      font-size: 14px;
+      font-weight: 600;
+      color: #fff;
+    }
+    .logo {
+      width: 24px;
+      height: 24px;
+      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      font-weight: bold;
+      color: #fff;
+    }
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      background: #16213e;
+      border-radius: 8px;
+      margin-bottom: 12px;
+      font-size: 13px;
+    }
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .status-dot.connected { background: #4CAF50; box-shadow: 0 0 6px #4CAF5088; }
+    .status-dot.disconnected { background: #666; }
+    .status-dot.waiting { background: #FFC107; animation: pulse 1.5s infinite; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+    .btn {
+      width: 100%;
+      padding: 10px;
+      border: none;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.15s;
+    }
+    .btn:hover { opacity: 0.9; }
+    .btn:active { opacity: 0.7; }
+    .btn-disconnect {
+      background: #dc2626;
+      color: #fff;
+    }
+    .info {
+      margin-top: 10px;
+      font-size: 11px;
+      color: #888;
+      line-height: 1.6;
+    }
+    .port-info {
+      margin-top: 8px;
+      font-size: 11px;
+      color: #555;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+    }
+    .error-info {
+      margin-top: 10px;
+      padding: 8px 10px;
+      background: #2d1b1b;
+      border: 1px solid #dc262644;
+      border-radius: 6px;
+      font-size: 11px;
+      color: #ef4444;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="logo">R</div>
+    <h1>RUNE Browser Bridge</h1>
+  </div>
+
+  <div class="status" id="statusBar">
+    <div class="status-dot waiting" id="statusDot"></div>
+    <span id="statusText">자동 연결 대기 중...</span>
+  </div>
+
+  <div id="waitingSection">
+    <div class="info">
+      RUNE에서 브라우저 작업을 요청하면 자동으로 연결됩니다.<br>
+      별도 조작이 필요 없습니다.
+    </div>
+  </div>
+
+  <div id="connectedSection" style="display:none;">
+    <button class="btn btn-disconnect" id="disconnectBtn">Disconnect</button>
+    <div class="port-info" id="portInfo"></div>
+  </div>
+
+  <div class="error-info" id="errorInfo"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

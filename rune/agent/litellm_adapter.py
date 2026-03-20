@@ -1,0 +1,431 @@
+"""LiteLLM streaming adapter, drop-in replacement for PydanticAI Agent.
+
+Provides the same interface as ``pydantic_ai.Agent`` (run_stream,
+stream_text, usage, all_messages, get_output) but calls LiteLLM directly.
+This removes the PydanticAI dependency and enables all LiteLLM providers
+(OpenAI, Anthropic, Gemini, Azure, Ollama, etc.) in a single code path.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from typing import Any
+
+import litellm
+
+from rune.utils.logger import get_logger
+
+log = get_logger(__name__)
+
+
+# Usage tracking
+
+@dataclass(slots=True)
+class StreamUsage:
+    """Token usage from a streaming completion."""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+
+@dataclass(slots=True)
+class UsageLimits:
+    """Drop-in replacement for pydantic_ai.usage.UsageLimits."""
+    request_tokens_limit: int = 1_000_000
+    response_tokens_limit: int = 16_384
+
+
+# Tool schema conversion
+
+def tools_to_openai_schema(tools: list[Any]) -> list[dict[str, Any]]:
+    """Convert PydanticAI Tool objects or raw callables to OpenAI tool format.
+
+    Handles three cases:
+    1. PydanticAI Tool with .definition attribute
+    2. PydanticAI Tool with ._schema / .json_schema attribute
+    3. Raw async functions (from fallback build_tool_set when PydanticAI absent)
+    """
+    result: list[dict[str, Any]] = []
+    for tool in tools:
+        name = ""
+        description = ""
+        parameters: dict[str, Any] = {"type": "object", "properties": {}}
+
+        # PydanticAI Tool object - extract schema
+        if hasattr(tool, "name"):
+            name = tool.name
+        elif hasattr(tool, "__name__"):
+            name = tool.__name__
+
+        if hasattr(tool, "description"):
+            description = tool.description or ""
+        elif hasattr(tool, "__doc__"):
+            description = (tool.__doc__ or "").strip()
+
+        # Try known PydanticAI Tool schema access patterns
+        if hasattr(tool, "_schema"):
+            schema = tool._schema
+            if hasattr(schema, "parameters_json_schema"):
+                parameters = schema.parameters_json_schema
+            elif isinstance(schema, dict):
+                parameters = schema.get("parameters", parameters)
+        elif hasattr(tool, "json_schema"):
+            parameters = tool.json_schema
+        elif hasattr(tool, "definition"):
+            defn = tool.definition
+            if hasattr(defn, "parameters_json_schema"):
+                parameters = defn.parameters_json_schema
+
+        if not name:
+            continue
+
+        # OpenAI requires tool names to match ^[a-zA-Z0-9_-]+$
+        # MCP tools use dots (mcp.github.list_issues) — convert to double underscore
+        api_name = name.replace(".", "__")
+
+        result.append({
+            "type": "function",
+            "function": {
+                "name": api_name,
+                "description": description,
+                "parameters": parameters,
+            },
+        })
+
+    return result
+
+
+def _build_tool_lookup(tools: list[Any]) -> dict[str, Any]:
+    """Build name-to-callable lookup from PydanticAI Tool objects or raw functions."""
+    lookup: dict[str, Any] = {}
+    for tool in tools:
+        name = getattr(tool, "name", None) or getattr(tool, "__name__", "")
+        if not name:
+            continue
+        # Store both original and API-safe name for reverse lookup
+        api_name = name.replace(".", "__")
+        # PydanticAI Tool wraps the function
+        fn = tool.function if hasattr(tool, "function") else (tool if callable(tool) else None)
+        if fn:
+            lookup[name] = fn
+            if api_name != name:
+                lookup[api_name] = fn
+    return lookup
+
+
+# Provider prefix resolution
+
+_PROVIDER_PREFIX: dict[str, str] = {
+    "anthropic": "anthropic/",
+    "gemini": "gemini/",
+    "azure": "azure/",
+    "ollama": "ollama/",
+}
+
+
+def _resolve_litellm_model(model_str: str) -> str:
+    """Convert 'provider:model' to LiteLLM format (e.g. 'anthropic/claude-...')."""
+    if "/" in model_str:
+        return model_str  # Already in LiteLLM format
+    if ":" in model_str:
+        provider, model_name = model_str.split(":", 1)
+        prefix = _PROVIDER_PREFIX.get(provider, "")
+        return f"{prefix}{model_name}"
+    return model_str  # OpenAI models need no prefix
+
+
+# StreamResult - mirrors PydanticAI's StreamedRunResult interface
+
+class StreamResult:
+    """Drop-in for PydanticAI's ``StreamedRunResult``.
+
+    Provides: stream_text(), usage(), get_output(), all_messages().
+    """
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        messages: list[dict[str, Any]],
+        tool_schemas: list[dict[str, Any]],
+        tool_lookup: dict[str, Any],
+        max_tokens: int,
+        temperature: float,
+        request_tokens_limit: int,
+        response_tokens_limit: int,
+    ) -> None:
+        self._model = model
+        self._messages = list(messages)
+        self._tool_schemas = tool_schemas
+        self._tool_lookup = tool_lookup
+        self._max_tokens = max_tokens
+        self._temperature = temperature
+        self._request_tokens_limit = request_tokens_limit
+        self._response_tokens_limit = response_tokens_limit
+        self._collected_text = ""
+        self._usage = StreamUsage()
+        self._stream: Any = None
+
+    async def stream_text(self, *, delta: bool = True) -> AsyncIterator[str]:
+        """Yield text deltas, auto-executing tool calls when encountered."""
+        _max_tool_rounds = 10
+        _tool_round = 0
+        while True:
+            self._stream = await litellm.acompletion(
+                model=self._model,
+                messages=self._messages,
+                tools=self._tool_schemas or None,
+                stream=True,
+                temperature=self._temperature,
+                max_tokens=min(self._max_tokens, self._response_tokens_limit),
+                stream_options={"include_usage": True},
+            )
+
+            text_this_turn = ""
+            tool_calls_by_index: dict[int, dict[str, Any]] = {}
+
+            async for chunk in self._stream:
+                if not chunk.choices:
+                    # Usage-only chunk (final)
+                    if hasattr(chunk, "usage") and chunk.usage:
+                        self._update_usage(chunk.usage)
+                    continue
+
+                choice = chunk.choices[0]
+
+                # Text delta
+                if choice.delta and choice.delta.content:
+                    text_this_turn += choice.delta.content
+                    if delta:
+                        yield choice.delta.content
+
+                # Tool call deltas - accumulate across chunks
+                if choice.delta and choice.delta.tool_calls:
+                    for tc in choice.delta.tool_calls:
+                        idx = tc.index if hasattr(tc, "index") else 0
+                        if idx not in tool_calls_by_index:
+                            tool_calls_by_index[idx] = {
+                                "id": getattr(tc, "id", None) or "",
+                                "type": "function",
+                                "function": {"name": "", "arguments": ""},
+                            }
+                        entry = tool_calls_by_index[idx]
+                        if tc.id:
+                            entry["id"] = tc.id
+                        if hasattr(tc, "function") and tc.function:
+                            if tc.function.name:
+                                entry["function"]["name"] = tc.function.name
+                            if tc.function.arguments:
+                                entry["function"]["arguments"] += tc.function.arguments
+
+                # Usage from final chunk
+                if hasattr(chunk, "usage") and chunk.usage:
+                    self._update_usage(chunk.usage)
+
+            self._collected_text += text_this_turn
+
+            # No tool calls, done
+            if not tool_calls_by_index:
+                # Append final assistant text to messages so the caller
+                # sees the full conversation (prevents re-generation in
+                # the outer agent loop).
+                if text_this_turn:
+                    self._messages.append({
+                        "role": "assistant",
+                        "content": text_this_turn,
+                    })
+                break
+
+            # Safety: if we already collected a substantial text answer
+            # and the LLM is still generating tool calls, stop here to
+            # prevent answer repetition.
+            if self._collected_text and len(self._collected_text.strip()) > 200 and text_this_turn and len(text_this_turn.strip()) > 100:
+                log.info("stream_text_stop_after_answer", text_len=len(self._collected_text))
+                self._messages.append({
+                    "role": "assistant",
+                    "content": self._collected_text,
+                })
+                break
+
+            # Max tool rounds guard
+            _tool_round += 1
+            if _tool_round > _max_tool_rounds:
+                log.warning("stream_text_max_tool_rounds", rounds=_tool_round)
+                if text_this_turn:
+                    self._messages.append({
+                        "role": "assistant",
+                        "content": text_this_turn,
+                    })
+                break
+
+            # Append assistant message with tool_calls
+            assistant_msg: dict[str, Any] = {"role": "assistant"}
+            if text_this_turn:
+                assistant_msg["content"] = text_this_turn
+            assistant_msg["tool_calls"] = list(tool_calls_by_index.values())
+            self._messages.append(assistant_msg)
+
+            # Execute each tool call and append results
+            for tc_data in tool_calls_by_index.values():
+                func_name = tc_data["function"]["name"]
+                func_args_str = tc_data["function"]["arguments"]
+                tc_id = tc_data["id"]
+
+                try:
+                    func_args = json.loads(func_args_str) if func_args_str else {}
+                except (json.JSONDecodeError, TypeError):
+                    func_args = {}
+
+                tool_result = await self._execute_tool(func_name, func_args)
+
+                self._messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "content": tool_result,
+                })
+
+            # Loop back to make another LLM call with tool results
+
+    async def _execute_tool(self, name: str, params: dict[str, Any]) -> str:
+        """Execute a tool by name and return string result."""
+        func = self._tool_lookup.get(name)
+        if func is None:
+            return f"Error: unknown tool '{name}'"
+        try:
+            result = await func(**params)
+            return str(result) if result is not None else ""
+        except Exception as exc:
+            return f"Error executing {name}: {exc}"
+
+    def _update_usage(self, usage: Any) -> None:
+        """Extract token counts from a usage object."""
+        self._usage.input_tokens += getattr(usage, "prompt_tokens", 0) or 0
+        self._usage.output_tokens += getattr(usage, "completion_tokens", 0) or 0
+        self._usage.prompt_tokens = self._usage.input_tokens
+        self._usage.completion_tokens = self._usage.output_tokens
+
+    def usage(self) -> StreamUsage:
+        """Return accumulated token usage."""
+        return self._usage
+
+    async def get_output(self) -> str:
+        """Return the full collected text output."""
+        return self._collected_text
+
+    def all_messages(self) -> list[dict[str, Any]]:
+        """Return the full message history (system + conversation)."""
+        return list(self._messages)
+
+
+# LiteLLMAgent - mirrors PydanticAI Agent interface
+
+class LiteLLMAgent:
+    """Drop-in replacement for ``pydantic_ai.Agent``.
+
+    Usage identical to PydanticAI::
+
+        agent = LiteLLMAgent(model="openai:gpt-5.2", system_prompt="...", tools=[...])
+        async with agent.run_stream(goal, message_history=msgs, usage_limits=limits) as stream:
+            async for delta in stream.stream_text(delta=True):
+                print(delta)
+            messages = stream.all_messages()
+    """
+
+    def __init__(
+        self,
+        model: str,
+        *,
+        system_prompt: str = "",
+        tools: list[Any] | None = None,
+        max_tokens: int = 16_384,
+        temperature: float = 0.0,
+    ) -> None:
+        self._model = _resolve_litellm_model(model)
+        self._system_prompt = system_prompt
+        self._tools = tools or []
+        self._tool_schemas = tools_to_openai_schema(self._tools)
+        self._tool_lookup = _build_tool_lookup(self._tools)
+        self._max_tokens = max_tokens
+        self._temperature = temperature
+
+    @asynccontextmanager
+    async def run_stream(
+        self,
+        goal: str,
+        *,
+        message_history: list[Any] | None = None,
+        usage_limits: Any = None,
+    ) -> AsyncIterator[StreamResult]:
+        """Start a streaming run. Mirrors ``Agent.run_stream()``."""
+        # Build messages list
+        messages: list[dict[str, Any]] = []
+
+        if self._system_prompt:
+            messages.append({"role": "system", "content": self._system_prompt})
+
+        # Append history (convert PydanticAI messages to dicts if needed)
+        # Skip system messages from history; we already prepended our own.
+        if message_history:
+            for msg in message_history:
+                if isinstance(msg, dict):
+                    if msg.get("role") == "system":
+                        continue  # Avoid duplicating system prompt
+                    messages.append(msg)
+                else:
+                    # PydanticAI message object - extract role + content
+                    role = getattr(msg, "role", "user")
+                    if role == "system":
+                        continue
+                    content = getattr(msg, "content", str(msg))
+                    messages.append({"role": role, "content": content})
+
+        # Append goal as user message, but only if it's not already
+        # the last user message in history (prevents duplication when
+        # the outer loop calls run_stream() on every step).
+        _dominated_by_history = False
+        if message_history:
+            # Check if the conversation already contains the goal
+            for msg in reversed(messages):
+                role = msg.get("role", "") if isinstance(msg, dict) else ""
+                if role == "user":
+                    content = msg.get("content", "") if isinstance(msg, dict) else ""
+                    if content == goal:
+                        _dominated_by_history = True
+                    break  # Only check the most recent user message
+
+        if not _dominated_by_history:
+            messages.append({"role": "user", "content": goal})
+
+        # Extract limits
+        request_limit = 1_000_000
+        response_limit = self._max_tokens
+        if usage_limits is not None:
+            request_limit = getattr(usage_limits, "request_tokens_limit", request_limit) or request_limit
+            response_limit = getattr(usage_limits, "response_tokens_limit", response_limit) or response_limit
+
+        stream_result = StreamResult(
+            model=self._model,
+            messages=messages,
+            tool_schemas=self._tool_schemas,
+            tool_lookup=self._tool_lookup,
+            max_tokens=self._max_tokens,
+            temperature=self._temperature,
+            request_tokens_limit=request_limit,
+            response_tokens_limit=response_limit,
+        )
+
+        yield stream_result
+
+    def update_model(self, model: str) -> None:
+        """Switch the underlying model (used by failover)."""
+        self._model = _resolve_litellm_model(model)
+
+    def update_tools(self, tools: list[Any]) -> None:
+        """Replace the tool set (used when tools change mid-loop)."""
+        self._tools = tools
+        self._tool_schemas = tools_to_openai_schema(tools)
+        self._tool_lookup = _build_tool_lookup(tools)
