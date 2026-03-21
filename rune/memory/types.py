@@ -23,6 +23,7 @@ class Episode:
     files_touched: str = ""
     commitments: str = ""
     duration_ms: float = 0.0
+    utility: int = 0
 
 
 @dataclass(slots=True)

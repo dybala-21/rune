@@ -377,15 +377,21 @@ class MemoryManager:
             return True
 
         # 1. Scored episodes
-        scored = await self.score_episodes(goal, limit=5)
+        scored = await self.score_episodes(goal, limit=7)
         if scored:
-            lines = ["## Relevant Past Episodes"]
+            # Keep score_episodes relevance order; utility is for labeling only
+            lines: list[str] = []
             for entry in scored:
                 ep: Episode = entry["episode"]
-                score = entry["score"]
                 summary = ep.task_summary or "(no summary)"
-                lines.append(f"- [{score:.2f}] {summary}")
-            _add_section("\n".join(lines) + "\n")
+                u = getattr(ep, "utility", 0)
+                if u > 0:
+                    lines.append(f"- ✅ {summary} (utility: +{u})")
+                elif u < 0:
+                    lines.append(f"- ⚠️ {summary} (utility: {u})")
+                # utility=0 episodes are neutral, skip them
+            if lines:
+                _add_section("## Past Experience (auto-learned)\n" + "\n".join(lines) + "\n")
 
         # 2. Lessons from top episodes
         lesson_lines: list[str] = []
@@ -399,7 +405,7 @@ class MemoryManager:
                     if isinstance(lesson_list, list):
                         for lesson in lesson_list:
                             lesson_lines.append(f"- {lesson}")
-                except (ValueError, TypeError):
+                except Exception:
                     if ep.lessons.strip():
                         lesson_lines.append(f"- {ep.lessons.strip()}")
         if lesson_lines:

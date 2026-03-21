@@ -439,15 +439,22 @@ async def save_agent_result_to_memory(
         combined_text = f"{goal}\n{result_text}"
         files = _extract_files_from_text(combined_text)
 
+        # Utility: +1 (golden), -1 (warning).
+        # Simple rule: trust the agent's completion status.
+        # Edge cases (Guardian refusal counted as success) are acceptable —
+        # they're +1 among many +1s and don't skew the pattern.
+        _utility = 1 if success else -1
+
         episode = Episode(
             task_summary=goal[:500],
             intent=f"{intent.domain}:{intent.action}:{intent.target}",
             result=result_text[:1000],
             lessons=lessons,
             conversation_id=conversation_id,
-            importance=0.7 if success else 0.5,
+            importance=0.7,
             files_touched=_json.dumps(files) if files else "",
             duration_ms=duration_ms,
+            utility=_utility,
         )
 
         await memory_manager.save_episode(episode)

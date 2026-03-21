@@ -254,7 +254,7 @@ CREATE INDEX IF NOT EXISTS idx_proactive_conv_records_user ON proactive_conversa
 
 # MemoryStore
 
-_CURRENT_SCHEMA_VERSION = 5
+_CURRENT_SCHEMA_VERSION = 6
 
 
 class MemoryStore:
@@ -379,6 +379,13 @@ class MemoryStore:
                 "ON episode_commitments(episode_id)"
             )
 
+        if current_version < 6:
+            # Self-improving: utility score for experience-based learning
+            try:
+                conn.execute("ALTER TABLE episodes ADD COLUMN utility INTEGER DEFAULT 0")
+            except Exception:
+                pass
+
         conn.execute(f"PRAGMA user_version = {_CURRENT_SCHEMA_VERSION}")
         log.info(
             "schema_migrated",
@@ -419,8 +426,8 @@ class MemoryStore:
             """INSERT OR REPLACE INTO episodes
                (id, timestamp, task_summary, intent, plan, result, lessons,
                 embedding, conversation_id, importance,
-                entities, files_touched, commitments, duration_ms)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                entities, files_touched, commitments, duration_ms, utility)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 episode.id, episode.timestamp, episode.task_summary,
                 episode.intent, episode.plan, episode.result,
@@ -428,6 +435,7 @@ class MemoryStore:
                 episode.conversation_id, episode.importance,
                 episode.entities, episode.files_touched,
                 episode.commitments, episode.duration_ms,
+                episode.utility,
             ),
         )
 
@@ -447,6 +455,8 @@ class MemoryStore:
             ep.commitments = r[12] or ""
         if len(r) > 13:
             ep.duration_ms = r[13] or 0.0
+        if len(r) > 14:
+            ep.utility = r[14] or 0
         return ep
 
     def get_recent_episodes(self, limit: int = 10) -> list[Episode]:

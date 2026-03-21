@@ -693,9 +693,11 @@ class NativeAgentLoop(EventEmitter):
         # Observation masking constant
         _OBSERVATION_TRUNCATE_LIMIT = 4000
 
-        # ----- helpers for tool-call tracking --------------------------------
+        _last_tool_params: dict[str, Any] = {}
 
         async def _on_tool_start(cap_name: str, params: dict[str, Any]) -> None:
+            nonlocal _last_tool_params
+            _last_tool_params = params
             self._last_activity = time.monotonic()  # (#30) activity on tool call
             self._stall.mark_activity(cap_name)
             # Track written file paths (#16)
@@ -715,17 +717,45 @@ class NativeAgentLoop(EventEmitter):
                 self._activity_phase = "research"
             await self.emit("tool_call", {"name": cap_name, "params": params})
 
+        def _tool_key(name: str, params: dict[str, Any]) -> str:
+            """Extract command-level key for behavior prediction.
+
+            "bash_execute" + {"command": "uv run ruff check ."} → "bash:ruff"
+            "file_write" + any → "file_write" (unchanged)
+            """
+            if name == "bash_execute":
+                cmd = params.get("command", "")
+                _skip = {"uv", "python", "python3", "npx", "run", "exec", "sudo", "-m", "-c"}
+                for part in cmd.split():
+                    if part not in _skip and not part.startswith("-"):
+                        return f"bash:{part}"
+            return name
+
         async def _on_tool_end(cap_name: str, result: CapabilityResult) -> None:
             self._last_activity = time.monotonic()  # (#30) activity on tool result
+
+            # Record tool call to persistent log (with params for command extraction)
+            try:
+                from rune.memory.store import get_memory_store
+                _store = get_memory_store()
+                _sid = self._session_id or "unknown"
+                _store.log_tool_call(
+                    _sid,
+                    cap_name,
+                    params=_last_tool_params or None,
+                    result_success=result.success,
+                    duration_ms=getattr(result, "duration_ms", 0) or 0,
+                )
+            except Exception:
+                pass  # Tool logging must never break the agent loop
 
             # Record tool call for proactive behavior prediction
             try:
                 from rune.proactive.prediction.engine import get_prediction_engine
                 pred_eng = get_prediction_engine()
-                pred_eng.behavior_predictor.record_tool_call(cap_name)
+                if result.success:
+                    pred_eng.behavior_predictor.record_tool_call(_tool_key(cap_name, _last_tool_params))
                 # Also record success/failure for frustration detection
-                if not hasattr(pred_eng, '_recent_actions'):
-                    pred_eng._recent_actions = []
                 pred_eng._recent_actions.append({
                     "type": "tool",
                     "tool": cap_name,

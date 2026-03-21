@@ -36,6 +36,7 @@ class PredictionEngine:
         "_frustration_detector",
         "_need_inferer",
         "_temporal_context",
+        "_recent_actions",
     )
 
     def __init__(
@@ -49,6 +50,7 @@ class PredictionEngine:
         self._frustration_detector = frustration_detector or FrustrationDetector()
         self._need_inferer = need_inferer or NeedInferer()
         self._temporal_context = temporal_context or TemporalContextAnalyzer()
+        self._recent_actions: list[dict[str, object]] = []
 
     @property
     def behavior_predictor(self) -> BehaviorPredictor:
@@ -121,8 +123,33 @@ class PredictionEngine:
 
 
 def get_prediction_engine() -> PredictionEngine:
-    """Get or create the singleton PredictionEngine."""
+    """Get or create the singleton PredictionEngine.
+
+    On first creation, seeds BehaviorPredictor from tool_call_log
+    so that cross-session tool patterns are available immediately.
+    """
     global _engine
     if _engine is None:
         _engine = PredictionEngine()
+        # Seed behavior predictor from persistent tool_call_log
+        try:
+            from rune.memory.store import get_memory_store
+            store = get_memory_store()
+            calls = store.get_recent_tool_calls(limit=200)
+            _skip = {"uv", "python", "python3", "npx", "run", "exec", "sudo", "-m", "-c"}
+            for c in reversed(calls):  # oldest first
+                if not c.get("result_success", True):
+                    continue  # Skip failed calls — don't learn failure patterns
+                name = c["tool_name"]
+                if name == "bash_execute":
+                    cmd = (c.get("params") or {}).get("command", "")
+                    for part in cmd.split():
+                        if part not in _skip and not part.startswith("-"):
+                            name = f"bash:{part}" if part else name
+                            break
+                _engine.behavior_predictor.record_tool_call(name)
+            if calls:
+                log.info("behavior_predictor_seeded", history=len(calls))
+        except Exception:
+            pass  # Seeding failure must never block the engine
     return _engine

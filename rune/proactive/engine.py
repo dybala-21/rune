@@ -51,9 +51,12 @@ class ProactiveEngine:
         "_seen_ids",
         "_suggestions",
         "_recent_suggestion_keys",
+        "_dismissed_keys",
         "_evaluation_count",
         "_listeners",
     )
+
+    _DISMISS_COOLDOWN_SECS = 1800  # 30 min cooldown for dismissed suggestions
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self._config = config or {}
@@ -61,6 +64,7 @@ class ProactiveEngine:
         self._seen_ids: set[str] = set()
         self._suggestions: dict[str, Suggestion] = {}  # id -> Suggestion
         self._recent_suggestion_keys: dict[str, datetime] = {}  # title_key -> last_added
+        self._dismissed_keys: dict[str, datetime] = {}  # title_key -> dismissed_at
         self._evaluation_count: int = 0
         self._listeners: dict[str, list[Any]] = {}  # event_name -> [callbacks]
 
@@ -183,6 +187,14 @@ class ProactiveEngine:
         title_key = suggestion.title.lower().strip()
         now = datetime.now(UTC)
 
+        # Check dismiss cooldown (30 min) first, then normal dedup (5 min)
+        if title_key and title_key in self._dismissed_keys:
+            dismissed_at = self._dismissed_keys[title_key]
+            if (now - dismissed_at).total_seconds() < self._DISMISS_COOLDOWN_SECS:
+                log.debug("suggestion_dismiss_cooldown", title=suggestion.title)
+                return
+            del self._dismissed_keys[title_key]  # cooldown expired
+
         if title_key and title_key in self._recent_suggestion_keys:
             last_added = self._recent_suggestion_keys[title_key]
             if (now - last_added).total_seconds() < _DEDUP_COOLDOWN_SECS:
@@ -199,6 +211,14 @@ class ProactiveEngine:
                 k: v
                 for k, v in self._recent_suggestion_keys.items()
                 if v > cutoff
+            }
+        # Prune stale dismiss entries
+        if len(self._dismissed_keys) > 100:
+            dismiss_cutoff = now - timedelta(seconds=self._DISMISS_COOLDOWN_SECS)
+            self._dismissed_keys = {
+                k: v
+                for k, v in self._dismissed_keys.items()
+                if v > dismiss_cutoff
             }
 
         log.debug("suggestion_added", id=suggestion.id)
@@ -240,6 +260,11 @@ class ProactiveEngine:
         suggestion = self._suggestions.get(suggestion_id)
         if suggestion is not None:
             suggestion.status = "accepted" if accepted else "dismissed"
+            # Dismissed suggestions get a longer cooldown (30 min) to avoid nagging
+            if not accepted:
+                title_key = suggestion.title.lower().strip()
+                if title_key:
+                    self._dismissed_keys[title_key] = datetime.now(UTC)
             # Remove from pending storage
             del self._suggestions[suggestion_id]
 
@@ -417,14 +442,21 @@ class ProactiveEngine:
             pred = get_prediction_engine()
             result = pred.predict(context)
 
-            # 3a: Tool behavior predictions - used internally for
-            # agent optimization, NOT surfaced as user-facing suggestions.
-            # The agent already generates contextual follow-up suggestions
-            # in its responses; tool-level predictions would be redundant
-            # noise (e.g., "web_search is likely useful next" is obvious
-            # and adds no value to the user).
-            # Tool predictions are still available via result.tool_predictions
-            # for internal use (e.g., pre-warming, tool prioritization).
+            # 3a: Command-level behavior predictions → suggestions
+            # Only surface bash commands (ruff, pytest, etc.) at 60%+ confidence.
+            # Generic tool names (file_read, web_search) are skipped — too obvious.
+            for tool, prob in result.tool_predictions:
+                if prob >= 0.6 and tool.startswith("bash:"):
+                    cmd_name = tool.split(":", 1)[1]
+                    candidates.append(
+                        Suggestion(
+                            type="followup",
+                            title=f"Run {cmd_name}?",
+                            description=f"You usually run {cmd_name} here ({prob:.0%})",
+                            confidence=prob,
+                            source="behavior_prediction",
+                        )
+                    )
 
             # 3b: Frustration detection → warning suggestions
             if result.frustration and result.frustration.level in ("moderate", "high"):
@@ -471,7 +503,7 @@ class ProactiveEngine:
                         Suggestion(
                             type="reminder",
                             title="Uncommitted changes",
-                            description=f"커밋하지 않은 변경이 {dirty_count}개 파일에 있어요. 커밋할까요?",
+                            description=f"{dirty_count} files have uncommitted changes. Want to commit?",
                             confidence=0.55,
                             source="git_context",
                         )
@@ -484,7 +516,7 @@ class ProactiveEngine:
                     Suggestion(
                         type="insight",
                         title="Idle detected",
-                        description="잠시 멈춰있는 것 같아요. 뭔가 도와드릴까요?",
+                        description="You seem idle. Need help with anything?",
                         confidence=0.45,
                         source="idle_detection",
                     )
@@ -506,7 +538,7 @@ class ProactiveEngine:
                         Suggestion(
                             type="followup",
                             title="Open commitment",
-                            description=f"미완료 항목: {c['text'][:100]}",
+                            description=f"Pending: {c['text'][:100]}",
                             confidence=0.6,
                             source="commitment_tracking",
                         )

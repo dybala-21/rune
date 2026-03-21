@@ -311,6 +311,15 @@ class RuneDaemon:
         except Exception as exc:
             log.debug("trash_cleanup_failed", error=str(exc))
 
+        # 3b. Prune old tool call logs (30-day retention)
+        try:
+            from rune.memory.store import get_memory_store
+            pruned = get_memory_store().prune_tool_calls(max_age_days=30)
+            if pruned:
+                log.info("subsystem_initialised", name="tool_call_prune", removed=pruned)
+        except Exception as exc:
+            log.debug("tool_call_prune_failed", error=str(exc))
+
         # 4. Orphaned run cleanup
         await self._cleanup_orphaned_runs()
 
