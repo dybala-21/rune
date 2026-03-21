@@ -509,9 +509,10 @@ async def _execute_managed_service(params: BashParams) -> CapabilityResult:
         # Remove from tracking
         _managed_processes.pop(service_id, None)
 
-        # Clean up drain tasks
+        # Clean up drain tasks — cancel then await to ensure no writes after close
         drain_out.cancel()
         drain_err.cancel()
+        await asyncio.gather(drain_out, drain_err, return_exceptions=True)
         if log_fh:
             with contextlib.suppress(OSError):
                 log_fh.close()

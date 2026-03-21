@@ -909,6 +909,15 @@ class AgentLoopController:
                 )
                 effective_goal = ctx.goal
                 run_context = {"workspace_root": ctx.workspace_root}
+                # Build memory context for self-improving (same as server/gateway)
+                try:
+                    from rune.memory.manager import get_memory_manager
+                    mgr = get_memory_manager()
+                    mem_ctx = await mgr.build_memory_context(goal)
+                    if mem_ctx:
+                        run_context["memory_context"] = mem_ctx
+                except Exception:
+                    pass  # Memory context is best-effort
             except Exception as exc:
                 log.debug("prepare_context_skipped", error=str(exc)[:200])
 

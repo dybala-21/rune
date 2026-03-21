@@ -634,14 +634,29 @@ class RuneApp:
             f"[#333333]{'─' * right}[/#333333]"
         )
         self.console.print()
+        # Learning stats summary
+        learn_info = self._get_learning_summary()
         self.console.print(
             f"  [#666666]Terminal Agent[/#666666]  "
             f"[#D4A017]·[/#D4A017]  "
             f"[#AAAAAA]{self._provider}:{self._model}[/#AAAAAA]  "
             f"[#333333]·[/#333333]  "
-            f"[#555555]/help for commands[/#555555]"
+            f"[#555555]{learn_info}[/#555555]"
         )
         self.console.print()
+
+    def _get_learning_summary(self) -> str:
+        """Build a one-line learning status for the welcome banner."""
+        try:
+            from rune.memory.store import get_memory_store
+            store = get_memory_store()
+            stats = store.get_stats()
+            episodes = stats.get("episodes", 0)
+            if episodes > 0:
+                return f"{episodes} episodes learned"
+            return "/help for commands"
+        except Exception:
+            return "/help for commands"
 
     def _handle_learning_command(self, arg: str) -> None:
         """Handle /learning on|off slash command."""
@@ -666,6 +681,60 @@ class RuneApp:
                 )
         except Exception:
             self.console.print("  [#888888]📝 Learning setting unavailable.[/#888888]")
+
+    def _show_learned_stats(self) -> None:
+        """Show learning statistics via /learned command."""
+        try:
+            from rune.memory.store import get_memory_store
+            store = get_memory_store()
+            stats = store.get_stats()
+
+            episodes = stats.get("episodes", 0)
+            tool_calls = stats.get("tool_call_log", 0)
+
+            # Count golden vs warning episodes
+            golden = 0
+            warning = 0
+            try:
+                rows = store.conn.execute(
+                    "SELECT utility, COUNT(*) FROM episodes GROUP BY utility"
+                )
+                for utility, count in rows:
+                    if utility and utility > 0:
+                        golden += count
+                    elif utility and utility < 0:
+                        warning += count
+            except Exception:
+                pass
+
+            # Get top behavior patterns
+            patterns = ""
+            try:
+                from rune.proactive.prediction.engine import get_prediction_engine
+                preds = get_prediction_engine().behavior_predictor.predict_next()
+                if preds:
+                    top = [f"{t} ({p:.0%})" for t, p in preds[:3]]
+                    patterns = ", ".join(top)
+            except Exception:
+                pass
+
+            self.console.print()
+            self.console.print("  [bold #D4A017]Learning Status[/bold #D4A017]")
+            self.console.print(
+                f"  [#AAAAAA]Episodes:[/#AAAAAA] {episodes}"
+                f"  [#56B6C2]{golden} golden[/#56B6C2]"
+                f"  [#E5C07B]{warning} warning[/#E5C07B]"
+            )
+            self.console.print(
+                f"  [#AAAAAA]Tool calls recorded:[/#AAAAAA] {tool_calls}"
+            )
+            if patterns:
+                self.console.print(
+                    f"  [#AAAAAA]Top predictions:[/#AAAAAA] {patterns}"
+                )
+            self.console.print()
+        except Exception:
+            self.console.print("  [#888888]Learning stats unavailable.[/#888888]")
 
     def _show_learning_notice(self) -> None:
         """Show first-run learning notice if not yet configured."""
@@ -785,6 +854,10 @@ class RuneApp:
 
         if cmd_name == "/learning":
             self._handle_learning_command(cmd_args)
+            return
+
+        if cmd_name == "/learned":
+            self._show_learned_stats()
             return
 
         # Run the command handler

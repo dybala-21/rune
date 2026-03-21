@@ -285,7 +285,7 @@ class MemoryStore:
             ]:
                 try:
                     conn.execute(stmt)
-                except Exception:
+                except apsw.SQLError:
                     pass  # Column already exists
 
         if current_version < 3:
@@ -355,7 +355,7 @@ class MemoryStore:
             ]:
                 try:
                     conn.execute(stmt)
-                except Exception:
+                except apsw.SQLError:
                     pass  # Column already exists
 
             conn.execute("""
@@ -383,8 +383,8 @@ class MemoryStore:
             # Self-improving: utility score for experience-based learning
             try:
                 conn.execute("ALTER TABLE episodes ADD COLUMN utility INTEGER DEFAULT 0")
-            except Exception:
-                pass
+            except apsw.SQLError:
+                pass  # Column already exists
 
         conn.execute(f"PRAGMA user_version = {_CURRENT_SCHEMA_VERSION}")
         log.info(

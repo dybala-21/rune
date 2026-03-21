@@ -26,6 +26,15 @@ from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
 
+
+def _mcp_error_msg(data: dict[str, Any]) -> str:
+    """Extract error message from MCP JSON-RPC response (handles non-standard servers)."""
+    err = data.get("error")
+    if isinstance(err, dict):
+        return err.get("message", "unknown")
+    return str(err) if err else "unknown"
+
+
 # ============================================================================
 # Types
 # ============================================================================
@@ -282,7 +291,7 @@ class MCPClient:
                     if "error" in data:
                         fut.set_exception(
                             RuntimeError(
-                                f"MCP error: {data['error'].get('message', 'unknown')}"
+                                f"MCP error: {_mcp_error_msg(data)}"
                             )
                         )
                     else:
@@ -406,7 +415,7 @@ class MCPClient:
 
         if "error" in data:
             raise RuntimeError(
-                f"MCP error: {data['error'].get('message', 'unknown')}"
+                f"MCP error: {_mcp_error_msg(data)}"
             )
         return data.get("result", {})
 
@@ -443,7 +452,7 @@ class MCPClient:
                 data = resp.json()
                 if "error" in data:
                     raise RuntimeError(
-                        f"MCP error: {data['error'].get('message', 'unknown')}"
+                        f"MCP error: {_mcp_error_msg(data)}"
                     )
                 return data.get("result", {})
 
@@ -464,7 +473,7 @@ class MCPClient:
                 if data.get("id") == message.get("id"):
                     if "error" in data:
                         raise RuntimeError(
-                            f"MCP error: {data['error'].get('message', 'unknown')}"
+                            f"MCP error: {_mcp_error_msg(data)}"
                         )
                     return data.get("result", {})
 
