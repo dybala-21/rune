@@ -739,11 +739,13 @@ class NativeAgentLoop(EventEmitter):
                 from rune.memory.store import get_memory_store
                 _store = get_memory_store()
                 _sid = self._session_id or "unknown"
+                _err = getattr(result, "error", "") or "" if not result.success else ""
                 _store.log_tool_call(
                     _sid,
                     cap_name,
                     params=_last_tool_params or None,
                     result_success=result.success,
+                    error_message=str(_err)[:500],
                     duration_ms=getattr(result, "duration_ms", 0) or 0,
                 )
             except Exception:
@@ -831,10 +833,13 @@ class NativeAgentLoop(EventEmitter):
             set_ask_user_callback(self._ask_user_callback)
             reset_ask_user_count()
 
+        # Scale tool rounds by complexity: weaker models call tools one-at-a-time
+        _tool_rounds = 20 if getattr(classification, "is_complex_coding", False) else 15
         agent = LiteLLMAgent(
             model=model,
             system_prompt=system_prompt,
             tools=list(tool_functions.values()),
+            max_tool_rounds=_tool_rounds,
         )
 
         messages: list[Any] = []
@@ -886,6 +891,7 @@ class NativeAgentLoop(EventEmitter):
                         model=model,
                         system_prompt=system_prompt,
                         tools=list(tool_functions.values()),
+                        max_tool_rounds=_tool_rounds,
                     )
                     log.info("tools_reduced_final_phase", tools=len(tools))
 
@@ -900,6 +906,7 @@ class NativeAgentLoop(EventEmitter):
                         model=model,
                         system_prompt=system_prompt,
                         tools=list(tool_functions.values()),
+                        max_tool_rounds=_tool_rounds,
                     )
 
             # Stall-limit tool removal (#H3)
@@ -914,6 +921,7 @@ class NativeAgentLoop(EventEmitter):
                         model=model,
                         system_prompt=system_prompt,
                         tools=list(tool_functions.values()),
+                        max_tool_rounds=_tool_rounds,
                     )
                     log.info("tools_disabled_stall", disabled=sorted(disabled))
 
@@ -1118,14 +1126,26 @@ class NativeAgentLoop(EventEmitter):
                 # -- final answer detection --
                 # stream_text() internally handles tool calls and re-calls the LLM.
                 # Once it returns, the collected text IS the final answer.
-                # If the agent used tools (total_evidence > 0) and produced
-                # substantial text, consider the task done.
+                # For code_modify/execution tasks, require writes or executions
+                # (not just reads) before considering the task done.
+                needs_action = classification.goal_type in (
+                    "code_modify", "execution", "full",
+                )
+                action_evidence = evidence.writes + evidence.executions
                 if output_text and len(output_text.strip()) > 50 and total_evidence > 0:
-                    log.info("final_answer_detected", step=self._step,
-                             text_len=len(output_text), evidence=total_evidence)
-                    trace.reason = "completed"
-                    trace.final_step = self._step
-                    break
+                    if needs_action and action_evidence == 0:
+                        # LLM read files but didn't write/execute yet — nudge it
+                        messages = self._inject_system_message(
+                            messages,
+                            "[System] You have read the files but not made any changes yet. "
+                            "Proceed to edit/write/execute now. Do not just describe what you plan to do.",
+                        )
+                    else:
+                        log.info("final_answer_detected", step=self._step,
+                                 text_len=len(output_text), evidence=total_evidence)
+                        trace.reason = "completed"
+                        trace.final_step = self._step
+                        break
 
                 # -- completion gate (full 18-requirement integration) --
                 intent_contract = resolve_intent_contract(classification, classification.confidence)
@@ -1136,9 +1156,9 @@ class NativeAgentLoop(EventEmitter):
                 requires_grounding = intent_contract.grounding_requirement == "required"
                 requires_code_verification = intent_contract.requires_code_verification
 
-                # For chat/general goals: if LLM answered without tools,
-                # it's a text-only response - mark as complete.
-                if classification.goal_type in ("chat", "full") and total_evidence == 0 and output_text:
+                # If IntentContract says no tools needed and LLM answered
+                # without tools, it's a text-only response - mark as complete.
+                if total_evidence == 0 and output_text and intent_contract.tool_requirement == "none":
                     effective_tool_req = "none"
                     effective_output_exp = "text"
                     requires_grounding = False

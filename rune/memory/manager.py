@@ -376,6 +376,23 @@ class MemoryManager:
             budget_used += len(text)
             return True
 
+        # 0. Learned rules (from Rule Learner)
+        try:
+            from rune.memory.rule_learner import get_rules_for_domain
+            # Inject rules for common domains; LLM picks relevant ones
+            rule_lines: list[str] = []
+            for domain in ("code_modify", "research", "execution"):
+                for rule in get_rules_for_domain(domain):
+                    rule_lines.append(
+                        f"- [{domain}] {rule['key']}: {rule['value']}"
+                    )
+            if rule_lines:
+                _add_section(
+                    "## Learned Rules\n" + "\n".join(rule_lines[:10]) + "\n"
+                )
+        except Exception:
+            pass  # Rule injection is best-effort
+
         # 1. Scored episodes
         scored = await self.score_episodes(goal, limit=7)
         if scored:

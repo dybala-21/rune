@@ -157,6 +157,7 @@ class StreamResult:
         temperature: float,
         request_tokens_limit: int,
         response_tokens_limit: int,
+        max_tool_rounds: int = 10,
     ) -> None:
         self._model = model
         self._messages = list(messages)
@@ -166,13 +167,14 @@ class StreamResult:
         self._temperature = temperature
         self._request_tokens_limit = request_tokens_limit
         self._response_tokens_limit = response_tokens_limit
+        self._max_tool_rounds = max_tool_rounds
         self._collected_text = ""
         self._usage = StreamUsage()
         self._stream: Any = None
 
     async def stream_text(self, *, delta: bool = True) -> AsyncIterator[str]:
         """Yield text deltas, auto-executing tool calls when encountered."""
-        _max_tool_rounds = 10
+        _max_tool_rounds = self._max_tool_rounds
         _tool_round = 0
         while True:
             self._stream = await litellm.acompletion(
@@ -343,6 +345,7 @@ class LiteLLMAgent:
         tools: list[Any] | None = None,
         max_tokens: int = 16_384,
         temperature: float = 0.0,
+        max_tool_rounds: int = 10,
     ) -> None:
         self._model = _resolve_litellm_model(model)
         self._system_prompt = system_prompt
@@ -351,6 +354,7 @@ class LiteLLMAgent:
         self._tool_lookup = _build_tool_lookup(self._tools)
         self._max_tokens = max_tokens
         self._temperature = temperature
+        self._max_tool_rounds = max_tool_rounds
 
     @asynccontextmanager
     async def run_stream(
@@ -416,6 +420,7 @@ class LiteLLMAgent:
             temperature=self._temperature,
             request_tokens_limit=request_limit,
             response_tokens_limit=response_limit,
+            max_tool_rounds=self._max_tool_rounds,
         )
 
         yield stream_result

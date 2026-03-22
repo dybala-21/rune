@@ -225,6 +225,7 @@ CREATE TABLE IF NOT EXISTS tool_call_log (
     tool_name TEXT NOT NULL,
     params TEXT DEFAULT '{}',
     result_success INTEGER NOT NULL DEFAULT 1,
+    error_message TEXT DEFAULT '',
     duration_ms REAL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -254,7 +255,7 @@ CREATE INDEX IF NOT EXISTS idx_proactive_conv_records_user ON proactive_conversa
 
 # MemoryStore
 
-_CURRENT_SCHEMA_VERSION = 6
+_CURRENT_SCHEMA_VERSION = 7
 
 
 class MemoryStore:
@@ -383,6 +384,13 @@ class MemoryStore:
             # Self-improving: utility score for experience-based learning
             try:
                 conn.execute("ALTER TABLE episodes ADD COLUMN utility INTEGER DEFAULT 0")
+            except apsw.SQLError:
+                pass  # Column already exists
+
+        if current_version < 7:
+            # Rule Learner: error messages for failure pattern matching
+            try:
+                conn.execute("ALTER TABLE tool_call_log ADD COLUMN error_message TEXT DEFAULT ''")
             except apsw.SQLError:
                 pass  # Column already exists
 
@@ -1275,15 +1283,16 @@ class MemoryStore:
         *,
         params: dict[str, Any] | None = None,
         result_success: bool = True,
+        error_message: str = "",
         duration_ms: float = 0.0,
     ) -> None:
         now = datetime.now(UTC).isoformat()
         params_json = json_encode(params or {})
         self.conn.execute(
             """INSERT INTO tool_call_log
-               (session_id, tool_name, params, result_success, duration_ms, created_at)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (session_id, tool_name, params_json, int(result_success), duration_ms, now),
+               (session_id, tool_name, params, result_success, error_message, duration_ms, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (session_id, tool_name, params_json, int(result_success), error_message[:500], duration_ms, now),
         )
 
     def get_recent_tool_calls(self, limit: int = 100) -> list[dict[str, Any]]:
@@ -1296,8 +1305,10 @@ class MemoryStore:
             {
                 "id": r[0], "session_id": r[1], "tool_name": r[2],
                 "params": json_decode(r[3] or "{}"),
-                "result_success": bool(r[4]), "duration_ms": r[5],
-                "created_at": r[6],
+                "result_success": bool(r[4]),
+                "error_message": r[5] if len(r) > 7 else "",
+                "duration_ms": r[6] if len(r) > 7 else (r[5] or 0),
+                "created_at": r[7] if len(r) > 7 else (r[6] or ""),
             }
             for r in rows
         ]

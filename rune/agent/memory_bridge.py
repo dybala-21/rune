@@ -459,6 +459,16 @@ async def save_agent_result_to_memory(
 
         await memory_manager.save_episode(episode)
 
+        # Rule Learner: trigger on failure
+        if not success:
+            try:
+                from rune.memory.rule_learner import learn_from_failures
+                from rune.memory.store import get_memory_store
+                domain = intent.domain or "code_modify"
+                await learn_from_failures(get_memory_store(), domain)
+            except Exception:
+                pass  # Rule learning must never block episode saving
+
         # Write daily log entry (markdown)
         try:
             from rune.memory.markdown_store import append_daily_entry
