@@ -69,6 +69,18 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // When command palette is open, let it handle Enter/Arrow/Escape
+    if (showCommands) {
+      if (e.key === 'Enter' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setShowCommands(false);
+        return;
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       if (!isRunning) handleSubmit();
@@ -157,8 +169,9 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
         border: isDragOver ? '2px solid var(--accent)' : '1px solid var(--border)',
         boxShadow: 'var(--shadow-lg)',
         pointerEvents: 'auto',
-        overflow: 'hidden',
+        overflow: showCommands ? 'visible' : 'hidden',
         transition: 'border-color 0.15s',
+        position: 'relative',
       }}>
         {/* Attachment previews */}
         {attachments.length > 0 && (

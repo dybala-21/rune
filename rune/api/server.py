@@ -1219,6 +1219,13 @@ def create_app() -> Any:
                     if not c.hidden
                 ])
 
+            elif method == "models.list":
+                from rune.ui.app import _KNOWN_MODELS
+                providers: dict[str, list[str]] = {}
+                for prov, model in _KNOWN_MODELS:
+                    providers.setdefault(prov, []).append(model)
+                return _ok(providers)
+
             else:
                 return _err("METHOD_NOT_FOUND", f"Unknown method: {method}")
 
