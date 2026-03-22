@@ -263,6 +263,7 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
                 onClick={() => fileInputRef.current?.click()}
                 disabled={disabled}
                 title="Attach file"
+                aria-label="Attach file"
                 style={{
                   width: 36, height: 36, borderRadius: '50%',
                   background: 'none', border: 'none',
@@ -319,6 +320,7 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
               type="button"
               onClick={onAbort}
               title="Stop"
+              aria-label="Stop generation"
               style={{
                 width: 36, height: 36, borderRadius: '50%',
                 background: 'var(--danger)', color: 'white',
@@ -334,6 +336,7 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
               onClick={handleSubmit}
               disabled={disabled}
               title="Send"
+              aria-label="Send message"
               style={{
                 width: 36, height: 36, borderRadius: '50%',
                 background: disabled ? 'var(--bg-tertiary)' : 'var(--accent)',

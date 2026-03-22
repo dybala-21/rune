@@ -13,13 +13,13 @@ interface Props {
   onClose: () => void;
 }
 
-const ITEM_STYLE = {
+const ITEM_STYLE: React.CSSProperties = {
   padding: '8px 12px',
   cursor: 'pointer',
   display: 'flex',
   justifyContent: 'space-between',
   alignItems: 'center',
-  borderBottom: '1px solid #222',
+  borderBottom: '1px solid var(--border-subtle, #222)',
 };
 
 async function rpc(method: string, params: Record<string, unknown> = {}) {
@@ -127,13 +127,13 @@ export function CommandPalette({ filter, onSelect, onClose }: Props) {
       style={{
         position: 'absolute', bottom: '100%', left: 0, right: 0,
         maxHeight: '280px', overflowY: 'auto',
-        background: '#1a1a2e', border: '1px solid #333',
-        borderRadius: '8px', marginBottom: '4px', zIndex: 100,
+        background: 'var(--bg-secondary, #1a1a2e)', border: '1px solid var(--border, #333)',
+        borderRadius: 'var(--radius-lg, 8px)', marginBottom: '4px', zIndex: 100,
       }}
       ref={listRef}
     >
       {title && (
-        <div style={{ padding: '6px 12px', color: '#666', fontSize: '11px', borderBottom: '1px solid #333' }}>
+        <div style={{ padding: '6px 12px', color: 'var(--text-muted, #666)', fontSize: '11px', borderBottom: '1px solid var(--border, #333)' }}>
           {title}
         </div>
       )}
