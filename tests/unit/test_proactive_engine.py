@@ -169,6 +169,12 @@ class TestEvaluateEmitsEvents:
 
     @pytest.mark.asyncio
     async def test_evaluate_no_intervention_for_low_confidence(self):
+        # Force in-memory DB to avoid real data leaking into predictions
+        import rune.proactive.prediction.engine as pe_mod
+        pe_mod._engine = None
+        import rune.memory.store as store_mod
+        store_mod._store = store_mod.MemoryStore(db_path=":memory:")
+
         engine = ProactiveEngine()
         intervention_cb = MagicMock()
         engine.on("intervention", intervention_cb)
@@ -211,6 +217,12 @@ class TestEvaluateEmitsEvents:
 
     @pytest.mark.asyncio
     async def test_evaluate_no_events_when_no_candidates(self):
+        # Force in-memory DB to avoid real data leaking into predictions
+        import rune.proactive.prediction.engine as pe_mod
+        pe_mod._engine = None
+        import rune.memory.store as store_mod
+        store_mod._store = store_mod.MemoryStore(db_path=":memory:")
+
         engine = ProactiveEngine()
         cb = MagicMock()
         engine.on("suggestion", cb)

@@ -18,6 +18,7 @@ interface SettingsSidebarProps {
   onOpenEnvPanel: () => void;
   onOpenCronPanel: () => void;
   onOpenMcpPanel: () => void;
+  onOpenMarkdownPanel?: () => void;
 }
 
 const CHANNEL_STATUS_COLORS: Record<string, string> = {
@@ -92,7 +93,7 @@ function toMemoryTuningDraft(config: ConfigInfo): MemoryTuningDraft {
   };
 }
 
-export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPanel, onOpenMcpPanel }: SettingsSidebarProps) {
+export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPanel, onOpenMcpPanel, onOpenMarkdownPanel }: SettingsSidebarProps) {
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [envVars, setEnvVars] = useState<EnvVarInfo[]>([]);
   const [config, setConfig] = useState<ConfigInfo | null>(null);
@@ -746,6 +747,28 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
             onClick={onOpenMcpPanel}
           />
         </SettingsSection>
+
+        {/* Config Files (Markdown Editor) */}
+        {onOpenMarkdownPanel && (
+          <SettingsSection
+            icon={
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <path d="M3 2h7l3 3v9a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" strokeWidth="1.2"/>
+                <path d="M10 2v3h3" stroke="currentColor" strokeWidth="1.2"/>
+                <path d="M5 8h6M5 11h4" stroke="currentColor" strokeWidth="1.2"/>
+              </svg>
+            }
+            title="Config Files"
+            subtitle="Heartbeat, Memory, Profile"
+            onClick={onOpenMarkdownPanel}
+          >
+            <SettingsItem
+              label="Edit Files"
+              detail="markdown"
+              onClick={onOpenMarkdownPanel}
+            />
+          </SettingsSection>
+        )}
 
       </div>
     </div>

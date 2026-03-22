@@ -1006,11 +1006,53 @@ class RuneDaemon:
             )
             await self._heartbeat_scheduler.start()
             log.info("subsystem_initialised", name="heartbeat_scheduler")
+
+            # Register HEARTBEAT.md checker as a cron task
+            try:
+                from rune.daemon.heartbeat_checker import (
+                    create_default_heartbeat,
+                    run_heartbeat_checks,
+                )
+                create_default_heartbeat()
+
+                async def _heartbeat_md_check() -> None:
+                    results = await run_heartbeat_checks()
+                    for r in results:
+                        if r["needs_attention"]:
+                            log.info(
+                                "heartbeat_alert",
+                                item=r["item"][:80],
+                                output=r["output"][:200],
+                            )
+                            # Broadcast to connected channels
+                            try:
+                                msg = f"⚡ {r['item']}\n{r['output'][:300]}"
+                                await self._broadcast_notification(msg)
+                            except Exception:
+                                pass
+
+                self._heartbeat_scheduler.add_task(
+                    "heartbeat_md_checker",
+                    "* * * * *",  # every minute (checks are internally rate-limited)
+                    _heartbeat_md_check,
+                )
+                log.info("heartbeat_md_checker_registered")
+            except Exception as exc:
+                log.debug("heartbeat_md_checker_failed", error=str(exc)[:200])
+
         except Exception as exc:
             log.warning("heartbeat_scheduler_init_failed", error=str(exc))
 
         # Start a simple file-based heartbeat indicator
         self._heartbeat_task = asyncio.create_task(self._heartbeat_file_loop())
+
+    async def _broadcast_notification(self, message: str) -> None:
+        """Send a notification to all connected channels (best-effort)."""
+        try:
+            if hasattr(self, "_gateway") and self._gateway is not None:
+                await self._gateway.broadcast_text(message)
+        except Exception:
+            pass  # Notification is best-effort
 
     async def _heartbeat_file_loop(self) -> None:
         """Periodically update a heartbeat file to indicate daemon is alive."""

@@ -447,3 +447,24 @@ export async function deleteMCPServer(name: string): Promise<void> {
 export async function testMCPServer(name: string): Promise<MCPTestResult> {
   return rpc('mcp.test', { name });
 }
+
+// Markdown file editor
+export interface MarkdownFileInfo {
+  key: string;
+  label: string;
+  description: string;
+  exists: boolean;
+  size: number;
+}
+
+export async function fetchMarkdownFiles(): Promise<MarkdownFileInfo[]> {
+  return rpc('markdown.list', {});
+}
+
+export async function readMarkdownFile(key: string): Promise<{ key: string; content: string }> {
+  return rpc('markdown.read', { key });
+}
+
+export async function writeMarkdownFile(key: string, content: string): Promise<{ key: string; saved: boolean }> {
+  return rpc('markdown.write', { key, content });
+}

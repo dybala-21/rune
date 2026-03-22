@@ -1226,6 +1226,43 @@ def create_app() -> Any:
                     providers.setdefault(prov, []).append(model)
                 return _ok(providers)
 
+            # Markdown file editor (HEARTBEAT.md, MEMORY.md, learned.md, user-profile.md)
+            elif method == "markdown.list":
+                from rune.utils.paths import rune_home
+                _rh = rune_home()
+                _files = {
+                    "heartbeat": {"path": str(_rh / "HEARTBEAT.md"), "label": "Heartbeat", "description": "Periodic monitoring checklist"},
+                    "memory": {"path": str(_rh / "memory" / "MEMORY.md"), "label": "Memory", "description": "Your knowledge — edit freely"},
+                    "learned": {"path": str(_rh / "memory" / "learned.md"), "label": "Learned", "description": "Auto-extracted facts & rules"},
+                    "profile": {"path": str(_rh / "memory" / "user-profile.md"), "label": "Profile", "description": "Your preferences"},
+                }
+                result = []
+                for key, info in _files.items():
+                    p = Path(info["path"])
+                    result.append({
+                        "key": key,
+                        "label": info["label"],
+                        "description": info["description"],
+                        "exists": p.exists(),
+                        "size": p.stat().st_size if p.exists() else 0,
+                    })
+                return _ok(result)
+
+            elif method == "markdown.read":
+                _key = params.get("key", "")
+                _content = _read_markdown_file(_key)
+                if _content is None:
+                    return _err("NOT_FOUND", f"File not found: {_key}")
+                return _ok({"key": _key, "content": _content})
+
+            elif method == "markdown.write":
+                _key = params.get("key", "")
+                _content = params.get("content", "")
+                _ok_write = _write_markdown_file(_key, _content)
+                if not _ok_write:
+                    return _err("WRITE_FAILED", f"Cannot write: {_key}")
+                return _ok({"key": _key, "saved": True})
+
             else:
                 return _err("METHOD_NOT_FOUND", f"Unknown method: {method}")
 
@@ -1234,6 +1271,38 @@ def create_app() -> Any:
         except Exception as exc:
             log.error("rpc_dispatch_error", method=method, error=str(exc))
             return _err("INTERNAL_ERROR", f"Internal error: {type(exc).__name__}")
+
+    # Markdown file helpers
+    def _resolve_markdown_path(key: str) -> Path | None:
+        from rune.utils.paths import rune_home
+        _rh = rune_home()
+        _map = {
+            "heartbeat": _rh / "HEARTBEAT.md",
+            "memory": _rh / "memory" / "MEMORY.md",
+            "learned": _rh / "memory" / "learned.md",
+            "profile": _rh / "memory" / "user-profile.md",
+        }
+        return _map.get(key)
+
+    def _read_markdown_file(key: str) -> str | None:
+        path = _resolve_markdown_path(key)
+        if path is None or not path.exists():
+            return None
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+
+    def _write_markdown_file(key: str, content: str) -> bool:
+        path = _resolve_markdown_path(key)
+        if path is None:
+            return False
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+            return True
+        except OSError:
+            return False
 
     # Static file serving for Web UI (SPA)
 

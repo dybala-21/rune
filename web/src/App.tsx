@@ -10,6 +10,7 @@ import { SkillsPanel } from './components/SkillsPanel';
 import { EnvPanel } from './components/EnvPanel';
 import { CronPanel } from './components/CronPanel';
 import { MCPPanel } from './components/MCPPanel';
+import { MarkdownPanel } from './components/MarkdownPanel';
 import { normalizeToolName } from './utils/tooling';
 import { fetchConfig, type ConfigInfo } from './api';
 
@@ -25,6 +26,7 @@ export function App() {
   const [envPanelOpen, setEnvPanelOpen] = useState(false);
   const [cronPanelOpen, setCronPanelOpen] = useState(false);
   const [mcpPanelOpen, setMcpPanelOpen] = useState(false);
+  const [markdownPanelOpen, setMarkdownPanelOpen] = useState(false);
   const [configInfo, setConfigInfo] = useState<ConfigInfo | null>(null);
 
   const isViewingHistory = history.viewingSessionId !== null;
@@ -162,6 +164,7 @@ export function App() {
                   onOpenEnvPanel={() => setEnvPanelOpen(true)}
                   onOpenCronPanel={() => setCronPanelOpen(true)}
                   onOpenMcpPanel={() => setMcpPanelOpen(true)}
+                  onOpenMarkdownPanel={() => setMarkdownPanelOpen(true)}
                 />
               )}
             </div>
@@ -344,6 +347,9 @@ export function App() {
       )}
       {mcpPanelOpen && (
         <MCPPanel onClose={() => setMcpPanelOpen(false)} />
+      )}
+      {markdownPanelOpen && (
+        <MarkdownPanel onClose={() => setMarkdownPanelOpen(false)} />
       )}
     </div>
   );

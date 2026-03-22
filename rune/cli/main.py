@@ -158,10 +158,37 @@ def _handle_non_interactive(
             prepare_agent_context,
         )
 
+        # Initialize MCP servers (best-effort, non-blocking)
+        try:
+            from rune.mcp.config import load_mcp_config
+            configs = load_mcp_config()
+            if configs:
+                from rune.mcp.bridge import initialize_mcp_bridge
+                result = await initialize_mcp_bridge(configs=configs)
+                if result.connected_servers > 0:
+                    console.print(
+                        f"[dim]MCP: {result.connected_servers} server(s), "
+                        f"{result.registered_count} tools[/dim]"
+                    )
+        except Exception:
+            pass  # MCP init is best-effort
+
         ctx = await prepare_agent_context(PrepareContextOptions(
             goal=message, channel="cli",
         ))
-        trace = await loop.run(ctx.goal, context={"workspace_root": ctx.workspace_root})
+
+        # Build memory context for self-improving
+        run_context: dict = {"workspace_root": ctx.workspace_root}
+        try:
+            from rune.memory.manager import get_memory_manager
+            mgr = get_memory_manager()
+            mem_ctx = await mgr.build_memory_context(message)
+            if mem_ctx:
+                run_context["memory_context"] = mem_ctx
+        except Exception:
+            pass
+
+        trace = await loop.run(ctx.goal, context=run_context)
 
         if output_parts:
             print()
@@ -176,6 +203,13 @@ def _handle_non_interactive(
             ))
         except Exception:
             pass  # best-effort memory save
+
+        # Cleanup MCP servers
+        try:
+            from rune.mcp.client import get_mcp_client_manager
+            await get_mcp_client_manager().disconnect_all()
+        except Exception:
+            pass
 
     try:
         asyncio.run(_run())
