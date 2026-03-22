@@ -1,4 +1,5 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
+import { CommandPalette } from './CommandPalette';
 import type { PendingAttachment } from '../types';
 
 const SUPPORTED_MIMES = new Set([
@@ -17,6 +18,8 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
+  const [showCommands, setShowCommands] = useState(false);
+  const [cmdFilter, setCmdFilter] = useState('');
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -81,7 +84,23 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
     if (el) {
       el.style.height = 'auto';
       el.style.height = Math.min(el.scrollHeight, 160) + 'px';
+
+      const val = el.value;
+      if (val.startsWith('/')) {
+        setShowCommands(true);
+        setCmdFilter(val.slice(1));
+      } else {
+        setShowCommands(false);
+      }
     }
+  };
+
+  const handleCommandSelect = (command: string) => {
+    if (textareaRef.current) {
+      textareaRef.current.value = command + ' ';
+      textareaRef.current.focus();
+    }
+    setShowCommands(false);
   };
 
   const handlePaste = (e: React.ClipboardEvent) => {
@@ -203,7 +222,15 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
           alignItems: 'flex-end',
           gap: 0,
           padding: '8px 8px 8px 16px',
+          position: 'relative',
         }}>
+          {showCommands && (
+            <CommandPalette
+              filter={cmdFilter}
+              onSelect={handleCommandSelect}
+              onClose={() => setShowCommands(false)}
+            />
+          )}
           {/* Attach button */}
           {!isRunning && (
             <>

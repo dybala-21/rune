@@ -882,6 +882,25 @@ def create_app() -> Any:
 
     @app.post("/api/message", dependencies=[Depends(auth)])
     async def api_message(req: MessageRequest) -> dict[str, Any]:
+        # Intercept slash commands — execute without agent
+        if req.text.startswith("/"):
+            from rune.ui.commands import COMMANDS, parse_slash_command
+            parsed = parse_slash_command(req.text)
+            if parsed:
+                cmd_name, args = parsed
+                cmd = COMMANDS.get(cmd_name)
+                if cmd:
+                    try:
+                        result = await cmd.handler(args)
+                        # __ACTION__ results are TUI-specific; return as info
+                        output = result or f"{cmd_name} executed."
+                        if isinstance(output, str) and output.startswith("__ACTION__:"):
+                            output = f"{cmd_name}: {output.replace('__ACTION__:', '')}"
+                    except Exception as exc:
+                        output = f"Error: {exc}"
+                    await _broadcast("command_result", {"command": cmd_name, "output": output})
+                    return {"ok": True, "command": cmd_name}
+
         run_id = uuid4().hex[:16]
         raw_attachments = [
             {
@@ -1186,6 +1205,19 @@ def create_app() -> Any:
                 from rune.api.handlers.mcp import test_mcp_server
                 result = await test_mcp_server(params["name"])
                 return _ok(result.model_dump())
+
+            elif method == "commands.list":
+                from rune.ui.commands import COMMANDS
+                return _ok([
+                    {
+                        "name": c.name,
+                        "description": c.description,
+                        "usage": c.usage or "",
+                        "aliases": c.aliases,
+                    }
+                    for c in COMMANDS.values()
+                    if not c.hidden
+                ])
 
             else:
                 return _err("METHOD_NOT_FOUND", f"Unknown method: {method}")

@@ -105,7 +105,7 @@ async def generate_rule_from_failure(
     Returns the rule text, or None if LLM fails.
     """
     try:
-        import litellm
+        from rune.llm.client import get_llm_client
 
         tool_name = failure_pattern["tool_name"]
         error_sample = failure_pattern["error_sample"]
@@ -121,14 +121,26 @@ async def generate_rule_from_failure(
             f"Rule:"
         )
 
-        response = await litellm.acompletion(
-            model="claude-haiku-4-5-20251001",
+        client = get_llm_client()
+        response = await client.completion(
             messages=[{"role": "user", "content": prompt}],
+            tier="fast",
             max_tokens=50,
-            temperature=0.0,
         )
 
-        rule_text = response.choices[0].message.content.strip()
+        # Extract text from response
+        text = ""
+        if isinstance(response, dict):
+            choices = response.get("choices", [])
+            if choices:
+                text = choices[0].get("message", {}).get("content", "")
+        else:
+            try:
+                text = response.choices[0].message.content
+            except (AttributeError, IndexError):
+                pass
+
+        rule_text = (text or "").strip()
         # Clean up: remove leading "- " or bullet points
         rule_text = rule_text.lstrip("- •").strip()
         if not rule_text or len(rule_text) < 5:
