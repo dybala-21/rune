@@ -57,13 +57,25 @@ export function ChatPanel({
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
+  const [showScrollBtn, setShowScrollBtn] = useState(false);
+
   useEffect(() => {
-    // Small delay to ensure DOM is laid out before scrolling
     const timer = requestAnimationFrame(() => {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     });
     return () => cancelAnimationFrame(timer);
   }, [messages, toolCalls, thinkingBlocks, delegateEvents, compactionEvents, pendingApproval, pendingQuestion]);
+
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const onScroll = () => {
+      const fromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+      setShowScrollBtn(fromBottom > 200);
+    };
+    container.addEventListener('scroll', onScroll);
+    return () => container.removeEventListener('scroll', onScroll);
+  }, []);
 
   type TimelineItem =
     | { type: 'message'; item: ChatMessage }
@@ -106,6 +118,7 @@ export function ChatPanel({
       overflowX: 'hidden',
       display: 'flex',
       flexDirection: 'column',
+      position: 'relative',
     }}>
       <div style={{
         maxWidth: 768,
@@ -191,6 +204,23 @@ export function ChatPanel({
 
         <div ref={bottomRef} />
       </div>
+
+      {showScrollBtn && (
+        <button
+          onClick={() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' })}
+          aria-label="Scroll to bottom"
+          style={{
+            position: 'absolute', bottom: 180, right: 24,
+            width: 36, height: 36, borderRadius: '50%',
+            background: 'var(--bg-tertiary, #333)', border: '1px solid var(--border, #444)',
+            color: 'var(--text-secondary, #aaa)', cursor: 'pointer',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 16, zIndex: 50, boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
+          }}
+        >
+          ↓
+        </button>
+      )}
     </div>
   );
 }

@@ -134,8 +134,21 @@ class SkillRegistry:
 
 
 def get_skill_registry() -> SkillRegistry:
-    """Get or create the singleton SkillRegistry."""
+    """Get or create the singleton SkillRegistry.
+
+    On first creation, loads skills from user (~/.rune/skills/)
+    and project (.rune/skills/) directories.
+    """
     global _registry
     if _registry is None:
         _registry = SkillRegistry()
+        # Auto-load from standard directories
+        from rune.utils.paths import rune_home
+        user_skills = rune_home() / "skills"
+        if user_skills.is_dir():
+            _registry.load_skills(user_skills)
+        # Project-level skills
+        project_skills = Path.cwd() / ".rune" / "skills"
+        if project_skills.is_dir():
+            _registry.load_skills(project_skills)
     return _registry

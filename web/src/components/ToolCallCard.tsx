@@ -90,12 +90,14 @@ export function ToolCallCard({ toolCall, isLatest = false }: ToolCallCardProps) 
 
   const summary = getToolSummary(toolCall);
 
+  const failed = toolCall.success === false;
+
   return (
     <div className="fade-in" style={{
       margin: '2px 0',
-      borderLeft: `2px solid ${toolColor}`,
+      borderLeft: `2px solid ${failed ? 'var(--danger, #e55)' : toolColor}`,
       borderRadius: 'var(--radius-md)',
-      background: 'var(--bg-secondary)',
+      background: failed ? 'rgba(220, 50, 50, 0.06)' : 'var(--bg-secondary)',
       overflow: 'hidden',
     }}>
       {/* Header */}
