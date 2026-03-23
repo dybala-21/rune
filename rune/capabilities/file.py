@@ -154,6 +154,15 @@ async def file_write(params: FileWriteParams) -> CapabilityResult:
     if params.create_dirs:
         file_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Syntax guard: validate before writing to disk
+    from rune.agent.syntax_guard import validate as _syntax_validate
+    _syn_err = _syntax_validate(str(file_path), params.content)
+    if _syn_err:
+        return CapabilityResult(
+            success=False,
+            output=f"Syntax error in {file_path.name}: {_syn_err}. Fix the content and retry.",
+        )
+
     file_path.write_text(params.content, encoding=params.encoding)
 
     return CapabilityResult(
@@ -210,6 +219,15 @@ async def file_edit(params: FileEditParams) -> CapabilityResult:
 
     if new_content == content:
         return CapabilityResult(success=True, output="No changes made")
+
+    # Syntax guard: validate replacement before writing to disk
+    from rune.agent.syntax_guard import validate as _syntax_validate
+    _syn_err = _syntax_validate(str(file_path), new_content)
+    if _syn_err:
+        return CapabilityResult(
+            success=False,
+            output=f"Edit would create syntax error in {file_path.name}: {_syn_err}. Fix and retry.",
+        )
 
     file_path.write_text(new_content)
 

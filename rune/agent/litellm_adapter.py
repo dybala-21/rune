@@ -87,6 +87,14 @@ def tools_to_openai_schema(tools: list[Any]) -> list[dict[str, Any]]:
         # MCP tools use dots (mcp.github.list_issues) — convert to double underscore
         api_name = name.replace(".", "__")
 
+        # TAFC: add optional 'think' parameter for reasoning before tool call
+        # Improves accuracy on weaker models (arXiv:2601.18282)
+        if "properties" in parameters:
+            parameters["properties"]["think"] = {
+                "type": "string",
+                "description": "Brief reasoning for this call (removed before execution)",
+            }
+
         result.append({
             "type": "function",
             "function": {
@@ -158,6 +166,7 @@ class StreamResult:
         request_tokens_limit: int,
         response_tokens_limit: int,
         max_tool_rounds: int = 10,
+        tool_call_policy: Any = None,
     ) -> None:
         self._model = model
         self._messages = list(messages)
@@ -171,12 +180,26 @@ class StreamResult:
         self._collected_text = ""
         self._usage = StreamUsage()
         self._stream: Any = None
+        # Tool call policy for weak-model guardrails
+        if tool_call_policy is None:
+            from rune.agent.tool_call_policy import ToolCallPolicy
+            tool_call_policy = ToolCallPolicy()
+        self._policy = tool_call_policy
 
     async def stream_text(self, *, delta: bool = True) -> AsyncIterator[str]:
         """Yield text deltas, auto-executing tool calls when encountered."""
         _max_tool_rounds = self._max_tool_rounds
         _tool_round = 0
+        _force_tool = False  # tool_choice="required" flag for retry
+        self._policy.reset()
+
         while True:
+            # Build extra params from policy
+            extra: dict[str, Any] = self._policy.get_extra_params()
+            if _force_tool:
+                extra["tool_choice"] = "required"
+                _force_tool = False  # one-shot
+
             self._stream = await litellm.acompletion(
                 model=self._model,
                 messages=self._messages,
@@ -185,6 +208,7 @@ class StreamResult:
                 temperature=self._temperature,
                 max_tokens=min(self._max_tokens, self._response_tokens_limit),
                 stream_options={"include_usage": True},
+                **extra,
             )
 
             text_this_turn = ""
@@ -230,11 +254,16 @@ class StreamResult:
 
             self._collected_text += text_this_turn
 
-            # No tool calls, done
+            # No tool calls — check if we should force a retry
             if not tool_calls_by_index:
-                # Append final assistant text to messages so the caller
-                # sees the full conversation (prevents re-generation in
-                # the outer agent loop).
+                if (self._tool_schemas
+                        and self._policy.should_force_tool(
+                            has_tool_calls=False, has_text=bool(text_this_turn.strip()))):
+                    log.info("policy_force_tool_retry")
+                    _force_tool = True
+                    continue  # retry with tool_choice="required"
+
+                # Truly done — append final text
                 if text_this_turn:
                     self._messages.append({
                         "role": "assistant",
@@ -290,10 +319,18 @@ class StreamResult:
                     "content": tool_result,
                 })
 
+                # Policy: check for repetitive tool calls
+                nudge = self._policy.record_tool_call(func_name)
+                if nudge:
+                    self._messages.append({"role": "user", "content": nudge})
+                    log.info("policy_tool_loop_nudge", tool=func_name)
+
             # Loop back to make another LLM call with tool results
 
     async def _execute_tool(self, name: str, params: dict[str, Any]) -> str:
         """Execute a tool by name and return string result."""
+        # TAFC: strip 'think' reasoning parameter before execution
+        params.pop("think", None)
         func = self._tool_lookup.get(name)
         if func is None:
             return f"Error: unknown tool '{name}'"
@@ -346,6 +383,7 @@ class LiteLLMAgent:
         max_tokens: int = 16_384,
         temperature: float = 0.0,
         max_tool_rounds: int = 10,
+        tool_call_policy: Any = None,
     ) -> None:
         self._model = _resolve_litellm_model(model)
         self._system_prompt = system_prompt
@@ -355,6 +393,10 @@ class LiteLLMAgent:
         self._max_tokens = max_tokens
         self._temperature = temperature
         self._max_tool_rounds = max_tool_rounds
+        if tool_call_policy is None:
+            from rune.agent.tool_call_policy import ToolCallPolicy
+            tool_call_policy = ToolCallPolicy()
+        self._policy = tool_call_policy
 
     @asynccontextmanager
     async def run_stream(
@@ -421,6 +463,7 @@ class LiteLLMAgent:
             request_tokens_limit=request_limit,
             response_tokens_limit=response_limit,
             max_tool_rounds=self._max_tool_rounds,
+            tool_call_policy=self._policy,
         )
 
         yield stream_result

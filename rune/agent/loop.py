@@ -507,8 +507,16 @@ class NativeAgentLoop(EventEmitter):
             # Step 2: Select tools based on classification
             tools = self._select_tools(classification)
 
-            # Step 3: Build system prompt
+            # Step 3: Build system prompt + provider supplement
             system_prompt = self._build_system_prompt(goal, classification, context)
+            try:
+                from rune.agent.provider_capabilities import get_prompt_supplement
+                _model_id = getattr(self._config, "model", "") or ""
+                supplement = get_prompt_supplement(_model_id)
+                if supplement:
+                    system_prompt += supplement
+            except Exception:
+                pass
 
             # Step 4: Run agent loop
             self._status = AgentStatus.ACTING
