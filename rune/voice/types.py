@@ -127,7 +127,7 @@ class VoiceEventEmitter:
                     except RuntimeError:
                         pass  # no running loop - skip async handler
             except Exception:
-                _log.warning("voice_event_handler_error", event=event, exc_info=True)
+                _log.warning("voice_event_handler_error", event_name=event, exc_info=True)
 
     def listener_count(self, event: str) -> int:
         """Return the number of listeners registered for *event*."""

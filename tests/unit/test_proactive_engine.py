@@ -86,15 +86,18 @@ class TestEventEmitterEmit:
         engine = ProactiveEngine()
         engine._emit("no_listeners_event", "data")
 
-    def test_emit_listener_exception_propagates(self):
-        """A listener exception currently propagates due to a structlog kwarg conflict
-        in the error handler (event= clashes with structlog's event positional arg).
-        This test documents the actual behavior."""
+    def test_emit_listener_exception_is_caught(self):
+        """A listener exception should be caught and logged, not propagated.
+
+        Previously this raised TypeError due to a structlog kwarg conflict
+        (event= clashes with structlog's event positional arg).  That bug
+        was fixed by renaming the kwarg to event_name=.
+        """
         engine = ProactiveEngine()
         bad_cb = MagicMock(side_effect=RuntimeError("boom"))
         engine.on("test_event", bad_cb)
-        with pytest.raises(TypeError):
-            engine._emit("test_event", "data")
+        # Should NOT raise — the exception is caught and logged
+        engine._emit("test_event", "data")
         bad_cb.assert_called_once()
 
 

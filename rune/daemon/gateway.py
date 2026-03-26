@@ -191,7 +191,7 @@ class ChannelGateway:
             try:
                 cb(*args)
             except Exception as exc:
-                log.warning("gateway_event_listener_error", event=event, error=str(exc))
+                log.warning("gateway_event_listener_error", event_name=event, error=str(exc))
 
     # Lifecycle
 

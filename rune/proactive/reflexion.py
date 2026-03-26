@@ -196,7 +196,7 @@ class ReflexionLearner:
 
         log.info(
             "reflexion_rejection",
-            event=event_type,
+            event_type=event_type,
             reason=reason,
             score=round(score, 3),
         )

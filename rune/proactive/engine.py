@@ -94,7 +94,7 @@ class ProactiveEngine:
             try:
                 cb(*args)
             except Exception as exc:
-                log.warning("event_listener_error", event=event, error=str(exc))
+                log.warning("event_listener_error", event_name=event, error=str(exc))
 
     def emit_task_completed(self, goal: str, result: dict[str, Any] | None = None) -> None:
         """Emit a task_completed event (called by external systems)."""
