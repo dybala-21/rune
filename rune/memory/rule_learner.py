@@ -3,6 +3,9 @@
 Trigger: same tool + similar error signature occurs 2+ times within 7 days.
 Action: asks LLM to generate a one-line prevention rule, stored in learned.md.
 Rules are domain-scoped and injected only into matching task types.
+
+Rules start at low confidence and must prove themselves through successful
+task outcomes before being injected into prompts (trial-based validation).
 """
 
 from __future__ import annotations
@@ -25,11 +28,14 @@ log = get_logger(__name__)
 # Constants
 _LOOKBACK_DAYS = 7
 _MIN_OCCURRENCES = 2
-_INITIAL_CONFIDENCE = 0.60
+_INITIAL_CONFIDENCE = 0.40
+_INJECTION_THRESHOLD = 0.60
 _DECAY_FACTOR = 0.9
 _GC_THRESHOLD = 0.30
 _SOFT_CAP = 30
 _RULE_CATEGORY_PREFIX = "rule:"
+_CONFIDENCE_UP = 0.03
+_CONFIDENCE_DOWN = 0.05
 
 
 def _error_signature(tool_name: str, error_message: str) -> str:
@@ -213,10 +219,13 @@ async def learn_from_failures(store: Any, domain: str = "code_modify") -> list[s
         update_fact_meta(rule_key, {
             "confidence": _INITIAL_CONFIDENCE,
             "hit_count": 0,
+            "eval_count": 0,
             "source": "rule_learner",
             "created_at": datetime.now(UTC).isoformat(),
             "failure_signature": sig,
             "failure_count": pattern["count"],
+            "human_key": key_part,
+            "category": f"rule:{domain}",
         })
 
         new_rules.append(key_part)
@@ -231,11 +240,32 @@ async def learn_from_failures(store: Any, domain: str = "code_modify") -> list[s
     return new_rules
 
 
+def _find_meta_key(
+    meta: dict[str, Any], category: str, human_key: str,
+) -> str | None:
+    """Find a meta entry by category + human_key.
+
+    Tries direct key first, then scans for the ``human_key`` field that
+    was added alongside the hash-based key.
+    """
+    direct = f"{category}:{human_key}"
+    if direct in meta:
+        return direct
+    for k, v in meta.items():
+        if (
+            v.get("human_key") == human_key
+            and v.get("category") == category
+        ):
+            return k
+    return None
+
+
 def get_rules_for_domain(domain: str) -> list[dict[str, Any]]:
     """Get active rules for a specific domain.
 
     Returns list of {key, value, confidence} for rules matching the domain.
-    Max 10 rules.
+    Max 10 rules.  Only rules with confidence >= ``_INJECTION_THRESHOLD``
+    are returned — new rules must prove themselves first.
     """
     from rune.memory.markdown_store import parse_learned_md
 
@@ -252,19 +282,82 @@ def get_rules_for_domain(domain: str) -> list[dict[str, Any]]:
         if fact.get("category") != category:
             continue
         key = fact.get("key", "")
-        confidence = fact.get("confidence", 0.5)
-        if confidence < _GC_THRESHOLD:
+
+        # Prefer meta confidence (updated by outcome feedback) over
+        # the static confidence stored in learned.md.
+        meta_key = _find_meta_key(meta, category, key)
+        if meta_key and meta[meta_key].get("eval_count", 0) > 0:
+            confidence = meta[meta_key].get("confidence", 0.5)
+        else:
+            confidence = fact.get("confidence", 0.5)
+
+        if confidence < _INJECTION_THRESHOLD:
             continue
+        meta_entry = meta.get(meta_key, {}) if meta_key else {}
         rules.append({
             "key": key,
             "value": fact.get("value", ""),
             "confidence": confidence,
-            "hit_count": meta.get(f"{category}:{key}", {}).get("hit_count", 0),
+            "hit_count": meta_entry.get("hit_count", 0),
         })
 
     # Sort by confidence desc, limit to 10
     rules.sort(key=lambda r: r["confidence"], reverse=True)
     return rules[:10]
+
+
+def update_rules_from_outcome(
+    domain: str,
+    task_success: bool,
+    goal: str = "",
+    error_message: str = "",
+) -> int:
+    """Update confidence of domain rules based on task outcome.
+
+    Only rules whose keywords appear in the task goal or error are updated,
+    avoiding noise from unrelated rules.  No LLM call — pure keyword match.
+
+    Returns number of rules updated.
+    """
+    meta = load_fact_meta()
+    category = f"rule:{domain}"
+    context = f"{goal} {error_message}".lower()
+    updated = 0
+
+    for key, entry in meta.items():
+        if not key.startswith(_RULE_CATEGORY_PREFIX):
+            continue
+        if entry.get("category") != category:
+            continue
+        if entry.get("source") != "rule_learner":
+            continue
+
+        # Relevance check: rule keywords must appear in task context
+        human_key = entry.get("human_key", "")
+        rule_words = {w for w in human_key.lower().split("_") if len(w) > 3}
+        if rule_words and context and not any(w in context for w in rule_words):
+            continue
+
+        conf = entry.get("confidence", _INITIAL_CONFIDENCE)
+        if task_success:
+            conf = min(1.0, conf + _CONFIDENCE_UP)
+        else:
+            conf = max(0.0, conf - _CONFIDENCE_DOWN)
+
+        entry["confidence"] = conf
+        entry["eval_count"] = entry.get("eval_count", 0) + 1
+        updated += 1
+
+    if updated:
+        save_fact_meta(meta)
+        log.debug(
+            "rules_updated_from_outcome",
+            domain=domain,
+            success=task_success,
+            count=updated,
+        )
+
+    return updated
 
 
 def decay_unused_rules() -> int:

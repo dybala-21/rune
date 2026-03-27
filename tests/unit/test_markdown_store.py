@@ -119,6 +119,43 @@ class TestLearnedMd:
         assert facts[0]["category"] == "general"
         assert facts[0]["confidence"] == 0.3
 
+    def test_colon_category_roundtrip(self, mem_dir: Path) -> None:
+        """Categories with colons (e.g. rule:code_modify) must survive
+        save → parse roundtrip.  Regression test for _LEARNED_RE fix."""
+        path = mem_dir / "learned.md"
+        save_learned_fact("rule:code_modify", "verify_edit", "re-read before edit", 0.60, path)
+        save_learned_fact("rule:research", "check_source", "verify sources", 0.55, path)
+
+        facts = parse_learned_md(path)
+        assert len(facts) == 2
+
+        by_cat = {f["category"]: f for f in facts}
+        assert "rule:code_modify" in by_cat
+        assert by_cat["rule:code_modify"]["key"] == "verify_edit"
+        assert by_cat["rule:code_modify"]["confidence"] == 0.60
+
+        assert "rule:research" in by_cat
+        assert by_cat["rule:research"]["key"] == "check_source"
+
+    def test_colon_category_update(self, mem_dir: Path) -> None:
+        """Updating a fact with colon category should replace, not duplicate."""
+        path = mem_dir / "learned.md"
+        save_learned_fact("rule:code_modify", "verify_edit", "v1", 0.40, path)
+        save_learned_fact("rule:code_modify", "verify_edit", "v2", 0.70, path)
+
+        facts = parse_learned_md(path)
+        rule_facts = [f for f in facts if f["category"] == "rule:code_modify"]
+        assert len(rule_facts) == 1
+        assert rule_facts[0]["value"] == "v2"
+        assert rule_facts[0]["confidence"] == 0.70
+
+    def test_colon_category_remove(self, mem_dir: Path) -> None:
+        """Removing a fact with colon category should work."""
+        path = mem_dir / "learned.md"
+        save_learned_fact("rule:code_modify", "verify_edit", "re-read", 0.60, path)
+        assert remove_learned_fact("verify_edit", path) is True
+        assert parse_learned_md(path) == []
+
     def test_prune(self, mem_dir: Path) -> None:
         path = mem_dir / "learned.md"
         for i in range(10):

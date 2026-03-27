@@ -459,12 +459,19 @@ async def save_agent_result_to_memory(
 
         await memory_manager.save_episode(episode)
 
+        # Rule outcome feedback: update confidence of active rules
+        domain = intent.domain or "code_modify"
+        try:
+            from rune.memory.rule_learner import update_rules_from_outcome
+            update_rules_from_outcome(domain, success, goal=goal, error_message=result_text[:300])
+        except Exception:
+            pass  # Rule feedback must never block episode saving
+
         # Rule Learner: trigger on failure
         if not success:
             try:
                 from rune.memory.rule_learner import learn_from_failures
                 from rune.memory.store import get_memory_store
-                domain = intent.domain or "code_modify"
                 await learn_from_failures(get_memory_store(), domain)
             except Exception:
                 pass  # Rule learning must never block episode saving

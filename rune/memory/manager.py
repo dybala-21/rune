@@ -118,13 +118,19 @@ class MemoryManager:
         commands = await loop.run_in_executor(None, self._store.get_recent_commands, 20)
         self._working.recent_commands = [c["command"] for c in commands]
 
-        # Reconcile: sync fact-meta.json with learned.md values
+        # Reconcile: sync fact-meta.json with learned.md values.
+        # If meta has eval data (eval_count > 0), meta wins — it has been
+        # validated by actual task outcomes.  Otherwise learned.md wins.
         from rune.memory.state import load_fact_meta, save_fact_meta
         meta = await loop.run_in_executor(None, load_fact_meta)
         meta_changed = False
         for fact in learned:
             key = fact["key"]
-            if key in meta and meta[key].get("confidence") != fact["confidence"]:
+            if key not in meta:
+                continue
+            if meta[key].get("eval_count", 0) > 0:
+                continue  # meta has outcome data — don't overwrite
+            if meta[key].get("confidence") != fact["confidence"]:
                 meta[key]["confidence"] = fact["confidence"]
                 meta_changed = True
         if meta_changed:

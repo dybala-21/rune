@@ -24,8 +24,9 @@ from rune.utils.paths import rune_home
 log = get_logger(__name__)
 
 # learned.md line pattern: - [category] key: value (confidence)
+# Category may contain colons (e.g. "rule:code_modify") so we use [^\]]+ instead of \w+
 _LEARNED_RE = re.compile(
-    r"^- \[(?P<category>\w+)\]\s*(?P<key>[^:]+):\s*(?P<value>.+?)"
+    r"^- \[(?P<category>[^\]]+)\]\s*(?P<key>[^:]+):\s*(?P<value>.+?)"
     r"(?:\s*\((?P<confidence>[\d.]+)\))?\s*$"
 )
 
