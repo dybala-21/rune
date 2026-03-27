@@ -10,9 +10,6 @@ Covers the new self-improving pipeline:
 
 from __future__ import annotations
 
-import json
-from unittest.mock import patch
-
 import pytest
 
 from rune.memory.rule_learner import (
@@ -22,11 +19,8 @@ from rune.memory.rule_learner import (
     _INITIAL_CONFIDENCE,
     _INJECTION_THRESHOLD,
     _find_meta_key,
-    get_rules_for_domain,
     update_rules_from_outcome,
 )
-from rune.memory.state import load_fact_meta, save_fact_meta
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -38,7 +32,6 @@ def meta_dir(tmp_dir, monkeypatch):
     """Redirect state dir and memory dir to temp."""
     state_dir = tmp_dir / "memory" / ".state"
     state_dir.mkdir(parents=True)
-    memory_dir = tmp_dir / "memory"
 
     monkeypatch.setattr("rune.memory.state._state_dir", lambda: state_dir)
     monkeypatch.setattr(

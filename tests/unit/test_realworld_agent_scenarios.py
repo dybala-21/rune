@@ -11,12 +11,11 @@ science, dataeng, AetherArc (WebSocket chat), from test-workspace.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import pytest
 
 from rune.memory.rule_learner import (
-    _GC_THRESHOLD,
     _INITIAL_CONFIDENCE,
     _INJECTION_THRESHOLD,
     _error_signature,
@@ -27,7 +26,6 @@ from rune.memory.rule_learner import (
 from rune.memory.store import MemoryStore
 from rune.memory.types import Episode
 from rune.proactive.reflexion import ReflexionLearner
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -337,7 +335,7 @@ class TestDataEngScenario:
 
     def test_etl_rule_with_mixed_tasks(self, meta_env):
         """스키마 검증 규칙이 ETL 관련 태스크에서만 평가됨."""
-        key = meta_env.add_rule("code_modify", "validate_schema_before_load",
+        meta_env.add_rule("code_modify", "validate_schema_before_load",
                                 "validate schema compatibility before data load")
 
         # 혼합 태스크: ETL + 비ETL

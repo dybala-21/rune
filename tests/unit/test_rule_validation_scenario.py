@@ -7,23 +7,18 @@ observable outcomes a user would notice.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
 from rune.memory.rule_learner import (
-    _CONFIDENCE_DOWN,
-    _CONFIDENCE_UP,
     _GC_THRESHOLD,
     _INITIAL_CONFIDENCE,
     _INJECTION_THRESHOLD,
     _error_signature,
-    find_repeated_failures,
     get_rules_for_domain,
     update_rules_from_outcome,
 )
 from rune.memory.store import MemoryStore
-
 
 # ---------------------------------------------------------------------------
 # Fixtures — a fully wired local environment
@@ -69,7 +64,7 @@ def env(tmp_dir, monkeypatch):
     def _parse_learned():
         from rune.memory.markdown_store import _LEARNED_RE
         facts = []
-        for i, line in enumerate(learned_md.read_text().splitlines()):
+        for _i, line in enumerate(learned_md.read_text().splitlines()):
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
@@ -85,7 +80,6 @@ def env(tmp_dir, monkeypatch):
         return facts
 
     def _save_learned(category, key, value, confidence=0.5, path=None):
-        import fcntl
         line = f"- [{category}] {key}: {value} ({confidence:.2f})\n"
         text = learned_md.read_text()
         # Update existing or append
@@ -99,9 +93,6 @@ def env(tmp_dir, monkeypatch):
 
     monkeypatch.setattr("rune.memory.rule_learner.save_learned_fact", _save_learned)
     monkeypatch.setattr("rune.memory.markdown_store.parse_learned_md", _parse_learned)
-    # Also patch the import inside get_rules_for_domain
-    import rune.memory.rule_learner as rl_mod
-    original_get_rules = rl_mod.get_rules_for_domain.__wrapped__ if hasattr(rl_mod.get_rules_for_domain, '__wrapped__') else None
 
     # Create DB
     store = MemoryStore(db_path=":memory:")

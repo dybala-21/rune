@@ -11,24 +11,17 @@ These tests simulate real-world agent workflows:
 from __future__ import annotations
 
 import json
-import time
 from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock
 
 import pytest
 
 from rune.memory.rule_learner import (
-    _DECAY_FACTOR,
-    _GC_THRESHOLD,
-    _INITIAL_CONFIDENCE,
     _error_signature,
-    decay_unused_rules,
     find_repeated_failures,
 )
 from rune.memory.store import MemoryStore
 from rune.memory.types import Episode
 from rune.proactive.reflexion import ReflexionLearner
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
