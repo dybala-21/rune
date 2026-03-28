@@ -311,7 +311,15 @@ class StreamResult:
                 except (json.JSONDecodeError, TypeError):
                     func_args = {}
 
-                tool_result = await self._execute_tool(func_name, func_args)
+                # Policy: hard-block tool if it exceeded nudge + grace window
+                if self._policy.should_block_tool(func_name):
+                    tool_result = (
+                        f"ERROR: {func_name} blocked — called too many times "
+                        f"consecutively. Use a different tool or approach."
+                    )
+                    log.warning("policy_tool_blocked", tool=func_name)
+                else:
+                    tool_result = await self._execute_tool(func_name, func_args)
 
                 self._messages.append({
                     "role": "tool",
@@ -319,7 +327,7 @@ class StreamResult:
                     "content": tool_result,
                 })
 
-                # Policy: check for repetitive tool calls
+                # Policy: check for repetitive tool calls (nudge before block)
                 nudge = self._policy.record_tool_call(func_name)
                 if nudge:
                     self._messages.append({"role": "user", "content": nudge})

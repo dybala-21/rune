@@ -396,8 +396,28 @@ class MemoryManager:
         except Exception:
             pass  # Rule injection is best-effort
 
-        # 1. Scored episodes
+        # 1. Scored episodes (vector/keyword) + entity search fallback
         scored = await self.score_episodes(goal, limit=7)
+
+        # Supplement with entity-based search: extract keywords from goal
+        # and find episodes by entity match (catches cases where vector
+        # search misses due to empty index or cross-language mismatch).
+        scored_ids = {entry["episode"].id for entry in scored}
+        goal_words = [w for w in goal.lower().split() if len(w) > 1]
+        for word in goal_words[:5]:
+            try:
+                entity_eps = self._store.get_episodes_by_entity(word, limit=3)
+                for ep in entity_eps:
+                    if ep.id not in scored_ids:
+                        scored_ids.add(ep.id)
+                        scored.append({
+                            "episode": ep,
+                            "score": 0.6,
+                            "breakdown": {"vector": 0, "importance": ep.importance, "recency": 0.5},
+                        })
+            except Exception:
+                pass
+
         if scored:
             # Keep score_episodes relevance order; utility is for labeling only
             lines: list[str] = []

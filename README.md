@@ -133,7 +133,7 @@ Use `/learned` in the TUI to see learning status.
 ║                               ▼                                  ║
 ║  ┌────────────────────────────────────────────────────────────┐  ║
 ║  │ AGENT CORE                                                 │  ║
-║  │  Agent Loop ─── Tools ─── Skills ─── MCP ─── Delegation   │  ║
+║  │  Agent Loop ─── Tools ─── Skills ─── MCP ─── Delegation    │  ║
 ║  │       │                                                    │  ║
 ║  │  Guardian ──── Evidence Gate ──── Quality Gate             │  ║
 ║  └────────────────────────┬───────────────────────────────────┘  ║
@@ -141,8 +141,8 @@ Use `/learned` in the TUI to see learning status.
 ║  ┌────────────────────────────────────────────────────────────┐  ║
 ║  │ MEMORY & LEARNING                                          │  ║
 ║  │  Episodes (utility scoring)  ·  Rule Learner               │  ║
-║  │  Behavior Predictor          ·  Proactive Engine            │  ║
-║  │  FAISS vectors + markdown    ·  Code Graph (tree-sitter)    │  ║
+║  │  Behavior Predictor          ·  Proactive Engine           │  ║
+║  │  FAISS vectors + markdown    ·  Code Graph (tree-sitter)   │  ║
 ║  └────────────────────────────────────────────────────────────┘  ║
 ╚══════════════════════════════════════════════════════════════════╝
 ```

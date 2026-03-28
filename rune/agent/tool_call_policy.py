@@ -2,7 +2,7 @@
 
 Handles two failure modes common in weaker models:
 1. Model generates text but never calls tools → retry with tool_choice="required"
-2. Model calls the same tool in a loop → nudge to progress
+2. Model calls the same tool in a loop → nudge, then block
 
 Configurable via config.yaml under `tool_policy:`.
 """
@@ -11,6 +11,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+
+# Read-only tools are exempt from hard blocking because sequential
+# reads of different files are a legitimate pattern.
+_READ_ONLY_TOOLS: frozenset[str] = frozenset({
+    "file_read", "file_list", "file_search",
+    "code_analyze", "code_find_def", "code_find_refs",
+    "project_map", "think",
+})
+
+_BLOCK_GRACE = 2  # extra calls allowed after nudge before hard block
 
 
 @dataclass
@@ -71,6 +81,20 @@ class ToolCallPolicy:
                 f"Consider progressing to the next step."
             )
         return None
+
+    def should_block_tool(self, name: str) -> bool:
+        """Return True if *name* should be hard-blocked.
+
+        After the nudge threshold (``max_consecutive_same_tool``) plus a
+        grace window of 2 additional calls, the tool is blocked to prevent
+        infinite loops.  Read-only tools are exempt because sequential
+        reads of different files are a legitimate pattern.
+        """
+        if name in _READ_ONLY_TOOLS:
+            return False
+        block_at = self.max_consecutive_same_tool + _BLOCK_GRACE
+        recent = self._tool_history[-block_at:]
+        return len(recent) == block_at and len(set(recent)) == 1
 
     def get_extra_params(self) -> dict[str, Any]:
         """Extra parameters to pass to litellm.acompletion()."""

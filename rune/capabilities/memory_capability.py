@@ -121,81 +121,154 @@ class MemoryTuneParams(BaseModel):
 # Implementations
 
 async def memory_search(params: MemorySearchParams) -> CapabilityResult:
-    """Semantic search across the memory store."""
+    """Multi-source memory search: facts + episodes + vector index.
+
+    Searches three sources and merges results:
+    1. Working memory facts (MEMORY.md + learned.md) — keyword match
+    2. Episode memory (SQLite) — entity + summary keyword match
+    3. Vector index (FAISS) — semantic search (when embeddings exist)
+    """
     log.debug("memory_search", query=params.query, limit=params.limit)
 
     try:
         from rune.memory.manager import get_memory_manager
+        from rune.memory.store import get_memory_store
 
         manager = get_memory_manager()
         await manager.initialize()
 
-        results = await manager.search(params.query, k=params.limit)
+        all_matches: list[dict] = []
+        query_lower = params.query.lower()
+        query_words = [w for w in query_lower.split() if len(w) > 1]
 
-        # Filter by minimum score
-        results = [r for r in results if r.score >= params.min_score]
+        # Source 1: Working memory facts (keyword match)
+        working = manager.working
+        for key, value in working.facts.items():
+            text = f"{key} {value}".lower()
+            if query_words and any(w in text for w in query_words):
+                all_matches.append({
+                    "type": "fact",
+                    "key": key,
+                    "summary": value,
+                    "score": 0.9,
+                })
 
-        if not results:
-            # Fall back to exact match in working memory
-            working = manager.working
-            matches: list[dict] = []
-            query_lower = params.query.lower()
-            for key, value in working.facts.items():
-                if query_lower in key.lower() or query_lower in value.lower():
-                    matches.append({"key": key, "value": value, "score": 1.0})
+        # Also search project MEMORY.md file
+        try:
+            import os
 
-            # Also search project MEMORY.md file
-            try:
-                import os
+            from rune.memory.project_memory import read_project_memory_head
+            md_content = read_project_memory_head(os.getcwd())
+            if md_content:
+                for line in md_content.splitlines():
+                    stripped = line.strip()
+                    if stripped and query_words and any(w in stripped.lower() for w in query_words):
+                        all_matches.append({
+                            "type": "project_fact",
+                            "key": "project_memory",
+                            "summary": stripped,
+                            "score": 0.8,
+                        })
+        except Exception:
+            pass
 
-                from rune.memory.project_memory import read_project_memory_head
-                md_content = read_project_memory_head(os.getcwd())
-                if md_content:
-                    for line in md_content.splitlines():
-                        line = line.strip()
-                        if line and query_lower in line.lower():
-                            matches.append({"key": "project_memory", "value": line, "score": 0.8})
-            except Exception:
-                pass
+        # Source 2: Episode memory (entity + keyword search)
+        try:
+            store = get_memory_store()
+            seen_ep_ids: set[str] = set()
 
-            if not matches:
-                return CapabilityResult(
-                    success=True,
-                    output="No matching memories found.",
-                    metadata={"query": params.query, "count": 0},
-                )
+            # Search by entities
+            for word in query_words:
+                episodes = store.get_episodes_by_entity(word, limit=5)
+                for ep in episodes:
+                    if ep.id in seen_ep_ids:
+                        continue
+                    seen_ep_ids.add(ep.id)
+                    all_matches.append({
+                        "type": "episode",
+                        "key": f"episode:{ep.timestamp[:10]}",
+                        "summary": f"{ep.task_summary} — {ep.result[:200]}",
+                        "score": 0.85,
+                        "entities": ep.entities,
+                        "lessons": ep.lessons,
+                    })
 
-            lines: list[str] = [f"Found {len(matches)} matching fact(s):"]
-            for m in matches[: params.limit]:
-                lines.append(f"  [{m['key']}] {m['value']}")
+            # Also keyword search in task_summary if few entity results
+            if len(seen_ep_ids) < 3 and query_words:
+                for word in query_words[:3]:
+                    rows = store.conn.execute(
+                        """SELECT * FROM episodes
+                           WHERE task_summary LIKE ? OR result LIKE ?
+                           ORDER BY timestamp DESC LIMIT 5""",
+                        (f"%{word}%", f"%{word}%"),
+                    )
+                    for r in rows:
+                        ep = store._row_to_episode(r)
+                        if ep.id in seen_ep_ids:
+                            continue
+                        seen_ep_ids.add(ep.id)
+                        all_matches.append({
+                            "type": "episode",
+                            "key": f"episode:{ep.timestamp[:10]}",
+                            "summary": f"{ep.task_summary} — {ep.result[:200]}",
+                            "score": 0.75,
+                            "entities": ep.entities,
+                            "lessons": ep.lessons,
+                        })
+        except Exception as exc:
+            log.debug("episode_search_fallback_error", error=str(exc)[:100])
 
+        # Source 3: Vector index (semantic search)
+        try:
+            results = await manager.search(params.query, k=params.limit)
+            for r in results:
+                if r.score >= params.min_score:
+                    all_matches.append({
+                        "type": r.metadata.type if r.metadata else "vector",
+                        "key": r.metadata.id if r.metadata else "",
+                        "summary": r.metadata.summary if r.metadata else r.text,
+                        "score": r.score,
+                    })
+        except Exception:
+            pass  # Vector search optional
+
+        # Deduplicate and sort
+        seen_summaries: set[str] = set()
+        unique_matches: list[dict] = []
+        for m in sorted(all_matches, key=lambda x: x["score"], reverse=True):
+            sig = m["summary"][:80]
+            if sig not in seen_summaries:
+                seen_summaries.add(sig)
+                unique_matches.append(m)
+
+        if not unique_matches:
             return CapabilityResult(
                 success=True,
-                output="\n".join(lines),
-                metadata={"query": params.query, "count": len(matches)},
+                output="No matching memories found.",
+                metadata={"query": params.query, "count": 0},
             )
 
-        # Format vector search results
-        lines: list[str] = [f"Found {len(results)} memory result(s):"]
-        for r in results:
-            score_str = f"{r.score:.2f}"
-            summary = r.metadata.summary if r.metadata else ""
-            entry_type = r.metadata.type if r.metadata else "unknown"
-            lines.append(f"  [{score_str}] ({entry_type}) {summary}")
+        # --- Format output ---
+        lines: list[str] = [f"Found {len(unique_matches)} memory result(s):"]
+        for m in unique_matches[: params.limit]:
+            score_str = f"{m['score']:.2f}"
+            mtype = m["type"]
+            summary = m["summary"]
+            lines.append(f"  [{score_str}] ({mtype}) {summary}")
+            if m.get("entities"):
+                lines.append(f"         entities: {m['entities']}")
+            if m.get("lessons") and m["lessons"] not in ("", "[]"):
+                lines.append(f"         lessons: {m['lessons'][:200]}")
 
         return CapabilityResult(
             success=True,
             output="\n".join(lines),
             metadata={
                 "query": params.query,
-                "count": len(results),
+                "count": len(unique_matches),
                 "results": [
-                    {
-                        "score": r.score,
-                        "type": r.metadata.type if r.metadata else "",
-                        "summary": r.metadata.summary if r.metadata else "",
-                    }
-                    for r in results
+                    {"score": m["score"], "type": m["type"], "summary": m["summary"][:200]}
+                    for m in unique_matches[: params.limit]
                 ],
             },
         )
