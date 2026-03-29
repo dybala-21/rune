@@ -81,6 +81,7 @@ class IntentContract:
     grounding_requirement: GroundingRequirement
     output_expectation: OutputExpectation
     requires_code_verification: bool
+    requires_code_write_artifact: bool = False
 
 
 # IntentMessage / Options
@@ -174,6 +175,7 @@ def resolve_intent_contract(
                 grounding_requirement="none",
                 output_expectation=output_expectation,
                 requires_code_verification=True,
+                requires_code_write_artifact=True,
             )
         if category == "browser":
             return IntentContract(

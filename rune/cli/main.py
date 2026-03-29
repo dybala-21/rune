@@ -79,6 +79,9 @@ def main(
     message: Annotated[
         str | None, typer.Option("--message", help="Non-interactive message")
     ] = None,
+    voice: Annotated[
+        bool, typer.Option("--voice", help="Voice input mode (speak instead of type)")
+    ] = False,
 ) -> None:
     """RUNE - AI Development Environment.
 
@@ -95,10 +98,95 @@ def main(
         raise typer.Exit()
 
     if ctx.invoked_subcommand is None:
-        if message:
+        if voice:
+            _handle_voice_mode(model=model, provider=provider)
+        elif message:
             _handle_non_interactive(message, model=model, provider=provider)
         else:
             _start_interactive(model=model, provider=provider)
+
+
+# Voice mode handling
+
+def _handle_voice_mode(
+    model: str | None = None,
+    provider: str | None = None,
+) -> None:
+    """Voice input mode — speak instead of type."""
+    import asyncio
+
+    from rune.agent.loop import NativeAgentLoop
+    from rune.types import AgentConfig
+
+    if not _ensure_llm_key():
+        console.print("[red]No API key configured.[/red]")
+        raise typer.Exit(1)
+
+    async def _voice_loop() -> None:
+        from rune.voice.service import get_voice_service
+
+        voice_svc = get_voice_service()
+        if not voice_svc.has_stt:
+            console.print(
+                "[red]No STT provider available.[/red]\n"
+                "  Set DEEPGRAM_API_KEY for cloud STT, or install sherpa-onnx for local."
+            )
+            raise typer.Exit(1)
+
+        agent_config = AgentConfig()
+        if model or provider:
+            from rune.config import get_config
+            cfg = get_config()
+            if model:
+                agent_config.model = model
+            if provider:
+                agent_config.provider = provider
+
+        loop = NativeAgentLoop(config=agent_config)
+
+        stt_name = type(voice_svc._stt).__name__ if voice_svc._stt else "none"
+        tts_name = type(voice_svc._tts).__name__ if voice_svc._tts else "text only"
+        console.print(
+            f"[bold green]🎤 Voice mode active.[/bold green]\n"
+            f"  STT: {stt_name}  |  TTS: {tts_name}\n"
+            f"  Speak to interact. Ctrl+C to exit.\n"
+        )
+
+        while True:
+            try:
+                console.print("[dim]🎤 Listening...[/dim]")
+                text = await voice_svc.listen_and_transcribe()
+
+                if not text:
+                    console.print("[dim]  (no speech detected)[/dim]")
+                    continue
+
+                console.print(f"[bold]❯[/bold] {text}\n")
+
+                # Build memory context
+                run_context: dict = {}
+                try:
+                    from rune.memory.manager import get_memory_manager
+                    mgr = get_memory_manager()
+                    mem_ctx = await mgr.build_memory_context(text)
+                    if mem_ctx:
+                        run_context["memory_context"] = mem_ctx
+                except Exception:
+                    pass
+
+                trace = await loop.run(text, context=run_context)
+
+                # TTS output (if available)
+                if voice_svc.has_tts and trace.reason == "completed":
+                    output = getattr(trace, "final_output", "") or ""
+                    if output:
+                        await voice_svc.speak_and_play(output[:500])
+
+            except KeyboardInterrupt:
+                console.print("\n[dim]Voice mode ended.[/dim]")
+                break
+
+    asyncio.run(_voice_loop())
 
 
 # Non-interactive message handling

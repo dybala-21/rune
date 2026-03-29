@@ -1,6 +1,7 @@
 """Voice type definitions for RUNE.
 
-Shared types for speech-to-text providers and voice sessions.
+Shared types for speech-to-text and text-to-speech providers,
+voice sessions, and the unified VoiceService.
 """
 
 from __future__ import annotations
@@ -151,5 +152,35 @@ class STTProvider(ABC):
         Returns
         -------
         TranscriptionResult with the transcribed text and metadata.
+        """
+        ...
+
+
+@dataclass(slots=True)
+class SynthesisResult:
+    """Result from a text-to-speech synthesis."""
+
+    audio: bytes = b""
+    sample_rate: int = 24000
+    duration_ms: float = 0.0
+
+
+class TTSProvider(ABC):
+    """Abstract base class for text-to-speech providers."""
+
+    @abstractmethod
+    async def synthesize(self, text: str, voice: str = "") -> SynthesisResult:
+        """Synthesize text to audio.
+
+        Parameters
+        ----------
+        text:
+            Text to convert to speech.
+        voice:
+            Voice identifier (provider-specific).
+
+        Returns
+        -------
+        SynthesisResult with raw audio bytes and metadata.
         """
         ...

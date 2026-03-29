@@ -70,7 +70,7 @@ codeintel = ["tree-sitter-language-pack>=0.13.0"]
 telegram = ["aiogram>=3.26.0", "aiohttp>=3.11.0"]
 discord = ["discord.py>=2.7.1"]
 slack = ["slack-sdk>=3.40.1"]
-voice = ["onnxruntime>=1.24.3"]
+voice = ["onnxruntime>=1.24.3", "kokoro-onnx>=0.5.0", "edge-tts>=6.1.0", "sounddevice>=0.5.0"]
 
 # Bundles
 full = ["rune-ai[vector,browser,embedding,codeintel,telegram,discord,slack,voice]"]

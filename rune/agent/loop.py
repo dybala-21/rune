@@ -1163,6 +1163,7 @@ class NativeAgentLoop(EventEmitter):
                 effective_output_exp = intent_contract.output_expectation
                 requires_grounding = intent_contract.grounding_requirement == "required"
                 requires_code_verification = intent_contract.requires_code_verification
+                requires_code_write = getattr(intent_contract, "requires_code_write_artifact", False)
 
                 # If IntentContract says no tools needed and LLM answered
                 # without tools, it's a text-only response - mark as complete.
@@ -1201,16 +1202,18 @@ class NativeAgentLoop(EventEmitter):
                     evidence=evidence,
                     changed_files_count=evidence.writes,
                     answer_length=len(output_text),
-                    # R06: Code verification
+                    # Code verification
                     requires_code_verification=requires_code_verification,
-                    # R14: Grounding
+                    # Code write artifact
+                    requires_code_write_artifact=requires_code_write,
+                    # Grounding
                     grounding_requirement=requires_grounding,
-                    # R15: Analysis depth
+                    # Analysis depth
                     analysis_depth_min_reads=analysis_min_reads,
-                    # R18: Web evidence
+                    # Web evidence
                     min_web_searches=min_web_searches,
                     min_web_fetches=min_web_fetches,
-                    # R13: Hard failures tracked (deduplicated) (#16)
+                    # Hard failures tracked (deduplicated) (#16)
                     hard_failures=list(self._hard_failures),
                 )
                 gate_result = evaluate_completion_gate(gate_input)
@@ -1231,12 +1234,21 @@ class NativeAgentLoop(EventEmitter):
 
                 # "partial" with substantial output - treat as completed to
                 # prevent indefinite loops when only minor requirements remain.
+                # Exception: if code write was required but nothing was written,
+                # do NOT accept partial — force the agent to keep working.
                 if gate_result.outcome == "partial" and output_text and len(output_text.strip()) > 50:
-                    log.info("partial_completion_accepted", step=self._step)
-                    trace.reason = "completed"
-                    trace.final_step = self._step
-                    trace.evidence_score = 0.8
-                    break
+                    if requires_code_write and gate_input.structured_write_count == 0:
+                        log.debug(
+                            "partial_rejected_no_write",
+                            step=self._step,
+                            writes=gate_input.structured_write_count,
+                        )
+                    else:
+                        log.info("partial_completion_accepted", step=self._step)
+                        trace.reason = "completed"
+                        trace.final_step = self._step
+                        trace.evidence_score = 0.8
+                        break
 
             except Exception as exc:
                 reason = classify_error(exc)

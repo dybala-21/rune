@@ -1,4 +1,4 @@
-"""Voice input module for RUNE.
+"""Voice module for RUNE — STT, TTS, and unified VoiceService.
 
 Re-exports for public API.
 """
@@ -11,6 +11,8 @@ from rune.voice.session import (
 )
 from rune.voice.types import (
     STTProvider,
+    SynthesisResult,
+    TTSProvider,
     TranscriptionResult,
     VoiceConfig,
     VoiceEvent,
@@ -20,6 +22,8 @@ from rune.voice.types import (
 
 __all__ = [
     "STTProvider",
+    "SynthesisResult",
+    "TTSProvider",
     "TranscriptionResult",
     "VoiceConfig",
     "VoiceEvent",

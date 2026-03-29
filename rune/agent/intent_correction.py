@@ -88,6 +88,7 @@ def apply_post_execution_intent_corrections(
             grounding_requirement=corrected.grounding_requirement,
             output_expectation=corrected.output_expectation,
             requires_code_verification=False,
+            requires_code_write_artifact=corrected.requires_code_write_artifact,
         )
         corrections.append("code_write_no_structured")
 
@@ -115,6 +116,7 @@ def apply_post_execution_intent_corrections(
             grounding_requirement=corrected.grounding_requirement,
             output_expectation="text",
             requires_code_verification=False,
+            requires_code_write_artifact=False,  # service task, no file write needed
         )
         corrections.append("execution_only_service_task")
 
@@ -136,6 +138,7 @@ def apply_post_execution_intent_corrections(
             grounding_requirement=corrected.grounding_requirement,
             output_expectation="text",
             requires_code_verification=corrected.requires_code_verification,
+            requires_code_write_artifact=False,  # research task, no file write needed
         )
         corrections.append("research_text_output")
 
