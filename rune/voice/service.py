@@ -160,34 +160,72 @@ def reset_voice_service() -> None:
 
 
 def _auto_detect_stt() -> STTProvider | None:
-    """Auto-detect best available STT provider."""
+    """Auto-detect best available STT provider.
+
+    Priority: Deepgram > OpenAI Whisper > Groq Whisper > Sherpa-ONNX (local).
+    """
     import os
 
-    # Prefer Deepgram if API key is set
+    # 1. Deepgram (best quality, Korean, $0.004/min)
     if os.environ.get("DEEPGRAM_API_KEY"):
         try:
             from rune.voice.providers.deepgram import DeepgramSTTProvider
             return DeepgramSTTProvider(api_key=os.environ["DEEPGRAM_API_KEY"])
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("stt_detect_skip", provider="deepgram", error=str(exc)[:80])
 
-    # Fallback to Sherpa-ONNX (local)
+    # 2. OpenAI Whisper (most users have this key, 99 languages, $0.006/min)
+    if os.environ.get("OPENAI_API_KEY"):
+        try:
+            from rune.voice.providers.openai_stt import OpenAISTTProvider
+            return OpenAISTTProvider(api_key=os.environ["OPENAI_API_KEY"])
+        except Exception as exc:
+            log.debug("stt_detect_skip", provider="openai", error=str(exc)[:80])
+
+    # 3. Groq Whisper (free tier, ultra-fast)
+    if os.environ.get("GROQ_API_KEY"):
+        try:
+            from rune.voice.providers.groq_stt import GroqSTTProvider
+            return GroqSTTProvider(api_key=os.environ["GROQ_API_KEY"])
+        except Exception as exc:
+            log.debug("stt_detect_skip", provider="groq", error=str(exc)[:80])
+
+    # 4. Sherpa-ONNX (fully local, no API key)
     try:
         from rune.voice.providers.sherpa_onnx import SherpaOnnxSTTProvider
         return SherpaOnnxSTTProvider()
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("stt_detect_skip", provider="sherpa_onnx", error=str(exc)[:80])
 
     return None
 
 
 def _auto_detect_tts(language: str = "en") -> TTSProvider | None:
-    """Auto-detect best available TTS provider."""
-    # Try Kokoro (local)
+    """Auto-detect best available TTS provider.
+
+    Priority: Kokoro (local) > Edge TTS (free cloud) > macOS say (offline).
+    """
+    # 1. Kokoro-ONNX (local, best quality, Korean)
     try:
         from rune.voice.providers.kokoro_tts import KokoroTTSProvider
         return KokoroTTSProvider(language=language)
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("tts_detect_skip", provider="kokoro", error=str(exc)[:80])
+
+    # 2. Edge TTS (free, no API key, Korean)
+    try:
+        from rune.voice.providers.edge_tts_provider import EdgeTTSProvider
+        return EdgeTTSProvider(language=language)
+    except Exception as exc:
+        log.debug("tts_detect_skip", provider="edge_tts", error=str(exc)[:80])
+
+    # 3. macOS say (offline, zero deps)
+    import platform
+    if platform.system() == "Darwin":
+        try:
+            from rune.voice.providers.macos_tts import MacOSTTSProvider
+            return MacOSTTSProvider(language=language)
+        except Exception as exc:
+            log.debug("tts_detect_skip", provider="macos_say", error=str(exc)[:80])
 
     return None
