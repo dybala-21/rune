@@ -135,8 +135,6 @@ def _handle_voice_mode(
 
         agent_config = AgentConfig()
         if model or provider:
-            from rune.config import get_config
-            cfg = get_config()
             if model:
                 agent_config.model = model
             if provider:

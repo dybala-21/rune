@@ -13,11 +13,10 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 from rune.utils.logger import get_logger
 from rune.voice.player import AudioPlayer
-from rune.voice.types import STTProvider, SynthesisResult, TTSProvider, TranscriptionResult
+from rune.voice.types import STTProvider, SynthesisResult, TTSProvider
 
 log = get_logger(__name__)
 
@@ -122,7 +121,7 @@ class VoiceService:
             await mgr.start()
             text = await asyncio.wait_for(transcript_future, timeout=30.0)
             return text.strip()
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.debug("voice_listen_timeout")
             return ""
         finally:

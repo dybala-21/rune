@@ -12,8 +12,8 @@ from rune.voice.session import (
 from rune.voice.types import (
     STTProvider,
     SynthesisResult,
-    TTSProvider,
     TranscriptionResult,
+    TTSProvider,
     VoiceConfig,
     VoiceEvent,
     VoiceEventEmitter,

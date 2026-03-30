@@ -38,10 +38,10 @@ class EdgeTTSProvider(TTSProvider):
 
         try:
             import edge_tts
-        except ImportError:
+        except ImportError as exc:
             raise RuntimeError(
                 "edge-tts is not installed. Install with: uv pip install edge-tts"
-            )
+            ) from exc
 
         voice = voice or self._voice
 

@@ -48,11 +48,11 @@ class KokoroTTSProvider(TTSProvider):
                 voices_path="voices-v1.0.bin",
             )
             log.info("kokoro_tts_loaded")
-        except ImportError:
+        except ImportError as exc:
             raise RuntimeError(
                 "kokoro-onnx is not installed. "
                 "Install with: uv pip install kokoro-onnx"
-            )
+            ) from exc
         except Exception as exc:
             raise RuntimeError(f"Failed to load Kokoro TTS: {exc}") from exc
 

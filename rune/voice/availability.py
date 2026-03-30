@@ -29,7 +29,9 @@ def _check() -> None:
                 importlib.import_module(mod_name)
                 _mic_state = "available"
                 break
-            except ImportError:
+            except (ImportError, OSError):
+                # OSError: PortAudio library not found (sounddevice installed
+                # but native library missing, e.g. CI without libportaudio)
                 continue
         else:
             _mic_state = "unavailable"
