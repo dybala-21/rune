@@ -413,3 +413,90 @@ class Renderer:
         self._live_display.spinner_index += 1
         if self._live:
             self._live.update(self._live_display)
+
+    # -- Orchestration progress -----------------------------------------------
+
+    _ROLE_COLORS: dict[str, str] = {
+        "researcher": "cyan",
+        "planner": "yellow",
+        "executor": "green",
+        "communicator": "magenta",
+    }
+
+    def _build_orchestration_table(
+        self, title: str,
+    ) -> "Table":
+        """Create a new orchestration progress table."""
+        from rich.box import ROUNDED
+        from rich.table import Table
+
+        tbl = Table(
+            title=title,
+            title_style="bold",
+            box=ROUNDED,
+            show_header=False,
+            padding=(0, 1),
+            expand=False,
+        )
+        tbl.add_column(width=4, justify="center")   # status icon
+        tbl.add_column(min_width=32)                 # task description
+        tbl.add_column(width=14, justify="right")    # role (color-coded)
+        return tbl
+
+    def print_orchestration_started(self, task_count: int, description: str = "") -> None:
+        """Store plan metadata. The table is printed on completion."""
+        self._orch_title = description or "multi-agent plan"
+        self._orch_rows: list[tuple[Text, str | Text, Text | str]] = []
+
+    def print_orchestration_task_progress(
+        self,
+        task_id: str,
+        completed: int,
+        total: int,
+        *,
+        success: bool,
+        description: str = "",
+        role: str = "",
+    ) -> None:
+        """Buffer a task row for the orchestration table."""
+        status = Text.from_markup("[green]\u2713[/green]" if success else "[red]\u2717[/red]")
+        label = description[:60] if description else task_id
+        if not success:
+            label = Text.from_markup(f"[red]{label}[/red]")
+        color = self._ROLE_COLORS.get(role, "dim")
+        role_text = Text.from_markup(f"[{color}]{role}[/{color}]") if role else Text("")
+        self._orch_rows.append((status, label, role_text))
+
+    def print_orchestration_task_retry(
+        self, task_id: str, failure_type: str, attempt: int, error: str,
+        description: str = "",
+    ) -> None:
+        """Buffer a retry row for the orchestration table."""
+        label = description[:40] if description else task_id
+        status = Text.from_markup("[yellow]\u21bb[/yellow]")
+        desc = Text.from_markup(f"[dim]{label} (retry #{attempt})[/dim]")
+        self._orch_rows.append((status, desc, Text("")))
+
+    def print_orchestration_completed(
+        self, *, success: bool, duration_ms: float,
+        completed_count: int, failed_count: int,
+    ) -> None:
+        """Print the full orchestration table with summary."""
+        tbl = self._build_orchestration_table(self._orch_title)
+        for status, desc, role in self._orch_rows:
+            tbl.add_row(status, desc, role)
+        self._safe_print(tbl)
+
+        total = completed_count + failed_count
+        elapsed = f"{duration_ms / 1000:.1f}s"
+        if success:
+            summary = f"[green]\u2713 {completed_count}/{total}[/green] [dim]\u00b7 {elapsed}[/dim]"
+        elif failed_count > 0 and completed_count > 0:
+            summary = f"[yellow]\u26a0 {completed_count}/{total}[/yellow] [dim]\u00b7 {elapsed}[/dim]"
+        else:
+            summary = f"[red]\u2717 {completed_count}/{total}[/red] [dim]\u00b7 {elapsed}[/dim]"
+        self._safe_print(Text.from_markup(f"  {summary}"))
+
+        # Cleanup
+        self._orch_rows = []
+        self._orch_title = ""

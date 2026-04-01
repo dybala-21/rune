@@ -460,6 +460,53 @@ class AgentLoopController:
         self._loop.off("goal_classified", self._on_goal_classified)
 
     # ===================================================================
+    # Orchestrator event bridge
+    # ===================================================================
+
+    def wire_orchestrator(self, orchestrator: Any) -> None:
+        """Wire orchestrator events to TUI display.
+
+        Call this when an :class:`Orchestrator` instance is created so
+        that multi-agent progress is visible in the terminal.
+        """
+        orchestrator.on("plan_ready", self._on_orch_plan_ready)
+        orchestrator.on("progress", self._on_orch_progress)
+        orchestrator.on("subtask_retry", self._on_orch_retry)
+        orchestrator.on("completed", self._on_orch_completed)
+
+    async def _on_orch_plan_ready(self, plan: Any) -> None:
+        task_count = len(plan.tasks) if hasattr(plan, "tasks") else 0
+        desc = getattr(plan, "description", "")
+        self._renderer.print_orchestration_started(task_count, desc)
+
+    async def _on_orch_progress(
+        self, completed: int, total: int, task_id: str, success: bool,
+        description: str = "", role: str = "",
+    ) -> None:
+        self._renderer.print_orchestration_task_progress(
+            task_id, completed, total, success=success,
+            description=description, role=role,
+        )
+
+    async def _on_orch_retry(
+        self, task_id: str, failure_type: str, attempt: int, error: str,
+    ) -> None:
+        self._renderer.print_orchestration_task_retry(
+            task_id, failure_type, attempt, error,
+        )
+
+    async def _on_orch_completed(self, result: Any) -> None:
+        success = getattr(result, "success", False)
+        duration_ms = getattr(result, "duration_ms", 0.0)
+        results = getattr(result, "results", [])
+        ok = sum(1 for r in results if getattr(r, "success", False))
+        fail = len(results) - ok
+        self._renderer.print_orchestration_completed(
+            success=success, duration_ms=duration_ms,
+            completed_count=ok, failed_count=fail,
+        )
+
+    # ===================================================================
     # Public API
     # ===================================================================
 

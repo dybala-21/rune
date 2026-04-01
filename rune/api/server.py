@@ -415,6 +415,61 @@ def create_app() -> Any:
             loop.on("tool_call", _on_tool)
             loop.on("tool_result", _on_tool_result)
 
+            # Wire orchestrator events if the loop delegates to one
+            def _hook_orchestrator(orchestrator: Any) -> None:
+                """Relay orchestrator events to SSE/WS clients."""
+                import asyncio as _aio
+
+                async def _on_plan(plan: Any) -> None:
+                    tc = len(plan.tasks) if hasattr(plan, "tasks") else 0
+                    await _broadcast(
+                        "orchestration_started",
+                        {"runId": run_id, "taskCount": tc,
+                         "description": getattr(plan, "description", "")},
+                    )
+
+                async def _on_progress(
+                    completed: int, total: int, task_id: str, success: bool,
+                    description: str = "", role: str = "",
+                ) -> None:
+                    await _broadcast(
+                        "orchestration_task_progress",
+                        {"runId": run_id, "taskId": task_id,
+                         "completed": completed, "total": total,
+                         "success": success,
+                         "description": description, "role": role},
+                    )
+
+                async def _on_retry(
+                    task_id: str, failure_type: str, attempt: int, error: str,
+                ) -> None:
+                    await _broadcast(
+                        "orchestration_task_retry",
+                        {"runId": run_id, "taskId": task_id,
+                         "failureType": failure_type, "attempt": attempt,
+                         "error": error[:200]},
+                    )
+
+                async def _on_orch_done(result: Any) -> None:
+                    results = getattr(result, "results", [])
+                    ok = sum(1 for r in results if getattr(r, "success", False))
+                    await _broadcast(
+                        "orchestration_completed",
+                        {"runId": run_id,
+                         "success": getattr(result, "success", False),
+                         "durationMs": round(getattr(result, "duration_ms", 0), 1),
+                         "completedCount": ok,
+                         "failedCount": len(results) - ok},
+                    )
+
+                orchestrator.on("plan_ready", _on_plan)
+                orchestrator.on("progress", _on_progress)
+                orchestrator.on("subtask_retry", _on_retry)
+                orchestrator.on("completed", _on_orch_done)
+
+            # Expose hook so delegate capability can call it
+            loop._web_orchestrator_hook = _hook_orchestrator  # type: ignore[attr-defined]
+
             await _broadcast(
                 "agent_start",
                 {"runId": run_id, "goal": agent_ctx.goal},

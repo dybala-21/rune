@@ -30,17 +30,19 @@ class ProactiveAgentBridge:
     - Everything else -> notify the user via the agent loop
     """
 
-    __slots__ = ("_engine", "_agent_loop", "_autonomous_executor", "_running")
+    __slots__ = ("_engine", "_agent_loop", "_autonomous_executor", "_guardian", "_running")
 
     def __init__(
         self,
         engine: ProactiveEngine,
         agent_loop: Any,
         autonomous_executor: Any = None,
+        guardian: Any = None,
     ) -> None:
         self._engine = engine
         self._agent_loop = agent_loop
         self._autonomous_executor = autonomous_executor
+        self._guardian = guardian
         self._running = False
 
     async def start(self) -> None:
@@ -86,9 +88,27 @@ class ProactiveAgentBridge:
 
         if can_auto_execute:
             try:
+                # Guardian gate: block high/critical risk before autonomy decision
+                if self._guardian is not None:
+                    validation = self._guardian.validate(suggestion.description)
+                    if not validation.allowed or validation.risk_level in (
+                        "high", "critical",
+                    ):
+                        log.warning(
+                            "proactive_guardian_blocked",
+                            suggestion_id=suggestion.id,
+                            risk_level=validation.risk_level,
+                            reason=validation.reason,
+                        )
+                        await self._notify_user(
+                            suggestion, auto_executed=False,
+                        )
+                        return
+
+                # Let autonomy classify the actual domain instead of
+                # always using "notify" which defaults to JUST_DO.
                 decision = self._autonomous_executor.decide(
                     command=suggestion.description,
-                    domain="notify",
                     risk_score=1.0 - suggestion.confidence,
                 )
 
@@ -179,8 +199,14 @@ class ProactiveAgentBridge:
         pattern_key = f"proactive:{suggestion.type}:{suggestion.title[:40]}"
         feedback: ExecutionFeedback = "approved" if success else "full_revert"
 
+        risk_score: float | None = None
+        if decision is not None and hasattr(decision, "risk_score"):
+            risk_score = decision.risk_score
+
         try:
-            self._autonomous_executor.record_feedback(pattern_key, feedback)
+            self._autonomous_executor.record_feedback(
+                pattern_key, feedback, risk_score=risk_score,
+            )
             log.debug(
                 "proactive_ledger_recorded",
                 suggestion_id=suggestion.id,

@@ -424,6 +424,47 @@ class ChannelGateway:
             # No channel accepted the notification - emit for TUI fallback
             self._emit("notification", notification)
 
+    # Orchestrator event relay
+
+    def wire_orchestrator(self, orchestrator: Any) -> None:
+        """Subscribe to orchestrator events and route them as notifications.
+
+        Call this when an :class:`Orchestrator` instance is created in the
+        daemon so that multi-agent progress is visible on external channels
+        (Slack, Discord, Telegram, etc.) via the existing notification
+        routing infrastructure.
+        """
+        import asyncio
+
+        async def _on_plan(plan: Any) -> None:
+            tc = len(plan.tasks) if hasattr(plan, "tasks") else 0
+            self._emit("orchestration_started", tc, getattr(plan, "description", ""))
+
+        async def _on_progress(
+            completed: int, total: int, task_id: str, success: bool,
+        ) -> None:
+            self._emit("orchestration_progress", completed, total, task_id, success)
+
+        async def _on_completed(result: Any) -> None:
+            results = getattr(result, "results", [])
+            ok = sum(1 for r in results if getattr(r, "success", False))
+            fail = len(results) - ok
+            duration_ms = getattr(result, "duration_ms", 0.0)
+            success = getattr(result, "success", False)
+
+            # Route summary as notification on external channels
+            status = "completed" if success else "failed"
+            await self.route_notification(GatewayNotification(
+                title=f"Orchestration {status}",
+                body=f"{ok} tasks succeeded, {fail} failed ({duration_ms / 1000:.1f}s)",
+                priority="medium" if success else "high",
+                source="orchestrator",
+            ))
+
+        orchestrator.on("plan_ready", _on_plan)
+        orchestrator.on("progress", _on_progress)
+        orchestrator.on("completed", _on_completed)
+
     # Ask-user pipeline
 
     async def ask_user(

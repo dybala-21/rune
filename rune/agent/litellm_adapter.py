@@ -194,6 +194,25 @@ class StreamResult:
         self._policy.reset()
 
         while True:
+            # Early stop: already have a substantial answer after 2+ tool
+            # rounds — don't make another LLM call that would regenerate
+            # the same content and waste tokens.
+            if (_tool_round >= 2
+                    and self._collected_text
+                    and len(self._collected_text.strip()) > 300):
+                log.info(
+                    "stream_text_early_stop",
+                    tool_rounds=_tool_round,
+                    text_len=len(self._collected_text),
+                )
+                break
+
+            # Suppress text yield for turns after we already have a
+            # substantial answer.  This prevents the TUI from showing
+            # duplicate response boxes when the LLM rewrites its earlier
+            # analysis after additional tool calls.
+            _suppress_yield = len(self._collected_text.strip()) > 300
+
             # Build extra params from policy
             extra: dict[str, Any] = self._policy.get_extra_params()
             if _force_tool:
@@ -226,7 +245,7 @@ class StreamResult:
                 # Text delta
                 if choice.delta and choice.delta.content:
                     text_this_turn += choice.delta.content
-                    if delta:
+                    if delta and not _suppress_yield:
                         yield choice.delta.content
 
                 # Tool call deltas - accumulate across chunks
@@ -252,7 +271,11 @@ class StreamResult:
                 if hasattr(chunk, "usage") and chunk.usage:
                     self._update_usage(chunk.usage)
 
-            self._collected_text += text_this_turn
+            # Only accumulate text that was yielded to the user.
+            # Suppressed turns are not added to _collected_text so that
+            # get_output() returns only what the user actually saw.
+            if not _suppress_yield:
+                self._collected_text += text_this_turn
 
             # No tool calls — check if we should force a retry
             if not tool_calls_by_index:
@@ -261,6 +284,9 @@ class StreamResult:
                             has_tool_calls=False, has_text=bool(text_this_turn.strip()))):
                     log.info("policy_force_tool_retry")
                     _force_tool = True
+                    # Reset collected text so the forced tool round's
+                    # subsequent answer is not suppressed.
+                    self._collected_text = ""
                     continue  # retry with tool_choice="required"
 
                 # Truly done — append final text

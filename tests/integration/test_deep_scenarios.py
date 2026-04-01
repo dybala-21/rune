@@ -631,7 +631,8 @@ class TestMultiTaskOrchestration:
         assert Orchestrator._classify_failure("Permission denied") == "critical"
         assert Orchestrator._classify_failure("429 rate limit exceeded") == "transient"
         assert Orchestrator._classify_failure("module not found: foo") == "systemic"
-        assert Orchestrator._classify_failure("some random error") == "correctable"
+        assert Orchestrator._classify_failure("some random error") == "unknown"
+        assert Orchestrator._classify_failure("invalid argument for param X") == "correctable"
         assert Orchestrator._classify_failure("Out of memory") == "critical"
         assert Orchestrator._classify_failure("ECONNRESET by peer") == "transient"
 

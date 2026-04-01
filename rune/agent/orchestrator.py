@@ -77,7 +77,7 @@ class OrchestratorConfig:
     abort_on_failure: bool = False  # If True, stop remaining tasks on first failure
 
 
-TaskFailureType = Literal["transient", "correctable", "systemic", "critical"]
+TaskFailureType = Literal["transient", "correctable", "systemic", "critical", "unknown"]
 
 # Type alias for the factory that creates per-role agent loops.
 # The factory receives the role id and returns an async callable that
@@ -148,12 +148,14 @@ class Orchestrator(EventEmitter):
 
         # Check for failures - attempt strategic replan once
         failed = [r for r in results if not r.success]
+        succeeded = [r for r in results if r.success]
         if failed and self._config.max_retries > 0:
             log.info(
                 "orchestrator_replan_attempt",
                 failed_count=len(failed),
+                succeeded_count=len(succeeded),
             )
-            new_plan = await self._strategic_replan(goal, failed)
+            new_plan = await self._strategic_replan(goal, failed, succeeded)
             if new_plan is not None and new_plan.tasks:
                 retry_results = await self._execute_worker_pool(new_plan)
                 # Merge: replace failed results with retried ones where possible
@@ -327,6 +329,8 @@ class Orchestrator(EventEmitter):
                         total_count,
                         ct.id,
                         result.success,
+                        ct.description,
+                        ct.role,
                     )
                     break  # Re-check ready tasks after each completion
 
@@ -431,22 +435,46 @@ class Orchestrator(EventEmitter):
                 failure_type=failure_type,
             )
 
-            if failure_type == "critical":
+            if failure_type in ("critical", "systemic"):
                 return result
-            if failure_type == "systemic":
-                return result
+
             if failure_type == "correctable" and attempt < self._config.max_retries:
+                await self.emit(
+                    "subtask_retry", task.id, failure_type,
+                    attempt + 1, result.error or "",
+                )
                 result = await self._corrective_retry(
                     task, result.error or "", dep_context
                 )
                 if result.success:
                     return result
-            if failure_type == "transient" and attempt < self._config.max_retries:
+            elif failure_type == "unknown" and attempt == 0:
+                # Unknown errors get a single corrective retry
+                log.warning(
+                    "orchestrator_unknown_error_retry",
+                    task_id=task.id,
+                    error=result.error,
+                )
+                await self.emit(
+                    "subtask_retry", task.id, failure_type,
+                    1, result.error or "",
+                )
+                result = await self._corrective_retry(
+                    task, result.error or "", dep_context
+                )
+                if result.success:
+                    return result
+                # Do not retry unknown errors more than once
+                break
+            elif failure_type == "transient" and attempt < self._config.max_retries:
+                await self.emit(
+                    "subtask_retry", task.id, failure_type,
+                    attempt + 1, result.error or "",
+                )
                 await asyncio.sleep(min(2 ** attempt, 8))
                 continue
-
-            # Non-retryable or retries exhausted
-            break
+            else:
+                break
 
         return result  # type: ignore[possibly-undefined]
 
@@ -544,7 +572,14 @@ class Orchestrator(EventEmitter):
 
     @staticmethod
     def _classify_failure(error: str) -> TaskFailureType:
-        """Classify an error string into a failure type."""
+        """Classify an error string into a failure type.
+
+        Returns one of: critical, systemic, transient, correctable, unknown.
+        ``correctable`` matches errors that are clearly fixable by retrying
+        with a different approach.  ``unknown`` is used when no pattern
+        matches — it still allows a single retry but is more conservative
+        than ``correctable``.
+        """
         lower = error.lower()
 
         # Critical: permission, security, OOM
@@ -572,8 +607,20 @@ class Orchestrator(EventEmitter):
         if any(p in lower for p in transient_patterns):
             return "transient"
 
-        # Default: assume correctable
-        return "correctable"
+        # Correctable: errors that hint at a fixable approach
+        correctable_patterns = [
+            "invalid argument", "invalid parameter", "invalid value",
+            "type error", "typeerror", "valueerror", "value error",
+            "key error", "keyerror", "index error", "indexerror",
+            "syntax error", "syntaxerror", "parse error",
+            "missing required", "expected", "unexpected token",
+            "wrong number", "invalid format", "malformed",
+        ]
+        if any(p in lower for p in correctable_patterns):
+            return "correctable"
+
+        # Default: unknown error — allow limited retry
+        return "unknown"
 
     def _assess_plan_risk(self, plan: OrchestrationPlan) -> str:
         """Assess the aggregate risk level of a plan.
@@ -631,8 +678,14 @@ class Orchestrator(EventEmitter):
         self,
         goal: str,
         failed_results: list[SubTaskResult],
+        succeeded_results: list[SubTaskResult] | None = None,
     ) -> OrchestrationPlan | None:
-        """Attempt to create a new plan accounting for the failures."""
+        """Attempt to create a new plan accounting for the failures.
+
+        When *succeeded_results* is provided the planner also sees what
+        has already been accomplished, so it can avoid duplicate work and
+        build on existing outputs.
+        """
         if self._agent_loop_factory is None:
             return None
 
@@ -641,10 +694,21 @@ class Orchestrator(EventEmitter):
             failure_summary = "\n".join(
                 f"- Task {r.task_id}: {r.error}" for r in failed_results
             )
+            success_summary = ""
+            if succeeded_results:
+                success_summary = (
+                    "\n\nAlready completed tasks (do NOT redo these):\n"
+                    + "\n".join(
+                        f"- Task {r.task_id}: {r.output[:200]}"
+                        for r in succeeded_results
+                    )
+                )
             raw_plan = await planner_run(
                 f"The following sub-tasks failed during execution of the goal: "
-                f"{goal}\n\nFailures:\n{failure_summary}\n\n"
+                f"{goal}\n\nFailures:\n{failure_summary}"
+                f"{success_summary}\n\n"
                 f"Create an alternative plan that works around these failures. "
+                f"Do not repeat already completed tasks. "
                 f"Return JSON with tasks list.",
                 {},
             )

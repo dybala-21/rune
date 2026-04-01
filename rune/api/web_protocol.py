@@ -40,6 +40,9 @@ SseEventType = Literal[
     "proactive_execution_completed", "autonomy_level_changed",
     # Meta
     "context_compaction", "delegate_event",
+    # Orchestration (multi-agent progress)
+    "orchestration_started", "orchestration_task_progress",
+    "orchestration_task_retry", "orchestration_completed",
     # Heartbeat
     "heartbeat",
 ]
@@ -203,6 +206,39 @@ def delegate_event(stage: str, message: str, run_id: str | None = None) -> SseEv
     if run_id:
         d["runId"] = run_id
     return SseEvent(event="delegate_event", data=d)
+
+def orchestration_started_event(
+    run_id: str, task_count: int, description: str = "",
+) -> SseEvent:
+    return SseEvent(event="orchestration_started", data={
+        "runId": run_id, "taskCount": task_count, "description": description,
+    })
+
+def orchestration_task_progress_event(
+    run_id: str, task_id: str, completed: int, total: int, success: bool,
+) -> SseEvent:
+    return SseEvent(event="orchestration_task_progress", data={
+        "runId": run_id, "taskId": task_id,
+        "completed": completed, "total": total, "success": success,
+    })
+
+def orchestration_task_retry_event(
+    run_id: str, task_id: str, failure_type: str, attempt: int, error: str,
+) -> SseEvent:
+    return SseEvent(event="orchestration_task_retry", data={
+        "runId": run_id, "taskId": task_id,
+        "failureType": failure_type, "attempt": attempt, "error": error[:200],
+    })
+
+def orchestration_completed_event(
+    run_id: str, success: bool, duration_ms: float,
+    completed_count: int, failed_count: int,
+) -> SseEvent:
+    return SseEvent(event="orchestration_completed", data={
+        "runId": run_id, "success": success,
+        "durationMs": round(duration_ms, 1),
+        "completedCount": completed_count, "failedCount": failed_count,
+    })
 
 def heartbeat_event() -> SseEvent:
     return SseEvent(event="heartbeat", data={})

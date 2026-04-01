@@ -252,9 +252,14 @@ class AutonomousExecutor:
             if risk_score > threshold and level >= check_level:
                 level = AutonomyLevel(max(0, check_level - 1))
 
+        # Track risk score via EMA so avg_risk reflects actual usage.
+        stats = self._patterns.get(pattern_key)
+        if stats is not None:
+            alpha = 0.3
+            stats.avg_risk = alpha * risk_score + (1 - alpha) * stats.avg_risk
+
         # Pattern-based promotion: if the user has repeatedly approved this
         # pattern, the level may be promoted above the base.
-        stats = self._patterns.get(pattern_key)
         if stats is not None:
             promoted = self._check_promotion(pattern_key, stats)
             if promoted is not None and promoted > level:
@@ -285,8 +290,16 @@ class AutonomousExecutor:
         self,
         pattern_key: str,
         feedback: ExecutionFeedback,
+        risk_score: float | None = None,
     ) -> None:
-        """Record user feedback for a completed execution."""
+        """Record user feedback for a completed execution.
+
+        Parameters:
+            pattern_key: The pattern key identifying the command.
+            feedback: The user's feedback on the execution.
+            risk_score: Optional risk score from the decision that triggered
+                this execution.  Used to maintain a rolling average via EMA.
+        """
         stats = self._patterns.setdefault(pattern_key, PatternStats())
         stats.total_executions += 1
         stats.last_used = time.monotonic()
@@ -299,9 +312,10 @@ class AutonomousExecutor:
             case "manual_correction":
                 stats.manual_corrections += 1
 
-        # Update rolling average risk
-        # (We don't have the risk_score here, so avg_risk is maintained via
-        # a simple EMA when the decision was made; callers should feed it.)
+        # Update rolling average risk via EMA (α = 0.3)
+        if risk_score is not None:
+            alpha = 0.3
+            stats.avg_risk = alpha * risk_score + (1 - alpha) * stats.avg_risk
         self._history.append((pattern_key, feedback))
         log.debug(
             "autonomy_feedback",
