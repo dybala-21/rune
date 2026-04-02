@@ -396,6 +396,27 @@ class AutonomousExecutor:
             new_level=promoted.name,
             approval_rate=f"{approval_rate:.2%}",
         )
+
+        # Record promotion in learned.md so the user sees it in session
+        # briefing. This makes self-improving visible.
+        try:
+            from rune.memory.markdown_store import save_learned_fact
+
+            # Human-readable command name: "unknown:web_search python" → "web_search"
+            cmd = pattern_key.split(":")[-1].split()[0] if ":" in pattern_key else pattern_key[:20]
+            level_desc = {
+                AutonomyLevel.INFORM_DO: f"{cmd}은(는) 이제 확인 없이 자동 실행합니다",
+                AutonomyLevel.JUST_DO: f"{cmd}은(는) 이제 알림 없이 자동 실행합니다",
+            }.get(promoted, f"{cmd} 승격됨")
+            save_learned_fact(
+                category="autonomy",
+                key=f"auto_{cmd[:20]}",
+                value=f"{level_desc} ({stats.approved}회 승인 학습)",
+                confidence=min(approval_rate, 0.95),
+            )
+        except Exception:
+            pass  # Must never block promotion logic
+
         return promoted
 
     def _check_demotion_window(self) -> bool:

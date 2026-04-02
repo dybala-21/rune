@@ -621,7 +621,7 @@ class RuneApp:
     # ===================================================================
 
     def _print_welcome(self) -> None:
-        """Print the RUNE welcome banner."""
+        """Print the RUNE welcome banner with session briefing."""
         width = min(self.console.width or 80, 80)
         rule_w = width - 4
         label = " rune "
@@ -643,6 +643,8 @@ class RuneApp:
             f"[#333333]·[/#333333]  "
             f"[#555555]{learn_info}[/#555555]"
         )
+        # Session briefing: show what RUNE has learned
+        self._print_session_briefing()
         self.console.print()
 
     def _get_learning_summary(self) -> str:
@@ -652,11 +654,66 @@ class RuneApp:
             store = get_memory_store()
             stats = store.get_stats()
             episodes = stats.get("episodes", 0)
+            facts_count = 0
+            try:
+                from rune.memory.markdown_store import parse_learned_md
+                facts_count = len(parse_learned_md())
+            except Exception:
+                pass
             if episodes > 0:
-                return f"{episodes} episodes learned"
+                parts = [f"{episodes} episodes"]
+                if facts_count > 0:
+                    parts.append(f"{facts_count} facts")
+                return " · ".join(parts) + " learned"
             return "/help for commands"
         except Exception:
             return "/help for commands"
+
+    _MAX_BRIEFING_ITEMS: int = 5
+
+    def _print_session_briefing(self) -> None:
+        """Show top learned facts and recent tasks as a session briefing.
+
+        Displays high-confidence facts from learned.md and recent
+        successful episodes so the user can see what RUNE remembers.
+        """
+        try:
+            from rune.memory.markdown_store import parse_learned_md
+            from rune.memory.store import get_memory_store
+
+            facts = parse_learned_md()
+            store = get_memory_store()
+            episodes = store.get_recent_episodes(3)
+        except Exception:
+            return
+
+        # Only show briefing if there's something to show
+        if not facts and not episodes:
+            return
+
+        self.console.print()
+
+        # Top facts by confidence
+        if facts:
+            top = sorted(facts, key=lambda f: -f["confidence"])[:self._MAX_BRIEFING_ITEMS]
+            self.console.print(f"  [#555555]Knows:[/#555555]")
+            for f in top:
+                val = f["value"][:60]
+                conf = int(f["confidence"] * 100)
+                self.console.print(
+                    f"  [#444444]·[/#444444] [#888888]{val}[/#888888] "
+                    f"[#555555]({conf}%)[/#555555]"
+                )
+
+        # Recent successful tasks
+        successful = [e for e in episodes if getattr(e, "utility", 0) > 0]
+        if successful:
+            self.console.print(f"  [#555555]Recent:[/#555555]")
+            for ep in successful[:3]:
+                summary = (ep.task_summary or "")[:55]
+                self.console.print(
+                    f"  [#444444]·[/#444444] [#888888]{summary}[/#888888]"
+                )
 
     def _handle_learning_command(self, arg: str) -> None:
         """Handle /learning on|off slash command."""

@@ -430,14 +430,27 @@ async def save_agent_result_to_memory(
         # Extract intent
         intent = extract_intent_from_goal(goal, classification_hint)
 
-        # Generate lessons from failures
-        if not success:
-            lessons = f"Task failed: {result_text[:200]}. Consider alternative approaches."
-
         # Extract file paths (deterministic, no LLM needed)
         import json as _json
         combined_text = f"{goal}\n{result_text}"
         files = _extract_files_from_text(combined_text)
+
+        # Generate lessons from both success and failure
+        if not success:
+            lessons = f"Task failed: {result_text[:200]}. Consider alternative approaches."
+        else:
+            # Success lessons: capture what worked for future reference
+            lesson_parts: list[str] = []
+            if intent.domain:
+                lesson_parts.append(f"domain={intent.domain}")
+            if intent.action:
+                lesson_parts.append(f"action={intent.action}")
+            if duration_ms > 0:
+                lesson_parts.append(f"took {duration_ms / 1000:.1f}s")
+            if files:
+                lesson_parts.append(f"files={','.join(files[:3])}")
+            if lesson_parts:
+                lessons = "Success: " + "; ".join(lesson_parts)
 
         # Utility: +1 (golden), -1 (warning).
         # Simple rule: trust the agent's completion status.
@@ -458,6 +471,34 @@ async def save_agent_result_to_memory(
         )
 
         await memory_manager.save_episode(episode)
+
+        # Save learned pattern (time-slot activity tracking)
+        try:
+            from datetime import datetime, timezone
+            from rune.memory.store import get_memory_store
+
+            now = datetime.now(timezone.utc)
+            hour = now.hour
+            if hour < 6:
+                slot = "night"
+            elif hour < 12:
+                slot = "morning"
+            elif hour < 18:
+                slot = "afternoon"
+            else:
+                slot = "evening"
+            day_type = "weekday" if now.weekday() < 5 else "weekend"
+            activity = f"{intent.domain}:{intent.action}" if intent.domain else goal[:30]
+
+            mem_store = get_memory_store()
+            mem_store.save_learned_pattern(
+                time_slot=slot,
+                activity=activity,
+                day_type=day_type,
+                avg_duration_minutes=duration_ms / 60_000 if duration_ms else 0,
+            )
+        except Exception:
+            pass  # Pattern tracking must never block episode saving
 
         # Rule outcome feedback: update confidence of active rules
         domain = intent.domain or "code_modify"
