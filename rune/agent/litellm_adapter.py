@@ -249,11 +249,13 @@ class StreamResult:
                 if choice.finish_reason:
                     _finish_reason = choice.finish_reason
 
-                # Text delta
+                # Text delta — buffer only, do NOT yield yet.
+                # We must wait until the stream ends to know whether
+                # tool_calls are present.  Yielding text before that
+                # check causes hallucinated text to reach the UI when
+                # the LLM generates text + tool_calls in the same turn.
                 if choice.delta and choice.delta.content:
                     text_this_turn += choice.delta.content
-                    if delta and not _suppress_yield:
-                        yield choice.delta.content
 
                 # Tool call deltas - accumulate across chunks
                 if choice.delta and choice.delta.tool_calls:
@@ -278,10 +280,27 @@ class StreamResult:
                 if hasattr(chunk, "usage") and chunk.usage:
                     self._update_usage(chunk.usage)
 
-            # Only accumulate text that was yielded to the user.
-            # Suppressed turns are not added to _collected_text so that
-            # get_output() returns only what the user actually saw.
-            if not _suppress_yield:
+            # Post-stream decision: yield text or discard
+            # Now that the full turn is complete, we know whether
+            # tool_calls were generated alongside the text.
+            _has_tools = bool(tool_calls_by_index) or _finish_reason == "tool_calls"
+
+            if _has_tools and text_this_turn:
+                # Text was generated alongside tool calls — this is
+                # pre-tool speculation (likely hallucination for factual
+                # questions).  Discard it: do NOT yield to UI, do NOT
+                # add to _collected_text.
+                log.info(
+                    "speculative_text_discarded",
+                    text_len=len(text_this_turn),
+                    tool_count=len(tool_calls_by_index),
+                )
+            elif text_this_turn and delta and not _suppress_yield:
+                # Pure text response (no tool calls) — yield all at once.
+                yield text_this_turn
+                self._collected_text += text_this_turn
+            elif text_this_turn and not _suppress_yield:
+                # delta=False mode: just accumulate, don't yield
                 self._collected_text += text_this_turn
 
             # No tool calls — check if we should force a retry

@@ -1,11 +1,12 @@
 <p align="center">
   <h1 align="center">ᚱ RUNE-BOT</h1>
   <p align="center"><strong>A local-first AI agent that learns from experience.</strong></p>
+  <p align="center">Every task makes it smarter. Your data stays on your machine.</p>
 </p>
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> ·
-  <a href="#what-makes-rune-different">What's Different</a> ·
+  <a href="#how-it-works">How It Works</a> ·
   <a href="#features">Features</a> ·
   <a href="#architecture">Architecture</a>
 </p>
@@ -18,14 +19,16 @@
 ---
 
 ```
+─── rune ──────────────────────────────────────────
+  Terminal Agent · claude-sonnet · 318 episodes learned
+
 ❯ Fix the authentication bug in api/auth.py
 
   ┃  ◇ file_read api/auth.py  ✓
   ┃  ◆ file_edit api/auth.py  ✓
   ┃  ▸ bash ruff check .  ✓
 
-✓ done — steps 1 — tools 3
-  💡 learned rule applied: verify_before_edit
+✓ done — steps 1 — tools 3 — tokens 12k
 ```
 
 ## Quick Start
@@ -41,42 +44,60 @@ rune env set OPENAI_API_KEY sk-...
 rune
 ```
 
-Works with OpenAI, Anthropic, Gemini, Grok, Mistral, DeepSeek, Cohere, Azure, Ollama, and [100+ providers](https://docs.litellm.ai/docs/providers) via LiteLLM.
+Works with **OpenAI, Anthropic, Gemini, Grok, Mistral, DeepSeek, Cohere, Azure, Ollama**, and [130+ providers](https://docs.litellm.ai/docs/providers) via LiteLLM. Switch models with one config change:
 
 ```bash
-rune --message "explain the auth flow in this repo"
 rune --model claude-sonnet-4-6 --provider anthropic
-rune web                                    # web UI
-rune self update                            # update to latest
+rune --model gpt-4o --provider openai
+rune --model gemini-2.5-flash --provider vertex_ai
 ```
 
-## What Makes RUNE Different
-
-**It learns from experience.** RUNE records what worked and what didn't. Successful patterns become golden experiences (✅), failures become warnings (⚠️). Next session, these are injected into context — the agent avoids past mistakes and repeats what worked. Over time, repeated failures generate prevention rules automatically.
-
-```
-## Past Experience (auto-learned)
-- ✅ Fixed lint with ruff check (utility: +1)
-- ⚠️ web_fetch on namu.wiki → 403 (utility: -1)
-
-## Learned Rules
-- verify_before_edit: re-read file before editing to avoid stale content
+```bash
+rune                                    # interactive TUI
+rune --message "explain the auth flow"  # one-shot
+rune web                                # web UI
+rune voice                              # voice mode (STT/TTS)
 ```
 
-**It proves its work.** An Evidence Gate checks that the agent actually read the files, wrote the changes, and ran the tests. A Quality Gate catches hollow answers and error masking. If evidence is missing, the task continues — not "done."
+## How It Works
 
-**It asks before acting.** Every file write, every shell command goes through Guardian — pattern-based risk analysis with workspace sandboxing. You approve or deny.
+### It remembers what worked
 
-**Your memory is a file you can edit.** Open `~/.rune/memory/learned.md` in any editor. Delete a line to make it forget. Everything is plain markdown.
+RUNE records every task as an episode scored +1 (success) or -1 (failure). Next session, similar tasks pull from past experience. Repeated failures auto-generate prevention rules.
+
+```
+Past Experience (auto-injected into context)
+  ✅ Fixed lint with ruff check (utility: +1)
+  ⚠️ web_fetch on namu.wiki → 403 (utility: -1)
+
+Learned Rules
+  verify_before_edit: re-read file before editing to avoid stale content
+```
+
+### It earns your trust
+
+Approve the same action multiple times and RUNE promotes it to auto-execute. Revert once and it demotes back. High-risk commands (sudo, rm -rf) stay manual no matter what.
+
+### It proves its work
+
+An Evidence Gate checks the agent actually read files, wrote changes, and ran tests. A Quality Gate catches hollow answers. If evidence is missing, the task keeps going.
+
+### It asks before acting
+
+Every file write, every shell command goes through Guardian — 80+ risk patterns with workspace sandboxing.
+
+### Your memory is a file
 
 ```
 ~/.rune/memory/
 ├── MEMORY.md          # your knowledge — edit freely
-├── learned.md         # auto-extracted facts + learned rules
+├── learned.md         # auto-extracted facts + rules
 ├── daily/
 │   └── 2026-03-22.md  # what happened today
 └── user-profile.md    # preferences
 ```
+
+Open in any editor. Delete a line to make it forget.
 
 ## Features
 
@@ -86,15 +107,35 @@ rune self update                            # update to latest
 |---|---|
 | **Files** | read, write, edit, delete, list, search |
 | **Execution** | bash (Guardian-validated), service management |
-| **Browser** | Playwright — navigate, observe, click, extract, screenshot |
+| **Browser** | Playwright headless — navigate, observe, click, extract, screenshot |
 | **Web** | search, fetch |
-| **Code** | project map, find definitions, find references, impact analysis |
-| **Memory** | search, save, tune |
+| **Code** | project map, definitions, references, impact analysis (tree-sitter) |
+| **Memory** | multi-source search (facts + episodes + vectors), save |
+| **Voice** | STT/TTS with multi-provider auto-detection |
 | **MCP** | stdio, SSE, HTTP transports — web UI for server management |
+
+### Multi-Agent
+
+Complex goals are decomposed into subtasks with dependency tracking:
+
+```
+╭──────┬───────────────────────────────────┬────────────────╮
+│  ✓   │ Scan for security vulnerabilities │     researcher │
+│  ✓   │ Fix XSS in login.py               │       executor │
+│  ✓   │ Fix SQLi in query.py              │       executor │
+│  ✓   │ Write security report             │       executor │
+╰──────┴───────────────────────────────────┴────────────────╯
+  ✓ 4/4 · 12.3s
+```
+
+- 4 roles: Researcher, Planner, Executor, Communicator — each with scoped tool access
+- Independent subtasks run in parallel; dependent ones wait for upstream results
+- Read-only tools run concurrently (up to 5), write tools stay serial
+- Research findings can spawn follow-up tasks at runtime (dynamic DAG expansion)
 
 ### Multi-Channel
 
-Same agent, same memory:
+Same agent, same memory, anywhere:
 
 | Channel | Setup |
 |---------|-------|
@@ -106,14 +147,16 @@ Same agent, same memory:
 
 ### Self-Improving
 
-| What | How |
-|------|-----|
-| Episode memory | Every task result is scored (+1 golden / -1 warning) and recalled for similar future tasks |
-| Behavior prediction | N-gram tool sequence prediction — suggests likely next actions |
-| Rule learning | Repeated failures auto-generate prevention rules via LLM |
-| Proactive suggestions | Watches workflow patterns, suggests actions, learns from dismissals |
+| | |
+|---|---|
+| **Episode memory** | Every task scored +1/-1, recalled for similar future tasks |
+| **Autonomy promotion** | Repeatedly approved actions auto-execute; reverts demote back |
+| **Behavior prediction** | N-gram tool sequence prediction |
+| **Time-slot patterns** | Learns your activity by time of day for proactive suggestions |
+| **Rule learning** | Repeated failures generate prevention rules via LLM |
+| **Proactive engine** | Watches patterns, suggests actions, learns from dismissals |
 
-Use `/learned` in the TUI to see learning status.
+`/learned` in the TUI shows everything RUNE has learned.
 
 ## Architecture
 
@@ -122,20 +165,20 @@ Use `/learned` in the TUI to see learning status.
                         │   LLM Providers     │
                         │  OpenAI · Anthropic │
                         │  Gemini · Ollama    │
-                        │  + 100 more         │
+                        │  130+ via LiteLLM   │
                         └─────────┬───────────┘
-                                  │ LiteLLM
+                                  │
 ╔═════════════════════════════════╪════════════════════════════════╗
 ║  ┌──────────────────────────────┴─────────────────────────────┐  ║
 ║  │ INTERFACE                                                  │  ║
-║  │  CLI · TUI · Web · Telegram · Discord · Slack              │  ║
+║  │  TUI · Web · Voice · Telegram · Discord · Slack            │  ║
 ║  └────────────────────────────┬───────────────────────────────┘  ║
 ║                               ▼                                  ║
 ║  ┌────────────────────────────────────────────────────────────┐  ║
 ║  │ AGENT CORE                                                 │  ║
-║  │  Agent Loop ─── Tools ─── Skills ─── MCP ─── Delegation    │  ║
+║  │  Agent Loop ── Tools ── Skills ── MCP ── Multi-Agent       │  ║
 ║  │       │                                                    │  ║
-║  │  Guardian ──── Evidence Gate ──── Quality Gate             │  ║
+║  │  Guardian ── Evidence Gate ── Quality Gate ── Autonomy     │  ║
 ║  └────────────────────────┬───────────────────────────────────┘  ║
 ║                           ▼                                      ║
 ║  ┌────────────────────────────────────────────────────────────┐  ║
@@ -147,6 +190,20 @@ Use `/learned` in the TUI to see learning status.
 ╚══════════════════════════════════════════════════════════════════╝
 ```
 
+## LLM Configuration
+
+```yaml
+# ~/.rune/config.yaml — any one key is enough
+
+openai_api_key: "sk-..."
+anthropic_api_key: "sk-ant-..."
+gemini_api_key: "AIza..."                          # Google AI Studio
+
+# Vertex AI (service account):
+google_credentials_file: "~/.rune/google-creds.json"
+# project_id auto-detected from credentials file
+```
+
 ## CLI
 
 ```bash
@@ -154,6 +211,7 @@ rune                              # interactive TUI
 rune --message "..."              # single prompt
 rune --model <model>              # specify model
 rune web                          # web UI + MCP management
+rune voice                        # voice mode
 
 rune memory show                  # view memory
 rune memory search <query>        # search
