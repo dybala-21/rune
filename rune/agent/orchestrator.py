@@ -289,7 +289,7 @@ class Orchestrator(EventEmitter):
         total_count = len(plan.tasks)
 
         async def worker(worker_id: str) -> None:
-            nonlocal completed_count
+            nonlocal completed_count, total_count
             while not board.is_done() and not abort_event.is_set():
                 ready = board.get_ready_tasks()
                 claimed = False
@@ -357,7 +357,7 @@ class Orchestrator(EventEmitter):
                 if not claimed and not board.is_done() and not abort_event.is_set():
                     await board.wait_for_change(timeout=1.0)
 
-        # Start max_workers workers — even if fewer initial tasks exist,
+        # Start max_workers workers. Even if fewer initial tasks exist,
         # dynamic expansion may add more work during execution.
         for i in range(self._config.max_workers):
             t = asyncio.create_task(worker(f"worker-{i}"), name=f"orch-worker-{i}")
@@ -365,7 +365,7 @@ class Orchestrator(EventEmitter):
 
         await asyncio.gather(*workers, return_exceptions=True)
 
-        # Collect results — includes dynamically added tasks
+        # Collect results, including dynamically added tasks
         results_map = board.get_results()
         plan_ids = {task.id for task in plan.tasks}
         ordered: list[SubTaskResult] = []
@@ -748,7 +748,7 @@ class Orchestrator(EventEmitter):
 
         return None
 
-    # -- Dynamic task expansion ---------------------------------------------
+    # Dynamic task expansion
 
     _MAX_FOLLOW_UP_TASKS: int = 5
 
@@ -797,8 +797,6 @@ class Orchestrator(EventEmitter):
             return tasks
         except Exception:
             return []
-
-    # -- Result merging -----------------------------------------------------
 
     @staticmethod
     def _merge_results(results: list[SubTaskResult]) -> str:

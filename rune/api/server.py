@@ -418,7 +418,6 @@ def create_app() -> Any:
             # Wire orchestrator events if the loop delegates to one
             def _hook_orchestrator(orchestrator: Any) -> None:
                 """Relay orchestrator events to SSE/WS clients."""
-                import asyncio as _aio
 
                 async def _on_plan(plan: Any) -> None:
                     tc = len(plan.tasks) if hasattr(plan, "tasks") else 0
@@ -1124,7 +1123,7 @@ def create_app() -> Any:
             }
 
         try:
-            # -- sessions --
+            # sessions
             if method == "sessions.list":
                 from rune.api.handlers.sessions import list_sessions
                 result = await list_sessions(
@@ -1139,7 +1138,7 @@ def create_app() -> Any:
                 params.get("sessionId", "")
                 return _ok({"events": [], "runs": []})
 
-            # -- skills --
+            # skills
             elif method == "skills.list":
                 from rune.api.handlers.skills import list_skills
                 result = await list_skills(scope=params.get("scope"))
@@ -1184,7 +1183,7 @@ def create_app() -> Any:
                 )
                 return _ok(result)
 
-            # -- config --
+            # config
             elif method == "config.get":
                 from rune.api.handlers.config import get_config_endpoint
                 result = await get_config_endpoint()
@@ -1195,7 +1194,7 @@ def create_app() -> Any:
                 result = await patch_config(ConfigPatchRequest(**params))
                 return _ok(result)
 
-            # -- cron --
+            # cron
             elif method == "cron.list":
                 from rune.api.handlers.cron import list_cron_jobs
                 result = await list_cron_jobs()
@@ -1218,13 +1217,13 @@ def create_app() -> Any:
                 result = await delete_cron_job(job_id)
                 return _ok(result)
 
-            # -- health --
+            # health
             elif method == "health":
                 from rune.api.handlers.health import health
                 result = await health()
                 return _ok(result)
 
-            # -- channels --
+            # channels
             elif method == "channels.list":
                 from rune.api.handlers.channels import list_channels
                 result = await list_channels()
@@ -1234,7 +1233,7 @@ def create_app() -> Any:
                 # Placeholder - channel restart not yet implemented
                 return _ok({"restarted": True, "name": params.get("name", "")})
 
-            # -- mcp --
+            # mcp
             elif method == "mcp.list":
                 from rune.api.handlers.mcp import list_mcp_servers
                 result = await list_mcp_servers()

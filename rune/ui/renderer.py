@@ -425,7 +425,7 @@ class Renderer:
 
     def _build_orchestration_table(
         self, title: str,
-    ) -> "Table":
+    ) -> Any:
         """Create a new orchestration progress table."""
         from rich.box import ROUNDED
         from rich.table import Table

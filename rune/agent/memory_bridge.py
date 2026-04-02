@@ -474,10 +474,11 @@ async def save_agent_result_to_memory(
 
         # Save learned pattern (time-slot activity tracking)
         try:
-            from datetime import datetime, timezone
+            from datetime import UTC, datetime
+
             from rune.memory.store import get_memory_store
 
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             hour = now.hour
             if hour < 6:
                 slot = "night"

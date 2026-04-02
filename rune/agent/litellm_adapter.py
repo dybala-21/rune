@@ -197,7 +197,7 @@ class StreamResult:
 
         while True:
             # Early stop: already have a substantial answer after 2+ tool
-            # rounds — don't make another LLM call that would regenerate
+            # rounds. Don't make another LLM call that would regenerate
             # the same content and waste tokens.
             if (_tool_round >= 2
                     and self._collected_text
@@ -327,7 +327,7 @@ class StreamResult:
                         ),
                     })
                     # Don't let the suppress gate block the continuation
-                    # text — the user needs to see the resumed output.
+                    # text. The user needs to see the resumed output.
                     self._collected_text = ""
                     continue  # retry with higher limit
 
@@ -358,7 +358,7 @@ class StreamResult:
                 log.warning("stream_text_max_tool_rounds", rounds=_tool_round)
 
             # Always append assistant message WITH tool_calls and execute
-            # them — this keeps the message history valid for both the
+            # them. This keeps the message history valid for both the
             # current provider (Anthropic requires tool_result immediately
             # after tool_use) and OpenAI (requires tool response for each
             # tool_call_id).
@@ -368,7 +368,7 @@ class StreamResult:
             assistant_msg["tool_calls"] = list(tool_calls_by_index.values())
             self._messages.append(assistant_msg)
 
-            # Execute tool calls — read-only tools run concurrently,
+            # Execute tool calls. Read-only tools run concurrently,
             # write/execute tools run serially.
             tc_list = list(tool_calls_by_index.values())
             await self._execute_tool_batch(tc_list)
@@ -427,9 +427,9 @@ class StreamResult:
                         res = await self._execute_tool(fn, args)
                     return tc_id, fn, res
 
-                sem = _aio.Semaphore(self._MAX_CONCURRENT_TOOLS)
+                _sem = _aio.Semaphore(self._MAX_CONCURRENT_TOOLS)
 
-                async def _limited(tc_data: dict[str, Any]) -> tuple[str, str, str]:
+                async def _limited(tc_data: dict[str, Any], sem: _aio.Semaphore = _sem) -> tuple[str, str, str]:
                     async with sem:
                         return await _run_one(tc_data)
 

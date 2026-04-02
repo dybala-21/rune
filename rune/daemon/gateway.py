@@ -434,7 +434,6 @@ class ChannelGateway:
         (Slack, Discord, Telegram, etc.) via the existing notification
         routing infrastructure.
         """
-        import asyncio
 
         async def _on_plan(plan: Any) -> None:
             tc = len(plan.tasks) if hasattr(plan, "tasks") else 0

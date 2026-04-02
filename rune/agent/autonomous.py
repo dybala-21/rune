@@ -402,7 +402,7 @@ class AutonomousExecutor:
         try:
             from rune.memory.markdown_store import save_learned_fact
 
-            # Human-readable command name: "unknown:web_search python" → "web_search"
+            # Human-readable command name: "unknown:web_search python" -> "web_search"
             cmd = pattern_key.split(":")[-1].split()[0] if ":" in pattern_key else pattern_key[:20]
             level_desc = {
                 AutonomyLevel.INFORM_DO: f"{cmd}은(는) 이제 확인 없이 자동 실행합니다",

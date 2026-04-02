@@ -643,8 +643,6 @@ class RuneApp:
             f"[#333333]·[/#333333]  "
             f"[#555555]{learn_info}[/#555555]"
         )
-        # Session briefing: show what RUNE has learned
-        self._print_session_briefing()
         self.console.print()
 
     def _get_learning_summary(self) -> str:
@@ -696,7 +694,7 @@ class RuneApp:
         # Top facts by confidence
         if facts:
             top = sorted(facts, key=lambda f: -f["confidence"])[:self._MAX_BRIEFING_ITEMS]
-            self.console.print(f"  [#555555]Knows:[/#555555]")
+            self.console.print("  [#555555]Knows:[/#555555]")
             for f in top:
                 val = f["value"][:60]
                 conf = int(f["confidence"] * 100)
@@ -708,7 +706,7 @@ class RuneApp:
         # Recent successful tasks
         successful = [e for e in episodes if getattr(e, "utility", 0) > 0]
         if successful:
-            self.console.print(f"  [#555555]Recent:[/#555555]")
+            self.console.print("  [#555555]Recent:[/#555555]")
             for ep in successful[:3]:
                 summary = (ep.task_summary or "")[:55]
                 self.console.print(
