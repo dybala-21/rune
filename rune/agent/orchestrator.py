@@ -312,6 +312,26 @@ class Orchestrator(EventEmitter):
                     )
                     if result.success:
                         await board.complete(ct.id, result)
+                        # Dynamic expansion: if output contains follow-up
+                        # tasks, add them to the board.
+                        expanded = self._parse_follow_up_tasks(
+                            result.output, ct.id,
+                        )
+                        for new_task in expanded:
+                            try:
+                                await board.add_task(new_task)
+                                total_count += 1
+                                log.info(
+                                    "dynamic_task_added",
+                                    parent=ct.id,
+                                    new_task=new_task.id,
+                                )
+                            except Exception as exc:
+                                log.debug(
+                                    "dynamic_task_add_failed",
+                                    parent=ct.id,
+                                    error=str(exc),
+                                )
                     else:
                         await board.fail(ct.id, result.error or "unknown error")
                         if self._config.abort_on_failure:
@@ -337,14 +357,17 @@ class Orchestrator(EventEmitter):
                 if not claimed and not board.is_done() and not abort_event.is_set():
                     await board.wait_for_change(timeout=1.0)
 
-        for i in range(min(self._config.max_workers, len(plan.tasks))):
+        # Start max_workers workers — even if fewer initial tasks exist,
+        # dynamic expansion may add more work during execution.
+        for i in range(self._config.max_workers):
             t = asyncio.create_task(worker(f"worker-{i}"), name=f"orch-worker-{i}")
             workers.append(t)
 
         await asyncio.gather(*workers, return_exceptions=True)
 
-        # Collect results
+        # Collect results — includes dynamically added tasks
         results_map = board.get_results()
+        plan_ids = {task.id for task in plan.tasks}
         ordered: list[SubTaskResult] = []
         for task in plan.tasks:
             if task.id in results_map:
@@ -358,6 +381,10 @@ class Orchestrator(EventEmitter):
                         error="Aborted due to earlier failure" if aborted else "Task did not complete",
                     )
                 )
+        # Append results from dynamically expanded tasks
+        for tid, result in results_map.items():
+            if tid not in plan_ids:
+                ordered.append(result)
         return ordered
 
     # -- Sequential execution -----------------------------------------------
@@ -720,6 +747,56 @@ class Orchestrator(EventEmitter):
             log.warning("orchestrator_replan_failed", error=str(exc))
 
         return None
+
+    # -- Dynamic task expansion ---------------------------------------------
+
+    _MAX_FOLLOW_UP_TASKS: int = 5
+
+    @staticmethod
+    def _parse_follow_up_tasks(
+        output: str, parent_id: str,
+    ) -> list[SubTask]:
+        """Extract follow-up tasks from a completed subtask's output.
+
+        Looks for a JSON array inside a ```follow_up code fence:
+
+            ```follow_up
+            [{"description": "...", "role": "executor"}, ...]
+            ```
+
+        Returns parsed SubTasks with automatic dependency on *parent_id*.
+        Silently returns [] on any parse failure (graceful degradation).
+        """
+        import re
+
+        pattern = re.compile(
+            r"```follow_up\s*\n(.*?)\n\s*```",
+            re.DOTALL,
+        )
+        match = pattern.search(output)
+        if not match:
+            return []
+
+        try:
+            from rune.utils.fast_serde import json_decode
+
+            raw = json_decode(match.group(1))
+            if not isinstance(raw, list):
+                return []
+
+            tasks: list[SubTask] = []
+            for item in raw[: Orchestrator._MAX_FOLLOW_UP_TASKS]:
+                if not isinstance(item, dict) or "description" not in item:
+                    continue
+                tasks.append(SubTask(
+                    id=uuid4().hex[:8],
+                    description=item["description"],
+                    role=item.get("role", "executor"),
+                    dependencies=[parent_id],
+                ))
+            return tasks
+        except Exception:
+            return []
 
     # -- Result merging -----------------------------------------------------
 

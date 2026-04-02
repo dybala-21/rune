@@ -113,6 +113,7 @@ class ConversationManager:
         "_llm",
         "_classification_cache",
         "_background_tasks",
+        "_compact_failures",
     )
 
     def __init__(
@@ -129,6 +130,8 @@ class ConversationManager:
         self._background_tasks: set[asyncio.Task[None]] = set()
         # Goal text -> GoalClassification cache (populated externally)
         self._classification_cache: dict[str, GoalClassification] = {}
+        # Circuit breaker: stop retrying compaction after consecutive failures
+        self._compact_failures: int = 0
 
     # Classification hint cache
 
@@ -324,19 +327,35 @@ class ConversationManager:
             memory_context="",  # Memory bridge integration is external
         )
 
+    _MAX_COMPACT_FAILURES: int = 3
+
     async def _safe_compact(
         self,
         conversation_id: str,
         budget_tokens: int,
         on_compaction: CompactionCallback | None,
     ) -> None:
-        """Run compaction swallowing errors so it never crashes the caller."""
+        """Run compaction swallowing errors so it never crashes the caller.
+
+        Circuit breaker: after 3 consecutive failures, skip future attempts
+        for this session to avoid wasting API calls on irrecoverable state.
+        """
+        if self._compact_failures >= self._MAX_COMPACT_FAILURES:
+            return
         try:
             await self.compact_conversation(
                 conversation_id, budget_tokens, on_compaction
             )
+            self._compact_failures = 0  # Reset on success
         except Exception:
-            log.debug("background_compaction_error", exc_info=True)
+            self._compact_failures += 1
+            if self._compact_failures >= self._MAX_COMPACT_FAILURES:
+                log.warning(
+                    "compact_circuit_breaker_tripped",
+                    failures=self._compact_failures,
+                )
+            else:
+                log.debug("background_compaction_error", exc_info=True)
 
     def _build_messages_within_budget(
         self,
@@ -402,9 +421,17 @@ class ConversationManager:
         if total_tokens < budget_tokens * 0.65:
             return
 
-        # Preserve latest turns (up to 5, but at least half)
+        # Preserve latest turns (up to 5, but at least half).
+        # Ensure we never split an assistant + tool-result pair.
         preserve_count = min(5, max(1, len(conv.turns) // 2 + 1))
-        to_compact = conv.turns[: len(conv.turns) - preserve_count]
+        split_idx = len(conv.turns) - preserve_count
+        # If the split falls on a tool-result turn, move the boundary
+        # back to include the preceding assistant turn.
+        if split_idx > 0 and split_idx < len(conv.turns):
+            boundary_turn = conv.turns[split_idx]
+            if boundary_turn.role == "tool":
+                split_idx = max(0, split_idx - 1)
+        to_compact = conv.turns[:split_idx]
         if len(to_compact) < 2:
             return
 

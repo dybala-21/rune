@@ -191,6 +191,8 @@ class StreamResult:
         _max_tool_rounds = self._max_tool_rounds
         _tool_round = 0
         _force_tool = False  # tool_choice="required" flag for retry
+        _output_recovery_count = 0  # max output tokens recovery attempts
+        _MAX_OUTPUT_RECOVERY = 2
         self._policy.reset()
 
         while True:
@@ -232,6 +234,7 @@ class StreamResult:
 
             text_this_turn = ""
             tool_calls_by_index: dict[int, dict[str, Any]] = {}
+            _finish_reason: str | None = None
 
             async for chunk in self._stream:
                 if not chunk.choices:
@@ -241,6 +244,10 @@ class StreamResult:
                     continue
 
                 choice = chunk.choices[0]
+
+                # Track finish_reason from final chunk
+                if choice.finish_reason:
+                    _finish_reason = choice.finish_reason
 
                 # Text delta
                 if choice.delta and choice.delta.content:
@@ -289,6 +296,41 @@ class StreamResult:
                     self._collected_text = ""
                     continue  # retry with tool_choice="required"
 
+                # Output truncation recovery: if the response was cut
+                # short by max_tokens, inject a "resume" message and
+                # escalate the token limit.
+                if (
+                    _finish_reason == "length"
+                    and text_this_turn
+                    and _output_recovery_count < _MAX_OUTPUT_RECOVERY
+                ):
+                    _output_recovery_count += 1
+                    # First attempt: double max_tokens
+                    if _output_recovery_count == 1:
+                        self._max_tokens = min(self._max_tokens * 2, 64_000)
+                        log.info(
+                            "output_truncation_escalate",
+                            new_max=self._max_tokens,
+                            attempt=_output_recovery_count,
+                        )
+                    # Append partial text and inject resume directive
+                    self._messages.append({
+                        "role": "assistant",
+                        "content": text_this_turn,
+                    })
+                    self._messages.append({
+                        "role": "user",
+                        "content": (
+                            "Output was cut short. Resume directly — "
+                            "no recap of what you already wrote. "
+                            "Continue from where you stopped."
+                        ),
+                    })
+                    # Don't let the suppress gate block the continuation
+                    # text — the user needs to see the resumed output.
+                    self._collected_text = ""
+                    continue  # retry with higher limit
+
                 # Truly done — append final text
                 if text_this_turn:
                     self._messages.append({
@@ -298,68 +340,133 @@ class StreamResult:
                 break
 
             # Safety: if we already collected a substantial text answer
-            # and the LLM is still generating tool calls, stop here to
-            # prevent answer repetition.
+            # and the LLM is still generating tool calls, execute the
+            # pending tool calls (to keep message history valid) but
+            # mark this as the last round so no further LLM call is made.
+            _force_last_round = False
             if self._collected_text and len(self._collected_text.strip()) > 200 and text_this_turn and len(text_this_turn.strip()) > 100:
                 log.info("stream_text_stop_after_answer", text_len=len(self._collected_text))
-                self._messages.append({
-                    "role": "assistant",
-                    "content": self._collected_text,
-                })
-                break
+                _force_last_round = True
 
             # Max tool rounds guard
             _tool_round += 1
+            _is_last_round = (
+                _force_last_round
+                or _tool_round > _max_tool_rounds
+            )
             if _tool_round > _max_tool_rounds:
                 log.warning("stream_text_max_tool_rounds", rounds=_tool_round)
-                if text_this_turn:
-                    self._messages.append({
-                        "role": "assistant",
-                        "content": text_this_turn,
-                    })
-                break
 
-            # Append assistant message with tool_calls
+            # Always append assistant message WITH tool_calls and execute
+            # them — this keeps the message history valid for both the
+            # current provider (Anthropic requires tool_result immediately
+            # after tool_use) and OpenAI (requires tool response for each
+            # tool_call_id).
             assistant_msg: dict[str, Any] = {"role": "assistant"}
             if text_this_turn:
                 assistant_msg["content"] = text_this_turn
             assistant_msg["tool_calls"] = list(tool_calls_by_index.values())
             self._messages.append(assistant_msg)
 
-            # Execute each tool call and append results
-            for tc_data in tool_calls_by_index.values():
-                func_name = tc_data["function"]["name"]
-                func_args_str = tc_data["function"]["arguments"]
-                tc_id = tc_data["id"]
+            # Execute tool calls — read-only tools run concurrently,
+            # write/execute tools run serially.
+            tc_list = list(tool_calls_by_index.values())
+            await self._execute_tool_batch(tc_list)
 
-                try:
-                    func_args = json.loads(func_args_str) if func_args_str else {}
-                except (json.JSONDecodeError, TypeError):
-                    func_args = {}
-
-                # Policy: hard-block tool if it exceeded nudge + grace window
-                if self._policy.should_block_tool(func_name):
-                    tool_result = (
-                        f"ERROR: {func_name} blocked — called too many times "
-                        f"consecutively. Use a different tool or approach."
-                    )
-                    log.warning("policy_tool_blocked", tool=func_name)
-                else:
-                    tool_result = await self._execute_tool(func_name, func_args)
-
-                self._messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc_id,
-                    "content": tool_result,
-                })
-
-                # Policy: check for repetitive tool calls (nudge before block)
-                nudge = self._policy.record_tool_call(func_name)
-                if nudge:
-                    self._messages.append({"role": "user", "content": nudge})
-                    log.info("policy_tool_loop_nudge", tool=func_name)
+            if _is_last_round:
+                break
 
             # Loop back to make another LLM call with tool results
+
+    _READ_ONLY_TOOLS: frozenset[str] = frozenset({
+        "file_read", "file_list", "file_search", "grep", "glob",
+        "code_analyze", "code_search", "code_symbols", "project_map",
+        "web_search", "web_fetch", "memory_search", "think",
+    })
+    _MAX_CONCURRENT_TOOLS: int = 5
+
+    async def _execute_tool_batch(
+        self, tc_list: list[dict[str, Any]],
+    ) -> None:
+        """Execute tool calls with read-only batching.
+
+        Consecutive read-only tools run concurrently (up to 5).
+        Write/execute tools run one at a time.
+        """
+        import asyncio as _aio
+
+        # Partition into batches
+        batches: list[tuple[bool, list[dict[str, Any]]]] = []
+        for tc in tc_list:
+            name = tc["function"]["name"]
+            is_ro = name in self._READ_ONLY_TOOLS
+            if batches and batches[-1][0] == is_ro and is_ro:
+                batches[-1][1].append(tc)
+            else:
+                batches.append((is_ro, [tc]))
+
+        for is_concurrent, batch in batches:
+            # Collect nudge messages to append AFTER all tool results
+            # (Anthropic requires all tool_result blocks before any
+            # other message type).
+            deferred_nudges: list[str] = []
+
+            if is_concurrent and len(batch) > 1:
+                # Run read-only tools concurrently
+                async def _run_one(tc_data: dict[str, Any]) -> tuple[str, str, str]:
+                    fn = tc_data["function"]["name"]
+                    args_str = tc_data["function"]["arguments"]
+                    tc_id = tc_data["id"]
+                    try:
+                        args = json.loads(args_str) if args_str else {}
+                    except (json.JSONDecodeError, TypeError):
+                        args = {}
+                    if self._policy.should_block_tool(fn):
+                        res = f"ERROR: {fn} blocked — called too many times consecutively."
+                    else:
+                        res = await self._execute_tool(fn, args)
+                    return tc_id, fn, res
+
+                sem = _aio.Semaphore(self._MAX_CONCURRENT_TOOLS)
+
+                async def _limited(tc_data: dict[str, Any]) -> tuple[str, str, str]:
+                    async with sem:
+                        return await _run_one(tc_data)
+
+                results = await _aio.gather(*[_limited(tc) for tc in batch])
+                for tc_id, fn, res in results:
+                    self._messages.append({
+                        "role": "tool", "tool_call_id": tc_id, "content": res,
+                    })
+                    nudge = self._policy.record_tool_call(fn)
+                    if nudge:
+                        deferred_nudges.append(nudge)
+            else:
+                # Run serially (write tools or single read)
+                for tc_data in batch:
+                    fn = tc_data["function"]["name"]
+                    args_str = tc_data["function"]["arguments"]
+                    tc_id = tc_data["id"]
+                    try:
+                        args = json.loads(args_str) if args_str else {}
+                    except (json.JSONDecodeError, TypeError):
+                        args = {}
+                    if self._policy.should_block_tool(fn):
+                        res = f"ERROR: {fn} blocked — called too many times consecutively."
+                        log.warning("policy_tool_blocked", tool=fn)
+                    else:
+                        res = await self._execute_tool(fn, args)
+                    self._messages.append({
+                        "role": "tool", "tool_call_id": tc_id, "content": res,
+                    })
+                    nudge = self._policy.record_tool_call(fn)
+                    if nudge:
+                        deferred_nudges.append(nudge)
+
+            # Append nudges after ALL tool results for this batch
+            for nudge_text in deferred_nudges:
+                self._messages.append({"role": "user", "content": nudge_text})
+                log.info("policy_tool_loop_nudge")
 
     async def _execute_tool(self, name: str, params: dict[str, Any]) -> str:
         """Execute a tool by name and return string result."""

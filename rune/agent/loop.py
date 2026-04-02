@@ -988,6 +988,10 @@ class NativeAgentLoop(EventEmitter):
                     step_tokens = request_tokens + response_tokens
                     self._token_budget.used += step_tokens
                     trace.total_tokens_used = self._token_budget.used
+                    await self.emit(
+                        "step_tokens", self._step, step_tokens,
+                        self._token_budget.used, self._token_budget.total,
+                    )
                 except Exception:
                     pass
 

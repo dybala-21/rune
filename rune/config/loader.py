@@ -95,6 +95,43 @@ def _resolve_api_keys(data: dict[str, Any]) -> dict[str, Any]:
     if "anthropic_api_key" not in data or data["anthropic_api_key"] is None:
         data["anthropic_api_key"] = os.environ.get("ANTHROPIC_API_KEY")
 
+    # Google Gemini API key (simple, like OpenAI)
+    if "gemini_api_key" not in data or data["gemini_api_key"] is None:
+        data["gemini_api_key"] = os.environ.get("GEMINI_API_KEY")
+    if data.get("gemini_api_key"):
+        os.environ.setdefault("GEMINI_API_KEY", data["gemini_api_key"])
+
+    # Google Cloud / Vertex AI: config → env → ~/.rune/google-credentials.json
+    if "google_credentials_file" not in data or data["google_credentials_file"] is None:
+        data["google_credentials_file"] = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if data.get("google_credentials_file") is None:
+        default_creds = rune_home() / "google-credentials.json"
+        if default_creds.is_file():
+            data["google_credentials_file"] = str(default_creds)
+
+    if "vertex_project" not in data or data["vertex_project"] is None:
+        data["vertex_project"] = os.environ.get("VERTEX_PROJECT")
+    # Auto-detect project from credentials file
+    if data.get("vertex_project") is None and data.get("google_credentials_file"):
+        try:
+            import json as _json
+            with open(data["google_credentials_file"]) as f:
+                creds = _json.load(f)
+            data["vertex_project"] = creds.get("project_id")
+        except Exception:
+            pass
+
+    if "vertex_location" not in data or data["vertex_location"] is None:
+        data["vertex_location"] = os.environ.get("VERTEX_LOCATION", "us-central1")
+
+    # Set env vars so litellm picks them up automatically
+    if data.get("google_credentials_file"):
+        os.environ.setdefault("GOOGLE_APPLICATION_CREDENTIALS", data["google_credentials_file"])
+    if data.get("vertex_project"):
+        os.environ.setdefault("VERTEX_PROJECT", data["vertex_project"])
+    if data.get("vertex_location"):
+        os.environ.setdefault("VERTEX_LOCATION", data["vertex_location"])
+
     return data
 
 

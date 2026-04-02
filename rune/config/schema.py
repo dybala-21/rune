@@ -218,4 +218,12 @@ class RuneConfig(BaseModel):
     openai_api_key: str | None = Field(default=None, alias="openai_api_key")
     anthropic_api_key: str | None = Field(default=None, alias="anthropic_api_key")
 
+    # Google Gemini (simple API key — like OpenAI)
+    gemini_api_key: str | None = Field(default=None, alias="gemini_api_key")
+
+    # Google Cloud / Vertex AI (service account — for enterprise)
+    google_credentials_file: str | None = Field(default=None, alias="google_credentials_file")
+    vertex_project: str | None = Field(default=None, alias="vertex_project")
+    vertex_location: str = Field(default="us-central1", alias="vertex_location")
+
     model_config = ConfigDict(populate_by_name=True)

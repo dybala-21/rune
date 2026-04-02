@@ -447,6 +447,7 @@ class AgentLoopController:
         self._loop.on("completed", self._on_completed)
         self._loop.on("error", self._on_error)
         self._loop.on("goal_classified", self._on_goal_classified)
+        self._loop.on("step_tokens", self._on_step_tokens)
 
     def _unwire_events(self) -> None:
         """Remove all event handlers."""
@@ -458,6 +459,7 @@ class AgentLoopController:
         self._loop.off("completed", self._on_completed)
         self._loop.off("error", self._on_error)
         self._loop.off("goal_classified", self._on_goal_classified)
+        self._loop.off("step_tokens", self._on_step_tokens)
 
     # ===================================================================
     # Orchestrator event bridge
@@ -574,6 +576,12 @@ class AgentLoopController:
             current_step=step,
         )
         log.debug("agent_step", step=step)
+
+    async def _on_step_tokens(
+        self, step: int, step_tokens: int, used: int, total: int,
+    ) -> None:
+        """Update the status bar with current token usage."""
+        self._renderer.update_status(tokens_used=used, token_budget=total)
 
     async def _on_text_delta(self, delta: str) -> None:
         """Handle streaming text delta - update streaming display."""
