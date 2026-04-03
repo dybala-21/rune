@@ -290,6 +290,7 @@ class RuneApp:
         self._main_sigint_handler_installed: bool = False
 
         # State tracking
+        self._restored_input: str = ""
         self._last_abort_time: float = 0.0
         self._user_message_history: list[str] = []
         self._total_input_tokens: int = 0
@@ -500,6 +501,13 @@ class RuneApp:
         try:
             while True:
                 try:
+                    # Restore input after agent cancel (ESC / Ctrl+C)
+                    restored = getattr(self, "_restored_input", "")
+                    if restored:
+                        self._session.default_buffer.text = restored
+                        self._session.default_buffer.cursor_position = len(restored)
+                        self._restored_input = ""
+
                     prompt_msg = "❯ " if not self._multiline else "❯❯ "
                     text = await self._session.prompt_async(
                         [("class:prompt", prompt_msg)],
@@ -556,13 +564,11 @@ class RuneApp:
             self._main_sigint_handler_installed = False
             self._restore_loop_exception_handler(loop)
 
-    # ===================================================================
     # Agent run with Live display
-    # ===================================================================
-
     async def _run_agent(self, text: str) -> None:
         """Run the agent loop with Rich Live footer for streaming/status."""
         self._agent_running = True
+        self._restored_input = text  # Save for restoration after cancel
         live = self.renderer.start_live()
 
         # Set up Ctrl+C to cancel agent during run
@@ -571,13 +577,45 @@ class RuneApp:
 
         cancel_requested = False
 
-        def _sigint_handler(signum: int, frame: Any) -> None:
+        def _request_cancel() -> None:
             nonlocal cancel_requested
             cancel_requested = True
             if self._agent_controller is not None:
                 asyncio.ensure_future(self._agent_controller.cancel())
 
+        def _sigint_handler(signum: int, frame: Any) -> None:
+            _request_cancel()
+
         signal.signal(signal.SIGINT, _sigint_handler)
+
+        # Set up ESC key detection during agent execution.
+        # Switches terminal to cbreak mode so we can poll stdin
+        # for ESC (0x1b) without waiting for Enter.
+        import select
+        import sys
+        import termios
+        import tty
+
+        stdin_fd = sys.stdin.fileno()
+        old_term: list[Any] | None = None
+        try:
+            old_term = termios.tcgetattr(stdin_fd)
+            tty.setcbreak(stdin_fd)
+        except (termios.error, OSError):
+            old_term = None  # Not a real terminal (e.g. piped stdin)
+
+        def _poll_escape() -> bool:
+            """Check if ESC was pressed without blocking."""
+            if old_term is None:
+                return False
+            try:
+                ready, _, _ = select.select([sys.stdin], [], [], 0)
+                if ready:
+                    ch = sys.stdin.read(1)
+                    return ch == "\x1b"
+            except (OSError, ValueError):
+                pass
+            return False
 
         try:
             with live:
@@ -590,36 +628,40 @@ class RuneApp:
                     # Wait for the task to complete
                     task = self._agent_controller._task  # noqa: SLF001
                     if task is not None:
-                        # Poll while waiting, to allow spinner ticks
+                        # Poll while waiting, to allow spinner ticks + ESC
                         while not task.done():
                             await asyncio.sleep(_SPINNER_INTERVAL)
                             self.renderer.tick_spinner()
-                        # Get result (controller already handles errors internally)
+                            if _poll_escape():
+                                _request_cancel()
+                        # Get result
                         try:
                             await task
                         except asyncio.CancelledError:
                             pass
                         except Exception as exc:
-                            # Controller should have shown this, but log as fallback
                             self.renderer.print_system_message(f"Error: {exc}")
 
         except (KeyboardInterrupt, asyncio.CancelledError):
             if self._agent_controller is not None:
                 with contextlib.suppress(Exception):
                     await self._agent_controller.cancel()
-            self.renderer.print_system_message("Cancelled.")
+            cancel_requested = True
         finally:
+            # Restore terminal mode before anything else
+            if old_term is not None:
+                with contextlib.suppress(Exception):
+                    termios.tcsetattr(stdin_fd, termios.TCSADRAIN, old_term)
             signal.signal(signal.SIGINT, original_sigint)
             self.renderer.stop_live()
             self._agent_running = False
 
         if cancel_requested:
             self.renderer.print_system_message("Agent cancelled.")
+        else:
+            self._restored_input = ""  # Clear on normal completion
 
-    # ===================================================================
     # Welcome
-    # ===================================================================
-
     def _print_welcome(self) -> None:
         """Print the RUNE welcome banner with session briefing."""
         width = min(self.console.width or 80, 80)
@@ -815,10 +857,7 @@ class RuneApp:
         except Exception:
             pass
 
-    # ===================================================================
     # Bottom toolbar (idle status bar)
-    # ===================================================================
-
     def _bottom_toolbar(self) -> str:
         """Return idle status bar text for prompt_toolkit."""
         return format_idle_status(
@@ -829,10 +868,7 @@ class RuneApp:
             multiline=self._multiline,
         )
 
-    # ===================================================================
     # Key bindings
-    # ===================================================================
-
     def _build_key_bindings(self) -> KeyBindings:
         kb = KeyBindings()
 
@@ -864,10 +900,7 @@ class RuneApp:
 
         return kb
 
-    # ===================================================================
     # Slash commands
-    # ===================================================================
-
     async def _handle_slash_command_text(self, text: str) -> None:
         """Parse and dispatch a slash command."""
         parsed = parse_slash_command(text)

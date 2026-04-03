@@ -281,50 +281,42 @@ class StreamResult:
                     self._update_usage(chunk.usage)
 
             # Post-stream decision: yield text or discard
-            # Now that the full turn is complete, we know whether
-            # tool_calls were generated alongside the text.
+            # We check ALL continuation paths (tool_calls, force_tool,
+            # truncation recovery) BEFORE yielding.  Any path that
+            # loops back makes the current text intermediate/speculative.
             _has_tools = bool(tool_calls_by_index) or _finish_reason == "tool_calls"
+            _discard = _has_tools and bool(text_this_turn)
 
-            if _has_tools and text_this_turn:
-                # Text was generated alongside tool calls — this is
-                # pre-tool speculation (likely hallucination for factual
-                # questions).  Discard it: do NOT yield to UI, do NOT
-                # add to _collected_text.
+            if _discard:
                 log.info(
                     "speculative_text_discarded",
                     text_len=len(text_this_turn),
                     tool_count=len(tool_calls_by_index),
                 )
-            elif text_this_turn and delta and not _suppress_yield:
-                # Pure text response (no tool calls) — yield all at once.
-                yield text_this_turn
-                self._collected_text += text_this_turn
-            elif text_this_turn and not _suppress_yield:
-                # delta=False mode: just accumulate, don't yield
-                self._collected_text += text_this_turn
 
-            # No tool calls — check if we should force a retry
+            # No tool calls - check continuation paths before yielding
             if not tool_calls_by_index:
-                if (self._tool_schemas
+                # force_tool_on_empty: only retry when the model produced
+                # NO text at all (empty response).  If text was generated,
+                # the model decided tools weren't needed — respect that.
+                # Change A already handles text+tools (hallucination).
+                if (not text_this_turn.strip()
+                        and self._tool_schemas
                         and self._policy.should_force_tool(
-                            has_tool_calls=False, has_text=bool(text_this_turn.strip()))):
+                            has_tool_calls=False, has_text=False)):
                     log.info("policy_force_tool_retry")
                     _force_tool = True
-                    # Reset collected text so the forced tool round's
-                    # subsequent answer is not suppressed.
+                    _discard = True
                     self._collected_text = ""
                     continue  # retry with tool_choice="required"
 
-                # Output truncation recovery: if the response was cut
-                # short by max_tokens, inject a "resume" message and
-                # escalate the token limit.
+                # Output truncation recovery
                 if (
                     _finish_reason == "length"
                     and text_this_turn
                     and _output_recovery_count < _MAX_OUTPUT_RECOVERY
                 ):
                     _output_recovery_count += 1
-                    # First attempt: double max_tokens
                     if _output_recovery_count == 1:
                         self._max_tokens = min(self._max_tokens * 2, 64_000)
                         log.info(
@@ -332,7 +324,6 @@ class StreamResult:
                             new_max=self._max_tokens,
                             attempt=_output_recovery_count,
                         )
-                    # Append partial text and inject resume directive
                     self._messages.append({
                         "role": "assistant",
                         "content": text_this_turn,
@@ -345,12 +336,19 @@ class StreamResult:
                             "Continue from where you stopped."
                         ),
                     })
-                    # Don't let the suppress gate block the continuation
-                    # text. The user needs to see the resumed output.
                     self._collected_text = ""
                     continue  # retry with higher limit
 
-                # Truly done — append final text
+            # Yield (only reached if no continuation path triggered)
+            if not _discard and text_this_turn:
+                if delta and not _suppress_yield:
+                    yield text_this_turn
+                    self._collected_text += text_this_turn
+                elif not _suppress_yield:
+                    self._collected_text += text_this_turn
+
+            # Pure text, no continuations — done
+            if not tool_calls_by_index:
                 if text_this_turn:
                     self._messages.append({
                         "role": "assistant",

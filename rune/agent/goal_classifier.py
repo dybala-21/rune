@@ -48,8 +48,8 @@ _TIER2_SYSTEM_PROMPT = """\
 You are a goal classifier. Given a user's request, classify it into exactly one category.
 
 Categories:
-- chat: Greetings, small talk, opinions, general questions about the assistant itself
-- web: Looking up factual information about real-world entities (people, places, events, products, organizations), web search, browsing, checking URLs
+- chat: Greetings, small talk, general questions about the assistant
+- web: Web search, browsing, checking URLs, looking up information online
 - research: Code/project analysis, review, assessment, finding improvements, understanding architecture, evaluating quality (read-only, no modifications)
 - code_modify: Creating, editing, fixing, refactoring code or files. ANY request to create or save a file.
 - execution: Running commands, tests, installing packages, building, deploying
@@ -57,9 +57,6 @@ Categories:
 - full: Complex multi-step tasks that span multiple categories
 
 Rules:
-- Questions about specific real-world people, places, events, dates, statistics, or products → web (NOT chat)
-- "Who is X?", "Do you know X?", "Tell me about X" where X is a real-world entity → web
-- Greetings ("hello", "hi"), thanks, how-are-you, questions about the assistant itself → chat
 - "build a report" or "make a chart" → full (NOT execution)
 - "run tests" or "npm install" → execution
 - "analyze the code" or "find improvements" or "review this project" → research
