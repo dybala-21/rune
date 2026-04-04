@@ -45,57 +45,50 @@ class ClassificationResult:
 
 # LLM classifier
 
-_TIER2_SYSTEM_PROMPT = """\
+_CLASSIFICATION_CATEGORIES = """\
+- chat: Greetings, small talk, general questions about the assistant
+- web: Web search, browsing, checking URLs, looking up information online
+- research: Code/project analysis, review, assessment, finding improvements, understanding architecture, evaluating quality (read-only, no modifications)
+- code_modify: Creating, editing, fixing, refactoring code or files. ANY request to create or save a file.
+- execution: Running commands, tests, installing packages, building, deploying
+- browser: Browser automation - clicking, filling forms, taking screenshots
+- full: Complex multi-step tasks that span multiple categories"""
+
+_CLASSIFICATION_RULES = """\
+- Report/chart generation → full (NOT execution)
+- Running commands, tests, installing packages → execution
+- Analyzing, reviewing, assessing code (read-only) → research
+- Fixing, editing, creating code or files → code_modify
+- If the request combines multiple categories → full
+- If evaluating without making changes → research"""
+
+_TIER2_SYSTEM_PROMPT = f"""\
 You are a goal classifier. Given a user's request, classify it into exactly one category.
 
 Categories:
-- chat: Greetings, small talk, general questions about the assistant
-- web: Web search, browsing, checking URLs, looking up information online
-- research: Code/project analysis, review, assessment, finding improvements, understanding architecture, evaluating quality (read-only, no modifications)
-- code_modify: Creating, editing, fixing, refactoring code or files. ANY request to create or save a file.
-- execution: Running commands, tests, installing packages, building, deploying
-- browser: Browser automation - clicking, filling forms, taking screenshots
-- full: Complex multi-step tasks that span multiple categories
+{_CLASSIFICATION_CATEGORIES}
 
 Rules:
-- "build a report" or "make a chart" → full (NOT execution)
-- "run tests" or "npm install" → execution
-- "analyze the code" or "find improvements" or "review this project" → research
-- "fix the bug in main.py" → code_modify
-- ANY request mentioning file creation, code writing, or saving to a file → code_modify
-- If the request combines multiple categories, choose "full"
-- If the request is about evaluating, reviewing, or assessing (without making changes), choose "research"
+{_CLASSIFICATION_RULES}
 
-Respond with ONLY a JSON object: {"goal_type": "<category>", "confidence": <0.0-1.0>, "reason": "<brief reason>"}
+Respond with ONLY a JSON object: {{"goal_type": "<category>", "confidence": <0.0-1.0>, "reason": "<brief reason>"}}
 """
 
-_TIER2_SYSTEM_PROMPT_WITH_PREVIOUS = """\
+_TIER2_SYSTEM_PROMPT_WITH_PREVIOUS = f"""\
 You are a goal classifier. Given a user's request and the previous request context, classify the current request and determine if it is related to the previous one.
 
 Categories:
-- chat: Greetings, small talk, general questions about the assistant
-- web: Web search, browsing, checking URLs, looking up information online
-- research: Code/project analysis, review, assessment, finding improvements, understanding architecture, evaluating quality (read-only, no modifications)
-- code_modify: Creating, editing, fixing, refactoring code or files. ANY request to create or save a file.
-- execution: Running commands, tests, installing packages, building, deploying
-- browser: Browser automation - clicking, filling forms, taking screenshots
-- full: Complex multi-step tasks that span multiple categories
+{_CLASSIFICATION_CATEGORIES}
 
 Rules:
-- "build a report" or "make a chart" → full (NOT execution)
-- "run tests" or "npm install" → execution
-- "analyze the code" or "find improvements" or "review this project" → research
-- "fix the bug in main.py" → code_modify
-- ANY request mentioning file creation, code writing, or saving to a file → code_modify
-- If the request combines multiple categories, choose "full"
-- If the request is about evaluating, reviewing, or assessing (without making changes), choose "research"
+{_CLASSIFICATION_RULES}
 
 is_related_to_previous rules:
-- true: the current request refers to, builds on, or continues the previous request (e.g. "fix the bug you found", "summarize that", "continue", "keep going")
-- false: the current request is about a completely different topic or task (e.g. previous was about Gen Z issues, current is about Iran-Israel conflict)
+- true: the current request references, continues, or builds on the previous one
+- false: the current request is about a completely different topic or task
 - When in doubt, choose false
 
-Respond with ONLY a JSON object: {"goal_type": "<category>", "confidence": <0.0-1.0>, "reason": "<brief reason>", "is_related_to_previous": true/false}
+Respond with ONLY a JSON object: {{"goal_type": "<category>", "confidence": <0.0-1.0>, "reason": "<brief reason>", "is_related_to_previous": true/false}}
 """
 
 
@@ -131,9 +124,7 @@ async def classify_tier2(
             system_prompt = _TIER2_SYSTEM_PROMPT
             user_content = goal
 
-        # Domain change detection needs a more capable model since the
-        # prompt is longer and requires reasoning about relatedness.
-        tier = "best" if has_previous else "fast"
+        tier = "fast"
 
         response = await client.completion(
             messages=[

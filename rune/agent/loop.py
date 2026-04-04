@@ -451,13 +451,15 @@ class NativeAgentLoop(EventEmitter):
             _prev_goal = ""
             _prev_goal_type = ""
             if message_history:
-                # Find the last user message as the previous goal
+                # goal_type is stored on assistant turns (set via add_turn in cli/api/ui)
+                for msg in reversed(message_history):
+                    if msg.get("goal_type"):
+                        _prev_goal_type = msg["goal_type"]
+                        break
                 for msg in reversed(message_history):
                     if msg.get("role") == "user" and msg.get("content"):
                         _prev_goal = msg["content"]
-                        _prev_goal_type = msg.get("goal_type", "")
                         break
-
             classification = await classify_goal(
                 goal,
                 previous_goal=_prev_goal,
