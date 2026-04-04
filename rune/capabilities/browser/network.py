@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from rune.utils.logger import get_logger

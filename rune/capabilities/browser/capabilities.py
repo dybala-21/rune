@@ -7,8 +7,6 @@ Batch/workflow/profile live in ``browser_extended``.
 
 from __future__ import annotations
 
-from typing import Any
-
 from pydantic import BaseModel, Field
 
 from rune.capabilities.browser.core import (
