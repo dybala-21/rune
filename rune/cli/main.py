@@ -812,6 +812,59 @@ def _ensure_llm_key() -> bool:
 
 # Browser commands
 
+
+def _get_extension_target_dir():
+    """Stable extension path: ~/.rune/extension/rune-browser-bridge/"""
+    from rune.utils.paths import rune_home
+
+    return rune_home() / "extension" / "rune-browser-bridge"
+
+
+def _get_extension_source_dir():
+    """Locate bundled extension inside the installed package."""
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parent.parent.parent / "extension" / "rune-browser-bridge"
+    if (src / "manifest.json").exists():
+        return src
+    return None
+
+
+def _install_extension_to_home():
+    """Copy bundled extension to ~/.rune/extension/rune-browser-bridge/.
+
+    Returns the target directory. Raises typer.Exit(1) on failure.
+    """
+    import shutil
+
+    src = _get_extension_source_dir()
+    if src is None:
+        console.print(
+            "[red]Bundled extension not found.[/red]\n"
+            "[dim]Reinstall RUNE: curl -LsSf .../install.sh | sh[/dim]"
+        )
+        raise typer.Exit(1)
+
+    target = _get_extension_target_dir()
+    if target.exists():
+        shutil.rmtree(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(src, target)
+    return target
+
+
+@browser_app.command("setup")
+def browser_setup() -> None:
+    """Extract the Chrome extension to ~/.rune/extension/ for loading in Chrome."""
+    target = _install_extension_to_home()
+    console.print(f"\n[green]Extension installed to:[/green] [cyan]{target}[/cyan]\n")
+    console.print("[bold]Load in Chrome:[/bold]")
+    console.print("  1. Open [cyan]chrome://extensions[/cyan]")
+    console.print("  2. Enable [bold]Developer mode[/bold] (top right)")
+    console.print("  3. Click [bold]Load unpacked[/bold]")
+    console.print(f"  4. Select: [cyan]{target}[/cyan]\n")
+
+
 @browser_app.command("connect")
 def browser_connect(
     no_open: Annotated[
@@ -821,18 +874,17 @@ def browser_connect(
     """Set up the Chrome Extension and start the relay server."""
     import shutil
     import subprocess
-    from pathlib import Path
 
-    # 1. Locate extension directory
-    ext_dir = Path(__file__).resolve().parent.parent.parent / "extension" / "rune-browser-bridge"
-    if not (ext_dir / "manifest.json").exists():
-        console.print(f"[red]Extension not found at {ext_dir}[/red]")
-        raise typer.Exit(1)
+    # 1. Ensure extension is extracted to ~/.rune/extension/
+    target = _get_extension_target_dir()
+    if not (target / "manifest.json").exists():
+        console.print("[dim]Extracting extension...[/dim]")
+        target = _install_extension_to_home()
 
     console.print("\n[bold]RUNE Browser Bridge[/bold] — Chrome Extension Setup\n")
 
     # 2. Copy path to clipboard
-    ext_path_str = str(ext_dir)
+    ext_path_str = str(target)
     try:
         if sys.platform == "darwin":
             subprocess.run(["pbcopy"], input=ext_path_str.encode(), check=True)

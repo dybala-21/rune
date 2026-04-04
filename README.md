@@ -133,6 +133,25 @@ Complex goals are decomposed into subtasks with dependency tracking:
 - Read-only tools run concurrently (up to 5), write tools stay serial
 - Research findings can spawn follow-up tasks at runtime (dynamic DAG expansion)
 
+### Browser Extension
+
+RUNE can control your real Chrome browser via the **RUNE Browser Bridge** extension. This is separate from Playwright headless — it lets RUNE interact with your actual browser session (logged-in sites, cookies, etc).
+
+```bash
+# 1. Extract extension (auto-runs during install)
+rune browser setup
+
+# 2. Load in Chrome
+#    Open chrome://extensions → Enable Developer mode → Load unpacked
+#    Select: ~/.rune/extension/rune-browser-bridge/
+
+# 3. Done — RUNE auto-connects when it needs the browser
+```
+
+The extension auto-discovers RUNE's relay server on `localhost:19222-19231`. No manual connection needed — when RUNE requests a browser action, the extension connects automatically.
+
+To check connection status: `rune browser status`
+
 ### Multi-Channel
 
 Same agent, same memory, anywhere:
