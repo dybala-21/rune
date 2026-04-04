@@ -448,7 +448,10 @@ def _simple_repl(model: str | None = None, provider: str | None = None) -> None:
         # Record assistant turn in conversation manager
         if conv_manager and conversation_id and answer:
             with contextlib.suppress(Exception):
-                conv_manager.add_turn(conversation_id, "assistant", answer)
+                conv_manager.add_turn(
+                    conversation_id, "assistant", answer,
+                    goal_type=getattr(loop, "_last_goal_type", ""),
+                )
 
         if collected_text:
             print()

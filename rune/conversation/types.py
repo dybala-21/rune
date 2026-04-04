@@ -23,6 +23,7 @@ class ConversationTurn:
     channel: str = ""
     episode_id: str = ""
     execution_context: str = ""
+    goal_type: str = ""  # GoalType of this turn's goal (for domain change detection)
     archived: bool = False
 
 

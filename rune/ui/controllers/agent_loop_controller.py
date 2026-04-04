@@ -996,6 +996,7 @@ class AgentLoopController:
                 with contextlib.suppress(Exception):
                     self._conv_manager.add_turn(
                         self._conversation_id, "assistant", answer,
+                        goal_type=getattr(self._loop, "_last_goal_type", ""),
                     )
 
             # Post-process: save assistant turn + episodic memory
