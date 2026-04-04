@@ -1,8 +1,11 @@
 <p align="center">
-  <h1 align="center">ᚱ RUNE-BOT</h1>
-  <p align="center"><strong>A local-first AI agent that learns from experience.</strong></p>
-  <p align="center">Every task makes it smarter. Your data stays on your machine.</p>
+  <img src="https://raw.githubusercontent.com/dybala-21/rune/main/rune.png" alt="RUNE" width="160" />
 </p>
+
+<h1 align="center">RUNE-BOT</h1>
+
+<p align="center"><strong>A local-first AI agent that learns from experience.</strong></p>
+<p align="center">Every task makes it smarter. Your data stays on your machine.</p>
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> ·
