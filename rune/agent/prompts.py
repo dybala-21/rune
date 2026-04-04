@@ -265,8 +265,11 @@ PROMPT_BROWSER = """
 - **NEVER report task completion unless you see actual URL/title/element changes confirming it.**
 - If stuck after 2 failed attempts: construct the target URL directly with browser_navigate instead of clicking.
 - Try constructing search URLs directly before using search bars
-- **Form filling**: Use browser_batch for multiple fields + submit in ONE call
+- **Form filling**: ALWAYS use browser_batch for multiple fields + submit in ONE call
+- **SPA detection**: If browser_navigate output shows "SPA DETECTED" with API URLs, STOP using browser_act and call those APIs directly with web_fetch. This is faster and more reliable than UI interaction.
+- If browser_act fails on a search bar or form, construct the search URL directly: browser_navigate(url='https://site.com/search?keyword=...')
 - ANTI-LOOP: NEVER repeat observe→extract more than twice
+- **Data extraction**: Use browser_extract with CSS selectors for lists/tables — faster than repeated observe+act
 
 ### Efficient Observation
 - **First observe**: no special params (full page overview)

@@ -231,6 +231,7 @@ class ElementMeta:
     selectors: list[dict[str, Any]] = field(default_factory=list)
     # selectors: [{"type": "role"|"text"|"label"|"placeholder"|"testid"|"css",
     #              "value": str, "confidence": float}]
+    breadcrumb: str = ""  # ancestor context path (e.g. "main > list > listitem")
 
 
 class ElementStore:
@@ -243,8 +244,14 @@ class ElementStore:
         self._ref_counter: int = 0
 
     def clear(self) -> None:
+        """Clear element cache but keep ref counter incrementing.
+
+        This ensures refs from different observe calls never collide
+        (e.g., observe 1: e0-e12, observe 2: e13-e25), preventing
+        stale-ref confusion when the LLM references an old element.
+        """
         self._elements.clear()
-        self._ref_counter = 0
+        # Do NOT reset _ref_counter — monotonic refs prevent collisions
 
     def get(self, ref: str) -> ElementMeta | None:
         return self._elements.get(ref)
@@ -336,6 +343,33 @@ _ARIA_LINE_RE = re.compile(
     r"^\s*-\s+(\w+)(?:\s+\"([^\"]*)\")?"
 )
 
+# Semantic roles worth showing in breadcrumb context (#P3 DOM Distillation).
+_CONTEXT_ROLES = frozenset({
+    "navigation", "main", "complementary", "banner", "contentinfo",
+    "region", "section", "article", "dialog", "form", "list",
+    "listitem", "table", "row", "group", "tabpanel", "menu",
+    "heading", "cell",
+})
+
+
+def _build_breadcrumb(ancestor_stack: list[tuple[int, str, str]]) -> str:
+    """Build a compact ancestor path from the indentation stack.
+
+    Only includes semantic roles (navigation, main, list, etc.) to
+    keep breadcrumbs concise. Shows last 3 ancestors maximum.
+    """
+    parts: list[str] = []
+    for _, role, name in ancestor_stack:
+        if role not in _CONTEXT_ROLES:
+            continue
+        if name:
+            parts.append(f'{role}"{name}"')
+        else:
+            parts.append(role)
+    if not parts:
+        return ""
+    return " > ".join(parts[-3:])
+
 
 def _parse_aria_snapshot(
     text: str,
@@ -344,21 +378,37 @@ def _parse_aria_snapshot(
 ) -> None:
     """Parse Playwright aria_snapshot YAML output into ElementMeta entries.
 
-    Scans ALL lines regardless of indent depth, catching nested elements
-    inside tables, comboboxes, dialogs, etc.
+    Uses indentation-based stack to track ancestor context, producing
+    breadcrumb paths like ``main > list > listitem"Hotel Name"`` for
+    each interactive element (#P3 DOM Distillation / AgentOccam).
     """
+    ancestor_stack: list[tuple[int, str, str]] = []  # (indent, role, name)
+
     for line in text.splitlines():
         m = _ARIA_LINE_RE.match(line)
         if not m:
             continue
+
+        indent = len(line) - len(line.lstrip())
         role = m.group(1)
         name = m.group(2) or ""
+
+        # Pop ancestors at same or deeper indent level
+        while ancestor_stack and ancestor_stack[-1][0] >= indent:
+            ancestor_stack.pop()
+
         if role in INTERACTIVE_ROLES:
+            breadcrumb = _build_breadcrumb(ancestor_stack)
             ref = store.next_ref()
             selectors = _build_selectors(role, name, {})
-            meta = ElementMeta(ref=ref, role=role, name=name, selectors=selectors)
+            meta = ElementMeta(
+                ref=ref, role=role, name=name,
+                selectors=selectors, breadcrumb=breadcrumb,
+            )
             store.put(meta)
             out.append(meta)
+
+        ancestor_stack.append((indent, role, name))
 
 
 def _build_selectors(role: str, name: str, node: dict) -> list[dict[str, Any]]:
