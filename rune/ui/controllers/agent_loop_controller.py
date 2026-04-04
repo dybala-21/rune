@@ -116,10 +116,7 @@ class AgentLoopController:
         self._pending_suggestion_context: str = ""  # injected into next goal
         self._pending_suggestion_source: str = ""  # source type of pending suggestion
 
-    # ===================================================================
     # Proactive suggestion system
-    # ===================================================================
-
     _PROACTIVE_SESSION_MAX = 5       # max suggestions per session
     _PROACTIVE_MIN_INTERVAL = 600.0  # 10 minutes between suggestions
     _PROACTIVE_TICK_INTERVAL = 60.0  # evaluation cycle
@@ -433,10 +430,7 @@ class AgentLoopController:
 
         return ctx
 
-    # ===================================================================
     # Event wiring - registers handlers on NativeAgentLoop
-    # ===================================================================
-
     def _wire_events(self) -> None:
         """Register handlers for ALL events emitted by NativeAgentLoop."""
         self._loop.on("step", self._on_step)
@@ -461,10 +455,7 @@ class AgentLoopController:
         self._loop.off("goal_classified", self._on_goal_classified)
         self._loop.off("step_tokens", self._on_step_tokens)
 
-    # ===================================================================
     # Orchestrator event bridge
-    # ===================================================================
-
     def wire_orchestrator(self, orchestrator: Any) -> None:
         """Wire orchestrator events to TUI display.
 
@@ -508,10 +499,8 @@ class AgentLoopController:
             completed_count=ok, failed_count=fail,
         )
 
-    # ===================================================================
-    # Public API
-    # ===================================================================
 
+    # Public API
     async def start(self, goal: str) -> None:
         """Start the agent loop for a user goal.
 
@@ -564,10 +553,7 @@ class AgentLoopController:
         self._finish_streaming()
         log.info("agent_loop_cancelled")
 
-    # ===================================================================
     # Event handlers (called by NativeAgentLoop via EventEmitter)
-    # ===================================================================
-
     async def _on_step(self, step: int) -> None:
         """Handle step start - update step counter and status bar."""
         self._step_count = step
@@ -748,9 +734,7 @@ class AgentLoopController:
         tier = getattr(classification, "tier", 1)
         log.info("goal_classified_ui", type=goal_type, confidence=confidence, tier=tier)
 
-    # ===================================================================
     # Blocking interaction handlers (called by agent loop)
-    # ===================================================================
 
     async def _async_input(self, prompt: str = "> ") -> str:
         """Run input() in a thread so the asyncio event loop isn't blocked."""
@@ -919,10 +903,7 @@ class AgentLoopController:
 
         return response or None
 
-    # ===================================================================
     # Internal
-    # ===================================================================
-
     def _flush_text(self, text: str) -> None:
         """Commit buffered text to scrollback as markdown."""
         if text.strip():
@@ -930,7 +911,14 @@ class AgentLoopController:
             self._app._last_response_text = text
 
     def _finish_streaming(self) -> None:
-        """Finish any active streaming display."""
+        """Finish any active streaming display.
+
+        Only commits text to scrollback if the streaming buffer is
+        non-empty.  Calling this on an already-finished stream is a
+        no-op, preventing empty response boxes from appearing.
+        """
+        if not self._streaming_buffer:
+            return
         self._renderer.finish_streaming()
         raw = self._renderer.get_streaming_text()
         if raw:
@@ -1035,10 +1023,7 @@ class AgentLoopController:
             self._renderer.print_system_message(f"Agent loop error: {exc}")
             self._app.update_status(status="idle")
 
-    # ===================================================================
     # Completion summary (TS RUNE format)
-    # ===================================================================
-
     @staticmethod
     def _fmt_tokens(n: int) -> str:
         """Format token count: 483000 -> '483k', 1900 -> '1.9k', 50 -> '50'."""
@@ -1120,7 +1105,7 @@ class AgentLoopController:
         sep = " \u2014 "  # em dash
         lines: list[str] = []
 
-        # --- Line 1: Narrative ---
+        # Line 1: Narrative
         file_count = len(set(files_modified))
         if success:
             icon = "[bold #98C379]\u2713[/bold #98C379]"
@@ -1140,7 +1125,7 @@ class AgentLoopController:
         narrative = f"{icon} {verb} after {' and '.join(parts)}." if parts else f"{icon} {verb}."
         lines.append(narrative)
 
-        # --- Line 2: Metrics ---
+        # Line 2: Metrics
         metrics: list[str] = []
         metrics.append(f"[bold]steps {steps}[/bold]")
 
@@ -1168,14 +1153,14 @@ class AgentLoopController:
 
         lines.append(f"[#56B6C2]{sep.join(metrics)}[/#56B6C2]")
 
-        # --- Line 3: Token breakdown ---
+        # Line 3: Token breakdown
         if input_tokens > 0 or output_tokens > 0:
             lines.append(
                 f"[#555555]input {self._fmt_tokens(input_tokens)}"
                 f"{sep}output {self._fmt_tokens(output_tokens)}[/#555555]"
             )
 
-        # --- Line 4: Evidence ---
+        # Line 4: Evidence
         outcome = getattr(trace, "outcome", None)
         evidence = getattr(trace, "evidence", None)
         if outcome:

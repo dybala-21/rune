@@ -180,6 +180,9 @@ class StreamResult:
         self._collected_text = ""
         self._usage = StreamUsage()
         self._stream: Any = None
+        self._tool_result_cache: dict[str, str] = {}  # dedup repeated tool calls
+        self._tool_fail_streak: dict[str, int] = {}  # consecutive failures per tool
+        self._blocked_groups: set[str] = set()  # tool groups blocked after repeated failures
         # Tool call policy for weak-model guardrails
         if tool_call_policy is None:
             from rune.agent.tool_call_policy import ToolCallPolicy
@@ -395,6 +398,15 @@ class StreamResult:
 
             # Loop back to make another LLM call with tool results
 
+    # Tool group mapping for failure-based group blocking.
+    # When browser_act fails 3 times, all browser_* tools are blocked.
+    _TOOL_GROUPS: dict[str, str] = {
+        "browser_act": "browser", "browser_navigate": "browser",
+        "browser_observe": "browser", "browser_find": "browser",
+        "browser_extract": "browser", "browser_batch": "browser",
+        "browser_screenshot": "browser", "browser_open": "browser",
+    }
+
     _READ_ONLY_TOOLS: frozenset[str] = frozenset({
         "file_read", "file_list", "file_search", "grep", "glob",
         "code_analyze", "code_search", "code_symbols", "project_map",
@@ -486,16 +498,84 @@ class StreamResult:
                 log.info("policy_tool_loop_nudge")
 
     async def _execute_tool(self, name: str, params: dict[str, Any]) -> str:
-        """Execute a tool by name and return string result."""
+        """Execute a tool by name and return string result.
+
+        Identical (name, params) calls within the same stream_text()
+        session return a cached result to prevent wasteful repetition
+        (e.g. same URL fetched 26 times).
+        """
         # TAFC: strip 'think' reasoning parameter before execution
         params.pop("think", None)
+
+        # Dedup: return cached result for identical calls
+        import hashlib as _hl
+        _cache_key = _hl.md5(
+            f"{name}:{json.dumps(params, sort_keys=True)}".encode(),
+            usedforsecurity=False,
+        ).hexdigest()[:16]
+        if _cache_key in self._tool_result_cache:
+            return (
+                "[CACHED — identical call already executed. "
+                "Use the result above or try a different approach.]\n"
+                + self._tool_result_cache[_cache_key][:500]
+            )
+
+        # Block tool after 3 consecutive failures.  When a tool like
+        # browser_act fails 3 times, block the ENTIRE tool group
+        # (all browser_* tools) since navigate+observe without
+        # working act is just burning tokens.
+        _group = self._TOOL_GROUPS.get(name, "")
+
+        _MAX_FAILS = 3
+
+        if _group and _group in self._blocked_groups:
+            return (
+                f"[BLOCKED — {_group} tools disabled after repeated failures. "
+                f"Use web_search or web_fetch instead.]"
+            )
+
+        if self._tool_fail_streak.get(name, 0) >= _MAX_FAILS:
+            if _group:
+                self._blocked_groups.add(_group)
+                return (
+                    f"[BLOCKED — {name} failed {_MAX_FAILS} times. "
+                    f"All {_group} tools disabled. Use web_search instead.]"
+                )
+            return (
+                f"[BLOCKED — {name} failed {_MAX_FAILS} times. "
+                f"Try a different approach.]"
+            )
+
         func = self._tool_lookup.get(name)
         if func is None:
             return f"Error: unknown tool '{name}'"
         try:
             result = await func(**params)
-            return str(result) if result is not None else ""
+            result_str = str(result) if result is not None else ""
+            self._tool_result_cache[_cache_key] = result_str
+            # Reset fail streak on success.
+            # Also treat "NO CHANGES DETECTED" as failure — the action
+            # technically executed but had no effect (phantom click).
+            is_failure = (
+                "[ERROR]" in result_str[:300]
+                or "Element not found" in result_str[:300]
+                or "NO CHANGES DETECTED" in result_str
+                or result_str.startswith("Error")
+            )
+            if is_failure:
+                streak = self._tool_fail_streak.get(name, 0) + 1
+                self._tool_fail_streak[name] = streak
+                # Block entire group immediately when threshold reached
+                if streak >= _MAX_FAILS and _group:
+                    self._blocked_groups.add(_group)
+            else:
+                self._tool_fail_streak[name] = 0
+            return result_str
         except Exception as exc:
+            streak = self._tool_fail_streak.get(name, 0) + 1
+            self._tool_fail_streak[name] = streak
+            if streak >= _MAX_FAILS and _group:
+                self._blocked_groups.add(_group)
             return f"Error executing {name}: {exc}"
 
     def _update_usage(self, usage: Any) -> None:

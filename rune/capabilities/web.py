@@ -297,6 +297,22 @@ async def web_fetch(params: WebFetchParams) -> CapabilityResult:
         else:
             text = _html_to_text(html)
 
+        # JS-rendered site detection: HTTP 200 but minimal useful text.
+        # Sites like yanolja.com return valid HTML with JS bundles but
+        # no readable content after tag stripping.
+        if len(text.strip()) < 500:
+            if domain:
+                _fetch_failures[domain] = _fetch_failures.get(domain, 0) + 1
+            return CapabilityResult(
+                success=False,
+                error=(
+                    f"Page returned minimal content ({len(text.strip())} chars) — "
+                    f"likely JavaScript-rendered or empty. "
+                    f"Use web_search snippets or browser_navigate instead."
+                ),
+                metadata={"status_code": resp.status_code, "js_rendered": True},
+            )
+
         # Truncate if too long
         truncated = False
         if len(text) > params.max_length:
