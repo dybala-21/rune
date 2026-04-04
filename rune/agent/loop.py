@@ -65,7 +65,6 @@ log = get_logger(__name__)
 
 T = TypeVar("T")
 
-
 # Turn-atomic grouping (#H4)
 
 @dataclass
@@ -338,6 +337,9 @@ class NativeAgentLoop(EventEmitter):
         # Per-run rollover bookkeeping
         self._rollover_phase_done: set[int] = set()
         self._session_id: str | None = None
+        # Cross-step tool failure persistence (#P4) — streak only, not blocked groups.
+        # Blocked groups are re-derived each step from the streak.
+        self._persistent_fail_streak: dict[str, int] = {}
         # Injected callbacks (set from CLI / controller)
         self._approval_callback: Callable[[str, str], Awaitable[bool]] | None = None
         self._ask_user_callback: Any = None  # AskUserCallback
@@ -378,6 +380,8 @@ class NativeAgentLoop(EventEmitter):
         self._rollover_phase_done = set()
         self._session_id = None
         self._cognitive_cache = None
+        # Reset cross-step failure state (#P4)
+        self._persistent_fail_streak.clear()
 
     async def run(
         self,
@@ -797,6 +801,10 @@ class NativeAgentLoop(EventEmitter):
             elif cap_name == "web_fetch":
                 evidence.web_fetches += 1
                 self._stall.web_fetch_count += 1  # (#15)
+            elif cap_name == "browser_extract":
+                # browser_extract produces actual data — count as a read
+                evidence.reads += 1
+                evidence.browser_reads += 1
             elif cap_name.startswith("browser_"):
                 evidence.browser_reads += 1
 
@@ -840,6 +848,16 @@ class NativeAgentLoop(EventEmitter):
             from rune.capabilities.ask_user import reset_ask_user_count, set_ask_user_callback
             set_ask_user_callback(self._ask_user_callback)
             reset_ask_user_count()
+
+        # Remove vision-only tools if the model doesn't support vision.
+        # This prevents non-vision models from wasting tokens on
+        # screenshots they cannot interpret.
+        from rune.llm.model_capabilities import get_capabilities
+        _model_name = model.split("/")[-1] if "/" in model else model
+        _caps = get_capabilities(_model_name)
+        if not _caps.supports_vision:
+            _VISION_TOOLS = {"browser_screenshot"}
+            tools = [t for t in tools if t not in _VISION_TOOLS]
 
         # Scale tool rounds by complexity: weaker models call tools one-at-a-time
         _tool_rounds = 15 if getattr(classification, "is_complex_coding", False) else 8
@@ -973,6 +991,11 @@ class NativeAgentLoop(EventEmitter):
                     message_history=messages or None,
                     usage_limits=usage_limits,
                 ) as stream:
+                    # Inject persistent fail streak into this step (#P4)
+                    if self._persistent_fail_streak:
+                        stream.inject_failure_state(
+                            self._persistent_fail_streak, set(),
+                        )
                     collected_text = ""
 
                     async for delta in stream.stream_text(delta=True):
@@ -983,6 +1006,13 @@ class NativeAgentLoop(EventEmitter):
                     # Mark activity for stream completion (#30)
                     self._last_activity = time.monotonic()
                     result = stream
+
+                # -- export fail streak for cross-step persistence (#P4) --
+                try:
+                    streak, _ = result.get_failure_state()
+                    self._persistent_fail_streak.update(streak)
+                except Exception:
+                    pass
 
                 # -- update token budget from usage stats --
                 try:

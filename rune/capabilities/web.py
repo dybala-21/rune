@@ -156,8 +156,22 @@ _BLANK_LINES_RE = re.compile(r"\n{3,}")
 
 
 def _html_to_text(html: str) -> str:
-    """Strip scripts/styles/tags from HTML, normalise whitespace."""
+    """Convert HTML to lightweight Markdown, preserving structure.
+
+    Keeps headings, links, and list items as Markdown instead of
+    stripping all tags to plain text.  This helps the LLM understand
+    page structure (navigation, sections, links).
+    """
     text = _SCRIPT_STYLE_RE.sub("", html)
+    # Structural tags → Markdown (before generic tag strip)
+    text = re.sub(r"<h1[^>]*>(.*?)</h1>", r"\n# \1\n", text, flags=re.DOTALL)
+    text = re.sub(r"<h2[^>]*>(.*?)</h2>", r"\n## \1\n", text, flags=re.DOTALL)
+    text = re.sub(r"<h[3-6][^>]*>(.*?)</h[3-6]>", r"\n### \1\n", text, flags=re.DOTALL)
+    text = re.sub(r"<li[^>]*>(.*?)</li>", r"- \1", text, flags=re.DOTALL)
+    text = re.sub(r'<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>', r"[\2](\1)", text, flags=re.DOTALL)
+    text = re.sub(r"<br\s*/?>", "\n", text)
+    text = re.sub(r"<p[^>]*>", "\n", text)
+    # Strip remaining tags
     text = _TAG_RE.sub(" ", text)
     text = _WS_RE.sub(" ", text)
     lines = [line.strip() for line in text.splitlines()]

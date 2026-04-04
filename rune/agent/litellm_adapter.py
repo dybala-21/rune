@@ -189,6 +189,19 @@ class StreamResult:
             tool_call_policy = ToolCallPolicy()
         self._policy = tool_call_policy
 
+    # Cross-step failure state injection/export
+
+    def inject_failure_state(
+        self, streak: dict[str, int], blocked: set[str],
+    ) -> None:
+        """Seed failure counters from a previous step's state."""
+        self._tool_fail_streak.update(streak)
+        self._blocked_groups.update(blocked)
+
+    def get_failure_state(self) -> tuple[dict[str, int], set[str]]:
+        """Export current failure state for cross-step persistence."""
+        return dict(self._tool_fail_streak), set(self._blocked_groups)
+
     async def stream_text(self, *, delta: bool = True) -> AsyncIterator[str]:
         """Yield text deltas, auto-executing tool calls when encountered."""
         _max_tool_rounds = self._max_tool_rounds
@@ -393,6 +406,20 @@ class StreamResult:
             tc_list = list(tool_calls_by_index.values())
             await self._execute_tool_batch(tc_list)
 
+            # Replace previous browser_observe results with 1-line
+            # summary.  Only the latest snapshot is useful; older ones
+            # waste tokens as context accumulates across rounds.
+            _latest_observe_idx = -1
+            for _i, _m in enumerate(self._messages):
+                if (_m.get("role") == "tool"
+                        and "Interactive Elements" in _m.get("content", "")):
+                    _latest_observe_idx = _i
+            if _latest_observe_idx > 0:
+                for _i, _m in enumerate(self._messages[:_latest_observe_idx]):
+                    if (_m.get("role") == "tool"
+                            and "Interactive Elements" in _m.get("content", "")):
+                        _m["content"] = "[Previous page snapshot — superseded by latest observe]"
+
             if _is_last_round:
                 break
 
@@ -405,6 +432,7 @@ class StreamResult:
         "browser_observe": "browser", "browser_find": "browser",
         "browser_extract": "browser", "browser_batch": "browser",
         "browser_screenshot": "browser", "browser_open": "browser",
+        "browser_discover_apis": "browser",
     }
 
     _READ_ONLY_TOOLS: frozenset[str] = frozenset({
@@ -565,6 +593,14 @@ class StreamResult:
             if is_failure:
                 streak = self._tool_fail_streak.get(name, 0) + 1
                 self._tool_fail_streak[name] = streak
+                # At 2 failures: hint to try URL construction before
+                # the group gets blocked at 3.
+                if streak == 2 and name == "browser_act":
+                    result_str += (
+                        "\n\n[HINT] browser_act failed twice. Before trying again, "
+                        "construct the target URL directly with browser_navigate. "
+                        "Example: browser_navigate(url='https://site.com/search?q=keyword&sort=review')"
+                    )
                 # Block entire group immediately when threshold reached
                 if streak >= _MAX_FAILS and _group:
                     self._blocked_groups.add(_group)
