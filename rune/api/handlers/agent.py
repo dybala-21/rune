@@ -239,7 +239,10 @@ async def _execute_agent(tracker: RunTracker, run_id: str, req: AgentRunRequest)
         # Record assistant turn
         if conv_manager and session_id and answer:
             try:
-                conv_manager.add_turn(session_id, "assistant", answer)
+                conv_manager.add_turn(
+                    session_id, "assistant", answer,
+                    goal_type=getattr(loop, "_last_goal_type", ""),
+                )
                 await conv_manager._store.save(conv_manager._active[session_id])
             except Exception:
                 pass

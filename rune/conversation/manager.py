@@ -176,6 +176,7 @@ class ConversationManager:
         role: str,
         content: str,
         tool_calls: list[dict[str, Any]] | None = None,
+        goal_type: str = "",
     ) -> ConversationTurn:
         """Add a turn to an active conversation.
 
@@ -201,6 +202,7 @@ class ConversationManager:
             role=role,
             content=effective_content,
             tool_calls=tool_calls or [],
+            goal_type=goal_type,
         )
         conv.turns.append(turn)
         conv.updated_at = datetime.now()
@@ -392,7 +394,10 @@ class ConversationManager:
             cost = self._turn_tokens(turn)
             if cost > remaining:
                 break
-            selected.append({"role": turn.role, "content": turn.content})
+            msg: dict[str, str] = {"role": turn.role, "content": turn.content}
+            if turn.goal_type:
+                msg["goal_type"] = turn.goal_type
+            selected.append(msg)
             remaining -= cost
 
         selected.reverse()

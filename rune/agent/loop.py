@@ -343,6 +343,8 @@ class NativeAgentLoop(EventEmitter):
         # Injected callbacks (set from CLI / controller)
         self._approval_callback: Callable[[str, str], Awaitable[bool]] | None = None
         self._ask_user_callback: Any = None  # AskUserCallback
+        # Last classification result (for domain change detection across turns)
+        self._last_goal_type: str = ""
 
     @property
     def status(self) -> AgentStatus:
@@ -415,7 +417,7 @@ class NativeAgentLoop(EventEmitter):
         self._reset_run_state()
         max_iterations = max_steps or self._config.max_iterations
 
-        # -- Checkpoint restoration -------------------------------------------
+        # Checkpoint restoration
         if resume_session_id:
             try:
                 ckpt_mgr = CheckpointManager()
@@ -445,11 +447,34 @@ class NativeAgentLoop(EventEmitter):
 
             from rune.config.defaults import TOKEN_OPTIMIZATION_ENABLED
 
-            classification = await classify_goal(goal)
-
-            # Mark as continuation when conversation history exists
+            # Extract previous goal info from message_history for domain change detection
+            _prev_goal = ""
+            _prev_goal_type = ""
             if message_history:
-                classification.is_continuation = True
+                # Find the last user message as the previous goal
+                for msg in reversed(message_history):
+                    if msg.get("role") == "user" and msg.get("content"):
+                        _prev_goal = msg["content"]
+                        _prev_goal_type = msg.get("goal_type", "")
+                        break
+
+            classification = await classify_goal(
+                goal,
+                previous_goal=_prev_goal,
+                previous_goal_type=_prev_goal_type,
+            )
+
+            # Mark as continuation only when history exists AND domain hasn't changed
+            if message_history:
+                if classification.is_domain_change:
+                    classification.is_continuation = False
+                    log.info(
+                        "domain_change_detected",
+                        previous_type=_prev_goal_type,
+                        current_type=classification.goal_type,
+                    )
+                else:
+                    classification.is_continuation = True
 
             # Tier 2 LLM fallback for low-confidence regex results (#17)
             if classification.confidence < 0.7 and classification.tier == 1:
@@ -472,8 +497,10 @@ class NativeAgentLoop(EventEmitter):
                     )
 
             log.info("goal_classified", type=classification.goal_type,
-                     confidence=classification.confidence, tier=classification.tier)
+                     confidence=classification.confidence, tier=classification.tier,
+                     is_domain_change=classification.is_domain_change)
             await self.emit("goal_classified", classification)
+            self._last_goal_type = classification.goal_type
 
             # Token budget scaling by intent (#24)
             intent_key = classification.goal_type
@@ -873,8 +900,25 @@ class NativeAgentLoop(EventEmitter):
         # Seed with conversation history from previous turns so the LLM
         # has multi-turn context (fixes multi-turn follow-up like "정리해").
         if message_history:
-            for msg in message_history:
-                messages.append(dict(msg))
+            if getattr(classification, "is_domain_change", False):
+                # Domain changed: strip tool results to prevent context bleed.
+                # Keep only user/assistant messages so the LLM has conversational
+                # context without being polluted by unrelated tool outputs.
+                for msg in message_history:
+                    role = msg.get("role", "")
+                    if role == "tool":
+                        continue
+                    if role == "assistant":
+                        # Keep only the final text, drop tool_calls
+                        cleaned = {"role": "assistant", "content": msg.get("content", "")}
+                        if cleaned["content"]:
+                            messages.append(cleaned)
+                    else:
+                        messages.append(dict(msg))
+                log.info("domain_change_history_trimmed", kept=len(messages))
+            else:
+                for msg in message_history:
+                    messages.append(dict(msg))
 
         # Workspace root for guard checks
         workspace_root = (context or {}).get("workspace_root", "") if context else ""

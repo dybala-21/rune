@@ -45,6 +45,7 @@ def _ensure_db(db_path: Path) -> sqlite3.Connection:
             channel TEXT NOT NULL DEFAULT '',
             episode_id TEXT NOT NULL DEFAULT '',
             execution_context TEXT NOT NULL DEFAULT '',
+            goal_type TEXT NOT NULL DEFAULT '',
             archived INTEGER NOT NULL DEFAULT 0,
             timestamp TEXT NOT NULL,
             tool_calls TEXT NOT NULL DEFAULT '[]',
@@ -52,6 +53,11 @@ def _ensure_db(db_path: Path) -> sqlite3.Connection:
             FOREIGN KEY (conversation_id) REFERENCES conversations(id)
         )
     """)
+    # Migrate: add goal_type column if missing (existing DBs)
+    try:
+        conn.execute("ALTER TABLE turns ADD COLUMN goal_type TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_turns_conv
         ON turns(conversation_id)
@@ -112,8 +118,8 @@ class ConversationStore:
             conn.execute(
                 """
                 INSERT INTO turns (id, conversation_id, role, content, channel, episode_id,
-                    execution_context, archived, timestamp, tool_calls, created_order)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    execution_context, goal_type, archived, timestamp, tool_calls, created_order)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     uuid4().hex[:16],
@@ -123,6 +129,7 @@ class ConversationStore:
                     turn.channel,
                     turn.episode_id,
                     turn.execution_context,
+                    turn.goal_type,
                     int(turn.archived),
                     _dt_to_str(turn.timestamp),
                     json_encode(turn.tool_calls),
@@ -251,7 +258,7 @@ class ConversationStore:
     def _load_turns(self, conversation_id: str) -> list[ConversationTurn]:
         rows = self._conn.execute(
             "SELECT role, content, channel, episode_id, execution_context, "
-            "archived, timestamp, tool_calls "
+            "archived, timestamp, tool_calls, goal_type "
             "FROM turns WHERE conversation_id = ? ORDER BY created_order",
             (conversation_id,),
         ).fetchall()
@@ -265,6 +272,7 @@ class ConversationStore:
                 channel=r[2],
                 episode_id=r[3],
                 execution_context=r[4],
+                goal_type=r[8] if len(r) > 8 else "",
                 archived=bool(r[5]),
             )
             for r in rows
@@ -284,7 +292,7 @@ class ConversationStore:
         """Return the most recent turn in a conversation."""
         row = self._conn.execute(
             "SELECT role, content, channel, episode_id, execution_context, "
-            "archived, timestamp, tool_calls "
+            "archived, timestamp, tool_calls, goal_type "
             "FROM turns WHERE conversation_id = ? ORDER BY created_order DESC LIMIT 1",
             (conversation_id,),
         ).fetchone()
@@ -298,6 +306,7 @@ class ConversationStore:
             channel=row[2],
             episode_id=row[3],
             execution_context=row[4],
+            goal_type=row[8] if len(row) > 8 else "",
             archived=bool(row[5]),
         )
 
