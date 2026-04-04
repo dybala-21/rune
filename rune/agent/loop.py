@@ -815,7 +815,7 @@ class NativeAgentLoop(EventEmitter):
                 "output_length": len(result.output or ""),
             })
 
-        # ----- Build PydanticAI agent and tool set ---------------------------
+        # Build PydanticAI agent and tool set
 
         # Resolve model from failover profile (reads active_provider/active_model from config)
         profile = failover.current_profile
@@ -842,7 +842,7 @@ class NativeAgentLoop(EventEmitter):
             reset_ask_user_count()
 
         # Scale tool rounds by complexity: weaker models call tools one-at-a-time
-        _tool_rounds = 20 if getattr(classification, "is_complex_coding", False) else 15
+        _tool_rounds = 15 if getattr(classification, "is_complex_coding", False) else 8
         agent = LiteLLMAgent(
             model=model,
             system_prompt=system_prompt,
@@ -861,7 +861,11 @@ class NativeAgentLoop(EventEmitter):
         # Workspace root for guard checks
         workspace_root = (context or {}).get("workspace_root", "") if context else ""
 
-        # ----- main loop -----------------------------------------------------
+        # main loop
+        _prev_evidence_total = 0
+        _no_new_evidence_steps = 0
+        _gate_blocked_count = 0
+
         for step in range(max_iterations):
             self._step = step + 1
             self._step_start_time = time.monotonic()
@@ -1135,6 +1139,29 @@ class NativeAgentLoop(EventEmitter):
                     + evidence.browser_reads
                 )
 
+                # Progress detection: break if no new *actionable* evidence
+                # AND no new text for 3 consecutive steps.
+                # browser_reads are excluded because observe/find loops
+                # inflate the counter without producing useful output.
+                actionable_evidence = (
+                    evidence.reads + evidence.writes + evidence.executions
+                    + evidence.web_searches + evidence.web_fetches
+                )
+                new_evidence = actionable_evidence - _prev_evidence_total
+                _prev_evidence_total = actionable_evidence
+                has_new_output = bool(output_text and output_text.strip())
+
+                if new_evidence == 0 and not has_new_output:
+                    _no_new_evidence_steps += 1
+                    if _no_new_evidence_steps >= 3:
+                        log.warning("no_progress_break", step=self._step,
+                                    evidence=total_evidence)
+                        trace.reason = "no_progress"
+                        trace.final_step = self._step
+                        break
+                else:
+                    _no_new_evidence_steps = 0
+
                 # -- final answer detection --
                 # stream_text() internally handles tool calls and re-calls the LLM.
                 # Once it returns, the collected text IS the final answer.
@@ -1228,13 +1255,22 @@ class NativeAgentLoop(EventEmitter):
                     trace.evidence_score = 1.0
                     break
 
-                # If blocked, let the loop continue to make more progress
+                # If blocked, let the loop continue — but limit repeats
+                # to prevent infinite loops when requirements can't be met.
                 if gate_result.outcome == "blocked":
+                    _gate_blocked_count += 1
                     log.debug(
                         "completion_gate_blocked",
                         step=self._step,
+                        count=_gate_blocked_count,
                         missing=gate_result.missing_requirement_ids,
                     )
+                    if _gate_blocked_count >= 5:
+                        log.warning("max_gate_blocked", step=self._step,
+                                    count=_gate_blocked_count)
+                        trace.reason = "max_gate_blocked"
+                        trace.final_step = self._step
+                        break
 
                 # "partial" with substantial output - treat as completed to
                 # prevent indefinite loops when only minor requirements remain.
