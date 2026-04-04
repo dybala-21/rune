@@ -126,7 +126,17 @@ do_install() {
             ;;
     esac
 
-    # 6. Verify
+    # 6. Browser extension (extract to ~/.rune/extension/)
+    ensure_path
+    case "$RUNE_EXTRAS" in
+        *browser*|*full*)
+            info "Setting up browser extension..."
+            rune browser setup 2>/dev/null || \
+                warn "Extension setup skipped — run 'rune browser setup' manually after install"
+            ;;
+    esac
+
+    # 7. Verify
     ensure_path
     if command_exists rune; then
         echo ""
@@ -168,6 +178,9 @@ do_update() {
     if command_exists rune; then
         NEW_VERSION="$(rune --version 2>/dev/null || echo 'unknown')"
     fi
+
+    # Update browser extension if present
+    rune browser setup 2>/dev/null || true
 
     if [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
         success "Already up to date: ${NEW_VERSION}"

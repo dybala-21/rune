@@ -103,6 +103,7 @@ packages = ["rune"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "web/dist" = "web/dist"
+"extension/rune-browser-bridge" = "extension/rune-browser-bridge"
 
 [tool.ruff]
 line-length = 100
