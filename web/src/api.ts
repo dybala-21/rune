@@ -388,10 +388,7 @@ export async function restartChannel(name: string): Promise<void> {
   return rpc('channels.restart', { name });
 }
 
-// ---------------------------------------------------------------------------
 // MCP Servers
-// ---------------------------------------------------------------------------
-
 export interface MCPServerInfo {
   name: string;
   command: string | null;

@@ -42,11 +42,7 @@ class LoopStateView(Protocol):
     def goal(self) -> str: ...
 
 
-# ---------------------------------------------------------------------------
 # Signal reading — returned by each signal on evaluation
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True, slots=True)
 class SignalReading:
     """A signal's decision for the current step."""
@@ -57,11 +53,7 @@ class SignalReading:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-# ---------------------------------------------------------------------------
 # Rehydration decision — returned by the trigger
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True, slots=True)
 class RehydrationDecision:
     fired: bool

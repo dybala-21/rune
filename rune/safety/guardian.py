@@ -195,8 +195,6 @@ class Guardian:
     def _expand(self, p: str) -> str:
         return p.replace("~", self._home, 1) if p.startswith("~") else p
 
-    # ----- Command validation --------------------------------------------------
-
     def validate(self, command: str, _context: str | None = None) -> ValidationResult:
         """Validate a bash command for safety risks.
 
@@ -302,8 +300,6 @@ class Guardian:
             risk_level="low" if effective.risk_score >= 15 else "safe",
         )
 
-    # ----- Approval & audit ----------------------------------------------------
-
     def set_approval_callback(self, callback: Callable[[str], Awaitable[bool]]) -> None:
         """Register a callback for interactive approval workflows."""
         self._approval_callback = callback
@@ -374,8 +370,6 @@ class Guardian:
         """Analyze a command and return findings. Delegates to analyzer module."""
         return analyze_command(command)
 
-    # ----- File path validation ------------------------------------------------
-
     def validate_file_path(self, file_path: str) -> ValidationResult:
         """Validate a write path against protected paths.
 
@@ -419,7 +413,7 @@ class Guardian:
                     reason=f"Write/delete to critical root path blocked: {crp}",
                 )
 
-        # -- minimum depth check -----------------------------------------------
+        # minimum depth check
         if len(Path(normalized).parts) < _MIN_WRITABLE_DEPTH:
             return ValidationResult(
                 allowed=False,
@@ -427,7 +421,7 @@ class Guardian:
                 reason=f"Path too close to filesystem root: {normalized}",
             )
 
-        # -- protected path containment (both directions) ----------------------
+        # protected path containment (both directions)
         for pp in PROTECTED_PATHS:
             expanded_pp = self._expand(pp)
             norm_pp = str(Path(expanded_pp).resolve())
