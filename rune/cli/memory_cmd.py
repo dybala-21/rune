@@ -77,7 +77,6 @@ def edit(
 @memory_app.command("search")
 def search(
     query: str = typer.Argument(..., help="Search query"),
-    explain: bool = typer.Option(False, "--explain", help="Show scoring breakdown"),
 ) -> None:
     """Search all memory with scores and sources."""
     import asyncio
