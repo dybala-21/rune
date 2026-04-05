@@ -85,9 +85,22 @@ Approve the same action multiple times and RUNE promotes it to auto-execute. Rev
 
 An Evidence Gate checks the agent actually read files, wrote changes, and ran tests. A Quality Gate catches hollow answers. If evidence is missing, the task keeps going.
 
+### It recovers what it forgot
+
+Long sessions hit token limits and old messages get compacted away. RUNE saves originals before deletion and automatically re-injects them when the context becomes relevant again.
+
+```
+Step 1-15:  web_search → web_fetch × 3 (research phase)
+Step 15:    Token budget 80% → old messages compacted
+Step 16:    file_write → phase transition detected
+            → auto-recall: research findings injected back
+```
+
+Three signals trigger automatic recall: phase transition (research → implementation), stall recovery (2+ steps with no progress), and completion gate blocked. No manual `memory_search` needed — works even with weaker models that miss explicit recall.
+
 ### It asks before acting
 
-Every file write, every shell command goes through Guardian — 80+ risk patterns with workspace sandboxing.
+Every file write, every shell command goes through Guardian — 43 risk patterns with workspace sandboxing.
 
 ### Your memory is a file
 
@@ -97,6 +110,7 @@ Every file write, every shell command goes through Guardian — 80+ risk pattern
 ├── learned.md         # auto-extracted facts + rules
 ├── daily/
 │   └── 2026-03-22.md  # what happened today
+├── compacted/         # auto-saved context before rollover
 └── user-profile.md    # preferences
 ```
 
@@ -173,6 +187,7 @@ Same agent, same memory, anywhere:
 |---|---|
 | **Episode memory** | Every task scored +1/-1, recalled for similar future tasks |
 | **Autonomy promotion** | Repeatedly approved actions auto-execute; reverts demote back |
+| **Context rehydration** | Compacted context auto-recovered on phase transition or stall |
 | **Behavior prediction** | N-gram tool sequence prediction |
 | **Time-slot patterns** | Learns your activity by time of day for proactive suggestions |
 | **Rule learning** | Repeated failures generate prevention rules via LLM |
