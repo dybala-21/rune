@@ -1142,13 +1142,30 @@ class RuneApp:
         except Exception:
             pass  # best-effort, don't crash on save failure
 
+    def _fetch_ollama_models(self) -> list[str]:
+        """Fetch available models from local Ollama instance."""
+        try:
+            import httpx
+            resp = httpx.get("http://localhost:11434/api/tags", timeout=2.0)
+            if resp.status_code == 200:
+                return [m["name"] for m in resp.json().get("models", [])]
+        except Exception:
+            pass
+        return []
+
     async def _interactive_model_select(self) -> None:
         """Two-step model selection: provider → model."""
         from rune.ui.inline_select import inline_select
 
+        # Build combined model list: static providers + dynamic ollama
+        all_models = list(_KNOWN_MODELS)
+        ollama_models = self._fetch_ollama_models()
+        for m in ollama_models:
+            all_models.append(("ollama", m))
+
         # Step 1: Select provider
         providers: list[str] = []
-        for prov, _ in _KNOWN_MODELS:
+        for prov, _ in all_models:
             if prov not in providers:
                 providers.append(prov)
 
@@ -1169,7 +1186,7 @@ class RuneApp:
         selected_provider = providers[prov_idx]
 
         # Step 2: Select model within provider
-        models = [(m, m) for p, m in _KNOWN_MODELS if p == selected_provider]
+        models = [(m, m) for p, m in all_models if p == selected_provider]
         if not models:
             return
 
@@ -1277,7 +1294,10 @@ class RuneApp:
         table.add_row("Model", f"[#00CED1]{self._model}[/#00CED1]")
         table.add_row("Input tokens", format_tokens(self._total_input_tokens))
         table.add_row("Output tokens", format_tokens(self._total_output_tokens))
-        table.add_row("Estimated", f"[bold #D4A017]{cost_str}[/bold #D4A017]")
+        if self._provider != "ollama":
+            table.add_row("Estimated", f"[bold #D4A017]{cost_str}[/bold #D4A017]")
+        else:
+            table.add_row("Cost", "[dim]free (local)[/dim]")
         self.console.print(Panel(table, title="[bold #D4A017]💰 Cost[/bold #D4A017]", title_align="left", border_style="#333333", padding=(0, 1)))
 
     def _show_stats(self) -> None:
