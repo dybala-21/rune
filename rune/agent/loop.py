@@ -1274,6 +1274,15 @@ class NativeAgentLoop(EventEmitter):
 
                 # If IntentContract says no tools needed and LLM answered
                 # without tools, it's a text-only response - mark as complete.
+                # No tools used + text answer = done. Don't loop for short answers
+                # regardless of tool_requirement — if the LLM chose to answer
+                # without tools, respect that decision.
+                if total_evidence == 0 and output_text and output_text.strip():
+                    log.info("text_only_complete", step=self._step, text_len=len(output_text))
+                    trace.reason = "completed"
+                    trace.final_step = self._step
+                    break
+
                 if total_evidence == 0 and output_text and intent_contract.tool_requirement == "none":
                     effective_tool_req = "none"
                     effective_output_exp = "text"
