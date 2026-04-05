@@ -332,6 +332,7 @@ class NativeAgentLoop(EventEmitter):
         self._hard_failures: list[str] = []
         # Activity phase for adaptive observation windows
         self._activity_phase: str = "exploration"
+        self._prev_activity_phase: str = "exploration"
         # Output token scaling by intent (#H5)
         self._max_output_tokens: int = 8_192
         # Per-run rollover bookkeeping
@@ -345,6 +346,10 @@ class NativeAgentLoop(EventEmitter):
         self._ask_user_callback: Any = None  # AskUserCallback
         # Last classification result (for domain change detection across turns)
         self._last_goal_type: str = ""
+        # Rehydration subsystem (initialized per run in _execute_loop)
+        self._rehydration_recorder: Any = None
+        self._rehydration_trigger: Any = None
+        self._gate_blocked_count: int = 0
 
     @property
     def status(self) -> AgentStatus:
@@ -378,12 +383,17 @@ class NativeAgentLoop(EventEmitter):
         self._hard_failure_signatures.clear()
         self._hard_failures.clear()
         self._activity_phase = "exploration"
+        self._prev_activity_phase = "exploration"
         self._max_output_tokens = 8_192
         self._rollover_phase_done = set()
         self._session_id = None
         self._cognitive_cache = None
         # Reset cross-step failure state (#P4)
         self._persistent_fail_streak.clear()
+        # Rehydration
+        self._rehydration_recorder = None
+        self._rehydration_trigger = None
+        self._gate_blocked_count = 0
 
     async def run(
         self,
@@ -731,6 +741,17 @@ class NativeAgentLoop(EventEmitter):
         self._cognitive_cache = cache
         evidence = ExecutionEvidenceSnapshot()
 
+        # Initialize rehydration subsystem
+        try:
+            from rune.agent.rehydration import CompactionRecorder, RehydrationTrigger
+
+            session_id = self._session_id or uuid.uuid4().hex[:12]
+            self._session_id = session_id
+            self._rehydration_recorder = CompactionRecorder(session_id)
+            self._rehydration_trigger = RehydrationTrigger()
+        except Exception as exc:
+            log.debug("rehydration_init_skipped", error=str(exc)[:100])
+
         # Observation masking constant
         _OBSERVATION_TRUNCATE_LIMIT = 4000
 
@@ -747,6 +768,7 @@ class NativeAgentLoop(EventEmitter):
                 if fp:
                     self._files_written.add(fp)
             # Detect activity phase for adaptive observation windows
+            self._prev_activity_phase = self._activity_phase
             if cap_name in ("file_write", "file_edit"):
                 self._activity_phase = "implementation"
             elif cap_name in ("bash_execute",) and any(
@@ -1133,6 +1155,20 @@ class NativeAgentLoop(EventEmitter):
                     dynamic_cap = self._get_dynamic_context_cap()
                     keep_count = max(3, int(FULL_WINDOW_MAX * dynamic_cap / 0.70))
                     if messages and len(messages) > keep_count + 2:
+                        # Record originals before compaction (rehydration)
+                        if self._rehydration_recorder is not None:
+                            to_compact = messages[:-keep_count] if keep_count < len(messages) else []
+                            if to_compact:
+                                try:
+                                    raw = [m if isinstance(m, dict) else m.model_dump() for m in to_compact]
+                                    await self._rehydration_recorder.record(
+                                        raw,
+                                        step_range=(max(0, self._step - len(raw)), self._step),
+                                        activity_phase=self._activity_phase,
+                                        compaction_event="phase_2_rollover",
+                                    )
+                                except Exception as exc:
+                                    log.debug("rehydration_record_p2_failed", error=str(exc)[:100])
                         # Use turn-atomic compaction to keep assistant+tool pairs together
                         messages = self._compact_messages_atomic(messages, keep_last=keep_count)
                         log.info("rollover_compacted", step=self._step, phase=2, msg_count=len(messages),
@@ -1186,6 +1222,20 @@ class NativeAgentLoop(EventEmitter):
                 if rollover_phase >= 3 and 3 not in self._rollover_phase_done:
                     # Phase 3 (90%): Emergency rollover - aggressive compaction
                     if messages and len(messages) > 4:
+                        # Record originals before emergency compaction (rehydration)
+                        if self._rehydration_recorder is not None:
+                            to_compact = messages[:-3] if len(messages) > 3 else []
+                            if to_compact:
+                                try:
+                                    raw = [m if isinstance(m, dict) else m.model_dump() for m in to_compact]
+                                    await self._rehydration_recorder.record(
+                                        raw,
+                                        step_range=(max(0, self._step - len(raw)), self._step),
+                                        activity_phase=self._activity_phase,
+                                        compaction_event="phase_3_emergency",
+                                    )
+                                except Exception as exc:
+                                    log.debug("rehydration_record_p3_failed", error=str(exc)[:100])
                         async def _emergency_summarizer(text: str) -> str:
                             return f"[Emergency rollover] Context compacted at step {self._step}. Goal: '{goal[:100]}'"
                         messages = await compact_messages(messages, _emergency_summarizer, keep_last=3)
@@ -1207,6 +1257,33 @@ class NativeAgentLoop(EventEmitter):
                     self._stall.mark_activity("agent_step")
                 else:
                     self._stall.mark_no_progress()
+
+                # -- Rehydration trigger (per-step, fail-safe) --
+                if self._rehydration_trigger is not None:
+                    try:
+                        from rune.agent.rehydration import format_injection, rehydrate
+
+                        view = self._make_loop_state_view(goal)
+                        decision = self._rehydration_trigger.evaluate(view)
+                        if decision.fired and decision.reading is not None:
+                            results = await rehydrate(
+                                view,
+                                decision.reading,
+                                self._session_id or "",
+                                k=3,
+                            )
+                            if results:
+                                injection = format_injection(results, decision.reading)
+                                if injection:
+                                    messages = self._inject_system_message(messages, injection)
+                                    log.info(
+                                        "rehydration_injected",
+                                        step=self._step,
+                                        signal=decision.reading.name,
+                                        results=len(results),
+                                    )
+                    except Exception as exc:
+                        log.debug("rehydration_trigger_failed", error=str(exc)[:100])
 
                 # Pre-compute evidence total for reuse below
                 total_evidence = (
@@ -1344,6 +1421,7 @@ class NativeAgentLoop(EventEmitter):
                 # to prevent infinite loops when requirements can't be met.
                 if gate_result.outcome == "blocked":
                     _gate_blocked_count += 1
+                    self._gate_blocked_count = _gate_blocked_count
                     log.debug(
                         "completion_gate_blocked",
                         step=self._step,
@@ -1406,6 +1484,21 @@ class NativeAgentLoop(EventEmitter):
 
                     # If compaction was signalled, compact messages
                     if failover_result.reason == "context_overflow" and messages:
+                        # Record originals before overflow compaction (rehydration)
+                        if self._rehydration_recorder is not None:
+                            to_compact = messages[:-10] if len(messages) > 10 else []
+                            if to_compact:
+                                try:
+                                    raw = [m if isinstance(m, dict) else m.model_dump() for m in to_compact]
+                                    await self._rehydration_recorder.record(
+                                        raw,
+                                        step_range=(max(0, self._step - len(raw)), self._step),
+                                        activity_phase=self._activity_phase,
+                                        compaction_event="context_overflow",
+                                    )
+                                except Exception as exc_r:
+                                    log.debug("rehydration_record_overflow_failed", error=str(exc_r)[:100])
+
                         async def _summarizer(text: str) -> str:
                             return f"(Summary of prior conversation: {len(text)} chars)"
 
@@ -1423,6 +1516,13 @@ class NativeAgentLoop(EventEmitter):
         if not trace.reason:
             trace.reason = "max_iterations"
             trace.final_step = self._step
+
+        # Flush rehydration recorder on session end
+        if self._rehydration_recorder is not None:
+            try:
+                await self._rehydration_recorder.flush()
+            except Exception:
+                pass
 
         trace.total_tokens_used = self._token_budget.used
         return trace
@@ -1759,6 +1859,45 @@ class NativeAgentLoop(EventEmitter):
                         content[i] = {"type": "text", "text": cached}
                 except Exception:
                     continue
+
+    # Rehydration state view adapter
+
+    def _make_loop_state_view(self, goal_text: str) -> Any:
+        """Create a lightweight read-only view for the rehydration trigger."""
+        loop = self
+
+        class _View:
+            @property
+            def step(self) -> int:
+                return loop._step
+
+            @property
+            def activity_phase(self) -> str:
+                return loop._activity_phase
+
+            @property
+            def phase_just_changed(self) -> bool:
+                return loop._prev_activity_phase != loop._activity_phase
+
+            @property
+            def stall_consecutive(self) -> int:
+                return loop._stall.consecutive_no_progress
+
+            @property
+            def gate_blocked_count(self) -> int:
+                return loop._gate_blocked_count
+
+            @property
+            def token_budget_fraction(self) -> float:
+                return loop._token_budget.fraction
+
+            def recent_tool_names(self, n: int) -> list[str]:
+                return []
+
+            def goal(self) -> str:
+                return goal_text
+
+        return _View()
 
     # Turn-atomic message compaction (#2a)
 

@@ -114,6 +114,7 @@ class ConversationManager:
         "_classification_cache",
         "_background_tasks",
         "_compact_failures",
+        "_rehydration_recorder",
     )
 
     def __init__(
@@ -132,6 +133,8 @@ class ConversationManager:
         self._classification_cache: dict[str, GoalClassification] = {}
         # Circuit breaker: stop retrying compaction after consecutive failures
         self._compact_failures: int = 0
+        # Rehydration recorder — set externally by the agent loop
+        self._rehydration_recorder: Any | None = None
 
     # Classification hint cache
 
@@ -447,6 +450,19 @@ class ConversationManager:
             turns_to_compact=len(to_compact),
             turns_preserved=preserve_count,
         )
+
+        # Record originals before compaction (rehydration)
+        if self._rehydration_recorder is not None:
+            try:
+                msgs = [{"role": t.role, "content": t.content} for t in to_compact]
+                await self._rehydration_recorder.record(
+                    msgs,
+                    step_range=(0, len(msgs)),
+                    activity_phase="conversation",
+                    compaction_event="conversation_compact",
+                )
+            except Exception as exc:
+                log.debug("rehydration_record_failed", error=str(exc)[:200])
 
         summary = await self.summarize_turns(to_compact)
 

@@ -7,12 +7,29 @@ or blocked.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Literal
 
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
+
+# Rehydration sentinel — strip injected recall blocks before evidence analysis
+_REHYDRATED_BLOCK_RE = re.compile(
+    r"\[\[REHYDRATED_CONTEXT[^\]]*\]\].*?\[\[/REHYDRATED_CONTEXT\]\]",
+    re.DOTALL,
+)
+
+
+def strip_rehydrated(content: str) -> str:
+    """Remove rehydrated context blocks before evidence analysis.
+
+    This is regex on a structured format (our own sentinel), not on
+    natural language — allowed by CLAUDE.md anti-patterns.
+    """
+    return _REHYDRATED_BLOCK_RE.sub("", content)
+
 
 # Type aliases
 
