@@ -143,7 +143,7 @@ def _rank_symbols(
     return ranked
 
 
-def _render_symbol(sym: Symbol, source_lines: list[str] | None = None) -> str:
+def _render_symbol(sym: Symbol) -> str:
     """Render a symbol as a compact definition line."""
     prefix = f"  {sym.parent}." if sym.parent else "  "
     kind_label = sym.kind[0].upper()  # F=function, C=class, M=method, V=variable

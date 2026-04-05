@@ -423,8 +423,6 @@ class MemoryStore:
             self._conn.close()
             self._conn = None
 
-    # ----- Episodes ----------------------------------------------------------
-
     def save_episode(self, episode: Episode) -> None:
         now = datetime.now(UTC).isoformat()
         if not episode.timestamp:
@@ -528,8 +526,6 @@ class MemoryStore:
         scored.sort(key=lambda x: x[0], reverse=True)
         return [ep for _, ep in scored[:limit]]
 
-    # ----- Commitments (Phase 1: Episode Memory) ----------------------------
-
     def save_commitment(
         self, episode_id: str, text: str, deadline: str | None = None,
     ) -> None:
@@ -611,8 +607,6 @@ class MemoryStore:
         )
         return [self._row_to_episode(r) for r in rows]
 
-    # ----- Command History ---------------------------------------------------
-
     def log_command(self, command: str, success: bool, task_id: str = "") -> None:
         now = datetime.now(UTC).isoformat()
         self.conn.execute(
@@ -631,8 +625,6 @@ class MemoryStore:
              "success": bool(r[3]), "task_id": r[4]}
             for r in rows
         ]
-
-    # ----- Conversations -----------------------------------------------------
 
     def create_conversation(self, user_id: str = "", title: str = "") -> str:
         conv_id = uuid4().hex[:16]
@@ -772,8 +764,6 @@ class MemoryStore:
             (uuid4().hex[:16], conversation_id, role, content, channel, now, max_order + 1),
         )
 
-    # ----- Learned Patterns --------------------------------------------------
-
     def save_learned_pattern(
         self,
         time_slot: str,
@@ -860,8 +850,6 @@ class MemoryStore:
             for r in rows
         ]
 
-    # ----- Behavior N-grams --------------------------------------------------
-
     def store_ngram(
         self,
         ngram: str,
@@ -929,8 +917,6 @@ class MemoryStore:
 
         return cnt
 
-    # ----- Channel Preferences -----------------------------------------------
-
     def save_channel_preference(
         self,
         user_id: str,
@@ -971,8 +957,6 @@ class MemoryStore:
             for r in rows
         ]
 
-    # ----- Reflexion Strategy ------------------------------------------------
-
     def save_reflexion_strategy(
         self,
         domain: str,
@@ -1007,8 +991,6 @@ class MemoryStore:
             }
             for r in rows
         ]
-
-    # ----- Rejection History -------------------------------------------------
 
     def save_rejection(
         self,
@@ -1055,8 +1037,6 @@ class MemoryStore:
             )
         return cnt
 
-    # ----- Engagement Metrics ------------------------------------------------
-
     def save_engagement_metric(
         self,
         metric_type: str,
@@ -1094,8 +1074,6 @@ class MemoryStore:
             }
             for r in rows
         ]
-
-    # ----- Proactive Suggestions State ---------------------------------------
 
     def save_suggestion_state(
         self,
@@ -1160,8 +1138,6 @@ class MemoryStore:
             )
         return cnt
 
-    # ----- Proactive Conversations -------------------------------------------
-
     def save_proactive_conversation(
         self,
         conversation_id: str,
@@ -1191,8 +1167,6 @@ class MemoryStore:
             }
             for r in rows
         ]
-
-    # ----- Per-User Engagement Store (TS EngagementStore adapter) ------------
 
     def get_user_engagement_metrics(
         self, user_id: str,
@@ -1274,8 +1248,6 @@ class MemoryStore:
             ),
         )
 
-    # ----- Tool Call Log -----------------------------------------------------
-
     def log_tool_call(
         self,
         session_id: str,
@@ -1329,8 +1301,6 @@ class MemoryStore:
                 (cutoff,),
             )
         return cnt
-
-    # ----- Runs --------------------------------------------------------------
 
     _MAX_RESULT_ANSWER_CHARS = 10_000
 
@@ -1423,8 +1393,6 @@ class MemoryStore:
             }
             for r in rows
         ]
-
-    # ----- Cron Jobs ---------------------------------------------------------
 
     def create_cron_job(
         self,
@@ -1566,8 +1534,6 @@ class MemoryStore:
             "updated_at": row[10],
         }
 
-    # ----- Proactive Feedback ------------------------------------------------
-
     def save_proactive_feedback(
         self,
         *,
@@ -1619,8 +1585,6 @@ class MemoryStore:
             }
             for r in rows
         ]
-
-    # ----- Sequence Patterns -------------------------------------------------
 
     def save_sequence_pattern(
         self,
@@ -1690,8 +1654,6 @@ class MemoryStore:
             }
             for r in rows
         ]
-
-    # ----- Utility methods ---------------------------------------------------
 
     def get_fact_by_key(self, key: str) -> Fact | None:
         row = self.conn.execute(

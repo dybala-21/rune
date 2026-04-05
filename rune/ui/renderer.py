@@ -209,7 +209,6 @@ def format_idle_status(
     *,
     model: str = "gpt-5.4",
     provider: str = "openai",
-    output_style: str = "normal",
     undo_count: int = 0,
     multiline: bool = False,
 ) -> str:

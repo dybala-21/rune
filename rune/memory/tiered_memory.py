@@ -65,8 +65,6 @@ class TieredMemoryManager:
         self._session: dict[str, Any] = {}
         self._session_events: list[dict[str, Any]] = []
 
-    # ----- Session tier ------------------------------------------------------
-
     def add_session_memory(self, key: str, value: Any) -> None:
         """Store a key-value pair in the current session context."""
         self._session[key] = value
@@ -80,8 +78,6 @@ class TieredMemoryManager:
     def get_session_context(self) -> dict[str, Any]:
         """Return a snapshot of all current session memory."""
         return dict(self._session)
-
-    # ----- Daily tier --------------------------------------------------------
 
     def promote_to_daily(self, entries: list[dict[str, Any]]) -> DailyMemoryEntry:
         """Aggregate session entries into a daily summary.
@@ -149,8 +145,6 @@ class TieredMemoryManager:
             log.warning("daily_summary_parse_failed", date=date, error=str(exc))
             return None
 
-    # ----- Durable tier ------------------------------------------------------
-
     def promote_to_durable(self, entry: DurableMemoryEntry) -> bool:
         """Promote an entry to learned.md if confidence is sufficient."""
         confidence = self._calculate_confidence(entry)
@@ -211,8 +205,6 @@ class TieredMemoryManager:
 
         return results
 
-    # ----- End-of-day consolidation ------------------------------------------
-
     async def consolidate_daily(self) -> DailyMemoryEntry | None:
         """Run end-of-day aggregation: flush session events to daily summary.
 
@@ -238,8 +230,6 @@ class TieredMemoryManager:
         self._session_events.clear()
         log.info("daily_consolidation_complete", date=daily.date)
         return daily
-
-    # ----- Internal ----------------------------------------------------------
 
     def _calculate_confidence(self, entry: DurableMemoryEntry) -> float:
         """Compute a confidence score for a durable memory candidate.

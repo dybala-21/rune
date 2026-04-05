@@ -863,7 +863,6 @@ class RuneApp:
         return format_idle_status(
             model=self._model,
             provider=self._provider,
-            output_style=self._output_style,
             undo_count=self._undo_count,
             multiline=self._multiline,
         )
