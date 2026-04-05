@@ -13,6 +13,7 @@ from typing import Protocol, runtime_checkable
 
 from rune.agent.rehydration.protocols import LoopStateView, SignalReading
 
+
 # Signal protocol
 @runtime_checkable
 class Signal(Protocol):

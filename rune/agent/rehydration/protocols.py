@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
+
 # Loop state view — read-only facade presented to signals
 @runtime_checkable
 class LoopStateView(Protocol):
