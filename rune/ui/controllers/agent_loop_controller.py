@@ -1141,14 +1141,17 @@ class AgentLoopController:
             metrics.append(f"tokens {self._fmt_tokens(input_tokens + output_tokens)}")
 
         model = self._app._model or "gpt-5.4"
-        if input_tokens > 0 or output_tokens > 0:
-            cost_str = self._fmt_cost(model, input_tokens, output_tokens)
-            metrics.append(f"cost {cost_str}")
-        elif total_tokens > 0:
-            est_in = int(total_tokens * 0.65)
-            est_out = total_tokens - est_in
-            cost_str = self._fmt_cost(model, est_in, est_out)
-            metrics.append(f"cost {cost_str}")
+        # Skip cost display for local models (ollama) - no API cost
+        is_local = getattr(self._app, "_provider", "") == "ollama"
+        if not is_local:
+            if input_tokens > 0 or output_tokens > 0:
+                cost_str = self._fmt_cost(model, input_tokens, output_tokens)
+                metrics.append(f"cost {cost_str}")
+            elif total_tokens > 0:
+                est_in = int(total_tokens * 0.65)
+                est_out = total_tokens - est_in
+                cost_str = self._fmt_cost(model, est_in, est_out)
+                metrics.append(f"cost {cost_str}")
 
         metrics.append(f"time {self._fmt_elapsed(elapsed_ms)}")
 

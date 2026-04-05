@@ -16,6 +16,10 @@ from typing import Any
 
 import litellm
 
+# Suppress cost-calculation warnings for models not in LiteLLM's price DB
+# (e.g., local ollama models routed via openai/ prefix).
+litellm.suppress_debug_info = True
+
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -131,19 +135,42 @@ _PROVIDER_PREFIX: dict[str, str] = {
     "anthropic": "anthropic/",
     "gemini": "gemini/",
     "azure": "azure/",
-    "ollama": "ollama/",
+    # Ollama uses openai/ prefix to route through the OpenAI-compatible
+    # /v1 endpoint. LiteLLM's native ollama/ adapter has broken tool_calls
+    # parsing in streaming mode (BerriAI/litellm#24091).
+    "ollama": "openai/",
+}
+
+# Extra kwargs injected per provider (e.g., api_base for ollama).
+_PROVIDER_EXTRA: dict[str, dict[str, str]] = {
+    "ollama": {
+        "api_base": "http://localhost:11434/v1",
+        "api_key": "ollama",
+    },
 }
 
 
-def _resolve_litellm_model(model_str: str) -> str:
-    """Convert 'provider:model' to LiteLLM format (e.g. 'anthropic/claude-...')."""
+def _resolve_litellm_model(model_str: str) -> tuple[str, dict[str, str]]:
+    """Convert 'provider:model' to LiteLLM format.
+
+    Returns (model_id, extra_kwargs) where extra_kwargs contains
+    provider-specific parameters like api_base for ollama.
+    """
+    # Already in LiteLLM format (e.g. "ollama/gemma4:26b" from failover)
     if "/" in model_str:
-        return model_str  # Already in LiteLLM format
+        # Reroute ollama/ to openai/ for working tool calling
+        if model_str.startswith("ollama/"):
+            model_name = model_str[len("ollama/"):]
+            extra = dict(_PROVIDER_EXTRA.get("ollama", {}))
+            return f"openai/{model_name}", extra
+        return model_str, {}
+    # RUNE format: "provider:model"
     if ":" in model_str:
         provider, model_name = model_str.split(":", 1)
         prefix = _PROVIDER_PREFIX.get(provider, "")
-        return f"{prefix}{model_name}"
-    return model_str  # OpenAI models need no prefix
+        extra = dict(_PROVIDER_EXTRA.get(provider, {}))
+        return f"{prefix}{model_name}", extra
+    return model_str, {}  # OpenAI models need no prefix
 
 
 # StreamResult - mirrors PydanticAI's StreamedRunResult interface
@@ -167,6 +194,7 @@ class StreamResult:
         response_tokens_limit: int,
         max_tool_rounds: int = 10,
         tool_call_policy: Any = None,
+        provider_extra: dict[str, str] | None = None,
     ) -> None:
         self._model = model
         self._messages = list(messages)
@@ -176,6 +204,7 @@ class StreamResult:
         self._temperature = temperature
         self._request_tokens_limit = request_tokens_limit
         self._response_tokens_limit = response_tokens_limit
+        self._provider_extra = provider_extra or {}
         self._max_tool_rounds = max_tool_rounds
         self._collected_text = ""
         self._usage = StreamUsage()
@@ -237,14 +266,17 @@ class StreamResult:
                 extra["tool_choice"] = "required"
                 _force_tool = False  # one-shot
 
+            _tools = self._tool_schemas or None
+
             self._stream = await litellm.acompletion(
                 model=self._model,
                 messages=self._messages,
-                tools=self._tool_schemas or None,
+                tools=_tools,
                 stream=True,
                 temperature=self._temperature,
                 max_tokens=min(self._max_tokens, self._response_tokens_limit),
                 stream_options={"include_usage": True},
+                **self._provider_extra,
                 **extra,
             )
 
@@ -659,7 +691,7 @@ class LiteLLMAgent:
         max_tool_rounds: int = 10,
         tool_call_policy: Any = None,
     ) -> None:
-        self._model = _resolve_litellm_model(model)
+        self._model, self._provider_extra = _resolve_litellm_model(model)
         self._system_prompt = system_prompt
         self._tools = tools or []
         self._tool_schemas = tools_to_openai_schema(self._tools)
@@ -738,13 +770,14 @@ class LiteLLMAgent:
             response_tokens_limit=response_limit,
             max_tool_rounds=self._max_tool_rounds,
             tool_call_policy=self._policy,
+            provider_extra=self._provider_extra,
         )
 
         yield stream_result
 
     def update_model(self, model: str) -> None:
         """Switch the underlying model (used by failover)."""
-        self._model = _resolve_litellm_model(model)
+        self._model, self._provider_extra = _resolve_litellm_model(model)
 
     def update_tools(self, tools: list[Any]) -> None:
         """Replace the tool set (used when tools change mid-loop)."""
