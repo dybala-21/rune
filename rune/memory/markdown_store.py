@@ -67,6 +67,20 @@ def _atomic_write(target: Path, content: str) -> None:
         os.close(fd_lock)
 
 
+def _atomic_append(target: Path, content: str) -> None:
+    """Append content to target with advisory lock. Creates file if missing."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock = _lock_path()
+    fd_lock = os.open(str(lock), os.O_WRONLY | os.O_CREAT)
+    try:
+        fcntl.flock(fd_lock, fcntl.LOCK_EX)
+        with open(target, "a", encoding="utf-8") as f:
+            f.write(content)
+    finally:
+        fcntl.flock(fd_lock, fcntl.LOCK_UN)
+        os.close(fd_lock)
+
+
 def _backup(target: Path) -> None:
     """Copy target to .state/<name>.bak before modifying."""
     if not target.exists():

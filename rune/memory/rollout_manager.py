@@ -151,8 +151,6 @@ class RolloutManager:
             tmp.unlink(missing_ok=True)
             raise
 
-    # ----- Mode management ---------------------------------------------------
-
     def get_mode(self) -> MemoryPolicyMode:
         """Determine the current memory policy mode.
 
@@ -183,8 +181,6 @@ class RolloutManager:
             config["mode"] = mode
             self._save_config(config)
             log.info("rollout_mode_set", mode=mode)
-
-    # ----- Metrics -----------------------------------------------------------
 
     def record_metric(self, metric: RolloutMetric) -> None:
         """Append a metric to the rollout log."""
@@ -227,8 +223,6 @@ class RolloutManager:
             days=self._auto_config.observation_window_days
         )
         return self.get_metrics(since=cutoff.isoformat())
-
-    # ----- Auto-promotion ----------------------------------------------------
 
     def should_auto_promote(self) -> bool:
         """Decide whether the current mode should be auto-promoted.

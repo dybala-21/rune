@@ -26,10 +26,7 @@ from rune.utils.logger import get_logger
 log = get_logger(__name__)
 
 
-# ---------------------------------------------------------------------------
 # Data types
-# ---------------------------------------------------------------------------
-
 @dataclass(slots=True, frozen=True)
 class ModelInfo:
     """Information about a single LLM model."""
@@ -47,10 +44,7 @@ class ProviderInfo:
     models: list[ModelInfo] = field(default_factory=list)
 
 
-# ---------------------------------------------------------------------------
 # Provider configurations - env var name for API key detection
-# ---------------------------------------------------------------------------
-
 PROVIDER_ENV_KEYS: dict[str, list[str]] = {
     "openai":    ["OPENAI_API_KEY"],
     "anthropic": ["ANTHROPIC_API_KEY"],
@@ -72,12 +66,8 @@ def _has_provider_key(provider: str) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
 # Hardcoded model lists (fallbacks / static providers)
-# ---------------------------------------------------------------------------
-
-# -- OpenAI ------------------------------------------------------------------
-
+# OpenAI
 FALLBACK_OPENAI_MODELS: list[ModelInfo] = [
     # GPT-5.4 series
     ModelInfo(id="gpt-5.4", provider="openai", label="GPT-5.4"),
@@ -129,7 +119,7 @@ FALLBACK_OPENAI_MODELS: list[ModelInfo] = [
     ModelInfo(id="gpt-3.5-turbo", provider="openai", label="GPT-3.5 Turbo"),
 ]
 
-# -- Anthropic ---------------------------------------------------------------
+# Anthropic
 
 ANTHROPIC_MODELS: list[ModelInfo] = [
     # Current generation
@@ -146,7 +136,7 @@ ANTHROPIC_MODELS: list[ModelInfo] = [
     ModelInfo(id="claude-3-haiku-20240307", provider="anthropic", label="Claude 3 Haiku (deprecated)"),
 ]
 
-# -- Google Gemini -----------------------------------------------------------
+# Google Gemini
 
 GEMINI_MODELS: list[ModelInfo] = [
     ModelInfo(id="gemini-3-pro", provider="gemini", label="Gemini 3 Pro"),
@@ -156,7 +146,7 @@ GEMINI_MODELS: list[ModelInfo] = [
     ModelInfo(id="gemini-2.0-flash-lite", provider="gemini", label="Gemini 2.0 Flash Lite"),
 ]
 
-# -- xAI Grok ----------------------------------------------------------------
+# xAI Grok
 
 XAI_MODELS: list[ModelInfo] = [
     ModelInfo(id="grok-3", provider="xai", label="Grok 3"),
@@ -166,7 +156,7 @@ XAI_MODELS: list[ModelInfo] = [
     ModelInfo(id="grok-2", provider="xai", label="Grok 2"),
 ]
 
-# -- Azure OpenAI (user deploys their own model names) -----------------------
+# Azure OpenAI (user deploys their own model names)
 
 AZURE_MODELS: list[ModelInfo] = [
     # Azure uses deployment names, but these are common defaults
@@ -176,7 +166,7 @@ AZURE_MODELS: list[ModelInfo] = [
     ModelInfo(id="gpt-35-turbo", provider="azure", label="Azure GPT-3.5 Turbo"),
 ]
 
-# -- Mistral -----------------------------------------------------------------
+# Mistral
 
 MISTRAL_MODELS: list[ModelInfo] = [
     ModelInfo(id="mistral-large-latest", provider="mistral", label="Mistral Large"),
@@ -187,14 +177,14 @@ MISTRAL_MODELS: list[ModelInfo] = [
     ModelInfo(id="open-mixtral-8x22b", provider="mistral", label="Mixtral 8x22B"),
 ]
 
-# -- DeepSeek ----------------------------------------------------------------
+# DeepSeek
 
 DEEPSEEK_MODELS: list[ModelInfo] = [
     ModelInfo(id="deepseek-chat", provider="deepseek", label="DeepSeek V3"),
     ModelInfo(id="deepseek-reasoner", provider="deepseek", label="DeepSeek R1"),
 ]
 
-# -- Cohere ------------------------------------------------------------------
+# Cohere
 
 COHERE_MODELS: list[ModelInfo] = [
     ModelInfo(id="command-a-03-2025", provider="cohere", label="Command A"),
@@ -203,7 +193,7 @@ COHERE_MODELS: list[ModelInfo] = [
     ModelInfo(id="command-light", provider="cohere", label="Command Light"),
 ]
 
-# -- All static providers mapped ---------------------------------------------
+# All static providers mapped
 
 _STATIC_PROVIDER_MODELS: dict[str, list[ModelInfo]] = {
     "anthropic": ANTHROPIC_MODELS,
@@ -227,10 +217,7 @@ _PROVIDER_LABELS: dict[str, str] = {
 }
 
 
-# ---------------------------------------------------------------------------
 # OpenAI dynamic fetch
-# ---------------------------------------------------------------------------
-
 CHAT_MODEL_PREFIXES = ("gpt-5", "gpt-4", "gpt-4o", "gpt-4.1", "gpt-3.5", "gpt-oss", "o1", "o3", "o4", "chatgpt")
 EXCLUDED_KEYWORDS = (
     "instruct", "realtime", "audio", "search", "transcription",
@@ -290,18 +277,12 @@ async def _fetch_openai_models(api_key: str) -> list[ModelInfo]:
     return [ModelInfo(id=mid, provider="openai", label=mid) for mid in model_ids]
 
 
-# ---------------------------------------------------------------------------
 # Cache
-# ---------------------------------------------------------------------------
-
 _cached_models: list[ModelInfo] | None = None
 _cache_timestamp: float = 0.0
 _CACHE_TTL = 300.0  # 5 minutes
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
 
 async def get_available_models() -> list[ModelInfo]:
     """Return all available models across providers, with caching."""

@@ -63,14 +63,10 @@ class VisionCache:
         self._total_hits = 0
         self._total_tokens_saved = 0
 
-    # ----- Hashing ---------------------------------------------------------
-
     @staticmethod
     def hash(data: bytes) -> str:
         """Compute sha256(data)[:16] for 64-bit collision resistance."""
         return hashlib.sha256(data).hexdigest()[:16]
-
-    # ----- Core operations -------------------------------------------------
 
     def get(self, hash_key: str) -> str | None:
         """Look up a cached summary by hash.
@@ -150,8 +146,6 @@ class VisionCache:
             total_hits=self._total_hits,
             total_tokens_saved=self._total_tokens_saved,
         )
-
-    # ----- LRU internals ---------------------------------------------------
 
     def _touch_lru(self, hash_key: str) -> None:
         with contextlib.suppress(ValueError):

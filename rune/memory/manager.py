@@ -144,6 +144,13 @@ class MemoryManager:
             source="markdown",
         )
 
+    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """Embed a batch of texts using the configured embedding provider."""
+        from rune.llm.local_embedding import get_embedding_provider
+
+        provider = get_embedding_provider()
+        return await provider.embed(texts)
+
     async def search(
         self,
         query: str,

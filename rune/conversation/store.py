@@ -278,8 +278,6 @@ class ConversationStore:
             for r in rows
         ]
 
-    # ----- New methods (ported from TS) ------------------------------------
-
     async def get_turn_count(self, conversation_id: str) -> int:
         """Return the number of turns in a conversation."""
         row = self._conn.execute(

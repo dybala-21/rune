@@ -27,10 +27,7 @@ router = APIRouter(prefix="/mcp", tags=["mcp"])
 auth = TokenAuthDependency()
 
 
-# ---------------------------------------------------------------------------
 # Request / Response models
-# ---------------------------------------------------------------------------
-
 class MCPServerRequest(BaseModel):
     """Request body for creating/updating an MCP server."""
     name: str = Field(max_length=100, description="Unique server name (alphanumeric, dots, hyphens, underscores)")
@@ -77,10 +74,7 @@ class MCPTestResponse(BaseModel):
     tools_count: int = 0
 
 
-# ---------------------------------------------------------------------------
 # Endpoints
-# ---------------------------------------------------------------------------
-
 @router.get("/servers", response_model=MCPServerListResponse, dependencies=[Depends(auth)])
 async def list_mcp_servers() -> MCPServerListResponse:
     """List all configured MCP servers."""

@@ -56,6 +56,7 @@ class VectorMetadata:
     timestamp: str = ""
     summary: str = ""
     category: str = ""
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
