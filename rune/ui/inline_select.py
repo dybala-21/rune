@@ -103,9 +103,13 @@ def _inline_select_impl(
     total_lines = visible + 2
 
     def _render(first_draw: bool = False) -> None:
+        # Build entire frame in a single buffer, then write once.
+        # Batching all ANSI escapes into one write() prevents partial
+        # cursor movement processing in some terminal emulators.
+        buf: list[str] = []
+
         if not first_draw:
-            for _ in range(total_lines):
-                out.write(_MOVE_UP)
+            buf.append(_MOVE_UP * total_lines)
 
         # Calculate scroll window
         half = visible // 2
@@ -120,29 +124,28 @@ def _inline_select_impl(
         # Top border with scroll indicator
         scroll_hint = f" {selected + 1}/{count}" if count > visible else ""
         border_fill = box_width - len(scroll_hint)
-        out.write(_CLEAR_LINE)
-        out.write(f"  {_BORDER}╭{'─' * border_fill}{_MUTED}{scroll_hint}{_BORDER}╮{_RESET}\n")
+        buf.append(f"{_CLEAR_LINE}  {_BORDER}╭{'─' * border_fill}{_MUTED}{scroll_hint}{_BORDER}╮{_RESET}\n")
 
         for i in range(start, end):
             _, label = items[i]
-            out.write(_CLEAR_LINE)
             pad = box_width - len(label) - 4
             if i == selected:
-                out.write(
-                    f"  {_BORDER}│{_RESET}"
+                buf.append(
+                    f"{_CLEAR_LINE}  {_BORDER}│{_RESET}"
                     f"{_SEL_BG}{_WHITE}{_BOLD} ❯ {label}{' ' * max(0, pad)}  {_RESET}"
                     f"{_BORDER}│{_RESET}\n"
                 )
             else:
-                out.write(
-                    f"  {_BORDER}│{_RESET}"
+                buf.append(
+                    f"{_CLEAR_LINE}  {_BORDER}│{_RESET}"
                     f"   {_MUTED}{label}{_RESET}{' ' * max(0, pad + 1)}"
                     f"{_BORDER}│{_RESET}\n"
                 )
 
         # Bottom border
-        out.write(_CLEAR_LINE)
-        out.write(f"  {_BORDER}╰{'─' * box_width}╯{_RESET}\n")
+        buf.append(f"{_CLEAR_LINE}  {_BORDER}╰{'─' * box_width}╯{_RESET}\n")
+
+        out.write("".join(buf))
         out.flush()
 
     # Title line
@@ -199,22 +202,20 @@ def _inline_select_impl(
         with contextlib.suppress(OSError, termios.error):
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
-        out.write(_SHOW_CURSOR)
+        # Build cleanup as a single write to prevent partial rendering
+        cleanup = [_SHOW_CURSOR]
+        cleanup.append(_MOVE_UP * total_lines)
+        for _ in range(total_lines):
+            cleanup.append(_CLEAR_LINE + "\n")
+        cleanup.append(_MOVE_UP * total_lines)
 
-        # Clear the menu lines
-        for _ in range(total_lines):
-            out.write(_MOVE_UP)
-        for _ in range(total_lines):
-            out.write(_CLEAR_LINE + "\n")
-        for _ in range(total_lines):
-            out.write(_MOVE_UP)
-
-        # Print result
         if result_idx is not None:
             _, label = items[result_idx]
-            out.write(f"  {_GREEN}{_BOLD}✓{_RESET} {_WHITE}{label}{_RESET}\n")
+            cleanup.append(f"  {_GREEN}{_BOLD}✓{_RESET} {_WHITE}{label}{_RESET}\n")
         else:
-            out.write(f"  {_MUTED}Cancelled.{_RESET}\n")
+            cleanup.append(f"  {_MUTED}Cancelled.{_RESET}\n")
+
+        out.write("".join(cleanup))
         out.flush()
 
     return result_idx
