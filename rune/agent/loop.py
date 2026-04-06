@@ -1428,6 +1428,20 @@ class NativeAgentLoop(EventEmitter):
                         count=_gate_blocked_count,
                         missing=gate_result.missing_requirement_ids,
                     )
+                    # Inject missing requirements so the agent knows
+                    # exactly what to do next instead of retrying blindly.
+                    _missing = [
+                        f"{r.id}: {r.failure_reason or r.description}"
+                        for r in gate_result.requirements
+                        if r.required and r.status != "done"
+                    ]
+                    if _missing:
+                        messages = self._inject_system_message(
+                            messages,
+                            "[Completion Gate] Requirements not met: "
+                            + ", ".join(_missing)
+                            + ". Focus on completing these before finishing.",
+                        )
                     if _gate_blocked_count >= 5:
                         log.warning("max_gate_blocked", step=self._step,
                                     count=_gate_blocked_count)
@@ -1445,6 +1459,11 @@ class NativeAgentLoop(EventEmitter):
                             "partial_rejected_no_write",
                             step=self._step,
                             writes=gate_input.structured_write_count,
+                        )
+                        messages = self._inject_system_message(
+                            messages,
+                            "[Completion Gate] Code write required but no files written yet. "
+                            "You must write/edit code files to complete this task.",
                         )
                     else:
                         log.info("partial_completion_accepted", step=self._step)

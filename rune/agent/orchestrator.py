@@ -16,6 +16,11 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 from uuid import uuid4
 
+from rune.agent.quality_gate import (
+    AgentResult as QAResult,
+    TaskInfo as QATaskInfo,
+    check_task_quality,
+)
 from rune.agent.roles import AgentRoleId, get_role
 from rune.agent.task_board import (
     SharedTaskBoard,
@@ -551,6 +556,29 @@ class Orchestrator(EventEmitter):
                 output = f"[stub] Executed: {goal}"
 
             duration_ms = (time.monotonic() - t0) * 1000
+
+            # Quality gate: catch hollow success before accepting.
+            # Skip for stub outputs (no agent_loop_factory) to avoid
+            # false positives on short synthetic responses.
+            qc = check_task_quality(
+                QATaskInfo(id=task.id, role=role_id, goal=goal),
+                QAResult(success=True, answer=str(output), duration_ms=duration_ms),
+            ) if self._agent_loop_factory is not None else None
+            if qc is not None and not qc.passed:
+                log.warning(
+                    "orchestrator_quality_gate_failed",
+                    task_id=task.id,
+                    score=qc.score,
+                    issues=qc.issues,
+                )
+                await self.emit("subtask_error", task.id, qc.suggestion or "Quality check failed")
+                return SubTaskResult(
+                    task_id=task.id,
+                    success=False,
+                    error=qc.suggestion or "Quality check failed",
+                    duration_ms=duration_ms,
+                )
+
             await self.emit("subtask_complete", task.id, output)
             log.info(
                 "orchestrator_subtask_done",
