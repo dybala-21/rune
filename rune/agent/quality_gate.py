@@ -78,7 +78,12 @@ ERROR_MASKING_PATTERNS: list[str] = [
 
 # check_task_quality
 
-def check_task_quality(task: TaskInfo, result: AgentResult) -> QualityCheck:
+def check_task_quality(
+    task: TaskInfo,
+    result: AgentResult,
+    *,
+    threshold: float = 0.3,
+) -> QualityCheck:
     """Heuristic quality verification for sub-agent results.
 
     Failed results are not subject to quality gate - only success=true
@@ -155,7 +160,7 @@ def check_task_quality(task: TaskInfo, result: AgentResult) -> QualityCheck:
             worst_score = min(worst_score, 0.6)
 
     # Verdict
-    passed = worst_score >= 0.3
+    passed = worst_score >= threshold
     suggestion: str | None = None
     if not passed:
         lines = [
