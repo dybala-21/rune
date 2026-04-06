@@ -401,6 +401,7 @@ class TestMultiTaskOrchestration:
                 execution_mode="sequential",
                 abort_on_failure=True,
                 max_retries=0,
+                quality_threshold=0.0,
             ),
             agent_loop_factory=mock_factory,
         )

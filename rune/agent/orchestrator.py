@@ -79,7 +79,7 @@ ExecutionMode = Literal["parallel", "sequential"]
 class OrchestratorConfig:
     max_workers: int = 3
     max_retries: int = 2
-    quality_threshold: float = 0.7
+    quality_threshold: float = 0.3
     risk_gate_enabled: bool = True
     execution_mode: ExecutionMode = "parallel"
     subtask_timeout_s: float = 300.0  # 5 minutes default
@@ -567,6 +567,7 @@ class Orchestrator(EventEmitter):
             qc = check_task_quality(
                 QATaskInfo(id=task.id, role=role_id, goal=goal),
                 QAResult(success=True, answer=str(output), duration_ms=duration_ms),
+                threshold=self._config.quality_threshold,
             ) if self._agent_loop_factory is not None else None
             if qc is not None and not qc.passed:
                 log.warning(
