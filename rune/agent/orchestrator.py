@@ -18,7 +18,11 @@ from uuid import uuid4
 
 from rune.agent.quality_gate import (
     AgentResult as QAResult,
+)
+from rune.agent.quality_gate import (
     TaskInfo as QATaskInfo,
+)
+from rune.agent.quality_gate import (
     check_task_quality,
 )
 from rune.agent.roles import AgentRoleId, get_role
