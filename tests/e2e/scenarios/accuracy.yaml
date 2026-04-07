@@ -1,0 +1,76 @@
+name: "accuracy-validation"
+description: "Verifies answer correctness with exact value checks."
+
+turns:
+  - id: basic_arithmetic
+    goal: "What is 7 * 8?"
+    verify:
+      - type: answer_contains
+        expect: "56"
+
+  - id: code_execution
+    goal: "Run Python: print(2**10). Tell me only the result."
+    verify:
+      - type: answer_contains
+        expect: "1024"
+
+  - id: file_write_verify
+    goal: "Write 'ACCURACY_CHECK_OK' to {workspace}/acc_test.txt"
+    verify:
+      - type: file_contains
+        path: "{workspace}/acc_test.txt"
+        expect: "ACCURACY_CHECK_OK"
+
+  - id: file_read_verify
+    goal: "Read {workspace}/acc_test.txt and show me its content"
+    verify:
+      - type: answer_contains
+        expect: "ACCURACY_CHECK_OK"
+
+  - id: cross_turn_reference
+    goal: "Add the result of 7*8 from earlier and 2**10 from earlier. What is the sum?"
+    verify:
+      - type: answer_contains
+        expect: "1080"
+
+  - id: list_sum
+    goal: "Run Python: print(sum([1,2,3,4,5])). Tell me only the result."
+    verify:
+      - type: answer_contains
+        expect: "15"
+
+  - id: json_file_write
+    goal: 'Write {"status":"pass","score":100} to {workspace}/acc_result.json'
+    verify:
+      - type: file_contains
+        path: "{workspace}/acc_result.json"
+        expect: "pass"
+      - type: file_contains
+        path: "{workspace}/acc_result.json"
+        expect: "100"
+
+  - id: error_recognition
+    goal: "Run Python: 'hello' + 5. Explain the error."
+    verify:
+      - type: answer_contains
+        expect: "TypeError"
+
+  - id: recall_previous
+    goal: "What was the list sum result from earlier?"
+    verify:
+      - type: answer_contains
+        expect: "15"
+
+  - id: final_check
+    goal: "What is 1+1?"
+    verify:
+      - type: answer_contains
+        expect: "2"
+      - type: answer_not_contains
+        expect: "3.14"
+
+after_all:
+  - type: episode_count
+    expect_min: 10
+  - type: conversation_turns
+    expect_min: 20

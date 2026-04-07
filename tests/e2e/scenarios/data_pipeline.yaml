@@ -1,0 +1,53 @@
+name: "data-pipeline"
+description: "Data processing workflow: create CSV, aggregate, export JSON, validate."
+
+turns:
+  - id: create_csv
+    goal: "Write this to {workspace}/sales.csv: name,amount\nalice,100\nbob,200\ncharlie,150\nalice,50\nbob,300"
+    verify:
+      - type: file_contains
+        path: "{workspace}/sales.csv"
+        expect: "alice,100"
+
+  - id: total_sum
+    goal: "Read {workspace}/sales.csv and tell me the total of the amount column."
+    verify:
+      - type: answer_contains
+        expect: "800"
+
+  - id: group_by_person
+    goal: "Use Python to read {workspace}/sales.csv and compute total amount per person. Show the results."
+    verify:
+      - type: answer_contains
+        expect: "alice"
+      - type: answer_contains
+        expect: "bob"
+      - type: answer_contains
+        expect: "500"
+
+  - id: export_json
+    goal: "Save the per-person totals as JSON to {workspace}/summary.json"
+    verify:
+      - type: file_contains
+        path: "{workspace}/summary.json"
+        expect: "alice"
+
+  - id: validate_output
+    goal: "Read {workspace}/summary.json and confirm bob's total is 500."
+    verify:
+      - type: answer_contains
+        expect: "500"
+
+  - id: pipeline_recap
+    goal: "Describe the data pipeline: input file, processing steps, and output file."
+    verify:
+      - type: answer_contains
+        expect: "sales.csv"
+      - type: answer_contains
+        expect: "summary.json"
+
+after_all:
+  - type: episode_count
+    expect_min: 6
+  - type: conversation_turns
+    expect_min: 12

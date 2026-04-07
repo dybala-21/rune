@@ -1,0 +1,46 @@
+name: "tool-chain-and-memory"
+description: "Tests write-read-modify-verify file chains and cross-turn memory."
+
+turns:
+  - id: create_file
+    goal: "Write 'apple,banana,cherry' to {workspace}/fruits.txt"
+    verify:
+      - type: file_contains
+        path: "{workspace}/fruits.txt"
+        expect: "apple"
+
+  - id: read_and_parse
+    goal: "Read {workspace}/fruits.txt, split by comma, and list each item with a number."
+    verify:
+      - type: episode_count
+        expect_min: 2
+
+  - id: count_with_code
+    goal: "Use Python to count the fruits in {workspace}/fruits.txt. Run the code and show the result."
+    verify:
+      - type: episode_count
+        expect_min: 3
+
+  - id: append_item
+    goal: "Append ',durian' to the content of {workspace}/fruits.txt"
+    verify:
+      - type: episode_count
+        expect_min: 4
+
+  - id: verify_update
+    goal: "Read {workspace}/fruits.txt and show the final content."
+    verify:
+      - type: answer_contains
+        expect: "durian"
+
+  - id: workflow_summary
+    goal: "Summarize all operations performed on this file in order."
+    verify:
+      - type: conversation_turns
+        expect_min: 11
+
+after_all:
+  - type: episode_count
+    expect_min: 6
+  - type: conversation_turns
+    expect_min: 12

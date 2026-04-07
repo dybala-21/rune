@@ -1,0 +1,29 @@
+name: "multi-turn-context"
+description: "Tests conversation context maintained across turns."
+
+turns:
+  - id: initial_calc
+    goal: "What is 3 + 7?"
+    verify:
+      - type: episode_count
+        expect_min: 1
+
+  - id: reference_previous
+    goal: "Multiply the previous result by 5."
+    verify:
+      - type: conversation_turns
+        expect_min: 3
+
+  - id: summarize_all
+    goal: "Summarize all calculations so far."
+    verify:
+      - type: conversation_turns
+        expect_min: 5
+      - type: episode_count
+        expect_min: 3
+
+after_all:
+  - type: episode_count
+    expect_min: 3
+  - type: conversation_turns
+    expect_min: 6
