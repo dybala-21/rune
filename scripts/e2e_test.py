@@ -72,7 +72,6 @@ import time  # noqa: E402
 from dataclasses import asdict, dataclass, field  # noqa: E402
 from typing import Any  # noqa: E402
 
-
 # Result types
 
 @dataclass
@@ -204,7 +203,6 @@ class E2EHarness:
     async def run_turn(self, goal: str, turn_num: int) -> TurnResult:
         """Run a single turn through the full pipeline."""
         from rune.agent.agent_context import (
-            AgentContext,
             PostProcessInput,
             PrepareContextOptions,
             post_process_agent_result,
@@ -697,7 +695,7 @@ def format_report(report: E2EReport, fmt: str) -> str:
     total = len(all_v)
     completed = sum(1 for t in report.turns if t.trace_reason == "completed")
     lines.append("")
-    lines.append(f"── Summary ──")
+    lines.append("── Summary ──")
     lines.append(f"  Turns: {completed}/{len(report.turns)} completed")
     if total > 0:
         lines.append(f"  Checks: {passed}/{total} passed")
