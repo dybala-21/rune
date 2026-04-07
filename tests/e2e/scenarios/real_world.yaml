@@ -1,0 +1,72 @@
+name: "real-world-dev-workflow"
+description: "Simulates a developer workflow: create code, test, debug, fix, review."
+
+turns:
+  - id: create_module
+    goal: "Create {workspace}/calculator.py with functions: add(a,b), subtract(a,b), multiply(a,b). Each returns the result."
+    verify:
+      - type: file_contains
+        path: "{workspace}/calculator.py"
+        expect: "def add"
+      - type: file_contains
+        path: "{workspace}/calculator.py"
+        expect: "def subtract"
+      - type: file_contains
+        path: "{workspace}/calculator.py"
+        expect: "def multiply"
+
+  - id: test_module
+    goal: "Run Python to test: add(3,4), subtract(10,3), multiply(5,6) from {workspace}/calculator.py. Show results."
+    verify:
+      - type: answer_contains
+        expect: "7"
+      - type: answer_contains
+        expect: "30"
+
+  - id: create_buggy
+    goal: "Create {workspace}/buggy.py with: def divide(a, b): return a / b"
+    verify:
+      - type: file_contains
+        path: "{workspace}/buggy.py"
+        expect: "def divide"
+
+  - id: trigger_bug
+    goal: "Run divide(10, 0) from {workspace}/buggy.py. What error occurs?"
+    verify:
+      - type: answer_contains
+        expect: "ZeroDivisionError"
+
+  - id: fix_bug
+    goal: "Fix {workspace}/buggy.py: if b is 0, return None instead of dividing."
+    verify:
+      - type: file_contains
+        path: "{workspace}/buggy.py"
+        expect: "None"
+
+  - id: verify_fix
+    goal: "Run divide(10, 0) and divide(10, 2) from the fixed {workspace}/buggy.py. Show both results."
+    verify:
+      - type: answer_contains
+        expect: "None"
+      - type: answer_contains
+        expect: "5"
+
+  - id: code_review
+    goal: "Read all .py files in {workspace}/ and give a one-line quality comment for each."
+    verify:
+      - type: answer_contains
+        expect: "calculator"
+      - type: answer_contains
+        expect: "buggy"
+
+  - id: project_recap
+    goal: "List all tasks performed in this project session in order."
+    verify:
+      - type: conversation_turns
+        expect_min: 15
+
+after_all:
+  - type: episode_count
+    expect_min: 8
+  - type: conversation_turns
+    expect_min: 16

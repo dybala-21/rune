@@ -1,0 +1,70 @@
+name: "hard-quality-validation"
+description: "Hard scenarios: multi-step reasoning, code correctness, file mutations, long context recall."
+
+turns:
+  - id: multi_step_reasoning
+    goal: "There are 3 boxes. A has 5 apples, B has 3 bananas, C has 7 cherries. What is the total fruit count?"
+    verify:
+      - type: answer_contains
+        expect: "15"
+
+  - id: power_calculation
+    goal: "Run Python: print(2**10). Tell me only the result."
+    verify:
+      - type: answer_contains
+        expect: "1024"
+
+  - id: json_create
+    goal: 'Write {"name": "rune", "version": 1} to {workspace}/meta.json'
+    verify:
+      - type: file_contains
+        path: "{workspace}/meta.json"
+        expect: "rune"
+
+  - id: json_parse
+    goal: "Read {workspace}/meta.json and tell me only the name field value."
+    verify:
+      - type: answer_contains
+        expect: "rune"
+
+  - id: cross_reference
+    goal: "Add the total fruit count from earlier (15) and 2**10 (1024). What is the sum?"
+    verify:
+      - type: answer_contains
+        expect: "1039"
+
+  - id: json_update
+    goal: "Update {workspace}/meta.json: change version to 2, keep name as is."
+    verify:
+      - type: episode_count
+        expect_min: 6
+
+  - id: json_verify
+    goal: "Read {workspace}/meta.json and show the final content."
+    verify:
+      - type: episode_count
+        expect_min: 7
+
+  - id: error_handling
+    goal: "Run Python: 'hello' + 5. Explain why it fails."
+    verify:
+      - type: answer_contains
+        expect: "TypeError"
+
+  - id: file_count
+    goal: "Count the .py files in the current directory."
+    verify:
+      - type: episode_count
+        expect_min: 9
+
+  - id: session_summary
+    goal: "List all tasks performed in this session with pass/fail status."
+    verify:
+      - type: conversation_turns
+        expect_min: 19
+
+after_all:
+  - type: episode_count
+    expect_min: 10
+  - type: conversation_turns
+    expect_min: 20

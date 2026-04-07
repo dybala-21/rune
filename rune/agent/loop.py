@@ -328,6 +328,7 @@ class NativeAgentLoop(EventEmitter):
         self._pending_verification_nudge: bool = False
         # Completion gate enhancements (#16) - tracked files + hard failures
         self._files_written: set[str] = set()
+        self._files_read: set[str] = set()
         self._hard_failure_signatures: set[str] = set()
         self._hard_failures: list[str] = []
         # Activity phase for adaptive observation windows
@@ -380,6 +381,7 @@ class NativeAgentLoop(EventEmitter):
         self._consecutive_reads_without_write = 0
         self._pending_verification_nudge = False
         self._files_written.clear()
+        self._files_read.clear()
         self._hard_failure_signatures.clear()
         self._hard_failures.clear()
         self._activity_phase = "exploration"
@@ -837,6 +839,11 @@ class NativeAgentLoop(EventEmitter):
                 evidence.file_reads += 1
                 evidence.reads += 1
                 self._consecutive_reads_without_write += 1  # (#27)
+                # Track unique file reads for R15 analysis depth
+                fp = _last_tool_params.get("file_path") or _last_tool_params.get("path", "")
+                if fp and fp not in self._files_read:
+                    self._files_read.add(fp)
+                evidence.unique_file_reads = len(self._files_read)
             elif cap_name in ("file_write", "file_edit", "file_delete"):
                 evidence.writes += 1
                 self._consecutive_reads_without_write = 0  # (#27) reset
@@ -962,13 +969,29 @@ class NativeAgentLoop(EventEmitter):
                 break
 
             if self._stall.is_stalled:
-                log.warning(
-                    "agent_stalled",
-                    step=self._step,
-                    consecutive=self._stall.consecutive_no_progress,
+                # Defer stall when prior tool evidence exists the LLM
+                # may still be formulating its answer after a successful
+                # tool call.  Other stall conditions (bash_stalled,
+                # file_read_exhausted, intent_repeat) are not deferred.
+                prior_evidence = (
+                    evidence.reads + evidence.writes + evidence.executions
+                    + evidence.web_searches + evidence.web_fetches
                 )
-                trace.reason = "stalled"
-                break
+                if prior_evidence > 0 and self._stall.consecutive_no_progress < 5:
+                    log.debug(
+                        "stall_deferred",
+                        step=self._step,
+                        evidence=prior_evidence,
+                        consecutive=self._stall.consecutive_no_progress,
+                    )
+                else:
+                    log.warning(
+                        "agent_stalled",
+                        step=self._step,
+                        consecutive=self._stall.consecutive_no_progress,
+                    )
+                    trace.reason = "stalled"
+                    break
 
             # Wind-down hard_stop check (#14)
             self._update_wind_down_phase()
@@ -1306,7 +1329,11 @@ class NativeAgentLoop(EventEmitter):
 
                 if new_evidence == 0 and not has_new_output:
                     _no_new_evidence_steps += 1
-                    if _no_new_evidence_steps >= 3:
+                    # If prior steps already produced evidence (tool calls succeeded)
+                    # the LLM may just need more turns to
+                    # formulate its answer.  Allow extra patience.
+                    threshold = 5 if actionable_evidence > 0 else 3
+                    if _no_new_evidence_steps >= threshold:
                         log.warning("no_progress_break", step=self._step,
                                     evidence=total_evidence)
                         trace.reason = "no_progress"
@@ -1315,7 +1342,7 @@ class NativeAgentLoop(EventEmitter):
                 else:
                     _no_new_evidence_steps = 0
 
-                # -- final answer detection --
+                # final answer detection
                 # stream_text() internally handles tool calls and re-calls the LLM.
                 # Once it returns, the collected text IS the final answer.
                 # For code_modify/execution tasks, require writes or executions
@@ -1324,7 +1351,10 @@ class NativeAgentLoop(EventEmitter):
                     "code_modify", "execution", "full",
                 )
                 action_evidence = evidence.writes + evidence.executions
-                if output_text and len(output_text.strip()) > 50 and total_evidence > 0:
+                # When action evidence exists (tools ran successfully),
+                # accept shorter answers — the result speaks for itself.
+                min_answer_len = 20 if action_evidence > 0 else 50
+                if output_text and len(output_text.strip()) > min_answer_len and total_evidence > 0:
                     if needs_action and action_evidence == 0:
                         # LLM read files but didn't write/execute yet — nudge it
                         messages = self._inject_system_message(
@@ -1339,7 +1369,7 @@ class NativeAgentLoop(EventEmitter):
                         trace.final_step = self._step
                         break
 
-                # -- completion gate (full 18-requirement integration) --
+                # completion gate (full 18-requirement integration)
                 intent_contract = resolve_intent_contract(classification, classification.confidence)
 
                 # Determine requirements from IntentContract
@@ -1381,7 +1411,12 @@ class NativeAgentLoop(EventEmitter):
                 min_web_searches = 0
                 min_web_fetches = 0
                 if classification.goal_type in ("research",):
-                    analysis_min_reads = 3
+                    # Complex research needs deeper analysis; simple lookups need less
+                    if getattr(classification, "is_multi_task", False) or \
+                       getattr(classification, "is_complex_coding", False):
+                        analysis_min_reads = 3
+                    else:
+                        analysis_min_reads = 1
                 elif classification.goal_type in ("code_modify", "execution"):
                     analysis_min_reads = 1
                 if intent_contract.grounding_requirement == "required":

@@ -1,0 +1,39 @@
+name: "self-improving-pipeline"
+description: "Tests episode saving, utility scoring, memory promotion, and reflexion."
+
+turns:
+  - id: tool_execution
+    goal: "List the files in the current working directory."
+    verify:
+      - type: episode_count
+        expect_min: 1
+
+  - id: context_recall
+    goal: "From the previous result, show only the directories."
+    verify:
+      - type: conversation_turns
+        expect_min: 3
+
+  - id: deliberate_failure_1
+    goal: "Read the file /tmp/rune_e2e_nonexistent_xyz.txt"
+    verify:
+      - type: episode_count
+        expect_min: 3
+
+  - id: deliberate_failure_2
+    goal: "Try reading /tmp/rune_e2e_nonexistent_xyz.txt again."
+    verify:
+      - type: episode_count
+        expect_min: 4
+
+  - id: simple_chat
+    goal: "What is 1 + 1?"
+    verify:
+      - type: episode_count
+        expect_min: 5
+
+after_all:
+  - type: episode_count
+    expect_min: 5
+  - type: conversation_turns
+    expect_min: 10

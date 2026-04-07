@@ -1,0 +1,57 @@
+name: "deep-validation"
+description: "Tests completion gate, tool chaining, error handling, and multi-turn recall."
+
+turns:
+  - id: count_files
+    goal: "Count the number of files in the current working directory."
+    verify:
+      - type: episode_count
+        expect_min: 1
+
+  - id: recall_count
+    goal: "Do you remember the file count? Add 100 to it."
+    verify:
+      - type: conversation_turns
+        expect_min: 3
+
+  - id: write_file
+    goal: "Write 'RUNE E2E TEST PASSED' to {workspace}/gate_test.txt"
+    verify:
+      - type: episode_count
+        expect_min: 3
+
+  - id: read_file
+    goal: "Read {workspace}/gate_test.txt and show me the content."
+    verify:
+      - type: episode_count
+        expect_min: 4
+
+  - id: missing_file_1
+    goal: "Parse {workspace}/nonexistent.json and show the summary field."
+    verify:
+      - type: episode_count
+        expect_min: 5
+
+  - id: missing_file_2
+    goal: "Try reading {workspace}/nonexistent.json again."
+    verify:
+      - type: episode_count
+        expect_min: 6
+
+  - id: recall_failure
+    goal: "Which file failed to read earlier, and why?"
+    verify:
+      - type: conversation_turns
+        expect_min: 13
+
+  - id: code_execution
+    goal: "Run Python: print(sum(range(1, 11))). Tell me the result."
+    verify:
+      - type: episode_count
+        expect_min: 8
+
+after_all:
+  - type: episode_count
+    expect_min: 8
+  - type: conversation_turns
+    expect_min: 16

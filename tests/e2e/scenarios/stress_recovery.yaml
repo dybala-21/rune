@@ -1,0 +1,52 @@
+name: "stress-and-recovery"
+description: "Edge cases: minimal answers, errors, recovery, and context recall."
+
+turns:
+  - id: minimal_answer
+    goal: "What is 1+1?"
+    verify:
+      - type: episode_count
+        expect_min: 1
+
+  - id: time_query
+    goal: "What is the current date and time?"
+    verify:
+      - type: episode_count
+        expect_min: 2
+
+  - id: fibonacci
+    goal: "Run Python to compute the 10th Fibonacci number. Show the result."
+    verify:
+      - type: episode_count
+        expect_min: 3
+
+  - id: unicode_file
+    goal: "Write 'Hello from RUNE' to {workspace}/greeting.txt"
+    verify:
+      - type: file_contains
+        path: "{workspace}/greeting.txt"
+        expect: "Hello from RUNE"
+
+  - id: recall_fibonacci
+    goal: "What was the Fibonacci result from earlier? Multiply it by 2."
+    verify:
+      - type: conversation_turns
+        expect_min: 9
+
+  - id: empty_dir
+    goal: "What files are in {workspace}/empty_subdir/?"
+    verify:
+      - type: episode_count
+        expect_min: 6
+
+  - id: session_review
+    goal: "Summarize what succeeded and what failed in this conversation."
+    verify:
+      - type: conversation_turns
+        expect_min: 13
+
+after_all:
+  - type: episode_count
+    expect_min: 7
+  - type: conversation_turns
+    expect_min: 14
