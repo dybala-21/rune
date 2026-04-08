@@ -227,14 +227,14 @@ class E2EHarness:
                     goal=goal,
                     channel="e2e-test",
                     conversation_id=self._conv_id,
-                    cwd=os.path.join(self.tmpdir, "workspace"),
+                    cwd=self.workspace,
                 ),
                 conversation_manager=self._conv_manager,
             )
 
             # Build memory context
             run_context: dict[str, Any] = {
-                "workspace_root": ctx.workspace_root or self.tmpdir,
+                "workspace_root": ctx.workspace_root or self.workspace,
             }
             try:
                 from rune.memory.manager import get_memory_manager

@@ -1,0 +1,100 @@
+name: "advanced-refactor-chain"
+description: "Create buggy multi-file project, find bugs via testing, fix them, verify fixes, refactor."
+
+turns:
+  - id: create_utils
+    goal: |
+      Create {workspace}/myproject/utils.py with these functions:
+      - parse_csv(text: str) -> list[dict]: splits CSV text into list of dicts using first row as headers
+      - safe_divide(a, b): returns a/b or 0 if b is zero
+      BUT intentionally make a bug in parse_csv: skip the header row incorrectly so it returns empty dicts.
+    verify:
+      - type: file_contains
+        path: "{workspace}/myproject/utils.py"
+        expect: "def parse_csv"
+      - type: file_contains
+        path: "{workspace}/myproject/utils.py"
+        expect: "def safe_divide"
+
+  - id: create_main
+    goal: |
+      Create {workspace}/myproject/main.py that imports from utils.py and has:
+      - process_data(csv_text) -> dict: calls parse_csv, then sums a numeric column called 'amount'
+      - format_report(data: dict) -> str: returns a human-readable summary string
+    verify:
+      - type: file_contains
+        path: "{workspace}/myproject/main.py"
+        expect: "def process_data"
+      - type: file_contains
+        path: "{workspace}/myproject/main.py"
+        expect: "def format_report"
+
+  - id: run_and_find_bug
+    goal: |
+      Run this Python code and show me the full output:
+      import sys; sys.path.insert(0, '{workspace}')
+      from myproject.utils import parse_csv
+      result = parse_csv("name,amount\nalice,100\nbob,200")
+      print(f"Parsed: {result}")
+      print(f"Length: {len(result)}")
+    verify:
+      - type: answer_contains
+        expect: "Parsed"
+
+  - id: diagnose_bug
+    goal: "The parse_csv function seems to return wrong results. Read {workspace}/myproject/utils.py, find the bug, and explain what's wrong."
+    verify:
+      - type: answer_contains
+        expect: "parse_csv"
+
+  - id: fix_and_verify
+    goal: "Fix the parse_csv bug in {workspace}/myproject/utils.py. Then run the same test: parse_csv('name,amount\\nalice,100\\nbob,200') and show the result."
+    verify:
+      - type: file_contains
+        path: "{workspace}/myproject/utils.py"
+        expect: "def parse_csv"
+      - type: answer_contains
+        expect: "alice"
+
+  - id: test_safe_divide
+    goal: "Run Python to test safe_divide(10,0), safe_divide(10,2), safe_divide(-6,3) from {workspace}/myproject/utils.py. Show all three results."
+    verify:
+      - type: answer_contains
+        expect: "0"
+      - type: answer_contains
+        expect: "5"
+      - type: answer_contains
+        expect: "-2"
+
+  - id: integration_test
+    goal: |
+      Run this integration test:
+      import sys; sys.path.insert(0, '{workspace}')
+      from myproject.main import process_data, format_report
+      csv = "name,amount\nalice,100\nbob,200\ncharlie,150"
+      data = process_data(csv)
+      print(format_report(data))
+      Show the output.
+    verify:
+      - type: answer_contains
+        expect: "450"
+
+  - id: refactor_review
+    goal: "Read all files in {workspace}/myproject/, suggest one specific refactoring improvement, and apply it."
+    verify:
+      - type: episode_count
+        expect_min: 8
+
+  - id: final_recap
+    goal: "Summarize: which bug was found, how it was fixed, what refactoring was done, and final test results."
+    verify:
+      - type: conversation_turns
+        expect_min: 17
+      - type: answer_contains
+        expect: "parse_csv"
+
+after_all:
+  - type: episode_count
+    expect_min: 9
+  - type: conversation_turns
+    expect_min: 18
