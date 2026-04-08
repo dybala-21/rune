@@ -1,0 +1,50 @@
+name: "complex-multi-task"
+description: "Complex compound tasks that should trigger orchestrator multi-agent path."
+
+turns:
+  - id: compound_project
+    goal: "Create a complete Python project in {workspace}/todoapp/: 1) A FastAPI-style todo API with CRUD functions in app.py 2) Unit tests in test_app.py 3) A README.md with usage instructions. Do all three."
+    verify:
+      - type: file_contains
+        path: "{workspace}/todoapp/app.py"
+        expect: "def"
+      - type: file_contains
+        path: "{workspace}/todoapp/test_app.py"
+        expect: "test"
+      - type: file_contains
+        path: "{workspace}/todoapp/README.md"
+        expect: "todo"
+
+  - id: verify_code
+    goal: "Run the tests in {workspace}/todoapp/test_app.py and show me the results."
+    verify:
+      - type: answer_contains
+        expect: "test"
+
+  - id: compound_analysis
+    goal: "Read all files in {workspace}/todoapp/, then: 1) Count total lines of code 2) List all function names 3) Check if tests cover all functions 4) Write a coverage summary to {workspace}/todoapp/coverage_report.txt"
+    verify:
+      - type: file_contains
+        path: "{workspace}/todoapp/coverage_report.txt"
+        expect: "coverage"
+
+  - id: compound_refactor
+    goal: "Refactor {workspace}/todoapp/app.py: 1) Add input validation 2) Add error handling for missing todos 3) Update the tests to cover the new error cases 4) Update README to document the error handling"
+    verify:
+      - type: file_contains
+        path: "{workspace}/todoapp/app.py"
+        expect: "error"
+
+  - id: final_verification
+    goal: "Run the updated tests, read all files, and give me a final project quality assessment with specific scores (1-10) for: code quality, test coverage, documentation."
+    verify:
+      - type: answer_contains
+        expect: "quality"
+      - type: conversation_turns
+        expect_min: 9
+
+after_all:
+  - type: episode_count
+    expect_min: 5
+  - type: conversation_turns
+    expect_min: 10

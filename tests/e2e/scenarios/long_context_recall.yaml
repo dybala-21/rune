@@ -1,0 +1,110 @@
+name: "long-context-recall"
+description: "15-turn deep conversation testing memory recall accuracy across many turns."
+
+turns:
+  - id: establish_fact_1
+    goal: "Remember this: Project ALPHA has budget $50,000 and deadline March 15."
+    verify:
+      - type: episode_count
+        expect_min: 1
+
+  - id: establish_fact_2
+    goal: "Also remember: Project BETA has budget $30,000 and deadline April 1."
+    verify:
+      - type: episode_count
+        expect_min: 2
+
+  - id: establish_fact_3
+    goal: "And one more: the team lead for ALPHA is Alice, for BETA is Bob."
+    verify:
+      - type: episode_count
+        expect_min: 3
+
+  - id: distraction_1
+    goal: "What is 17 * 23?"
+    verify:
+      - type: answer_contains
+        expect: "391"
+
+  - id: distraction_2
+    goal: "Write a Python one-liner that reverses the string 'hello world'. Run it."
+    verify:
+      - type: answer_contains
+        expect: "dlrow olleh"
+
+  - id: create_work_file
+    goal: "Create {workspace}/projects.txt listing both projects with their budgets."
+    verify:
+      - type: file_contains
+        path: "{workspace}/projects.txt"
+        expect: "ALPHA"
+      - type: file_contains
+        path: "{workspace}/projects.txt"
+        expect: "BETA"
+
+  - id: distraction_3
+    goal: "Run Python: print(sum(range(1,101))). Show the result."
+    verify:
+      - type: answer_contains
+        expect: "5050"
+
+  - id: deep_recall_budget
+    goal: "What is the combined budget of projects ALPHA and BETA? Calculate it."
+    verify:
+      - type: answer_contains
+        expect: "80,000"
+
+  - id: deep_recall_deadline
+    goal: "Which project has the earlier deadline? By how many days?"
+    verify:
+      - type: answer_contains
+        expect: "ALPHA"
+
+  - id: deep_recall_people
+    goal: "Who leads project ALPHA? Who leads project BETA?"
+    verify:
+      - type: answer_contains
+        expect: "Alice"
+      - type: answer_contains
+        expect: "Bob"
+
+  - id: cross_reference
+    goal: "If Alice's project (ALPHA) is over budget by 10%, what is the new budget? And what percentage of the combined budget does BETA represent now?"
+    verify:
+      - type: answer_contains
+        expect: "55,000"
+
+  - id: update_and_verify
+    goal: "Update {workspace}/projects.txt to reflect ALPHA's new 10% over-budget amount. Keep BETA unchanged."
+    verify:
+      - type: file_contains
+        path: "{workspace}/projects.txt"
+        expect: "55,000"
+
+  - id: final_file_check
+    goal: "Read {workspace}/projects.txt and show me the complete current content."
+    verify:
+      - type: answer_contains
+        expect: "ALPHA"
+      - type: answer_contains
+        expect: "BETA"
+
+  - id: conversation_summary
+    goal: "List every fact established in this conversation (projects, budgets, deadlines, leads, calculations) in a structured format."
+    verify:
+      - type: answer_contains
+        expect: "ALPHA"
+      - type: answer_contains
+        expect: "BETA"
+      - type: answer_contains
+        expect: "Alice"
+      - type: answer_contains
+        expect: "Bob"
+      - type: conversation_turns
+        expect_min: 27
+
+after_all:
+  - type: episode_count
+    expect_min: 14
+  - type: conversation_turns
+    expect_min: 28

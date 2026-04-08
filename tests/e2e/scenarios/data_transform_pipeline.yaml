@@ -1,0 +1,88 @@
+name: "data-transform-pipeline"
+description: "Multi-stage data pipeline: generate → clean → transform → aggregate → export → validate."
+
+turns:
+  - id: generate_raw_data
+    goal: |
+      Create {workspace}/pipeline/raw_orders.csv with this content:
+      order_id,customer,product,qty,price,status
+      1,alice,widget,3,10.50,completed
+      2,bob,gadget,1,25.00,completed
+      3,alice,widget,2,10.50,cancelled
+      4,charlie,gizmo,5,8.00,completed
+      5,bob,widget,1,10.50,pending
+      6,alice,gadget,2,25.00,completed
+      7,charlie,widget,4,10.50,completed
+    verify:
+      - type: file_contains
+        path: "{workspace}/pipeline/raw_orders.csv"
+        expect: "order_id,customer,product,qty,price,status"
+
+  - id: clean_data
+    goal: |
+      Write Python code to {workspace}/pipeline/clean.py that:
+      1. Reads raw_orders.csv
+      2. Filters out cancelled and pending orders (keep only completed)
+      3. Writes cleaned data to {workspace}/pipeline/cleaned_orders.csv
+      Then run it.
+    verify:
+      - type: file_contains
+        path: "{workspace}/pipeline/clean.py"
+        expect: "completed"
+
+  - id: verify_cleaned
+    goal: "Read {workspace}/pipeline/cleaned_orders.csv and tell me how many rows it has (excluding header). List the order_ids."
+    verify:
+      - type: answer_contains
+        expect: "5"
+
+  - id: aggregate
+    goal: |
+      Write Python code to {workspace}/pipeline/aggregate.py that:
+      1. Reads cleaned_orders.csv
+      2. Computes: total_revenue = sum(qty * price) for each customer
+      3. Writes results to {workspace}/pipeline/customer_revenue.json as {"customer": revenue}
+      Then run it.
+    verify:
+      - type: file_contains
+        path: "{workspace}/pipeline/aggregate.py"
+        expect: "revenue"
+
+  - id: validate_aggregation
+    goal: |
+      Read {workspace}/pipeline/customer_revenue.json.
+      Manually verify: alice had orders 1(3*10.50=31.50) and 6(2*25.00=50.00), so alice total = 81.50.
+      Does the JSON match? Show the full JSON content and confirm.
+    verify:
+      - type: answer_contains
+        expect: "81.5"
+
+  - id: generate_report
+    goal: |
+      Write a Python script {workspace}/pipeline/report.py that reads customer_revenue.json
+      and prints a formatted report showing:
+      - Each customer and their revenue
+      - Total across all customers
+      - The top customer by revenue
+      Run it and show the output.
+    verify:
+      - type: answer_contains
+        expect: "alice"
+      - type: answer_contains
+        expect: "charlie"
+
+  - id: pipeline_summary
+    goal: "List all files in {workspace}/pipeline/ and describe what each file does in the data pipeline."
+    verify:
+      - type: answer_contains
+        expect: "raw_orders"
+      - type: answer_contains
+        expect: "cleaned_orders"
+      - type: answer_contains
+        expect: "customer_revenue"
+
+after_all:
+  - type: episode_count
+    expect_min: 7
+  - type: conversation_turns
+    expect_min: 14

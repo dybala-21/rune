@@ -1,0 +1,83 @@
+name: "error-cascade-recovery"
+description: "Tests error handling depth: cascading failures, diagnostic reasoning, multi-attempt recovery."
+
+turns:
+  - id: create_broken_chain
+    goal: |
+      Create three files in {workspace}/chain/:
+      1. config.json: {"db_path": "/nonexistent/db.sqlite", "timeout": 30}
+      2. loader.py: reads config.json and tries to open db_path, raises FileNotFoundError if missing
+      3. app.py: imports loader, calls loader.load_config(), prints "App started"
+    verify:
+      - type: file_contains
+        path: "{workspace}/chain/config.json"
+        expect: "db_path"
+      - type: file_contains
+        path: "{workspace}/chain/loader.py"
+        expect: "FileNotFoundError"
+      - type: file_contains
+        path: "{workspace}/chain/app.py"
+        expect: "import"
+
+  - id: trigger_cascade
+    goal: |
+      Run {workspace}/chain/app.py with Python. It should fail.
+      Show me the full error traceback and explain the root cause of the failure chain.
+    verify:
+      - type: answer_contains
+        expect: "FileNotFoundError"
+
+  - id: diagnose_root_cause
+    goal: "The error cascades from config.json → loader.py → app.py. Which file should we fix first to resolve the entire chain? Explain your reasoning."
+    verify:
+      - type: answer_contains
+        expect: "config"
+
+  - id: fix_with_fallback
+    goal: "Fix {workspace}/chain/loader.py to handle the missing db_path gracefully: if the path doesn't exist, create an empty SQLite database at {workspace}/chain/local.db instead. Use sqlite3 module."
+    verify:
+      - type: file_contains
+        path: "{workspace}/chain/loader.py"
+        expect: "sqlite3"
+
+  - id: verify_recovery
+    goal: "Run {workspace}/chain/app.py again. It should now succeed. Show the output and confirm {workspace}/chain/local.db was created."
+    verify:
+      - type: answer_contains
+        expect: "App started"
+
+  - id: add_error_logging
+    goal: |
+      Add error logging to {workspace}/chain/loader.py:
+      - When the original db_path fails, log a warning with the path that failed
+      - When falling back to local.db, log an info message
+      Use Python's logging module. Then run app.py again and show the log output.
+    verify:
+      - type: file_contains
+        path: "{workspace}/chain/loader.py"
+        expect: "logging"
+
+  - id: stress_test
+    goal: |
+      Now break config.json by making it invalid JSON (add a syntax error).
+      Run app.py again. Does the error handling catch this new failure type?
+      If not, fix loader.py to handle JSONDecodeError too, then re-run.
+    verify:
+      - type: answer_contains
+        expect: "JSON"
+
+  - id: full_diagnosis
+    goal: "Summarize all errors encountered in this session, how each was resolved, and what defensive patterns were applied."
+    verify:
+      - type: conversation_turns
+        expect_min: 15
+      - type: answer_contains
+        expect: "FileNotFoundError"
+      - type: answer_contains
+        expect: "JSON"
+
+after_all:
+  - type: episode_count
+    expect_min: 8
+  - type: conversation_turns
+    expect_min: 16

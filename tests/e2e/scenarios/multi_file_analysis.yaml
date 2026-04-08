@@ -1,0 +1,123 @@
+name: "multi-file-analysis"
+description: "Create a 5-file project, analyze dependencies, find issues, refactor with cross-file impact."
+
+turns:
+  - id: create_models
+    goal: |
+      Create {workspace}/webapp/models.py:
+      class User:
+          def __init__(self, name, email):
+              self.name = name
+              self.email = email
+          def to_dict(self):
+              return {"name": self.name, "email": self.email}
+
+      class Product:
+          def __init__(self, name, price):
+              self.name = name
+              self.price = price
+          def to_dict(self):
+              return {"name": self.name, "price": self.price}
+    verify:
+      - type: file_contains
+        path: "{workspace}/webapp/models.py"
+        expect: "class User"
+      - type: file_contains
+        path: "{workspace}/webapp/models.py"
+        expect: "class Product"
+
+  - id: create_service
+    goal: |
+      Create {workspace}/webapp/service.py that imports User and Product from models.py:
+      - create_user(name, email) -> User
+      - create_product(name, price) -> Product
+      - get_user_products(user, products) -> list: returns products where price < 20
+    verify:
+      - type: file_contains
+        path: "{workspace}/webapp/service.py"
+        expect: "from"
+      - type: file_contains
+        path: "{workspace}/webapp/service.py"
+        expect: "def create_user"
+
+  - id: create_api
+    goal: |
+      Create {workspace}/webapp/api.py that imports from service.py:
+      - handle_create_user(data: dict) -> dict: validates name/email exist, creates user, returns to_dict()
+      - handle_list_products(user, products) -> list[dict]: gets user products, converts each to_dict()
+    verify:
+      - type: file_contains
+        path: "{workspace}/webapp/api.py"
+        expect: "handle_create_user"
+      - type: file_contains
+        path: "{workspace}/webapp/api.py"
+        expect: "handle_list_products"
+
+  - id: create_tests
+    goal: |
+      Create {workspace}/webapp/test_all.py with pytest-style tests:
+      - test_user_creation: creates user, checks to_dict() output
+      - test_product_creation: creates product, checks to_dict()
+      - test_user_products_filter: creates products with various prices, verifies filtering
+      - test_api_create_user: tests handle_create_user with valid and invalid data
+    verify:
+      - type: file_contains
+        path: "{workspace}/webapp/test_all.py"
+        expect: "def test_user_creation"
+      - type: file_contains
+        path: "{workspace}/webapp/test_all.py"
+        expect: "def test_api_create_user"
+
+  - id: run_tests
+    goal: "Run the tests in {workspace}/webapp/test_all.py using Python (import and call each test function). Show which pass and which fail."
+    verify:
+      - type: answer_contains
+        expect: "test_"
+
+  - id: analyze_dependencies
+    goal: "Read all 4 .py files in {workspace}/webapp/ and map the import dependencies: which file imports from which? Draw the dependency chain."
+    verify:
+      - type: answer_contains
+        expect: "models"
+      - type: answer_contains
+        expect: "service"
+      - type: answer_contains
+        expect: "api"
+
+  - id: add_feature
+    goal: |
+      Add a 'discount' parameter to Product.__init__ in {workspace}/webapp/models.py (default 0).
+      Update to_dict() to include discounted_price = price * (1 - discount).
+      Then update service.py: get_user_products should also filter by discounted_price < 20 (not original price).
+      Do NOT break existing tests.
+    verify:
+      - type: file_contains
+        path: "{workspace}/webapp/models.py"
+        expect: "discount"
+      - type: file_contains
+        path: "{workspace}/webapp/service.py"
+        expect: "discount"
+
+  - id: verify_no_regression
+    goal: "Run all tests in {workspace}/webapp/test_all.py again to confirm nothing is broken after the refactoring."
+    verify:
+      - type: answer_contains
+        expect: "test_"
+
+  - id: final_review
+    goal: "Read all files in {workspace}/webapp/, count total lines of code, and give a quality assessment of the project architecture."
+    verify:
+      - type: answer_contains
+        expect: "models"
+      - type: answer_contains
+        expect: "service"
+      - type: answer_contains
+        expect: "api"
+      - type: conversation_turns
+        expect_min: 17
+
+after_all:
+  - type: episode_count
+    expect_min: 9
+  - type: conversation_turns
+    expect_min: 18
