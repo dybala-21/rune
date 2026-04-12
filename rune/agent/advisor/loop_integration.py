@@ -1,17 +1,7 @@
-"""Thin bridge between AgentLoop and the AdvisorService.
+"""Bridge between AgentLoop and AdvisorService.
 
-Keeps ``loop.py`` free of advisor plumbing: each hook site becomes a
-single call to ``maybe_consult`` with explicit state snapshots. Two
-invariants enforced here:
-
-1. ``build_policy_input`` is cheap (no list/dict copies) so it can be
-   called at every state-change event without a measurable hot-path
-   cost. ``build_advisor_request`` is only called AFTER
-   ``should_call`` returns True — the heavier copies (messages tail,
-   files_written) are deferred until we're actually consulting.
-2. Every exception from the service is swallowed into a benign
-   ``noop`` decision. The executor loop never sees an exception from
-   this module.
+build_policy_input is cheap (primitives only); build_advisor_request
+deferred until needed. All exceptions become noop decisions.
 """
 
 from __future__ import annotations

@@ -1,31 +1,8 @@
 """Runtime on/off toggle for the advisor layer.
 
-The advisor is opt-in at the env level (``RUNE_ADVISOR_MODEL``), but
-users also need a way to flip it off mid-session — e.g. from the TUI
-with ``/advisor off`` or from the web UI — without restarting the
-daemon or unsetting env vars.
-
-Resolution order (highest priority first):
-1. ``RUNE_ADVISOR_ENABLED`` env var — hard override for scripts/CI
-2. Persisted toggle file at ``~/.rune/data/advisor_enabled``
-3. Default: ``False`` — advisor is fully off on a fresh install. The
-   user must opt in once (``/advisor on`` in the TUI, or the web
-   sidebar toggle) even when ``RUNE_ADVISOR_MODEL`` is set. This keeps
-   the UI honest: a fresh install truthfully shows "Advisor: off".
-
-Off semantics: ``AdvisorConfig.from_env`` checks this first and returns
-a disabled config regardless of ``RUNE_ADVISOR_MODEL``, so no advisor
-calls fire and no tokens are billed. ``AdvisorService.consult`` also
-re-reads the toggle on every call so a mid-episode flip is honored
-without waiting for the next ``for_episode`` rebuild.
-
-Known limitation — Phase A native path:
-    When ``RUNE_ADVISOR_NATIVE=1`` is also opted in and the executor is
-    an Anthropic pair, the ``advisor_20260301`` tool is attached to the
-    tool list once at episode start (see ``rune.agent.loop``). Flipping
-    the toggle off mid-episode does NOT remove that already-attached
-    tool, so the server may still run advisor sub-inferences for the
-    remainder of the current episode. The next episode is clean.
+Priority: RUNE_ADVISOR_ENABLED env > ~/.rune/data/advisor_enabled file > default (off).
+Re-read on every consult() for mid-episode flips. Phase A native tool stays
+attached if toggled off mid-episode — next episode is clean.
 """
 
 from __future__ import annotations

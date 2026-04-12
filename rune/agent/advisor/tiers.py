@@ -1,13 +1,5 @@
 """Capability tier map for advisor pairing validation.
-
-Provider-agnostic: adding a new model = one entry. Matching is by
-(provider, model_prefix) so "claude-opus-4-6" matches the "claude-opus"
-entry regardless of version suffix.
-
-Rule: tier(advisor) >= tier(executor) + MIN_TIER_GAP. If violated, the
-episode disables the advisor with a WARN log rather than silently
-running with a weaker advisor.
-"""
+Matching by (provider, model_prefix). Requires tier(advisor) >= tier(executor) + MIN_TIER_GAP."""
 
 from __future__ import annotations
 

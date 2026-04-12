@@ -1,19 +1,6 @@
-"""AdvisorService — provider-agnostic orchestration.
-
-This is the single entry point for the loop to consult an advisor. It:
-
-1. Resolves the configured advisor model (env var ``RUNE_ADVISOR_MODEL``
-   as the Phase 0 source; the config layer will override this later).
-2. Validates the executor↔advisor pairing against the tier map.
-3. Builds a budget-fit payload via context_fitter.
-4. Invokes LiteLLM directly — one code path for every provider.
-5. Normalizes + parses the response into an ``AdvisorDecision``.
-6. Tracks per-episode budget (calls + tokens) and disables itself on
-   repeated failure to avoid cascading loop damage.
-
-The service is a light singleton scoped to one agent episode. The loop
-constructs it once per ``run()`` call via ``AdvisorService.for_episode``.
-"""
+"""Provider-agnostic advisor orchestration. Resolves model, validates
+pairing, builds payload, invokes LiteLLM, parses response, tracks budget.
+Singleton per episode via ``AdvisorService.for_episode``."""
 
 from __future__ import annotations
 
@@ -83,15 +70,8 @@ class AdvisorConfig:
 
     @staticmethod
     def from_env(executor_model: str) -> AdvisorConfig:
-        """Read ``RUNE_ADVISOR_MODEL`` (format: ``provider/model``).
-
-        Empty / unset → disabled. Invalid pairing → disabled with WARN.
-        The env var is Phase 0 wiring; a config schema field is planned
-        as a follow-up that this function will transparently prefer.
-
-        Also checks the runtime on/off toggle (``is_advisor_enabled``):
-        TUI/web can flip the advisor off without unsetting the env var.
-        """
+        """Read RUNE_ADVISOR_MODEL + runtime toggle. Returns disabled on
+        unset, invalid pairing, or toggle off."""
         from rune.agent.advisor.runtime_toggle import is_advisor_enabled
         if not is_advisor_enabled():
             return AdvisorConfig(

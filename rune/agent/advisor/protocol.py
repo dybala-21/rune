@@ -1,11 +1,5 @@
-"""Advisor request/decision types.
-
-The advisor is read-only: it receives a structured snapshot of the
-executor's current state and returns a short plan. It never calls tools
-or takes actions directly. This is enforced at the service boundary —
-any tool_call blocks in the advisor response are stripped by the
-normalizer before parsing.
-"""
+"""Advisor request/decision types. Read-only: state snapshot in, plan out.
+Tool calls in advisor responses are stripped by normalizer."""
 
 from __future__ import annotations
 

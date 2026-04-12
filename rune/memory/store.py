@@ -241,11 +241,7 @@ CREATE TABLE IF NOT EXISTS runs (
     finished_at TEXT DEFAULT NULL
 );
 
--- Advisor events (Tier 2): persists every advisor consultation so we can
--- measure trigger effectiveness, cross-provider hit rates, and escalation
--- cost over multiple episodes. Metadata only — plan_steps text is not
--- stored for privacy/size reasons. episode_outcome and plan_injected are
--- UPDATEd after the episode terminates.
+-- Advisor events: metadata only, outcome updated post-episode.
 CREATE TABLE IF NOT EXISTS advisor_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL,
@@ -418,9 +414,7 @@ class MemoryStore:
                 pass  # Column already exists
 
         if current_version < 8:
-            # Tier 2: advisor persistence — Episode advisor counters.
-            # The advisor_events table itself is created via _SCHEMA_SQL
-            # (CREATE TABLE IF NOT EXISTS runs after this migration block).
+            # Add advisor counter columns to episodes
             for stmt in [
                 "ALTER TABLE episodes ADD COLUMN advisor_calls INTEGER DEFAULT 0",
                 "ALTER TABLE episodes ADD COLUMN advisor_followed_count INTEGER DEFAULT 0",
@@ -1376,15 +1370,7 @@ class MemoryStore:
         plan_injected: bool = False,
         stuck_reason: str = "",
     ) -> int:
-        """Record one advisor consultation. Returns the inserted row id.
-
-        ``episode_outcome`` is left empty here and updated later via
-        :meth:`update_advisor_outcome` when the episode terminates.
-
-        ``stuck_reason`` identifies which sub-condition fired for stuck
-        triggers (gate_blocked / stall / no_progress / wind_down).
-        Empty string for other triggers.
-        """
+        """Insert one advisor event. Returns row id."""
         now = datetime.now(UTC).isoformat()
         self.conn.execute(
             """INSERT INTO advisor_events
@@ -1429,16 +1415,7 @@ class MemoryStore:
         self,
         since_days: int = 30,
     ) -> dict[str, Any]:
-        """Aggregate advisor KPIs over the recent window.
-
-        Returns a dict with:
-        - total_calls
-        - by_trigger: {trigger: count}
-        - by_outcome: {outcome: count}
-        - completion_rate_by_trigger: {trigger: float}
-        - avg_output_tokens
-        - p50_latency_ms
-        """
+        """Aggregate advisor KPIs over the recent window."""
         cutoff = datetime.fromtimestamp(
             time.time() - since_days * 86400, tz=UTC,
         ).isoformat()

@@ -1,28 +1,9 @@
-"""Claude native ``advisor_20260301`` tool integration (Phase A).
+"""Claude native ``advisor_20260301`` tool integration.
 
-Encapsulates every bit of state, schema, and parsing specific to
-Anthropic's server-side advisor path so the caller modules
-(``loop.py``, ``litellm_adapter.py``) only need thin hooks.
+Fail-open on mismatch; function=None (server-side dispatch); schema
+passthrough (no OpenAI envelope); observability via usage.iterations.
 
-Design constraints
-------------------
-1. **Fail-open**: any mismatch returns an inert config — the policy-
-   driven path in ``advisor/loop_integration.py`` remains the fallback.
-2. **No client dispatch**: the generated ``ToolWrapper`` has
-   ``function=None``; Anthropic runs the advisor sub-inference server-
-   side and embeds the result inline in the response stream.
-3. **Schema passthrough**: the raw ``json_schema`` dict is emitted as
-   the tool entry unchanged, not wrapped in OpenAI's ``function``
-   envelope. The passthrough hook lives in
-   ``litellm_adapter.tools_to_openai_schema``.
-4. **Observability**: when a native response arrives, advisor calls are
-   reconstructed from ``usage.iterations[]`` (``type=='advisor_message'``)
-   so Tier 2 persistence keeps aggregating metrics identically to the
-   policy-driven path.
-
-Reference
----------
-https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool
+Ref: https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool
 """
 
 from __future__ import annotations

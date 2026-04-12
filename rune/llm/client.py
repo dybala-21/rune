@@ -189,8 +189,7 @@ class LLMClient:
         if prefix and not resolved_model.startswith(prefix):
             resolved_model = f"{prefix}{resolved_model}"
 
-        # Clamp max_tokens to the model's hard output cap. Gemini 2.0
-        # flash-lite caps at 8192; sending 16384 returns a 400.
+        # Clamp to model's hard output cap
         from rune.agent.litellm_adapter import _clamp_max_tokens
         effective_max_tokens = _clamp_max_tokens(resolved_model, max_tokens)
 

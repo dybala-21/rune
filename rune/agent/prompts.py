@@ -461,12 +461,8 @@ Respond in the SAME language the user used. Korean input → Korean output.
 - NEVER repeat the same information in different wordings."""
 
 
-# Claude native advisor_20260301 tool usage block.
-# Injected only when the advisor is enabled AND the executor/advisor
-# pair matches Anthropic's officially supported native compatibility
-# matrix (handled in advisor/native_tool.py::resolve_native_config).
-# This block is a direct port of Anthropic's suggested system prompt:
-# https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool#suggested-system-prompt-for-coding-tasks
+# Ported from Anthropic's suggested system prompt for the native advisor tool.
+# https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool
 PROMPT_ADVISOR_TIMING = """\
 ## Advisor Tool Usage
 
@@ -684,10 +680,7 @@ def build_system_prompt(
             "to change Y, then run tests."
         )
 
-    # Phase A: Claude native advisor tool usage block.
-    # Injected right before the task so the timing guidance is fresh in
-    # the executor's working context. Only fires when the advisor is
-    # enabled AND the executor/advisor pair is Anthropic-official.
+    # Native advisor timing guidance (Anthropic pairs only)
     if advisor_native_enabled:
         parts.append(PROMPT_ADVISOR_TIMING)
 

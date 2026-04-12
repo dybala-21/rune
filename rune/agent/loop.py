@@ -67,9 +67,7 @@ from rune.utils.logger import get_logger
 
 _HAS_PYDANTIC_AI = True  # Always True — LiteLLMAgent replaces PydanticAI
 
-# Extensions counted as "code" for R19 verification freshness tracking.
-# Documentation/config files are intentionally excluded so workflows that
-# only edit .md / .json don't trigger the freshness gate.
+# R19: file extensions considered "code" (doc/config excluded)
 _CODE_FILE_EXTS = {
     ".py", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs",
     ".go", ".rs", ".java", ".kt", ".swift",
@@ -346,11 +344,7 @@ class NativeAgentLoop(EventEmitter):
         self._files_read: set[str] = set()
         self._hard_failure_signatures: set[str] = set()
         self._hard_failures: list[str] = []
-        # R19 verification freshness tracking — see completion_gate.py R19.
-        # Uses a tool-call sequence counter (not step counter) so that
-        # intra-step write→verify→write patterns are caught. A step can
-        # contain many tool calls; step-level tracking would let weak
-        # models bypass the check by packing edit-verify-edit into one step.
+        # R19: tool-call sequence counter (not step) to catch intra-step patterns
         self._last_code_write_step: int = 0
         self._last_verify_step: int = 0
         self._tool_call_seq: int = 0
@@ -876,10 +870,7 @@ class NativeAgentLoop(EventEmitter):
                 self._pending_verification_nudge = True  # (#27)
                 # Written file paths are tracked in _on_tool_start where
                 # params are available - no duplicate tracking needed here.
-                # R19: bump last_code_write_step if a code-extension file was
-                # touched. Uses tool-call sequence (not step) so intra-step
-                # edit→verify→edit is caught. Documentation/config writes are
-                # intentionally excluded so doc-only flows don't trip the gate.
+                # R19: track code-file writes for freshness gate
                 if result.success and cap_name != "file_delete":
                     fp = (
                         _last_tool_params.get("file_path")
@@ -891,9 +882,7 @@ class NativeAgentLoop(EventEmitter):
             elif cap_name == "bash_execute":
                 evidence.executions += 1
                 self._consecutive_reads_without_write = 0  # (#27) reset
-                # R19: any successful bash execution counts as verification.
-                # Looser than path-matching but avoids brittle command parsing
-                # — agents that use pytest/python -m/REPL still get credit.
+                # R19: any successful bash counts as verification
                 if result.success:
                     self._tool_call_seq += 1
                     self._last_verify_step = self._tool_call_seq
@@ -961,17 +950,9 @@ class NativeAgentLoop(EventEmitter):
             _VISION_TOOLS = {"browser_screenshot"}
             tools = [t for t in tools if t not in _VISION_TOOLS]
 
-        # Advisor service: one per episode, disabled unless RUNE_ADVISOR_MODEL
-        # is set and the pairing passes tier validation. Created BEFORE the
-        # LiteLLMAgent so Phase A can resolve its native-tool config and
-        # inject the advisor_20260301 schema + anthropic-beta header into
-        # the very first LLM call of the episode.
         advisor_service = AdvisorService.for_episode(model)
 
-        # Phase A: Claude native advisor_20260301 tool detection.
-        # Returns an inert config for any non-Anthropic pair; in that case
-        # the policy-driven path in loop_integration.maybe_consult remains
-        # the only advisor mechanism (unchanged fallback).
+        # Native advisor tool (Anthropic pairs only, inert otherwise)
         from rune.agent.advisor.native_tool import (
             build_native_tool_wrapper,
             resolve_native_config,
@@ -985,10 +966,6 @@ class NativeAgentLoop(EventEmitter):
             _native_wrapper = build_native_tool_wrapper(_native_cfg)
             if _native_wrapper is not None:
                 tool_functions["advisor"] = _native_wrapper
-            # Anthropic's suggested system prompt block — executor learns
-            # when to call advisor() on its own initiative. Appended
-            # rather than rebuilt via build_system_prompt because the
-            # prompt is already finalized upstream.
             from rune.agent.prompts import PROMPT_ADVISOR_TIMING
             system_prompt = system_prompt + "\n\n" + PROMPT_ADVISOR_TIMING
             log.info(
@@ -1041,10 +1018,6 @@ class NativeAgentLoop(EventEmitter):
         # `build_tool_set()`. That site is required because the native
         # advisor tool must be in the first LiteLLMAgent construction.)
 
-        # R19 verification-freshness gate is opt-in via env var. Default OFF
-        # so existing tests / e2e flows are unaffected. When ON, the gate
-        # blocks completion if a code file was modified after the last
-        # bash_execute step (catches hallucinated success in weak executors).
         import os as _os_for_freshness
         verify_freshness_enabled = (
             _os_for_freshness.environ.get("RUNE_VERIFY_FRESHNESS", "")
@@ -1058,10 +1031,7 @@ class NativeAgentLoop(EventEmitter):
         _no_new_evidence_steps = 0
         _gate_blocked_count = 0
 
-        # Advisor closures — capture per-step state via the enclosing scope
-        # so hook sites become 3-line calls. build_policy_input is cheap
-        # (primitive allocation only); build_advisor_request does heavier
-        # copies and is only invoked after should_call returns True.
+        # Advisor closures (deferred: request built only after should_call fires)
         def _make_policy_input():
             return build_policy_input(
                 classification=classification,
@@ -1105,17 +1075,7 @@ class NativeAgentLoop(EventEmitter):
                 trace.reason = "cancelled"
                 break
 
-            # Site A: top-of-iteration advisor hook. Covers EARLY,
-            # PRE-DONE, RECONCILE, and the stuck-variants (stall,
-            # wind_down, no_progress). The H1 gate_blocked case has its
-            # own site after gate evaluation. Policy rejects almost
-            # every iteration cheaply; maybe_consult is inert unless
-            # the service is enabled and should_call fires.
-            #
-            # Skipped entirely when the Claude native path is active —
-            # the executor LLM calls advisor() on its own initiative via
-            # the advisor_20260301 tool, so the policy state machine
-            # would just be a redundant second path.
+            # Site A: advisor hook (skipped when native path active)
             if advisor_service.enabled and not _native_cfg.enabled:
                 messages, _adv_dec = await maybe_consult(
                     advisor_service,
@@ -1533,9 +1493,7 @@ class NativeAgentLoop(EventEmitter):
                         verify_freshness_enabled
                         and self._last_code_write_step > self._last_verify_step
                     ):
-                        # R19 fast-path block: code was modified but not
-                        # verified via bash_execute after the last write.
-                        # Force the executor to actually run the fresh file.
+                        # R19: code modified but not re-run
                         log.info(
                             "verify_freshness_fastpath_block",
                             step=self._step,
@@ -1669,12 +1627,7 @@ class NativeAgentLoop(EventEmitter):
                             + ", ".join(_missing)
                             + ". Focus on completing these before finishing.",
                         )
-                    # H1: advisor escalation at gate_blocked boundary. The
-                    # policy gates on _gate_blocked_count == 3 so this is a
-                    # no-op until the counter reaches the threshold.
-                    # Skipped when the Claude native path is active —
-                    # the executor handles its own advisor calls via the
-                    # advisor_20260301 tool, no policy escalation needed.
+                    # H1: advisor at gate_blocked boundary (skipped for native path)
                     if advisor_service.enabled and not _native_cfg.enabled:
                         messages, _adv_dec = await maybe_consult(
                             advisor_service,
@@ -1794,15 +1747,7 @@ class NativeAgentLoop(EventEmitter):
             except Exception:
                 pass
 
-        # Tier 2: batch-write advisor events to the memory store.
-        # Persistence is opt-out via RUNE_ADVISOR_PERSIST=0; skipped
-        # entirely if no advisor calls happened this episode.
-        #
-        # Phase A native path: synthetic advisor events reconstructed
-        # from the LiteLLMAgent's last stream usage are merged into
-        # AdvisorBudget.call_history first, so the same persist loop
-        # below records both client-policy and server-native calls
-        # under one schema.
+        # Persist advisor events (merge native path events first)
         try:
             _native_events = agent.native_advisor_events() if agent else []
             if _native_events:
