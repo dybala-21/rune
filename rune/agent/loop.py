@@ -65,14 +65,7 @@ from rune.types import (
 from rune.utils.events import EventEmitter
 from rune.utils.logger import get_logger
 
-_HAS_PYDANTIC_AI = True  # Always True — LiteLLMAgent replaces PydanticAI
-
-# R19: file extensions considered "code" (doc/config excluded)
-_CODE_FILE_EXTS = {
-    ".py", ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs",
-    ".go", ".rs", ".java", ".kt", ".swift",
-    ".rb", ".php", ".cs", ".cpp", ".cc", ".c", ".h", ".hpp",
-}
+_HAS_PYDANTIC_AI = True  # Always True - LiteLLMAgent replaces PydanticAI
 
 log = get_logger(__name__)
 
@@ -876,7 +869,9 @@ class NativeAgentLoop(EventEmitter):
                         _last_tool_params.get("file_path")
                         or _last_tool_params.get("path", "")
                     )
-                    if fp and any(fp.endswith(ext) for ext in _CODE_FILE_EXTS):
+                    from rune.intelligence.ast_analyzer import is_code_extension
+                    _dot = fp.rfind(".")
+                    if fp and _dot >= 0 and is_code_extension(fp[_dot:]):
                         self._tool_call_seq += 1
                         self._last_code_write_step = self._tool_call_seq
             elif cap_name == "bash_execute":

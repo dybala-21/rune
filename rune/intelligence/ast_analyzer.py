@@ -58,6 +58,11 @@ _LANG_MAP: dict[str, str] = {
 }
 
 
+def is_code_extension(ext: str) -> bool:
+    """Return True if the extension maps to a known programming language."""
+    return ext.lower() in _LANG_MAP
+
+
 class ASTAnalyzer:
     """Multi-language AST analysis using tree-sitter."""
 
