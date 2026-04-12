@@ -50,17 +50,9 @@ class NativeAdvisorConfig:
 
 
 def _native_opt_in_enabled() -> bool:
-    """Native path is **explicitly opt-in** via ``RUNE_ADVISOR_NATIVE=1``.
-
-    Default OFF because the underlying LiteLLM version may not yet
-    support the ``advisor_20260301`` tool schema; an unsupported
-    LiteLLM rejects the tool type with ``litellm.APIConnectionError``,
-    forcing the fallback path. Until LiteLLM ships explicit support,
-    users must affirm compatibility themselves.
-    """
-    import os
-    val = os.environ.get("RUNE_ADVISOR_NATIVE", "").strip().lower()
-    return val in ("1", "true", "yes", "on")
+    """Opt-in via RUNE_ADVISOR_NATIVE=1. Default OFF."""
+    from rune.agent.advisor.runtime_toggle import parse_env_bool
+    return parse_env_bool("RUNE_ADVISOR_NATIVE", default=False)
 
 
 def resolve_native_config(

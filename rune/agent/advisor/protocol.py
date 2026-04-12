@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-AdvisorTrigger = Literal["early", "pre_done", "stuck", "reconcile"]
+AdvisorTrigger = Literal["early", "pre_done", "stuck", "reconcile", "native"]
 
 AdvisorAction = Literal[
     "continue",

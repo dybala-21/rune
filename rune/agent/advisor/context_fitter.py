@@ -20,10 +20,7 @@ budget-fitting. We never rely on exact provider-specific tokenizers.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from rune.agent.advisor.protocol import AdvisorRequest
+from rune.agent.advisor.protocol import AdvisorRequest
 
 DEFAULT_TARGET_TOKENS = 7_500
 CHARS_PER_TOKEN = 3.5

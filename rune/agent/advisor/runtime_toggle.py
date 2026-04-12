@@ -21,6 +21,16 @@ _TRUTHY = ("1", "true", "on", "yes")
 _FALSY = ("0", "false", "off", "no")
 
 
+def parse_env_bool(var_name: str, default: bool = False) -> bool:
+    """Parse a boolean env var. Returns *default* when unset or unrecognised."""
+    val = os.environ.get(var_name, "").strip().lower()
+    if val in _TRUTHY:
+        return True
+    if val in _FALSY:
+        return False
+    return default
+
+
 def _setting_path() -> str:
     from rune.utils.paths import rune_data
     return str(rune_data() / _SETTING_FILE)
@@ -37,6 +47,8 @@ def is_advisor_enabled() -> bool:
         return True
     if env in _FALSY:
         return False
+
+    # No env override — check file
 
     try:
         path = _setting_path()

@@ -297,5 +297,6 @@ def _extract_usage(raw: Any) -> tuple[int, int]:
             or 0
         )
         return (prompt, completion)
-    except Exception:
+    except Exception as exc:
+        log.debug("usage_extraction_failed", error=str(exc)[:100])
         return (0, 0)

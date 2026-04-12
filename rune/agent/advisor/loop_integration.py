@@ -9,6 +9,9 @@ from __future__ import annotations
 from typing import Any
 
 from rune.agent.advisor.parser import format_injection
+from rune.utils.logger import get_logger
+
+log = get_logger(__name__)
 from rune.agent.advisor.policy import (
     PolicyInput,
     mark_called,
@@ -157,11 +160,13 @@ async def maybe_consult(
         return messages, None
     try:
         request = build_request(trigger)
-    except Exception:
+    except Exception as exc:
+        log.debug("advisor_request_build_failed", trigger=trigger, error=str(exc)[:200])
         return messages, None
     try:
         decision = await service.consult(request)
-    except Exception:
+    except Exception as exc:
+        log.debug("advisor_consult_failed", trigger=trigger, error=str(exc)[:200])
         return messages, None
     hard_failures = policy_input.hard_failures
     mark_called(
