@@ -1,0 +1,654 @@
+name: "long-project-build"
+description: >
+  Full project lifecycle: design → scaffold → implement → test → debug → refactor → integration.
+  Tests sustained multi-turn coding with a local Ollama model (gemma4:e2b).
+  Builds a CLI expense tracker from scratch (~25 turns, ~60 min expected).
+
+# Run:
+#   uv run python scripts/e2e_test.py \
+#     --provider ollama --model gemma4:e2b \
+#     --scenario tests/e2e/scenarios/long_project_build.yaml
+
+turns:
+  # ── Phase 1: Design ──────────────────────────────────────────────
+
+  - id: design_spec
+    goal: |
+      I want to build a CLI expense tracker in Python. The project will live at {workspace}/expense_tracker/.
+      Design the project structure and write a spec to {workspace}/expense_tracker/SPEC.md with:
+      - Feature list: add expense, list expenses, filter by category/date range, monthly summary, export to CSV
+      - Data model: Expense(id, amount, category, description, date)
+      - Storage: JSON file at data/expenses.json
+      - CLI interface: using argparse (not click/typer)
+      - Module structure: models.py, storage.py, cli.py, reports.py, __main__.py
+      Just write the spec, do not implement yet.
+    verify:
+      - type: file_exists
+        path: "{workspace}/expense_tracker/SPEC.md"
+      - type: file_contains
+        path: "{workspace}/expense_tracker/SPEC.md"
+        expect: "Expense"
+      - type: file_contains
+        path: "{workspace}/expense_tracker/SPEC.md"
+        expect: "argparse"
+
+  # ── Phase 2: Scaffold ───────────────────────────────────────────
+
+  - id: scaffold_project
+    goal: |
+      Create the project scaffold at {workspace}/expense_tracker/ based on the spec.
+      Create these empty files with just docstrings and class/function stubs (no implementation):
+      - expense_tracker/__init__.py
+      - expense_tracker/models.py  (Expense dataclass with id, amount, category, description, date)
+      - expense_tracker/storage.py (ExpenseStorage class with load, save, add, delete, get_all stubs)
+      - expense_tracker/reports.py (monthly_summary, filter_by_category, filter_by_date_range, export_csv stubs)
+      - expense_tracker/cli.py     (build_parser, main stubs)
+      - expense_tracker/__main__.py (entry point calling cli.main)
+    verify:
+      - type: file_exists
+        path: "{workspace}/expense_tracker/expense_tracker/__init__.py"
+      - type: file_exists
+        path: "{workspace}/expense_tracker/expense_tracker/models.py"
+      - type: file_exists
+        path: "{workspace}/expense_tracker/expense_tracker/storage.py"
+      - type: file_exists
+        path: "{workspace}/expense_tracker/expense_tracker/reports.py"
+      - type: file_exists
+        path: "{workspace}/expense_tracker/expense_tracker/cli.py"
+      - type: file_exists
+        path: "{workspace}/expense_tracker/expense_tracker/__main__.py"
+
+  # ── Phase 3: Implement Core ─────────────────────────────────────
+
+  - id: implement_models
+    goal: |
+      Implement {workspace}/expense_tracker/expense_tracker/models.py fully:
+      - Expense dataclass with fields: id (str, UUID), amount (float), category (str), description (str), date (str, ISO format YYYY-MM-DD)
+      - Add a to_dict() method and a from_dict(data) classmethod
+      - Add validation: amount must be positive, category must be non-empty
+      - Raise ValueError with clear messages on invalid input
+    verify:
+      - type: file_contains
+        path: "{workspace}/expense_tracker/expense_tracker/models.py"
+        expect: "class Expense"
+      - type: file_contains
+        path: "{workspace}/expense_tracker/expense_tracker/models.py"
+        expect: "to_dict"
+      - type: file_contains
+        path: "{workspace}/expense_tracker/expense_tracker/models.py"
+        expect: "from_dict"
+      - type: file_contains
+        path: "{workspace}/expense_tracker/expense_tracker/models.py"
+        expect: "ValueError"
+
+  - id: implement_storage
+    goal: |
+      Implement {workspace}/expense_tracker/expense_tracker/storage.py fully:
+      - ExpenseStorage class taking a file_path parameter (default: "data/expenses.json")
+      - load(): read JSON file, return list of Expense objects. If file doesn't exist, return empty list.
+      - save(expenses): write list of Expense dicts to JSON file with indent=2. Create parent dirs if needed.
+      - add(expense): load current data, append, save, return the expense
+      - delete(expense_id): load, remove by id, save. Raise KeyError if not found.
+      - get_all(): return all expenses sorted by date descending
+      - get_by_id(expense_id): return single expense or raise KeyError
+    verify:
+      - type: file_contains
+        path: "{workspace}/expense_tracker/expense_tracker/storage.py"
+        expect: "class ExpenseStorage"
+      - type: file_contains
+        path: "{workspace}/expense_tracker/expense_tracker/storage.py"
+        expect: "def load"
+      - type: file_contains
+        path: "{workspace}/expense_tracker/expense_tracker/storage.py"
+        expect: "def save"
+      - type: file_contains
+        path: "{workspace}/expense_tracker/expense_tracker/storage.py"
+        expect: "def add"
+      - type: file_contains
+        path: "{workspace}/expense_tracker/expense_tracker/storage.py"
+        expect: "def delete"
+
+  - id: implement_reports
+    goal: |
+      Implement {workspace}/expense_tracker/expense_tracker/reports.py fully:
+      - monthly_summary(expenses) -> dict: group by YYYY-MM, sum amounts per month, return {month: total}
+      - filter_by_category(expenses, category) -> list: case-insensitive match
+      - filter_by_date_range(expenses, start_date, end_date) -> list: inclusive range, dates as YYYY-MM-DD strings
+      - export_csv(expenses, output_path) -> str: write CSV with headers id,amount,category,description,date. Return the output_path.
+      - category_breakdown(expenses) -> dict: group by category, return {category: total_amount}
+    verify:
+      - type: file_contains
+        path: "{workspace}/expense_tracker/expense_tracker/reports.py"
+        expect: "def monthly_summary"
+      - type: file_contains
+        path: "{workspace}/expense_tracker/expense_tracker/reports.py"
+        expect: "def filter_by_category"
+      - type: file_contains
+        path: "{workspace}/expense_tracker/expense_tracker/reports.py"
+        expect: "def export_csv"
+      - type: file_contains
+        path: "{workspace}/expense_tracker/expense_tracker/reports.py"
+        expect: "def category_breakdown"
+
+  - id: implement_cli
+    goal: |
+      Implement {workspace}/expense_tracker/expense_tracker/cli.py fully:
+      - build_parser() -> argparse.ArgumentParser with subcommands:
+        - add: --amount (required float), --category (required str), --description (str), --date (str, default today)
+        - list: --category (optional filter), --start-date, --end-date (optional date range)
+        - summary: --month (optional YYYY-MM filter)
+        - delete: --id (required str)
+        - export: --output (required str, CSV file path)
+      - main(args=None): parse args, dispatch to appropriate storage/reports functions, print results to stdout
+      - Use the ExpenseStorage with default path "data/expenses.json"
+    verify:
+      - type: file_contains
+        path: "{workspace}/expense_tracker/expense_tracker/cli.py"
+        expect: "argparse"
+      - type: file_contains
+        path: "{workspace}/expense_tracker/expense_tracker/cli.py"
+        expect: "def build_parser"
+      - type: file_contains
+        path: "{workspace}/expense_tracker/expense_tracker/cli.py"
+        expect: "def main"
+
+  - id: implement_main_entry
+    goal: |
+      Implement {workspace}/expense_tracker/expense_tracker/__main__.py:
+      - Import and call cli.main()
+      - Make sure `python -m expense_tracker` works as the entry point
+    verify:
+      - type: file_contains
+        path: "{workspace}/expense_tracker/expense_tracker/__main__.py"
+        expect: "main"
+
+  # ── Phase 4: Unit Testing ───────────────────────────────────────
+
+  - id: test_models
+    goal: |
+      Run Python code to test the Expense model at {workspace}/expense_tracker:
+      ```
+      import sys; sys.path.insert(0, '{workspace}/expense_tracker')
+      from expense_tracker.models import Expense
+
+      # Test valid creation
+      e = Expense(id="test-1", amount=42.50, category="food", description="lunch", date="2024-01-15")
+      print(f"Created: {e}")
+
+      # Test to_dict / from_dict roundtrip
+      d = e.to_dict()
+      e2 = Expense.from_dict(d)
+      print(f"Roundtrip match: {e.id == e2.id and e.amount == e2.amount}")
+
+      # Test validation - negative amount
+      try:
+          Expense(id="bad", amount=-10, category="food", description="test", date="2024-01-01")
+          print("ERROR: should have raised ValueError")
+      except ValueError as ex:
+          print(f"Caught expected error: {ex}")
+
+      # Test validation - empty category
+      try:
+          Expense(id="bad", amount=10, category="", description="test", date="2024-01-01")
+          print("ERROR: should have raised ValueError")
+      except ValueError as ex:
+          print(f"Caught expected error: {ex}")
+      ```
+      Show the full output.
+    verify:
+      - type: answer_contains
+        expect: "Created"
+      - type: answer_contains
+        expect: "Roundtrip match: True"
+      - type: answer_contains
+        expect: "Caught expected error"
+
+  - id: test_storage
+    goal: |
+      Run Python code to test ExpenseStorage at {workspace}/expense_tracker:
+      ```
+      import sys, os, tempfile, json; sys.path.insert(0, '{workspace}/expense_tracker')
+      from expense_tracker.models import Expense
+      from expense_tracker.storage import ExpenseStorage
+
+      # Use a temp file
+      tmp = os.path.join('{workspace}', 'test_data', 'test_expenses.json')
+      store = ExpenseStorage(tmp)
+
+      # Add 3 expenses
+      e1 = Expense(id="1", amount=25.00, category="food", description="lunch", date="2024-01-15")
+      e2 = Expense(id="2", amount=50.00, category="transport", description="taxi", date="2024-01-20")
+      e3 = Expense(id="3", amount=15.00, category="food", description="coffee", date="2024-02-01")
+
+      store.add(e1)
+      store.add(e2)
+      store.add(e3)
+      print(f"Added 3 expenses")
+
+      # Test get_all (should be sorted by date desc)
+      all_exp = store.get_all()
+      print(f"Total: {len(all_exp)}")
+      print(f"First date: {all_exp[0].date}")
+
+      # Test get_by_id
+      found = store.get_by_id("2")
+      print(f"Found by ID: {found.description}")
+
+      # Test delete
+      store.delete("2")
+      remaining = store.get_all()
+      print(f"After delete: {len(remaining)}")
+
+      # Test delete non-existent
+      try:
+          store.delete("999")
+          print("ERROR: should have raised KeyError")
+      except KeyError:
+          print("Caught expected KeyError")
+
+      # Verify persistence
+      store2 = ExpenseStorage(tmp)
+      reloaded = store2.get_all()
+      print(f"Reloaded from disk: {len(reloaded)}")
+      ```
+      Show the full output.
+    verify:
+      - type: answer_contains
+        expect: "Added 3 expenses"
+      - type: answer_contains
+        expect: "Total: 3"
+      - type: answer_contains
+        expect: "After delete: 2"
+      - type: answer_contains
+        expect: "Reloaded from disk: 2"
+
+  - id: test_reports
+    goal: |
+      Run Python code to test reports at {workspace}/expense_tracker:
+      ```
+      import sys, os; sys.path.insert(0, '{workspace}/expense_tracker')
+      from expense_tracker.models import Expense
+      from expense_tracker.reports import monthly_summary, filter_by_category, filter_by_date_range, export_csv, category_breakdown
+
+      expenses = [
+          Expense(id="1", amount=25.00, category="Food", description="lunch", date="2024-01-15"),
+          Expense(id="2", amount=50.00, category="Transport", description="taxi", date="2024-01-20"),
+          Expense(id="3", amount=15.00, category="food", description="coffee", date="2024-02-01"),
+          Expense(id="4", amount=100.00, category="Food", description="dinner", date="2024-02-15"),
+          Expense(id="5", amount=30.00, category="Transport", description="bus", date="2024-02-20"),
+      ]
+
+      # Monthly summary
+      summary = monthly_summary(expenses)
+      print(f"Monthly summary: {summary}")
+
+      # Filter by category (case-insensitive)
+      food = filter_by_category(expenses, "food")
+      print(f"Food items: {len(food)}")
+
+      # Filter by date range
+      jan = filter_by_date_range(expenses, "2024-01-01", "2024-01-31")
+      print(f"January items: {len(jan)}")
+
+      # Category breakdown
+      breakdown = category_breakdown(expenses)
+      print(f"Category breakdown: {breakdown}")
+
+      # Export CSV
+      csv_path = os.path.join('{workspace}', 'test_export.csv')
+      result = export_csv(expenses, csv_path)
+      with open(csv_path) as f:
+          lines = f.readlines()
+      print(f"CSV lines (including header): {len(lines)}")
+      print(f"CSV header: {lines[0].strip()}")
+      ```
+      Show the full output.
+    verify:
+      - type: answer_contains
+        expect: "Monthly summary"
+      - type: answer_contains
+        expect: "Food items: 3"
+      - type: answer_contains
+        expect: "January items: 2"
+      - type: answer_contains
+        expect: "CSV lines (including header): 6"
+
+  # ── Phase 5: Bug Discovery & Fix ───────────────────────────────
+
+  - id: introduce_bug_test
+    goal: |
+      Run this edge case test at {workspace}/expense_tracker to find any bugs:
+      ```
+      import sys; sys.path.insert(0, '{workspace}/expense_tracker')
+      from expense_tracker.models import Expense
+      from expense_tracker.reports import monthly_summary, filter_by_date_range
+
+      # Edge case: expenses with same date
+      expenses = [
+          Expense(id="1", amount=10.00, category="A", description="x", date="2024-03-15"),
+          Expense(id="2", amount=20.00, category="B", description="y", date="2024-03-15"),
+          Expense(id="3", amount=30.00, category="A", description="z", date="2024-03-15"),
+      ]
+
+      # Same-date summary
+      summary = monthly_summary(expenses)
+      print(f"Same-date summary: {summary}")
+      expected_total = 60.0
+      actual = list(summary.values())[0]
+      print(f"Expected {expected_total}, got {actual}, match: {abs(actual - expected_total) < 0.01}")
+
+      # Boundary: date range with exact start and end match
+      result = filter_by_date_range(expenses, "2024-03-15", "2024-03-15")
+      print(f"Single-day filter count: {len(result)} (expected 3)")
+
+      # Empty list
+      empty_summary = monthly_summary([])
+      print(f"Empty summary: {empty_summary}")
+
+      # Filter with no matches
+      no_match = filter_by_date_range(expenses, "2025-01-01", "2025-12-31")
+      print(f"No match count: {len(no_match)}")
+      ```
+      Show output. If anything fails or looks wrong, identify the issue.
+    verify:
+      - type: answer_contains
+        expect: "match: True"
+      - type: answer_contains
+        expect: "Single-day filter count: 3"
+
+  - id: fix_any_bugs
+    goal: |
+      If any bugs were found in the previous test, fix them now in the appropriate files under {workspace}/expense_tracker/.
+      Then re-run the same edge case tests to confirm everything passes.
+      If no bugs were found, just confirm all edge cases pass and explain why.
+    verify:
+      - type: answer_contains
+        expect: "pass"
+
+  # ── Phase 6: CLI Integration Test ──────────────────────────────
+
+  - id: test_cli_add
+    goal: |
+      Test the CLI add command by running at {workspace}/expense_tracker:
+      ```
+      import sys, os; sys.path.insert(0, '{workspace}/expense_tracker')
+      os.chdir('{workspace}/expense_tracker')
+      from expense_tracker.cli import main
+
+      # Add expenses via CLI
+      main(['add', '--amount', '42.50', '--category', 'food', '--description', 'sushi dinner', '--date', '2024-06-15'])
+      main(['add', '--amount', '15.00', '--category', 'transport', '--description', 'bus pass', '--date', '2024-06-16'])
+      main(['add', '--amount', '200.00', '--category', 'shopping', '--description', 'headphones', '--date', '2024-06-20'])
+      print("Added 3 expenses via CLI")
+      ```
+      Show the output.
+    verify:
+      - type: answer_contains
+        expect: "Added 3 expenses via CLI"
+
+  - id: test_cli_list
+    goal: |
+      Test the CLI list command by running at {workspace}/expense_tracker:
+      ```
+      import sys, os; sys.path.insert(0, '{workspace}/expense_tracker')
+      os.chdir('{workspace}/expense_tracker')
+      from expense_tracker.cli import main
+
+      print("=== All expenses ===")
+      main(['list'])
+
+      print("\n=== Food only ===")
+      main(['list', '--category', 'food'])
+
+      print("\n=== June 15-16 only ===")
+      main(['list', '--start-date', '2024-06-15', '--end-date', '2024-06-16'])
+      ```
+      Show all output.
+    verify:
+      - type: answer_contains
+        expect: "sushi"
+      - type: answer_contains
+        expect: "food"
+
+  - id: test_cli_summary
+    goal: |
+      Test the CLI summary command at {workspace}/expense_tracker:
+      ```
+      import sys, os; sys.path.insert(0, '{workspace}/expense_tracker')
+      os.chdir('{workspace}/expense_tracker')
+      from expense_tracker.cli import main
+
+      print("=== Monthly Summary ===")
+      main(['summary'])
+      ```
+      Show output. The total for 2024-06 should be 257.50.
+    verify:
+      - type: answer_contains
+        expect: "257.5"
+
+  - id: test_cli_export
+    goal: |
+      Test the CLI export command at {workspace}/expense_tracker:
+      ```
+      import sys, os; sys.path.insert(0, '{workspace}/expense_tracker')
+      os.chdir('{workspace}/expense_tracker')
+      from expense_tracker.cli import main
+
+      export_path = os.path.join('{workspace}', 'cli_export.csv')
+      main(['export', '--output', export_path])
+
+      with open(export_path) as f:
+          content = f.read()
+      print(f"Exported CSV:\n{content}")
+      line_count = len(content.strip().split('\n'))
+      print(f"Total lines: {line_count}")
+      ```
+      Show output.
+    verify:
+      - type: file_exists
+        path: "{workspace}/cli_export.csv"
+      - type: answer_contains
+        expect: "Total lines: 4"
+
+  # ── Phase 7: Error Handling ─────────────────────────────────────
+
+  - id: test_error_handling
+    goal: |
+      Test error handling in the CLI at {workspace}/expense_tracker:
+      ```
+      import sys, os; sys.path.insert(0, '{workspace}/expense_tracker')
+      os.chdir('{workspace}/expense_tracker')
+      from expense_tracker.cli import main
+
+      # Test 1: Add with negative amount (should fail gracefully)
+      try:
+          main(['add', '--amount', '-5', '--category', 'test', '--description', 'negative'])
+          print("Test 1: negative amount handled")
+      except (ValueError, SystemExit) as e:
+          print(f"Test 1: caught error: {e}")
+
+      # Test 2: Delete non-existent ID
+      try:
+          main(['delete', '--id', 'nonexistent-uuid'])
+          print("Test 2: missing ID handled")
+      except (KeyError, SystemExit) as e:
+          print(f"Test 2: caught error: {e}")
+
+      # Test 3: No subcommand
+      try:
+          main([])
+          print("Test 3: no args handled")
+      except SystemExit as e:
+          print(f"Test 3: caught SystemExit: {e}")
+      ```
+      Show the output.
+    verify:
+      - type: answer_contains
+        expect: "Test 1"
+      - type: answer_contains
+        expect: "Test 2"
+      - type: answer_contains
+        expect: "Test 3"
+
+  - id: improve_error_handling
+    goal: |
+      Review the error handling output from the previous turn.
+      If any error was not handled gracefully (e.g., raw exception printed instead of user-friendly message),
+      fix the CLI at {workspace}/expense_tracker/expense_tracker/cli.py to handle it properly:
+      - Negative amounts: print error message and return, don't crash
+      - Non-existent delete ID: print "Expense not found" and return
+      - No subcommand: print help text
+      After fixing, re-run the same 3 error handling tests to confirm.
+    verify:
+      - type: file_contains
+        path: "{workspace}/expense_tracker/expense_tracker/cli.py"
+        expect: "def main"
+
+  # ── Phase 8: Refactoring ────────────────────────────────────────
+
+  - id: refactor_formatting
+    goal: |
+      The CLI list output is probably just raw repr() or dict printing.
+      Refactor {workspace}/expense_tracker/expense_tracker/cli.py to display expenses in a formatted table:
+      ```
+      ID       | Date       | Category   | Amount   | Description
+      ---------|------------|------------|----------|------------
+      abc123.. | 2024-06-15 | food       |    42.50 | sushi dinner
+      ```
+      Use string formatting (f-strings or str.format), no external libraries.
+      Then run `main(['list'])` to show the improved output.
+    verify:
+      - type: answer_contains
+        expect: "Date"
+      - type: answer_contains
+        expect: "Category"
+      - type: answer_contains
+        expect: "Amount"
+
+  - id: add_statistics
+    goal: |
+      Add a new 'stats' subcommand to the CLI at {workspace}/expense_tracker/expense_tracker/cli.py:
+      - Total expenses count
+      - Total amount spent
+      - Average expense amount
+      - Top category by spending
+      - Biggest single expense
+      Register it in build_parser() and implement the handler.
+      Then test it:
+      ```
+      import sys, os; sys.path.insert(0, '{workspace}/expense_tracker')
+      os.chdir('{workspace}/expense_tracker')
+      from expense_tracker.cli import main
+      main(['stats'])
+      ```
+    verify:
+      - type: answer_contains
+        expect: "Total"
+      - type: answer_contains
+        expect: "Average"
+      - type: file_contains
+        path: "{workspace}/expense_tracker/expense_tracker/cli.py"
+        expect: "stats"
+
+  # ── Phase 9: Comprehensive Test ─────────────────────────────────
+
+  - id: write_test_suite
+    goal: |
+      Create a proper test file at {workspace}/expense_tracker/tests/test_expense_tracker.py
+      that tests the full project with at least 10 test functions using unittest:
+      - test_expense_creation
+      - test_expense_validation_negative_amount
+      - test_expense_validation_empty_category
+      - test_expense_roundtrip (to_dict / from_dict)
+      - test_storage_add_and_retrieve
+      - test_storage_delete
+      - test_storage_delete_not_found
+      - test_monthly_summary
+      - test_filter_by_category
+      - test_filter_by_date_range
+      - test_export_csv
+      - test_category_breakdown
+      Each test should be self-contained with its own fixtures (temp files for storage tests).
+    verify:
+      - type: file_exists
+        path: "{workspace}/expense_tracker/tests/test_expense_tracker.py"
+      - type: file_contains
+        path: "{workspace}/expense_tracker/tests/test_expense_tracker.py"
+        expect: "unittest"
+      - type: file_contains
+        path: "{workspace}/expense_tracker/tests/test_expense_tracker.py"
+        expect: "def test_expense_creation"
+      - type: file_contains
+        path: "{workspace}/expense_tracker/tests/test_expense_tracker.py"
+        expect: "def test_monthly_summary"
+
+  - id: run_test_suite
+    goal: |
+      Run the test suite:
+      ```
+      cd {workspace}/expense_tracker && python -m pytest tests/test_expense_tracker.py -v 2>&1 || python -m unittest tests.test_expense_tracker -v 2>&1
+      ```
+      Show the full output with pass/fail for each test.
+    verify:
+      - type: answer_contains
+        expect: "test_expense_creation"
+      - type: answer_not_contains
+        expect: "FAILED"
+
+  - id: fix_test_failures
+    goal: |
+      If any tests failed in the previous run, read the error messages, identify the root cause,
+      fix the code (not the tests — unless the test itself is wrong), and re-run.
+      If all tests passed, just confirm the result and summarize the test coverage.
+    verify:
+      - type: answer_contains
+        expect: "pass"
+
+  # ── Phase 10: Final Integration ─────────────────────────────────
+
+  - id: full_lifecycle_demo
+    goal: |
+      Run a complete lifecycle demonstration at {workspace}/expense_tracker.
+      Clean slate — delete the data/expenses.json if it exists, then:
+      1. Add 5 varied expenses spanning 2 months
+      2. List all expenses (should show formatted table)
+      3. Filter by one category
+      4. Show monthly summary
+      5. Show stats
+      6. Delete one expense
+      7. Export remaining to CSV
+      8. Show final list
+      Do all of this programmatically (calling main() for each step) and show all output.
+    verify:
+      - type: answer_contains
+        expect: "Total"
+      - type: answer_contains
+        expect: "Category"
+      - type: episode_count
+        expect_min: 20
+
+  - id: final_summary
+    goal: |
+      Summarize the entire project build:
+      1. What was built (features and modules)
+      2. How many files were created
+      3. What bugs were found and fixed
+      4. What refactoring was done
+      5. Test coverage summary
+      6. Any remaining improvements you'd suggest
+      Read all files in {workspace}/expense_tracker/ to give an accurate count.
+    verify:
+      - type: conversation_turns
+        expect_min: 48
+      - type: answer_contains
+        expect: "models.py"
+      - type: answer_contains
+        expect: "storage.py"
+      - type: answer_contains
+        expect: "cli.py"
+
+after_all:
+  - type: episode_count
+    expect_min: 22
+  - type: conversation_turns
+    expect_min: 50

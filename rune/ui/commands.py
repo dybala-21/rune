@@ -286,6 +286,12 @@ COMMANDS: dict[str, Command] = {
         description="Toggle background learning (on/off)",
         handler=_noop_handler,  # Handled by app.py directly
     ),
+    "/advisor": Command(
+        name="/advisor",
+        description="Toggle advisor layer (on/off)",
+        handler=_noop_handler,  # Handled by app.py directly
+        usage="/advisor [on|off]",
+    ),
 }
 
 # Build alias lookup

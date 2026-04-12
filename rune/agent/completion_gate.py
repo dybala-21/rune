@@ -152,6 +152,11 @@ class CompletionGateInput:
     # Answer length
     answer_length: int = 0
 
+    # R19: block completion if code was edited but not re-run since.
+    verify_freshness_enabled: bool = False
+    last_code_write_step: int = 0
+    last_verify_step: int = 0
+
 
 @dataclass(slots=True)
 class CompletionGateResult:
@@ -186,6 +191,7 @@ REQUIREMENT_IDS: dict[str, str] = {
     "MODULE_COVERAGE": "R16_MODULE_COVERAGE",
     "DEEP_ANALYSIS": "R17_DEEP_ANALYSIS",
     "WEB_EVIDENCE": "R18_WEB_EVIDENCE",
+    "VERIFY_FRESHNESS": "R19_VERIFY_FRESHNESS",
 }
 
 
@@ -285,7 +291,7 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
     ev = inp.evidence
     es = inp.evidence_samples
 
-    # --- R01: Intent Resolved -----------------------------------------------
+    # R01: Intent Resolved
     r01 = RequirementTraceItem(
         id=REQUIREMENT_IDS["INTENT_RESOLVED"],
         description="User intent is resolved",
@@ -298,7 +304,7 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
     if r01.status != "done":
         missing.append(r01.id)
 
-    # --- R02: Tool Usage ----------------------------------------------------
+    # R02: Tool Usage
     needs_tools = inp.tool_requirement != "none"
     has_tool_usage = (ev.reads + ev.writes + ev.executions) > 0
     r02_ok = (not needs_tools) or has_tool_usage
@@ -314,7 +320,7 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
     if r02.required and r02.status != "done":
         missing.append(r02.id)
 
-    # --- R03: Read Evidence -------------------------------------------------
+    # R03: Read Evidence
     needs_read = inp.tool_requirement in ("read", "write")
     r03_ok = (not needs_read) or ev.reads > 0 or ev.file_reads > 0
     r03 = RequirementTraceItem(
@@ -329,7 +335,7 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
     if r03.required and r03.status != "done":
         missing.append(r03.id)
 
-    # --- R04: Write Evidence ------------------------------------------------
+    # R04: Write Evidence
     needs_write = inp.tool_requirement == "write"
     r04_ok = (not needs_write) or ev.writes > 0
     r04 = RequirementTraceItem(
@@ -344,7 +350,7 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
     if r04.required and r04.status != "done":
         missing.append(r04.id)
 
-    # --- R05: Execution Evidence --------------------------------------------
+    # R05: Execution Evidence
     needs_exec = inp.tool_requirement == "write"
     r05_ok = (not needs_exec) or ev.executions > 0
     r05 = RequirementTraceItem(
@@ -359,7 +365,7 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
     if r05.required and r05.status == "blocked":
         missing.append(r05.id)
 
-    # --- R06: Verification --------------------------------------------------
+    # R06: Verification
     r06_ok = (not inp.requires_code_verification) or ev.verifications > 0
     r06 = RequirementTraceItem(
         id=REQUIREMENT_IDS["VERIFICATION"],
@@ -373,7 +379,7 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
     if r06.required and r06.status != "done":
         missing.append(r06.id)
 
-    # --- R07: File Artifact -------------------------------------------------
+    # R07: File Artifact
     needs_file_artifact = inp.output_expectation in ("file", "either")
     has_file_artifact = inp.changed_files_count > 0 or inp.structured_write_count > 0
     r07_ok = (not needs_file_artifact) or has_file_artifact or inp.output_expectation == "either"
@@ -393,7 +399,7 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
     if r07.required and r07.status == "blocked":
         missing.append(r07.id)
 
-    # --- R08: Code Write Artifact -------------------------------------------
+    # R08: Code Write Artifact
     r08_ok = (not inp.requires_code_write_artifact) or inp.structured_write_count > 0
     r08 = RequirementTraceItem(
         id=REQUIREMENT_IDS["CODE_WRITE_ARTIFACT"],
@@ -407,7 +413,7 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
     if r08.required and r08.status != "done":
         missing.append(r08.id)
 
-    # --- R09-R11: Service Task Requirements ---------------------------------
+    # R09-R11: Service Task Requirements
     st = inp.service_task
     has_service = st is not None
 
@@ -449,7 +455,7 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
     requirements.append(r11)
     # Service cleanup is non-blocking (skipped, not blocked)
 
-    # --- R12: Workspace Alignment -------------------------------------------
+    # R12: Workspace Alignment
     ws = inp.workspace
     ws_aligned = True
     ws_warning = ""
@@ -471,7 +477,7 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
     if r12.required and r12.status != "done":
         missing.append(r12.id)
 
-    # --- R13: No Hard Failures ----------------------------------------------
+    # R13: No Hard Failures
     r13_ok = len(inp.hard_failures) == 0
     r13 = RequirementTraceItem(
         id=REQUIREMENT_IDS["NO_HARD_FAILURES"],
@@ -485,7 +491,7 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
     if r13.status != "done":
         missing.append(r13.id)
 
-    # --- R14: Grounding Requirement -----------------------------------------
+    # R14: Grounding Requirement
     r14_ok = (not inp.grounding_requirement) or (ev.web_searches > 0 or ev.web_fetches > 0)
     r14 = RequirementTraceItem(
         id=REQUIREMENT_IDS["GROUNDING"],
@@ -499,7 +505,7 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
     if r14.required and r14.status != "done":
         missing.append(r14.id)
 
-    # --- R15: Analysis Depth ------------------------------------------------
+    # R15: Analysis Depth
     min_reads = inp.analysis_depth_min_reads
     r15_required = min_reads > 0
     r15_ok = (not r15_required) or ev.unique_file_reads >= min_reads
@@ -515,7 +521,7 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
     if r15.required and r15.status != "done":
         missing.append(r15.id)
 
-    # --- R16: Module Coverage -----------------------------------------------
+    # R16: Module Coverage
     r16_required = inp.min_module_coverage > 0 and inp.module_count > 0
     coverage = ev.unique_file_reads
     r16_ok = (not r16_required) or coverage >= inp.min_module_coverage
@@ -533,7 +539,7 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
     if r16.required and r16.status != "done":
         missing.append(r16.id)
 
-    # --- R17: Deep Analysis Tools -------------------------------------------
+    # R17: Deep Analysis Tools
     r17_required = inp.min_deep_analysis_tools > 0
     r17_ok = (not r17_required) or inp.deep_analysis_tools >= inp.min_deep_analysis_tools
     r17 = RequirementTraceItem(
@@ -550,7 +556,7 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
     if r17.required and r17.status != "done":
         missing.append(r17.id)
 
-    # --- R18: Web Evidence --------------------------------------------------
+    # R18: Web Evidence
     r18_required = inp.min_web_searches > 0 or inp.min_web_fetches > 0
     r18_ok_search = ev.web_searches >= inp.min_web_searches
     r18_ok_fetch = ev.web_fetches >= inp.min_web_fetches
@@ -570,7 +576,31 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
     if r18.required and r18.status != "done":
         missing.append(r18.id)
 
-    # --- Aggregate outcome --------------------------------------------------
+    # R19: Verification Freshness (critical block, opt-in)
+    r19_required = inp.verify_freshness_enabled and inp.last_code_write_step > 0
+    r19_ok = (
+        not r19_required
+        or inp.last_verify_step >= inp.last_code_write_step
+    )
+    r19 = RequirementTraceItem(
+        id=REQUIREMENT_IDS["VERIFY_FRESHNESS"],
+        description="Code files verified after last modification",
+        required=r19_required,
+        status="done" if r19_ok else "blocked",
+        evidence=(
+            f"last_code_write_step={inp.last_code_write_step}, "
+            f"last_verify_step={inp.last_verify_step}"
+        ),
+        failure_reason="" if r19_ok else (
+            f"Code modified at step {inp.last_code_write_step} but no "
+            f"bash_execute ran after that step (last verify step "
+            f"{inp.last_verify_step}). Re-run the modified script before "
+            f"declaring done."
+        ),
+    )
+    requirements.append(r19)
+    if r19.required and r19.status != "done":
+        missing.append(r19.id)
 
     result: CompletionGateResult
 
@@ -605,6 +635,9 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
             critical_ids = {
                 REQUIREMENT_IDS["INTENT_RESOLVED"],
                 REQUIREMENT_IDS["NO_HARD_FAILURES"],
+                # R19 is critical: stale-verify must force a real re-run
+                # rather than being accepted as partial completion
+                REQUIREMENT_IDS["VERIFY_FRESHNESS"],
             }
             blocked_ids = {r.id for r in blocked_required}
             has_critical_block = bool(blocked_ids & critical_ids)

@@ -47,6 +47,7 @@ browser_app = typer.Typer(help="Browser relay and extension management")
 
 import contextlib
 
+from rune.cli.advisor_cmd import advisor_app
 from rune.cli.memory_cmd import memory_app
 from rune.cli.self_cmd import self_app
 
@@ -57,6 +58,7 @@ app.add_typer(db_app, name="db")
 app.add_typer(browser_app, name="browser")
 app.add_typer(self_app, name="self")
 app.add_typer(memory_app, name="memory")
+app.add_typer(advisor_app, name="advisor")
 
 
 # Global callback

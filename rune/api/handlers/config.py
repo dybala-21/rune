@@ -37,6 +37,7 @@ class ConfigGetResponse(BaseModel):
     active_model: ActiveModelInfo | None = Field(None, alias="activeModel")
     memory_tuning: dict[str, Any] | None = Field(None, alias="memoryTuning")
     safety_tuning: dict[str, Any] | None = Field(None, alias="safetyTuning")
+    advisor_enabled: bool = Field(False, alias="advisorEnabled")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -46,6 +47,7 @@ class ConfigPatchRequest(BaseModel):
     active_model: dict[str, str] | None = Field(None, alias="activeModel")
     memory_tuning: dict[str, Any] | None = Field(None, alias="memoryTuning")
     safety_tuning: dict[str, Any] | None = Field(None, alias="safetyTuning")
+    advisor_enabled: bool | None = Field(None, alias="advisorEnabled")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -66,12 +68,14 @@ def _get_rune_config():
 @router.get("", response_model=ConfigGetResponse, dependencies=[Depends(auth)])
 async def get_config_endpoint() -> ConfigGetResponse:
     """Retrieve the current daemon configuration."""
+    from rune.agent.advisor.runtime_toggle import is_advisor_enabled
     cfg = _get_rune_config()
     return ConfigGetResponse(
         proactiveEnabled=cfg.proactive.enabled,
         gatewayChannels=["api"],
         maxConcurrency=3,
         version=VERSION,
+        advisorEnabled=is_advisor_enabled(),
         activeModel={
             "provider": cfg.llm.default_provider or "openai",
             "model": cfg.llm.default_model,
@@ -127,6 +131,12 @@ async def patch_config(req: ConfigPatchRequest) -> ConfigPatchResponse:
 
     if req.safety_tuning is not None:
         log.info("config_patch", field="safetyTuning")
+        updated = True
+
+    if req.advisor_enabled is not None:
+        from rune.agent.advisor.runtime_toggle import set_advisor_enabled
+        set_advisor_enabled(req.advisor_enabled)
+        log.info("config_patch", field="advisorEnabled", value=req.advisor_enabled)
         updated = True
 
     return ConfigPatchResponse(updated=updated)
