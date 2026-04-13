@@ -127,3 +127,33 @@ class TestFormatInjection:
     def test_abort_with_no_steps(self):
         d = parse("NEXT: abort")
         assert "ABORT" in format_injection(d)
+
+    def test_stuck_trigger_uses_directive_language(self):
+        d = parse(
+            "NEXT: retry_tool:web_fetch\n1. fetch the API docs",
+            trigger="stuck",
+        )
+        s = format_injection(d)
+        assert "DIRECTIVE" in s
+        assert "stalled" in s
+        assert "step 1 IMMEDIATELY" in s
+        assert "web_fetch" in s
+
+    def test_reconcile_trigger_uses_mandatory_language(self):
+        d = parse(
+            "NEXT: switch_approach\n1. try a different URL",
+            trigger="reconcile",
+        )
+        s = format_injection(d)
+        assert "DIRECTIVE" in s
+        assert "not followed" in s
+        assert "different approach" in s
+
+    def test_early_trigger_uses_informational(self):
+        d = parse(
+            "NEXT: continue\n1. read the config file first",
+            trigger="early",
+        )
+        s = format_injection(d)
+        assert "[Advisor]" in s
+        assert "DIRECTIVE" not in s

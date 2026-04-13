@@ -793,6 +793,23 @@ class RuneApp:
                 self.console.print(
                     f"  [#888888]   model: {model}[/#888888]"
                 )
+                # Show resolved interaction mode for the current executor
+                try:
+                    from rune.agent.advisor.service import AdvisorConfig
+                    exec_full = f"{self._provider}:{self._model}" if self._model else ""
+                    if exec_full:
+                        cfg = AdvisorConfig.from_env(exec_full)
+                        if cfg.enabled:
+                            self.console.print(
+                                f"  [#888888]   mode:  {cfg.mode}[/#888888]"
+                            )
+                            if cfg.mode == "advice_only":
+                                self.console.print(
+                                    "  [#E5C07B]   note:  non-Claude + strong executor — "
+                                    "advisor effect is weak empirically[/#E5C07B]"
+                                )
+                except Exception:
+                    pass
             else:
                 self.console.print(
                     "  [#E5C07B]   model: <unset>  (set RUNE_ADVISOR_MODEL=provider/model)[/#E5C07B]"

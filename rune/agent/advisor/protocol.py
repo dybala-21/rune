@@ -14,6 +14,7 @@ AdvisorAction = Literal[
     "switch_approach",
     "abort",
     "need_reconcile",
+    "apply_patch",  # architect mode: advisor provides full file content
 ]
 
 
@@ -56,6 +57,11 @@ class AdvisorDecision:
     model: str = ""
     error_code: str | None = None
     trigger: AdvisorTrigger | None = None
+    # Architect mode (action == "apply_patch"):
+    #   patch = full file content to write
+    #   patch_target_file = absolute path
+    patch: str | None = None
+    patch_target_file: str | None = None
 
     @staticmethod
     def noop(error_code: str, trigger: AdvisorTrigger | None = None) -> AdvisorDecision:

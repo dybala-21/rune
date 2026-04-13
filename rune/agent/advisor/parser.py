@@ -32,8 +32,13 @@ _VERB_LINE_RE = re.compile(
 )
 _NUMBERED_LINE_RE = re.compile(r"^\s*(?:\d+\s*[.)]|[-*])\s*(.+)$")
 
+# Architect mode: FILE: <path> marker + fenced code block
+_FILE_LINE_RE = re.compile(r"^\s*FILE\s*:\s*(.+?)\s*$", re.MULTILINE | re.IGNORECASE)
+_CODE_BLOCK_RE = re.compile(r"```(?:[\w.+-]*)?\n(.*?)```", re.DOTALL)
+
 MAX_PLAN_STEPS = 5
 MAX_PLAN_WORDS = 100
+MAX_PATCH_BYTES = 200_000  # defend against runaway output
 
 
 def parse(
@@ -103,6 +108,24 @@ def parse(
         if len(plan_steps) >= MAX_PLAN_STEPS:
             break
 
+    # Architect mode: extract FILE: path + fenced code block.
+    # If either is missing or the block is too large, fall back gracefully
+    # to an advice-style continue decision so the loop never gets a
+    # half-formed patch.
+    patch: str | None = None
+    patch_target_file: str | None = None
+    if action == "apply_patch":
+        file_match = _FILE_LINE_RE.search(raw)
+        code_match = _CODE_BLOCK_RE.search(raw)
+        if file_match and code_match:
+            candidate = code_match.group(1)
+            if len(candidate.encode("utf-8", errors="ignore")) <= MAX_PATCH_BYTES:
+                patch = candidate
+                patch_target_file = file_match.group(1).strip()
+        if patch is None or not patch_target_file:
+            # Degrade to plain advice — loop will treat as informational
+            action = "continue"
+
     return AdvisorDecision(
         action=action,
         plan_steps=plan_steps,
@@ -114,19 +137,57 @@ def parse(
         output_tokens=output_tokens,
         latency_ms=latency_ms,
         trigger=trigger,
+        patch=patch,
+        patch_target_file=patch_target_file,
     )
 
 
 def format_injection(decision: AdvisorDecision) -> str:
-    """Render an ``AdvisorDecision`` as a system message to inject into
-    the executor's message list. Callers drop this via
-    ``_inject_system_message`` in the loop."""
+    """Render an AdvisorDecision with graduated strength.
+
+    Strongest → weakest:
+      APPLY_PATCH  : architect mode — advisor provides full file content.
+      STUCK/RECONCILE: directive — executor must follow.
+      EARLY/PRE_DONE: informational hint.
+    """
+    # Architect mode — strongest injection
+    if decision.action == "apply_patch" and decision.patch and decision.patch_target_file:
+        parts = [
+            "[ADVISOR PATCH — MANDATORY]",
+            f"The advisor has written corrected code for {decision.patch_target_file}.",
+            "Your NEXT action MUST be:",
+            f"  file_write(file_path='{decision.patch_target_file}', content=<PATCH below>)",
+            "Do NOT modify the patch. Do NOT write a different file.",
+            "After writing, run bash_execute to verify.",
+            "",
+            "<PATCH>",
+            decision.patch,
+            "</PATCH>",
+        ]
+        return "\n".join(parts)
+
     if not decision.plan_steps and decision.action == "continue":
         return ""
+
+    steps = [f"{i + 1}. {step}" for i, step in enumerate(decision.plan_steps)]
+
+    if decision.trigger in ("stuck", "reconcile"):
+        header = "[Advisor — DIRECTIVE]"
+        if decision.target_tool:
+            header += f" USE {decision.target_tool}"
+        prefix = (
+            "Your progress has stalled. Follow these steps IN ORDER:"
+            if decision.trigger == "stuck"
+            else "Previous advice was not followed. You MUST take a different approach:"
+        )
+        suffix = "Execute step 1 IMMEDIATELY in your next action."
+        parts = [header, prefix, ""] + steps + ["", suffix]
+        return "\n".join(parts)
+
+    # EARLY / PRE_DONE: informational
     header = f"[Advisor] {decision.action.upper()}"
     if decision.target_tool:
         header += f" → {decision.target_tool}"
-    if not decision.plan_steps:
+    if not steps:
         return header
-    body_lines = [f"{i + 1}. {step}" for i, step in enumerate(decision.plan_steps)]
-    return header + "\n" + "\n".join(body_lines)
+    return header + "\n" + "\n".join(steps)

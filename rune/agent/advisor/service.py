@@ -29,15 +29,50 @@ from rune.utils.logger import get_logger
 log = get_logger(__name__)
 
 
-_ADVISOR_SYSTEM_PROMPT = """You are an ADVISOR. You will NOT take actions. You will NOT call tools.
+_ADVISOR_SYSTEM_PROMPT = """You are an ADVISOR for a lightweight executor model.
 
-Respond in under 100 words, enumerated. Start with EXACTLY one verb line:
-NEXT: continue | retry_tool:<name> | switch_approach | abort | need_reconcile
+The executor is a WEAKER model that may ignore subtle hints.
+Your advice is injected into the executor's conversation — be CONCRETE.
 
-Then 1-5 numbered steps, no prose.
+RESPONSE FORMAT (strict):
+NEXT: continue | retry_tool:<exact_tool_name> | switch_approach | abort | need_reconcile
 
-If the executor's evidence contradicts a prior advisor note, prefer the
-evidence. Be concrete — name tools, file paths, and missing requirements.
+Then 1-5 numbered steps, under 100 words total.
+
+RULES:
+- NEVER say "consider" or "try to" — say "DO X" or "CALL tool_name"
+- For retry_tool, name the EXACT tool from the executor's toolset
+- If LAST_ADVISOR_NOTE shows the executor ignored previous advice,
+  recommend a DIFFERENT approach, not the same one repeated
+- If the same failure pattern appears 2+ times, recommend abort
+- Prefer evidence over assumptions — if the executor found something, use it
+"""
+
+
+_ADVISOR_SYSTEM_PROMPT_ARCHITECT = """You are an ADVISOR for a WEAK executor.
+
+The executor cannot reliably translate abstract advice into correct code.
+Instead of giving instructions, WRITE THE CORRECTED CODE YOURSELF.
+
+RESPONSE FORMAT (strict):
+NEXT: apply_patch:<short_reason>
+FILE: <absolute_path_to_file>
+```
+<complete corrected file content>
+```
+
+Rules:
+- Output the ENTIRE file content, not a diff. The executor will
+  overwrite the file with exactly what's inside the code fence.
+- Preserve existing imports, docstrings, and unrelated functions.
+- Use an ABSOLUTE path that appears in files_written or recent reads.
+- If the task cannot be solved by patching one file, OR if you lack
+  enough context to write correct code, fall back to:
+    NEXT: <verb>
+    1. <step>
+    ...
+  (same advice-only format as non-architect mode).
+- Do NOT include explanations outside the code fence in apply_patch mode.
 """
 
 # Per-provider soft timeout (ms). Reasoning models get longer budgets.
@@ -67,6 +102,10 @@ class AdvisorConfig:
     model: str
     timeout_ms: int
     max_calls: int = _DEFAULT_MAX_CALLS
+    # Interaction mode: "native" | "architect" | "advice_only"
+    mode: str = "advice_only"
+    executor_provider: str = ""
+    executor_model: str = ""
 
     @staticmethod
     def from_env(executor_model: str) -> AdvisorConfig:
@@ -102,11 +141,25 @@ class AdvisorConfig:
                 enabled=False, provider="", model="", timeout_ms=0,
             )
         timeout = _TIMEOUT_MS.get(adv_provider, _TIMEOUT_MS[""])
+        # Resolve interaction mode
+        from rune.agent.advisor.tiers import is_claude_native_eligible, resolve_advisor_mode
+        native_eligible = is_claude_native_eligible(
+            exec_provider, exec_model_name, adv_provider, adv_model,
+        )
+        mode = resolve_advisor_mode(
+            executor_provider=exec_provider,
+            executor_tier=pairing.executor_tier,
+            advisor_provider=adv_provider,
+            native_eligible=native_eligible,
+        )
         return AdvisorConfig(
             enabled=True,
             provider=adv_provider,
             model=adv_model,
             timeout_ms=timeout,
+            mode=mode,
+            executor_provider=exec_provider,
+            executor_model=exec_model_name,
         )
 
 
@@ -249,8 +302,13 @@ class AdvisorService:
         raw_model = f"{self._config.provider}/{self._config.model}"
         resolved_model, extra = _resolve_litellm_model(raw_model)
 
+        system_prompt = (
+            _ADVISOR_SYSTEM_PROMPT_ARCHITECT
+            if self._config.mode == "architect"
+            else _ADVISOR_SYSTEM_PROMPT
+        )
         messages = [
-            {"role": "system", "content": _ADVISOR_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": payload},
         ]
 

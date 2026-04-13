@@ -60,6 +60,34 @@ class PairingResult:
     reason: str = ""
 
 
+# Advisor interaction modes:
+#   "native"       — Anthropic executor + Opus advisor: server-side tool_use
+#   "architect"    — non-Anthropic executor: advisor outputs full-file patch
+#   "advice_only"  — fallback: advisor outputs natural-language steps only
+AdvisorMode = str  # Literal["native", "architect", "advice_only"]
+
+
+def resolve_advisor_mode(
+    executor_provider: str,
+    executor_tier: int,
+    advisor_provider: str,
+    native_eligible: bool,
+) -> AdvisorMode:
+    """Pick the advisor interaction pattern for this executor/advisor pair.
+
+    Native path is preferred when the pair is Anthropic-official.
+    Architect is used when the executor is non-Anthropic AND weak
+    (tier < 60) — the executor is unlikely to translate advice into
+    correct code, so the advisor writes the code directly.
+    Everything else falls back to advice-only (the current behavior).
+    """
+    if native_eligible:
+        return "native"
+    if executor_provider.lower() != "anthropic" and executor_tier < 60:
+        return "architect"
+    return "advice_only"
+
+
 def resolve_tier(provider: str, model: str) -> int:
     """Return the capability tier for (provider, model).
 
