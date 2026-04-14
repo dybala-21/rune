@@ -28,6 +28,11 @@ class PendingAdvice:
 
     observed_tools: list[str] = field(default_factory=list)
 
+    # Index into AdvisorBudget.call_history for merging verdicts
+    # into the persisted event record.
+    call_history_index: int = -1
+    advice_mode: str = ""
+
 
 @dataclass(frozen=True, slots=True)
 class ComplianceVerdict:
@@ -70,6 +75,9 @@ def build_pending(
     step: int,
     evidence_total: int,
     hard_failure_count: int,
+    *,
+    call_history_index: int = -1,
+    advice_mode: str = "",
 ) -> PendingAdvice:
     """Create a PendingAdvice from an advisor decision.
 
@@ -86,4 +94,6 @@ def build_pending(
         expected_action=decision.action,
         baseline_evidence=evidence_total,
         baseline_hard_failures=hard_failure_count,
+        call_history_index=call_history_index,
+        advice_mode=advice_mode,
     )

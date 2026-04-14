@@ -99,6 +99,35 @@ def _render_p3(req: AdvisorRequest) -> list[str]:
     return [f"LAST_ADVISOR_NOTE: {note}"]
 
 
+# Architect mode: bytes per file and total. Bounded to stay under the
+# advisor context window. 10KB per file, 30KB total.
+_MAX_FILE_BYTES = 10_000
+_MAX_TOTAL_FILE_BYTES = 30_000
+
+
+def _render_file_contents(req: AdvisorRequest) -> list[str]:
+    """Render file_contents for architect mode as fenced code blocks."""
+    if not req.file_contents:
+        return []
+    out: list[str] = ["FILE_CONTENTS:"]
+    total = 0
+    for path, content in req.file_contents.items():
+        if not content:
+            continue
+        truncated = content
+        if len(truncated) > _MAX_FILE_BYTES:
+            truncated = truncated[:_MAX_FILE_BYTES] + "\n... [truncated]"
+        if total + len(truncated) > _MAX_TOTAL_FILE_BYTES:
+            out.append(f"  [{path}] (omitted, budget exhausted)")
+            continue
+        total += len(truncated)
+        out.append(f"FILE: {path}")
+        out.append("```")
+        out.append(truncated)
+        out.append("```")
+    return out
+
+
 def build_payload(
     req: AdvisorRequest,
     target_tokens: int = DEFAULT_TARGET_TOKENS,
@@ -110,7 +139,10 @@ def build_payload(
     dropped if the budget is tight.
     """
     p0 = _render_p0(req)
-    p0_text = "\n".join(p0)
+    # Architect file contents go in the high-priority section.
+    file_block = _render_file_contents(req)
+    p0_plus = p0 + ([""] + file_block if file_block else [])
+    p0_text = "\n".join(p0_plus)
     p0_tokens = estimate_tokens(p0_text)
     if p0_tokens >= target_tokens:
         return p0_text
@@ -124,7 +156,7 @@ def build_payload(
     p1 = _render_p1(req, budget_chars=max(200, remaining_chars // 2))
     sections.insert(0, (1, p1))
 
-    out = list(p0)
+    out = list(p0_plus)
     used_chars = 0
     for _prio, lines in sections:
         if not lines:

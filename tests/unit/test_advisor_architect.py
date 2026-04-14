@@ -128,6 +128,59 @@ class TestArchitectMode:
         assert mode == "architect"
 
 
+class TestContextFitterFileContents:
+    def test_file_contents_rendered_in_payload(self):
+        from rune.agent.advisor.context_fitter import build_payload
+        from rune.agent.advisor.protocol import AdvisorRequest
+
+        req = AdvisorRequest(
+            trigger="stuck",
+            goal="fix parse_time",
+            classification_summary="code_modify complex=True",
+            activity_phase="implementation",
+            step=5,
+            token_budget_frac=0.4,
+            evidence_snapshot={"writes": 1},
+            gate_state=None,
+            stall_state={},
+            recent_messages=[],
+            files_written=["/ws/x.py"],
+            file_contents={"/ws/x.py": "def broken():\n    pass\n"},
+        )
+        payload = build_payload(req)
+        assert "FILE_CONTENTS:" in payload
+        assert "/ws/x.py" in payload
+        assert "def broken" in payload
+
+    def test_empty_file_contents_omitted(self):
+        from rune.agent.advisor.context_fitter import build_payload
+        from rune.agent.advisor.protocol import AdvisorRequest
+
+        req = AdvisorRequest(
+            trigger="early", goal="x", classification_summary="",
+            activity_phase="exploration", step=1, token_budget_frac=0.1,
+            evidence_snapshot={}, gate_state=None, stall_state={},
+            recent_messages=[], files_written=[],
+        )
+        payload = build_payload(req)
+        assert "FILE_CONTENTS:" not in payload
+
+    def test_oversized_file_truncated(self):
+        from rune.agent.advisor.context_fitter import build_payload
+        from rune.agent.advisor.protocol import AdvisorRequest
+
+        big = "x = 1\n" * 3000  # ~18KB > 10KB per-file cap
+        req = AdvisorRequest(
+            trigger="stuck", goal="", classification_summary="",
+            activity_phase="", step=1, token_budget_frac=0.0,
+            evidence_snapshot={}, gate_state=None, stall_state={},
+            recent_messages=[], files_written=["/ws/big.py"],
+            file_contents={"/ws/big.py": big},
+        )
+        payload = build_payload(req)
+        assert "[truncated]" in payload
+
+
 class TestPendingAdviceForPatch:
     def test_apply_patch_expects_file_write(self):
         raw = """NEXT: apply_patch:fix

@@ -34,6 +34,8 @@ class AdvisorRequest:
     recent_messages: list[dict[str, Any]]
     files_written: list[str]
     last_advisor_note: str | None = None
+    # Architect mode only. Keyed by absolute path, values are raw file text.
+    file_contents: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

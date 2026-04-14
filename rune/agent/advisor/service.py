@@ -186,6 +186,11 @@ class AdvisorService:
         return self._config.model
 
     @property
+    def mode(self) -> str:
+        """Interaction mode: 'native' | 'architect' | 'advice_only'."""
+        return self._config.mode
+
+    @property
     def model_full(self) -> str:
         """Return provider-qualified advisor model id.
 

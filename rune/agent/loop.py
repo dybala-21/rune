@@ -123,6 +123,33 @@ def _effective_max_steps(budget: int) -> int:
     return 20
 
 
+def _compute_tool_rounds(
+    classification: Any,
+    executor_model: str,
+    advisor_enabled: bool,
+) -> int:
+    """Tool-round budget by task complexity and executor tier."""
+    from rune.agent.advisor.tiers import extract_provider_and_model, resolve_tier
+
+    provider, model_name = extract_provider_and_model(executor_model)
+    tier = resolve_tier(provider, model_name)
+
+    is_complex = getattr(classification, "is_complex_coding", False)
+    base = 15 if is_complex else 8
+
+    # Modest tier bonus. Larger bonuses burn tokens on weak models
+    # that keep retrying the same failing tool.
+    if tier < 50:
+        tier_bonus = 2
+    elif tier < 70:
+        tier_bonus = 1
+    else:
+        tier_bonus = 0
+
+    advisor_discount = -2 if advisor_enabled else 0
+    return max(base + tier_bonus + advisor_discount, base)
+
+
 # Phase-adaptive observation windows (#12)
 
 _PHASE_WINDOWS: dict[str, tuple[int, int]] = {
@@ -932,8 +959,10 @@ class NativeAgentLoop(EventEmitter):
                 max_uses=_native_cfg.max_uses,
             )
 
-        # Scale tool rounds by complexity: weaker models call tools one-at-a-time
-        _tool_rounds = 15 if getattr(classification, "is_complex_coding", False) else 8
+        # Scale tool rounds by complexity and executor capability.
+        _tool_rounds = _compute_tool_rounds(
+            classification, model, advisor_service.enabled,
+        )
         agent = LiteLLMAgent(
             model=model,
             system_prompt=system_prompt,
@@ -1007,6 +1036,26 @@ class NativeAgentLoop(EventEmitter):
                 hard_failures=len(self._hard_failures),
             )
 
+        def _load_file_contents_for_architect() -> dict[str, str]:
+            """Read files_written from disk for architect-mode advisor.
+
+            Only fires when advisor mode is architect. Bounded to the
+            5 most recent files, 20KB per file. Read errors are skipped
+            so advisor calls never fail on I/O.
+            """
+            if advisor_service.mode != "architect":
+                return {}
+            contents: dict[str, str] = {}
+            for path in list(self._files_written)[-5:]:
+                try:
+                    with open(path, encoding="utf-8", errors="replace") as f:
+                        data = f.read(20_000)
+                    contents[path] = data
+                except Exception as exc:
+                    log.debug("architect_file_read_failed",
+                              path=path, error=str(exc)[:100])
+            return contents
+
         def _make_advisor_request(trigger: str, gate_result=None):
             return build_advisor_request(
                 trigger=trigger,
@@ -1025,6 +1074,7 @@ class NativeAgentLoop(EventEmitter):
                 files_written=self._files_written,
                 hard_failures=list(self._hard_failures),
                 last_advisor_note=_last_advisor_raw or None,
+                file_contents=_load_file_contents_for_architect(),
             )
 
         # BCT: deferred compliance tracking for advisor plans
@@ -1059,6 +1109,18 @@ class NativeAgentLoop(EventEmitter):
                     else:
                         log.info("advisor_compliance_ignored",
                                  reason=_verdict.reason, step=self._step)
+                    # Merge verdict back into call_history so persistence
+                    # writes it to advisor_events (Plan B measurement).
+                    idx = _pending_advice.call_history_index
+                    history = advisor_service.budget.call_history
+                    if 0 <= idx < len(history):
+                        history[idx]["compliance_verdict"] = _verdict.reason
+                        history[idx]["expected_tool"] = _pending_advice.expected_tool or ""
+                        history[idx]["observed_tools"] = ",".join(_pending_advice.observed_tools[:20])
+                        history[idx]["step_at_call"] = _pending_advice.injected_at_step
+                        history[idx]["pre_call_evidence"] = _pending_advice.baseline_evidence
+                        history[idx]["post_call_evidence"] = _ev_total
+                        history[idx]["advice_mode"] = _pending_advice.advice_mode
                     _pending_advice = None
 
             # Site A: advisor hook (skipped when native path active)
@@ -1084,6 +1146,8 @@ class NativeAgentLoop(EventEmitter):
                     _pending_advice = build_pending(
                         _adv_dec, self._step,
                         _ev_total, len(self._hard_failures),
+                        call_history_index=len(advisor_service.budget.call_history) - 1,
+                        advice_mode=advisor_service.mode,
                     )
 
             if self._stall.is_stalled:
@@ -1648,6 +1712,8 @@ class NativeAgentLoop(EventEmitter):
                             _pending_advice = build_pending(
                                 _adv_dec, self._step,
                                 _ev_total, len(self._hard_failures),
+                                call_history_index=len(advisor_service.budget.call_history) - 1,
+                                advice_mode=advisor_service.mode,
                             )
                     if _gate_blocked_count >= 5:
                         log.warning("max_gate_blocked", step=self._step,
@@ -1787,6 +1853,13 @@ class NativeAgentLoop(EventEmitter):
                         latency_ms=int(entry.get("latency_ms") or 0),
                         plan_injected=bool(entry.get("plan_injected")),
                         stuck_reason=entry.get("stuck_reason", "") or "",
+                        advice_mode=entry.get("advice_mode", "") or "",
+                        compliance_verdict=entry.get("compliance_verdict", "") or "",
+                        expected_tool=entry.get("expected_tool", "") or "",
+                        observed_tools=entry.get("observed_tools", "") or "",
+                        step_at_call=int(entry.get("step_at_call") or 0),
+                        pre_call_evidence=int(entry.get("pre_call_evidence") or 0),
+                        post_call_evidence=int(entry.get("post_call_evidence") or 0),
                     )
                 _store.update_advisor_outcome(
                     session_id=self._session_id,

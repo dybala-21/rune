@@ -254,7 +254,15 @@ CREATE TABLE IF NOT EXISTS advisor_events (
     episode_outcome TEXT DEFAULT '',
     plan_injected INTEGER DEFAULT 0,
     stuck_reason TEXT DEFAULT '',
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    -- v10: advisor mode and compliance verdict persistence
+    advice_mode TEXT DEFAULT '',
+    compliance_verdict TEXT DEFAULT '',
+    expected_tool TEXT DEFAULT '',
+    observed_tools TEXT DEFAULT '',
+    step_at_call INTEGER DEFAULT 0,
+    pre_call_evidence INTEGER DEFAULT 0,
+    post_call_evidence INTEGER DEFAULT 0
 );
 
 -- Indexes
@@ -274,7 +282,7 @@ CREATE INDEX IF NOT EXISTS idx_advisor_events_created ON advisor_events(created_
 
 # MemoryStore
 
-_CURRENT_SCHEMA_VERSION = 9
+_CURRENT_SCHEMA_VERSION = 10
 
 
 class MemoryStore:
@@ -435,6 +443,22 @@ class MemoryStore:
                 )
             except apsw.SQLError:
                 pass  # Column already exists
+
+        if current_version < 10:
+            # Per-call advisor mode and compliance verdict persistence.
+            for stmt in [
+                "ALTER TABLE advisor_events ADD COLUMN advice_mode TEXT DEFAULT ''",
+                "ALTER TABLE advisor_events ADD COLUMN compliance_verdict TEXT DEFAULT ''",
+                "ALTER TABLE advisor_events ADD COLUMN expected_tool TEXT DEFAULT ''",
+                "ALTER TABLE advisor_events ADD COLUMN observed_tools TEXT DEFAULT ''",
+                "ALTER TABLE advisor_events ADD COLUMN step_at_call INTEGER DEFAULT 0",
+                "ALTER TABLE advisor_events ADD COLUMN pre_call_evidence INTEGER DEFAULT 0",
+                "ALTER TABLE advisor_events ADD COLUMN post_call_evidence INTEGER DEFAULT 0",
+            ]:
+                try:
+                    conn.execute(stmt)
+                except apsw.SQLError:
+                    pass  # Column already exists
 
         conn.execute(f"PRAGMA user_version = {_CURRENT_SCHEMA_VERSION}")
         log.info(
@@ -1369,6 +1393,13 @@ class MemoryStore:
         latency_ms: int = 0,
         plan_injected: bool = False,
         stuck_reason: str = "",
+        advice_mode: str = "",
+        compliance_verdict: str = "",
+        expected_tool: str = "",
+        observed_tools: str = "",
+        step_at_call: int = 0,
+        pre_call_evidence: int = 0,
+        post_call_evidence: int = 0,
     ) -> int:
         """Insert one advisor event. Returns row id."""
         now = datetime.now(UTC).isoformat()
@@ -1376,12 +1407,19 @@ class MemoryStore:
             """INSERT INTO advisor_events
                (session_id, trigger, action, provider, model,
                 output_tokens, latency_ms, episode_outcome,
-                plan_injected, stuck_reason, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?)""",
+                plan_injected, stuck_reason, created_at,
+                advice_mode, compliance_verdict, expected_tool,
+                observed_tools, step_at_call,
+                pre_call_evidence, post_call_evidence)
+               VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?,
+                       ?, ?, ?, ?, ?, ?, ?)""",
             (
                 session_id, trigger, action, provider, model,
                 int(output_tokens), int(latency_ms),
                 int(plan_injected), stuck_reason, now,
+                advice_mode, compliance_verdict, expected_tool,
+                observed_tools, int(step_at_call),
+                int(pre_call_evidence), int(post_call_evidence),
             ),
         )
         (row_id,) = self.conn.execute(

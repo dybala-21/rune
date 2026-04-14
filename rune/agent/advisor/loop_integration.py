@@ -71,6 +71,7 @@ def build_advisor_request(
     files_written: set[str] | list[str],
     hard_failures: list[str],
     last_advisor_note: str | None = None,
+    file_contents: dict[str, str] | None = None,
 ) -> AdvisorRequest:
     """Full snapshot construction — only called after should_call==True.
 
@@ -117,6 +118,7 @@ def build_advisor_request(
         recent_messages=msgs,
         files_written=list(files_written),
         last_advisor_note=last_advisor_note,
+        file_contents=file_contents or {},
     )
 
 
