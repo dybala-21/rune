@@ -101,9 +101,15 @@ def _resolve_api_keys(data: dict[str, Any]) -> dict[str, Any]:
     if data.get("gemini_api_key"):
         os.environ.setdefault("GEMINI_API_KEY", data["gemini_api_key"])
 
-    # Google Cloud / Vertex AI: config > env > ~/.rune/google-credentials.json
+    # Google Cloud / Vertex AI:
+    #   config > env > .rune/google-credentials.json (project)
+    #         > ~/.rune/google-credentials.json (user)
     if "google_credentials_file" not in data or data["google_credentials_file"] is None:
         data["google_credentials_file"] = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if data.get("google_credentials_file") is None:
+        project_creds = Path.cwd() / ".rune" / "google-credentials.json"
+        if project_creds.is_file():
+            data["google_credentials_file"] = str(project_creds)
     if data.get("google_credentials_file") is None:
         default_creds = rune_home() / "google-credentials.json"
         if default_creds.is_file():

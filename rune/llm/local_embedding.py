@@ -11,6 +11,8 @@ models for local embedding generation.  Matches the TS original:
 from __future__ import annotations
 
 import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -74,10 +76,21 @@ class LocalEmbeddingEngine:
         self._model_id: str | None = None
         self._model_config: EmbeddingModelConfig | None = None
         self._initialized = False
-        self._initializing = False
         self._init_failovers = 0
         self._embed_failovers = 0
         self._last_error: str | None = None
+        # Thread safety: Llama is not thread-safe. Serialize all access.
+        # Sync lock protects direct embed_sync / initialize callers.
+        self._sync_lock = threading.Lock()
+        # Dedicated single-worker executor: caps concurrent native calls
+        # to one thread regardless of caller count.
+        self._executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="rune-embed",
+        )
+        # Async lock: lazily bound to the running loop. Protects concurrent
+        # awaits on embed_single / embed. None until first use because the
+        # loop may not exist at __init__ time (singleton constructed early).
+        self._async_lock: asyncio.Lock | None = None
 
     @property
     def dimensions(self) -> int:
@@ -197,15 +210,12 @@ class LocalEmbeddingEngine:
             )
             model_id = DEFAULT_MODEL
 
-        if self._initialized and self._model_id == model_id:
-            return
-        if self._initializing:
-            return
+        with self._sync_lock:
+            # Re-check after acquiring lock — another caller may have won the race.
+            if self._initialized and self._model_id == model_id:
+                return
 
-        self._initializing = True
-        last_error: Exception | None = None
-
-        try:
+            last_error: Exception | None = None
             candidates = self._same_dim_candidates(model_id)
             for candidate in candidates:
                 try:
@@ -226,83 +236,96 @@ class LocalEmbeddingEngine:
                         model_id=candidate,
                         error=self._last_error,
                     )
-
             raise last_error or RuntimeError("No embedding model could be initialized")
-        finally:
-            self._initializing = False
 
     # -- Embed (matches TS embed) -------------------------------------------
 
     def embed_sync(self, text: str) -> list[float]:
-        """Generate embedding for a single text (synchronous)."""
+        """Generate embedding for a single text (synchronous, thread-safe)."""
+        # initialize() acquires the lock internally; call before entering
+        # our critical section to avoid a re-entrant acquire.
         if not self._initialized or self._model is None:
             self.initialize()
 
-        try:
-            # Suppress llama-cpp runtime warnings on each embed call
-            import contextlib
-            import io
-            stderr_trap = io.StringIO()
-            with contextlib.redirect_stderr(stderr_trap):
-                result = self._model.embed(text)
-            # llama-cpp-python returns list[float] or list[list[float]]
-            if result and isinstance(result[0], list):
-                return result[0]
-            return result
-        except Exception as exc:
-            failed_model = self._model_id or DEFAULT_MODEL
-            self._last_error = str(exc)[:200]
-            log.warning(
-                "embedding_failed_trying_failover",
-                model_id=failed_model,
-                error=self._last_error,
-            )
-
-            # Try same-dimension failover
-            candidates = self._same_dim_candidates(failed_model)
-            for candidate in candidates:
-                if candidate == failed_model:
-                    continue
-                try:
-                    self._activate_model(candidate)
+        with self._sync_lock:
+            try:
+                import contextlib
+                import io
+                stderr_trap = io.StringIO()
+                with contextlib.redirect_stderr(stderr_trap):
                     result = self._model.embed(text)
-                    self._embed_failovers += 1
-                    if result and isinstance(result[0], list):
-                        return result[0]
-                    return result
-                except Exception as fb_exc:
-                    self._last_error = str(fb_exc)[:200]
-                    log.warning(
-                        "embedding_failover_failed",
-                        from_model=failed_model,
-                        to_model=candidate,
-                        error=self._last_error,
-                    )
+                if result and isinstance(result[0], list):
+                    return result[0]
+                return result
+            except Exception as exc:
+                failed_model = self._model_id or DEFAULT_MODEL
+                self._last_error = str(exc)[:200]
+                log.warning(
+                    "embedding_failed_trying_failover",
+                    model_id=failed_model,
+                    error=self._last_error,
+                )
 
-            raise RuntimeError(f"All embedding models failed: {exc}") from exc
+                candidates = self._same_dim_candidates(failed_model)
+                for candidate in candidates:
+                    if candidate == failed_model:
+                        continue
+                    try:
+                        self._activate_model(candidate)
+                        result = self._model.embed(text)
+                        self._embed_failovers += 1
+                        if result and isinstance(result[0], list):
+                            return result[0]
+                        return result
+                    except Exception as fb_exc:
+                        self._last_error = str(fb_exc)[:200]
+                        log.warning(
+                            "embedding_failover_failed",
+                            from_model=failed_model,
+                            to_model=candidate,
+                            error=self._last_error,
+                        )
+
+                raise RuntimeError(f"All embedding models failed: {exc}") from exc
 
     def embed_batch_sync(self, texts: list[str]) -> list[list[float]]:
         """Generate embeddings for multiple texts (synchronous)."""
+        # Iterate; each embed_sync call acquires the sync lock individually.
+        # Lock is re-entrant-safe: we don't hold it across iterations so
+        # other callers can interleave per-item.
         return [self.embed_sync(t) for t in texts]
 
+    def _get_async_lock(self) -> asyncio.Lock:
+        """Lazily bind the async lock to the current running loop."""
+        if self._async_lock is None:
+            self._async_lock = asyncio.Lock()
+        return self._async_lock
+
     async def embed_single(self, text: str) -> list[float]:
-        """Generate embedding (async, runs in executor)."""
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self.embed_sync, text)
+        """Generate embedding (async, serialized via async lock + dedicated executor)."""
+        async with self._get_async_lock():
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(self._executor, self.embed_sync, text)
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
-        """Generate embeddings (async, runs in executor)."""
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self.embed_batch_sync, texts)
+        """Generate embeddings (async, serialized via async lock + dedicated executor)."""
+        async with self._get_async_lock():
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                self._executor, self.embed_batch_sync, texts,
+            )
 
     def dispose(self) -> None:
-        """Release model resources."""
-        if self._model is not None:
-            del self._model
-            self._model = None
-        self._initialized = False
-        self._model_id = None
-        self._model_config = None
+        """Release model resources and shut down the embedding executor."""
+        with self._sync_lock:
+            if self._model is not None:
+                del self._model
+                self._model = None
+            self._initialized = False
+            self._model_id = None
+            self._model_config = None
+        # Shut down without blocking — pending tasks drain naturally.
+        self._executor.shutdown(wait=False)
 
 
 # Singleton + compat API

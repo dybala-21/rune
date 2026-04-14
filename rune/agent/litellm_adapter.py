@@ -46,15 +46,17 @@ class UsageLimits:
 # Tool schema conversion
 
 def tools_to_openai_schema(tools: list[Any]) -> list[dict[str, Any]]:
-    """Convert PydanticAI Tool objects or raw callables to OpenAI tool format.
+    """Convert tool objects to OpenAI tool format. Advisor-type schemas
+    (``advisor_*``) pass through unwrapped."""
+    from rune.agent.advisor.native_tool import is_native_schema
 
-    Handles three cases:
-    1. PydanticAI Tool with .definition attribute
-    2. PydanticAI Tool with ._schema / .json_schema attribute
-    3. Raw async functions (from fallback build_tool_set when PydanticAI absent)
-    """
     result: list[dict[str, Any]] = []
     for tool in tools:
+        # Passthrough for Anthropic native server-side tools.
+        if hasattr(tool, "json_schema") and is_native_schema(tool.json_schema):
+            result.append(dict(tool.json_schema))
+            continue
+
         name = ""
         description = ""
         parameters: dict[str, Any] = {"type": "object", "properties": {}}
@@ -150,11 +152,79 @@ _PROVIDER_EXTRA: dict[str, dict[str, str]] = {
 }
 
 
+def _vertex_active() -> bool:
+    """True when GOOGLE_APPLICATION_CREDENTIALS points to an existing file."""
+    import os as _os
+    path = _os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+    if not (path and _os.path.isfile(path)):
+        return False
+    global _VERTEX_SDK_WARNED
+    try:
+        import google.auth  # noqa: F401
+    except ImportError:
+        if not _VERTEX_SDK_WARNED:
+            log.warning(
+                "vertex_sdk_missing",
+                hint="install with: uv pip install 'rune-ai[vertex]'",
+            )
+            _VERTEX_SDK_WARNED = True
+    return True
+
+
+_VERTEX_SDK_WARNED: bool = False
+
+
+def _vertex_extra() -> dict[str, str]:
+    """Return vertex_project / vertex_location kwargs for LiteLLM."""
+    import os as _os
+    extra: dict[str, str] = {}
+    proj = _os.environ.get("VERTEX_PROJECT") or _os.environ.get("VERTEXAI_PROJECT")
+    loc = (
+        _os.environ.get("VERTEX_LOCATION")
+        or _os.environ.get("VERTEXAI_LOCATION")
+        or "us-central1"
+    )
+    if proj:
+        extra["vertex_project"] = proj
+    extra["vertex_location"] = loc
+    return extra
+
+
+_MODEL_OUTPUT_CAP_CACHE: dict[str, int] = {}
+
+
+def _model_output_cap(model: str) -> int | None:
+    """Return the model's max output-token limit (cached). None if unknown."""
+    cached = _MODEL_OUTPUT_CAP_CACHE.get(model)
+    if cached is not None:
+        return cached if cached > 0 else None
+    try:
+        import litellm as _litellm
+        info = _litellm.get_model_info(model) or {}
+        limit = info.get("max_output_tokens") or info.get("max_tokens")
+        if isinstance(limit, int) and limit > 0:
+            _MODEL_OUTPUT_CAP_CACHE[model] = limit
+            return limit
+    except Exception:
+        pass
+    _MODEL_OUTPUT_CAP_CACHE[model] = 0  # sentinel: unknown
+    return None
+
+
+def _clamp_max_tokens(model: str, max_tokens: int) -> int:
+    """Clamp a desired max_tokens to the model's hard output cap."""
+    cap = _model_output_cap(model)
+    if cap is None:
+        return max_tokens
+    return min(max_tokens, cap)
+
+
 def _resolve_litellm_model(model_str: str) -> tuple[str, dict[str, str]]:
     """Convert 'provider:model' to LiteLLM format.
 
     Returns (model_id, extra_kwargs) where extra_kwargs contains
-    provider-specific parameters like api_base for ollama.
+    provider-specific parameters like api_base for ollama or
+    vertex_project/vertex_location for Vertex AI.
     """
     # Already in LiteLLM format (e.g. "ollama/gemma4:26b" from failover)
     if "/" in model_str:
@@ -163,10 +233,20 @@ def _resolve_litellm_model(model_str: str) -> tuple[str, dict[str, str]]:
             model_name = model_str[len("ollama/"):]
             extra = dict(_PROVIDER_EXTRA.get("ollama", {}))
             return f"openai/{model_name}", extra
+        # Reroute gemini/ to vertex_ai/ when service-account creds are active
+        if model_str.startswith("gemini/") and _vertex_active():
+            model_name = model_str[len("gemini/"):]
+            return f"vertex_ai/{model_name}", _vertex_extra()
+        if model_str.startswith("vertex_ai/"):
+            return model_str, _vertex_extra()
         return model_str, {}
     # RUNE format: "provider:model"
     if ":" in model_str:
         provider, model_name = model_str.split(":", 1)
+        if provider == "gemini" and _vertex_active():
+            return f"vertex_ai/{model_name}", _vertex_extra()
+        if provider == "vertex_ai":
+            return f"vertex_ai/{model_name}", _vertex_extra()
         prefix = _PROVIDER_PREFIX.get(provider, "")
         extra = dict(_PROVIDER_EXTRA.get(provider, {}))
         return f"{prefix}{model_name}", extra
@@ -195,6 +275,7 @@ class StreamResult:
         max_tool_rounds: int = 10,
         tool_call_policy: Any = None,
         provider_extra: dict[str, str] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> None:
         self._model = model
         self._messages = list(messages)
@@ -205,13 +286,15 @@ class StreamResult:
         self._request_tokens_limit = request_tokens_limit
         self._response_tokens_limit = response_tokens_limit
         self._provider_extra = provider_extra or {}
+        self._extra_headers = extra_headers or {}
         self._max_tool_rounds = max_tool_rounds
         self._collected_text = ""
         self._usage = StreamUsage()
         self._stream: Any = None
-        self._tool_result_cache: dict[str, str] = {}  # dedup repeated tool calls
-        self._tool_fail_streak: dict[str, int] = {}  # consecutive failures per tool
-        self._blocked_groups: set[str] = set()  # tool groups blocked after repeated failures
+        self._tool_result_cache: dict[str, str] = {}
+        self._tool_fail_streak: dict[str, int] = {}
+        self._blocked_groups: set[str] = set()
+        self._native_advisor_events: list[dict[str, Any]] = []
         # Tool call policy for weak-model guardrails
         if tool_call_policy is None:
             from rune.agent.tool_call_policy import ToolCallPolicy
@@ -268,17 +351,24 @@ class StreamResult:
 
             _tools = self._tool_schemas or None
 
-            self._stream = await litellm.acompletion(
-                model=self._model,
-                messages=self._messages,
-                tools=_tools,
-                stream=True,
-                temperature=self._temperature,
-                max_tokens=min(self._max_tokens, self._response_tokens_limit),
-                stream_options={"include_usage": True},
-                **self._provider_extra,
-                **extra,
+            _effective_max = _clamp_max_tokens(
+                self._model,
+                min(self._max_tokens, self._response_tokens_limit),
             )
+            _acompletion_kwargs: dict[str, Any] = {
+                "model": self._model,
+                "messages": self._messages,
+                "tools": _tools,
+                "stream": True,
+                "temperature": self._temperature,
+                "max_tokens": _effective_max,
+                "stream_options": {"include_usage": True},
+            }
+            if self._extra_headers:
+                _acompletion_kwargs["extra_headers"] = dict(self._extra_headers)
+            _acompletion_kwargs.update(self._provider_extra)
+            _acompletion_kwargs.update(extra)
+            self._stream = await litellm.acompletion(**_acompletion_kwargs)
 
             text_this_turn = ""
             tool_calls_by_index: dict[int, dict[str, Any]] = {}
@@ -366,7 +456,9 @@ class StreamResult:
                 ):
                     _output_recovery_count += 1
                     if _output_recovery_count == 1:
-                        self._max_tokens = min(self._max_tokens * 2, 64_000)
+                        self._max_tokens = _clamp_max_tokens(
+                            self._model, min(self._max_tokens * 2, 64_000),
+                        )
                         log.info(
                             "output_truncation_escalate",
                             new_max=self._max_tokens,
@@ -647,11 +739,21 @@ class StreamResult:
             return f"Error executing {name}: {exc}"
 
     def _update_usage(self, usage: Any) -> None:
-        """Extract token counts from a usage object."""
+        """Extract token counts; parse native advisor events when beta is active."""
         self._usage.input_tokens += getattr(usage, "prompt_tokens", 0) or 0
         self._usage.output_tokens += getattr(usage, "completion_tokens", 0) or 0
         self._usage.prompt_tokens = self._usage.input_tokens
         self._usage.completion_tokens = self._usage.output_tokens
+        if self._extra_headers.get("anthropic-beta"):
+            from rune.agent.advisor.native_tool import (
+                extract_synthetic_events_from_usage,
+            )
+            synthetic = extract_synthetic_events_from_usage(usage)
+            if synthetic:
+                self._native_advisor_events.extend(synthetic)
+
+    def native_advisor_events(self) -> list[dict[str, Any]]:
+        return list(self._native_advisor_events)
 
     def usage(self) -> StreamUsage:
         """Return accumulated token usage."""
@@ -690,15 +792,19 @@ class LiteLLMAgent:
         temperature: float = 0.0,
         max_tool_rounds: int = 10,
         tool_call_policy: Any = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> None:
         self._model, self._provider_extra = _resolve_litellm_model(model)
         self._system_prompt = system_prompt
         self._tools = tools or []
         self._tool_schemas = tools_to_openai_schema(self._tools)
         self._tool_lookup = _build_tool_lookup(self._tools)
-        self._max_tokens = max_tokens
+        self._requested_max_tokens = max_tokens
+        self._max_tokens = _clamp_max_tokens(self._model, max_tokens)
         self._temperature = temperature
         self._max_tool_rounds = max_tool_rounds
+        self._extra_headers: dict[str, str] = dict(extra_headers or {})
+        self._last_stream_result: StreamResult | None = None
         if tool_call_policy is None:
             from rune.agent.tool_call_policy import ToolCallPolicy
             tool_call_policy = ToolCallPolicy()
@@ -771,13 +877,23 @@ class LiteLLMAgent:
             max_tool_rounds=self._max_tool_rounds,
             tool_call_policy=self._policy,
             provider_extra=self._provider_extra,
+            extra_headers=self._extra_headers,
         )
+        self._last_stream_result = stream_result
 
         yield stream_result
+
+    def native_advisor_events(self) -> list[dict[str, Any]]:
+        if self._last_stream_result is None:
+            return []
+        return self._last_stream_result.native_advisor_events()
 
     def update_model(self, model: str) -> None:
         """Switch the underlying model (used by failover)."""
         self._model, self._provider_extra = _resolve_litellm_model(model)
+        self._max_tokens = _clamp_max_tokens(
+            self._model, self._requested_max_tokens,
+        )
 
     def update_tools(self, tools: list[Any]) -> None:
         """Replace the tool set (used when tools change mid-loop)."""

@@ -27,6 +27,17 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeVar
 
+from rune.agent.advisor import AdvisorService
+from rune.agent.advisor.compliance import (
+    PendingAdvice,
+    build_pending,
+    check_compliance,
+)
+from rune.agent.advisor.loop_integration import (
+    build_advisor_request,
+    build_policy_input,
+    maybe_consult,
+)
 from rune.agent.checkpoint import CheckpointData, CheckpointManager
 from rune.agent.cognitive_cache import SessionToolCache
 from rune.agent.completion_gate import (
@@ -34,7 +45,7 @@ from rune.agent.completion_gate import (
     ExecutionEvidenceSnapshot,
     evaluate_completion_gate,
 )
-from rune.agent.failover import FailoverManager, classify_error, compact_messages
+from rune.agent.failover import FailoverManager, classify_error
 from rune.agent.goal_classifier import ClassificationResult, classify_goal
 from rune.agent.intent_engine import resolve_intent_contract
 from rune.agent.litellm_adapter import LiteLLMAgent, UsageLimits
@@ -59,66 +70,22 @@ from rune.types import (
 from rune.utils.events import EventEmitter
 from rune.utils.logger import get_logger
 
-_HAS_PYDANTIC_AI = True  # Always True — LiteLLMAgent replaces PydanticAI
+_HAS_PYDANTIC_AI = True  # Always True - LiteLLMAgent replaces PydanticAI
 
 log = get_logger(__name__)
 
 T = TypeVar("T")
 
-# Turn-atomic grouping (#H4)
-
-@dataclass
-class Turn:
-    """An atomic conversation turn (assistant message + tool results).
-
-    Ported from groupIntoTurns() in loop.ts - ensures tool-call/result pairs
-    are never split during context trimming.
-    """
-
-    messages: list[Any]
-    role: str  # 'user', 'assistant', 'system', 'tool'
-    token_estimate: int = 0
-
-
-def _group_into_turns(messages: list[Any]) -> list[Turn]:
-    """Group messages into atomic turns.
-
-    - Each assistant message is paired with all immediately following
-      tool-result messages (they form one atomic unit).
-    - User messages are their own turn.
-    - System messages are their own turn.
-
-    This mirrors groupIntoTurns() from loop.ts and prevents breaking
-    AI SDK tool-call/result pairs during context trimming.
-    """
-    turns: list[Turn] = []
-    i = 0
-    while i < len(messages):
-        msg = messages[i]
-        role = _msg_role(msg)
-
-        if role == "assistant":
-            # Collect assistant + all following tool messages as one atomic turn
-            turn_msgs: list[Any] = [msg]
-            j = i + 1
-            while j < len(messages) and _msg_role(messages[j]) == "tool":
-                turn_msgs.append(messages[j])
-                j += 1
-            turns.append(Turn(messages=turn_msgs, role="assistant"))
-            i = j
-        else:
-            turns.append(Turn(messages=[msg], role=role))
-            i += 1
-
-    return turns
-
-
-def _msg_role(msg: Any) -> str:
-    """Extract the role string from a message (dict or object)."""
-    if isinstance(msg, dict):
-        return msg.get("role", "unknown")
-    return getattr(msg, "role", "unknown")
-
+# Turn-atomic grouping — shared implementation in message_utils
+from rune.agent.message_utils import (
+    group_into_turns as _group_into_turns,
+)
+from rune.agent.message_utils import (
+    msg_role as _msg_role,
+)
+from rune.agent.message_utils import (
+    validate_tool_pairs as _validate_tool_pairs,
+)
 
 # Token budget scaling by intent (#24)
 
@@ -154,6 +121,33 @@ def _effective_max_steps(budget: int) -> int:
     if budget >= 100_000:
         return 30
     return 20
+
+
+def _compute_tool_rounds(
+    classification: Any,
+    executor_model: str,
+    advisor_enabled: bool,
+) -> int:
+    """Tool-round budget by task complexity and executor tier."""
+    from rune.agent.advisor.tiers import extract_provider_and_model, resolve_tier
+
+    provider, model_name = extract_provider_and_model(executor_model)
+    tier = resolve_tier(provider, model_name)
+
+    is_complex = getattr(classification, "is_complex_coding", False)
+    base = 15 if is_complex else 8
+
+    # Modest tier bonus. Larger bonuses burn tokens on weak models
+    # that keep retrying the same failing tool.
+    if tier < 50:
+        tier_bonus = 2
+    elif tier < 70:
+        tier_bonus = 1
+    else:
+        tier_bonus = 0
+
+    advisor_discount = -2 if advisor_enabled else 0
+    return max(base + tier_bonus + advisor_discount, base)
 
 
 # Phase-adaptive observation windows (#12)
@@ -331,6 +325,10 @@ class NativeAgentLoop(EventEmitter):
         self._files_read: set[str] = set()
         self._hard_failure_signatures: set[str] = set()
         self._hard_failures: list[str] = []
+        # R19: tool-call sequence counter (not step) to catch intra-step patterns
+        self._last_code_write_step: int = 0
+        self._last_verify_step: int = 0
+        self._tool_call_seq: int = 0
         # Activity phase for adaptive observation windows
         self._activity_phase: str = "exploration"
         self._prev_activity_phase: str = "exploration"
@@ -384,6 +382,9 @@ class NativeAgentLoop(EventEmitter):
         self._files_read.clear()
         self._hard_failure_signatures.clear()
         self._hard_failures.clear()
+        self._last_code_write_step = 0
+        self._last_verify_step = 0
+        self._tool_call_seq = 0
         self._activity_phase = "exploration"
         self._prev_activity_phase = "exploration"
         self._max_output_tokens = 8_192
@@ -764,6 +765,7 @@ class NativeAgentLoop(EventEmitter):
             _last_tool_params = params
             self._last_activity = time.monotonic()  # (#30) activity on tool call
             self._stall.mark_activity(cap_name)
+            _step_tool_calls.append(cap_name)
             # Track written file paths (#16)
             if cap_name in ("file_write", "file_edit", "file_delete"):
                 fp = params.get("file_path") or params.get("path", "")
@@ -850,9 +852,24 @@ class NativeAgentLoop(EventEmitter):
                 self._pending_verification_nudge = True  # (#27)
                 # Written file paths are tracked in _on_tool_start where
                 # params are available - no duplicate tracking needed here.
+                # R19: track code-file writes for freshness gate
+                if result.success and cap_name != "file_delete":
+                    fp = (
+                        _last_tool_params.get("file_path")
+                        or _last_tool_params.get("path", "")
+                    )
+                    from rune.intelligence.ast_analyzer import is_code_extension
+                    _dot = fp.rfind(".")
+                    if fp and _dot >= 0 and is_code_extension(fp[_dot:]):
+                        self._tool_call_seq += 1
+                        self._last_code_write_step = self._tool_call_seq
             elif cap_name == "bash_execute":
                 evidence.executions += 1
                 self._consecutive_reads_without_write = 0  # (#27) reset
+                # R19: any successful bash counts as verification
+                if result.success:
+                    self._tool_call_seq += 1
+                    self._last_verify_step = self._tool_call_seq
             elif cap_name == "web_search":
                 evidence.web_searches += 1
                 self._stall.web_search_count += 1  # (#15)
@@ -917,13 +934,41 @@ class NativeAgentLoop(EventEmitter):
             _VISION_TOOLS = {"browser_screenshot"}
             tools = [t for t in tools if t not in _VISION_TOOLS]
 
-        # Scale tool rounds by complexity: weaker models call tools one-at-a-time
-        _tool_rounds = 15 if getattr(classification, "is_complex_coding", False) else 8
+        advisor_service = AdvisorService.for_episode(model)
+
+        # Native advisor tool (Anthropic pairs only, inert otherwise)
+        from rune.agent.advisor.native_tool import (
+            build_native_tool_wrapper,
+            resolve_native_config,
+        )
+        _native_cfg = resolve_native_config(
+            executor_model=model,
+            advisor_model_full=advisor_service.model_full,
+            max_uses=advisor_service.budget.max_calls,
+        )
+        if _native_cfg.enabled:
+            _native_wrapper = build_native_tool_wrapper(_native_cfg)
+            if _native_wrapper is not None:
+                tool_functions["advisor"] = _native_wrapper
+            from rune.agent.prompts import PROMPT_ADVISOR_TIMING
+            system_prompt = system_prompt + "\n\n" + PROMPT_ADVISOR_TIMING
+            log.info(
+                "advisor_native_path_enabled",
+                executor=model,
+                advisor=advisor_service.model_full,
+                max_uses=_native_cfg.max_uses,
+            )
+
+        # Scale tool rounds by complexity and executor capability.
+        _tool_rounds = _compute_tool_rounds(
+            classification, model, advisor_service.enabled,
+        )
         agent = LiteLLMAgent(
             model=model,
             system_prompt=system_prompt,
             tools=list(tool_functions.values()),
             max_tool_rounds=_tool_rounds,
+            extra_headers=_native_cfg.beta_headers,
         )
 
         messages: list[Any] = []
@@ -954,19 +999,156 @@ class NativeAgentLoop(EventEmitter):
         # Workspace root for guard checks
         workspace_root = (context or {}).get("workspace_root", "") if context else ""
 
+        # (advisor_service + native path detection happens earlier —
+        # see `AdvisorService.for_episode(model)` above, right after
+        # `build_tool_set()`. That site is required because the native
+        # advisor tool must be in the first LiteLLMAgent construction.)
+
+        import os as _os_for_freshness
+        verify_freshness_enabled = (
+            _os_for_freshness.environ.get("RUNE_VERIFY_FRESHNESS", "")
+            .strip()
+            .lower()
+            in ("1", "true", "yes", "on")
+        )
+
         # main loop
         _prev_evidence_total = 0
         _no_new_evidence_steps = 0
         _gate_blocked_count = 0
 
+        # Last advisor raw text — fed back into reconcile requests
+        _last_advisor_raw: str = ""
+
+        # Advisor closures (deferred: request built only after should_call fires)
+        def _make_policy_input():
+            return build_policy_input(
+                classification=classification,
+                activity_phase=self._activity_phase,
+                reads=evidence.reads,
+                writes=evidence.writes,
+                web_fetches=evidence.web_fetches,
+                files_written=len(self._files_written),
+                gate_blocked_count=_gate_blocked_count,
+                stall_consecutive=self._stall.consecutive_no_progress,
+                no_progress_steps=_no_new_evidence_steps,
+                wind_down_phase=self._wind_down_phase,
+                hard_failures=len(self._hard_failures),
+            )
+
+        def _load_file_contents_for_architect() -> dict[str, str]:
+            """Read files_written from disk for architect-mode advisor.
+
+            Only fires when advisor mode is architect. Bounded to the
+            5 most recent files, 20KB per file. Read errors are skipped
+            so advisor calls never fail on I/O.
+            """
+            if advisor_service.mode != "architect":
+                return {}
+            contents: dict[str, str] = {}
+            for path in list(self._files_written)[-5:]:
+                try:
+                    with open(path, encoding="utf-8", errors="replace") as f:
+                        data = f.read(20_000)
+                    contents[path] = data
+                except Exception as exc:
+                    log.debug("architect_file_read_failed",
+                              path=path, error=str(exc)[:100])
+            return contents
+
+        def _make_advisor_request(trigger: str, gate_result=None):
+            return build_advisor_request(
+                trigger=trigger,
+                goal=goal,
+                classification=classification,
+                activity_phase=self._activity_phase,
+                step=self._step,
+                token_budget_frac=(
+                    self._token_budget.used / max(1, self._token_budget.total)
+                ),
+                evidence=evidence,
+                gate_result=gate_result,
+                stall_consecutive=self._stall.consecutive_no_progress,
+                stall_cumulative=self._stall.cumulative_no_progress,
+                recent_messages=messages,
+                files_written=self._files_written,
+                hard_failures=list(self._hard_failures),
+                last_advisor_note=_last_advisor_raw or None,
+                file_contents=_load_file_contents_for_architect(),
+            )
+
+        # BCT: deferred compliance tracking for advisor plans
+        _pending_advice: PendingAdvice | None = None
+        _step_tool_calls: list[str] = []
+
         for step in range(max_iterations):
             self._step = step + 1
             self._step_start_time = time.monotonic()
+            _step_tool_calls.clear()
 
             # -- pre-flight checks ---
             if self._cancel_event.is_set():
                 trace.reason = "cancelled"
                 break
+
+            # BCT: check compliance for a pending advisor plan
+            if _pending_advice is not None:
+                _ev_total = (evidence.reads + evidence.writes
+                             + evidence.executions + evidence.web_fetches)
+                _verdict = check_compliance(
+                    _pending_advice, self._step,
+                    _ev_total, len(self._hard_failures),
+                    _step_tool_calls,
+                )
+                if _verdict is not None:
+                    if _verdict.followed:
+                        self._stall.consecutive_no_progress = 0
+                        _no_new_evidence_steps = 0
+                        log.info("advisor_compliance_followed",
+                                 reason=_verdict.reason, step=self._step)
+                    else:
+                        log.info("advisor_compliance_ignored",
+                                 reason=_verdict.reason, step=self._step)
+                    # Merge verdict back into call_history so persistence
+                    # writes it to advisor_events (Plan B measurement).
+                    idx = _pending_advice.call_history_index
+                    history = advisor_service.budget.call_history
+                    if 0 <= idx < len(history):
+                        history[idx]["compliance_verdict"] = _verdict.reason
+                        history[idx]["expected_tool"] = _pending_advice.expected_tool or ""
+                        history[idx]["observed_tools"] = ",".join(_pending_advice.observed_tools[:20])
+                        history[idx]["step_at_call"] = _pending_advice.injected_at_step
+                        history[idx]["pre_call_evidence"] = _pending_advice.baseline_evidence
+                        history[idx]["post_call_evidence"] = _ev_total
+                        history[idx]["advice_mode"] = _pending_advice.advice_mode
+                    _pending_advice = None
+
+            # Site A: advisor hook (skipped when native path active)
+            if advisor_service.enabled and not _native_cfg.enabled:
+                messages, _adv_dec = await maybe_consult(
+                    advisor_service,
+                    policy_input=_make_policy_input(),
+                    build_request=lambda trg: _make_advisor_request(trg),
+                    messages=messages,
+                    inject=self._inject_system_message,
+                )
+                if _adv_dec and _adv_dec.raw_text:
+                    _last_advisor_raw = _adv_dec.raw_text[:300]
+                if _adv_dec and _adv_dec.action == "abort":
+                    log.warning("advisor_recommended_abort", step=self._step)
+                    trace.reason = "advisor_abort"
+                    trace.final_step = self._step
+                    break
+                if _adv_dec and _adv_dec.plan_steps and _adv_dec.trigger == "stuck":
+                    # Deferred reset: set pending_advice, counters reset on verdict
+                    _ev_total = (evidence.reads + evidence.writes
+                                 + evidence.executions + evidence.web_fetches)
+                    _pending_advice = build_pending(
+                        _adv_dec, self._step,
+                        _ev_total, len(self._hard_failures),
+                        call_history_index=len(advisor_service.budget.call_history) - 1,
+                        advice_mode=advisor_service.mode,
+                    )
 
             if self._stall.is_stalled:
                 # Defer stall when prior tool evidence exists the LLM
@@ -1259,9 +1441,13 @@ class NativeAgentLoop(EventEmitter):
                                     )
                                 except Exception as exc:
                                     log.debug("rehydration_record_p3_failed", error=str(exc)[:100])
-                        async def _emergency_summarizer(text: str) -> str:
-                            return f"[Emergency rollover] Context compacted at step {self._step}. Goal: '{goal[:100]}'"
-                        messages = await compact_messages(messages, _emergency_summarizer, keep_last=3)
+                        summary = f"[Emergency rollover] Context compacted at step {self._step}. Goal: '{goal[:100]}'"
+                        turns = _group_into_turns(messages)
+                        kept = turns[-3:] if len(turns) > 3 else turns
+                        messages = [{"role": "system", "content": summary}]
+                        for t in kept:
+                            messages.extend(t.messages)
+                        messages = _validate_tool_pairs(messages)
                         log.warning("emergency_rollover", step=self._step, phase=3, msg_count=len(messages))
                     self._rollover_phase_done.add(3)
 
@@ -1362,6 +1548,25 @@ class NativeAgentLoop(EventEmitter):
                             "[System] You have read the files but not made any changes yet. "
                             "Proceed to edit/write/execute now. Do not just describe what you plan to do.",
                         )
+                    elif (
+                        verify_freshness_enabled
+                        and self._last_code_write_step > self._last_verify_step
+                    ):
+                        # R19: code modified but not re-run
+                        log.info(
+                            "verify_freshness_fastpath_block",
+                            step=self._step,
+                            last_write=self._last_code_write_step,
+                            last_verify=self._last_verify_step,
+                        )
+                        messages = self._inject_system_message(
+                            messages,
+                            f"[Completion Gate] You modified a code file (tool call "
+                            f"#{self._last_code_write_step}) but did not run "
+                            f"bash_execute after that (last verify call "
+                            f"#{self._last_verify_step}). Re-run the script and "
+                            f"show the real output before declaring done.",
+                        )
                     else:
                         log.info("final_answer_detected", step=self._step,
                                  text_len=len(output_text), evidence=total_evidence)
@@ -1441,6 +1646,10 @@ class NativeAgentLoop(EventEmitter):
                     # Web evidence
                     min_web_searches=min_web_searches,
                     min_web_fetches=min_web_fetches,
+                    # R19: verification freshness (opt-in via env var)
+                    verify_freshness_enabled=verify_freshness_enabled,
+                    last_code_write_step=self._last_code_write_step,
+                    last_verify_step=self._last_verify_step,
                     # Hard failures tracked (deduplicated) (#16)
                     hard_failures=list(self._hard_failures),
                 )
@@ -1477,6 +1686,35 @@ class NativeAgentLoop(EventEmitter):
                             + ", ".join(_missing)
                             + ". Focus on completing these before finishing.",
                         )
+                    # H1: advisor at gate_blocked boundary (skipped for native path)
+                    if advisor_service.enabled and not _native_cfg.enabled:
+                        messages, _adv_dec = await maybe_consult(
+                            advisor_service,
+                            policy_input=_make_policy_input(),
+                            build_request=lambda trg, _gr=gate_result: _make_advisor_request(
+                                trg, gate_result=_gr,
+                            ),
+                            messages=messages,
+                            inject=self._inject_system_message,
+                        )
+                        if _adv_dec and _adv_dec.raw_text:
+                            _last_advisor_raw = _adv_dec.raw_text[:300]
+                        if _adv_dec and _adv_dec.action == "abort":
+                            log.warning("advisor_recommended_abort", step=self._step)
+                            trace.reason = "advisor_abort"
+                            trace.final_step = self._step
+                            break
+                        if _adv_dec and _adv_dec.plan_steps:
+                            # Deferred: full reset only after compliance verdict
+                            _gate_blocked_count = max(0, _gate_blocked_count - 1)
+                            _ev_total = (evidence.reads + evidence.writes
+                                         + evidence.executions + evidence.web_fetches)
+                            _pending_advice = build_pending(
+                                _adv_dec, self._step,
+                                _ev_total, len(self._hard_failures),
+                                call_history_index=len(advisor_service.budget.call_history) - 1,
+                                advice_mode=advisor_service.mode,
+                            )
                     if _gate_blocked_count >= 5:
                         log.warning("max_gate_blocked", step=self._step,
                                     count=_gate_blocked_count)
@@ -1553,12 +1791,13 @@ class NativeAgentLoop(EventEmitter):
                                 except Exception as exc_r:
                                     log.debug("rehydration_record_overflow_failed", error=str(exc_r)[:100])
 
-                        async def _summarizer(text: str) -> str:
-                            return f"(Summary of prior conversation: {len(text)} chars)"
-
-                        messages = await compact_messages(
-                            messages, _summarizer, keep_last=10
-                        )
+                        summary = f"(Summary of prior conversation compacted at step {self._step})"
+                        turns = _group_into_turns(messages)
+                        kept = turns[-10:] if len(turns) > 10 else turns
+                        messages = [{"role": "system", "content": summary}]
+                        for t in kept:
+                            messages.extend(t.messages)
+                        messages = _validate_tool_pairs(messages)
                         log.info("messages_compacted_after_overflow")
 
                     continue
@@ -1577,6 +1816,66 @@ class NativeAgentLoop(EventEmitter):
                 await self._rehydration_recorder.flush()
             except Exception:
                 pass
+
+        # Persist advisor events (merge native path events first)
+        try:
+            _native_events = agent.native_advisor_events() if agent else []
+            if _native_events:
+                advisor_service.budget.call_history.extend(_native_events)
+                advisor_service.budget.calls_used += len(_native_events)
+                advisor_service.budget.tokens_used += sum(
+                    int(e.get("output_tokens") or 0) for e in _native_events
+                )
+        except Exception as exc:
+            log.warning(
+                "advisor_native_events_merge_failed",
+                error=str(exc)[:200],
+            )
+        try:
+            import os as _os_persist
+            _persist_env = _os_persist.environ.get("RUNE_ADVISOR_PERSIST", "").strip().lower()
+            _persist_enabled = _persist_env not in ("0", "false", "no", "off")
+            if (
+                _persist_enabled
+                and advisor_service.budget.calls_used > 0
+                and self._session_id
+            ):
+                from rune.memory.store import get_memory_store
+                _store = get_memory_store()
+                for entry in advisor_service.budget.call_history:
+                    _store.log_advisor_event(
+                        session_id=self._session_id,
+                        trigger=entry.get("trigger", "") or "",
+                        action=entry.get("action", "") or "",
+                        provider=entry.get("provider", "") or "",
+                        model=entry.get("model", "") or "",
+                        output_tokens=int(entry.get("output_tokens") or 0),
+                        latency_ms=int(entry.get("latency_ms") or 0),
+                        plan_injected=bool(entry.get("plan_injected")),
+                        stuck_reason=entry.get("stuck_reason", "") or "",
+                        advice_mode=entry.get("advice_mode", "") or "",
+                        compliance_verdict=entry.get("compliance_verdict", "") or "",
+                        expected_tool=entry.get("expected_tool", "") or "",
+                        observed_tools=entry.get("observed_tools", "") or "",
+                        step_at_call=int(entry.get("step_at_call") or 0),
+                        pre_call_evidence=int(entry.get("pre_call_evidence") or 0),
+                        post_call_evidence=int(entry.get("post_call_evidence") or 0),
+                    )
+                _store.update_advisor_outcome(
+                    session_id=self._session_id,
+                    outcome=trace.reason or "",
+                )
+                log.info(
+                    "advisor_events_persisted",
+                    session_id=self._session_id,
+                    count=advisor_service.budget.calls_used,
+                    outcome=trace.reason,
+                )
+        except Exception as exc:
+            log.warning(
+                "advisor_events_persist_failed",
+                error=str(exc)[:200],
+            )
 
         trace.total_tokens_used = self._token_budget.used
         return trace
@@ -1689,7 +1988,9 @@ class NativeAgentLoop(EventEmitter):
             result.append(msg)
 
         # Context pollution prevention (#1c): remove empty messages
-        result = [m for m in result if not self._is_empty_message(m)]
+        # Preserve tool messages even if empty — removing them breaks assistant+tool pairs
+        result = [m for m in result if not self._is_empty_message(m)
+                  or _msg_role(m) == "tool"]
 
         return result
 
@@ -1957,35 +2258,12 @@ class NativeAgentLoop(EventEmitter):
 
     @staticmethod
     def _compact_messages_atomic(messages: list, keep_last: int) -> list:
-        """Compact messages preserving assistant+tool pairs.
-
-        When compacting, assistant messages are never split from their
-        subsequent tool result messages. This prevents broken context
-        where a tool result appears without the call that produced it.
-        """
-        # Walk backward, grouping assistant messages with their tool results
-        groups: list[list] = []
-        i = len(messages) - 1
-        while i >= 0:
-            msg = messages[i]
-            role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", "")
-            if role == "tool":
-                # Find the preceding assistant message
-                group = [msg]
-                if i > 0:
-                    prev = messages[i - 1]
-                    prev_role = prev.get("role") if isinstance(prev, dict) else getattr(prev, "role", "")
-                    if prev_role == "assistant":
-                        group.insert(0, prev)
-                        i -= 1
-                groups.insert(0, group)
-            else:
-                groups.insert(0, [msg])
-            i -= 1
-
-        # Keep last N groups
-        kept_groups = groups[-keep_last:]
-        return [msg for group in kept_groups for msg in group]
+        """Compact keeping last N turn-atomic groups (assistant+tools)."""
+        turns = _group_into_turns(messages)
+        if len(turns) <= keep_last:
+            return list(messages)
+        kept = turns[-keep_last:]
+        return [msg for turn in kept for msg in turn.messages]
 
     # Dynamic context cap (#2b)
 

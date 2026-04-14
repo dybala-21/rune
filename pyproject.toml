@@ -65,6 +65,8 @@ vector = ["faiss-cpu>=1.13.2"]
 browser = ["playwright>=1.58.0"]
 embedding = ["llama-cpp-python>=0.3.0"]
 codeintel = ["tree-sitter-language-pack>=0.13.0"]
+# Vertex AI (service-account auth for Gemini via LiteLLM vertex_ai/)
+vertex = ["google-cloud-aiplatform>=1.70.0"]
 
 # Channel adapters
 telegram = ["aiogram>=3.26.0", "aiohttp>=3.11.0"]
@@ -73,7 +75,7 @@ slack = ["slack-sdk>=3.40.1"]
 voice = ["onnxruntime>=1.24.3", "kokoro-onnx>=0.5.0", "edge-tts>=6.1.0", "sounddevice>=0.5.0"]
 
 # Bundles
-full = ["rune-ai[vector,browser,embedding,codeintel,telegram,discord,slack,voice]"]
+full = ["rune-ai[vector,browser,embedding,codeintel,vertex,telegram,discord,slack,voice]"]
 all = ["rune-ai[full]"]
 
 dev = [

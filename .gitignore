@@ -32,6 +32,14 @@ Thumbs.db
 *.key
 *.p12
 *.pfx
+# Google service-account credentials (never commit)
+google-credentials*.json
+*-service-account*.json
+*-gcp-*.json
+wanted-strategic-*.json
+
+# RUNE project-level runtime dir (may hold credentials, cache, etc.)
+.rune/
 
 # RUNE runtime data (never commit)
 api-tokens.json

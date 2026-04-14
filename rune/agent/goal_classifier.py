@@ -175,12 +175,17 @@ async def classify_tier2(
                 # Different goal_type but LLM says related — trust LLM
                 is_domain_change = False
 
+        # Derive is_complex_coding from goal_type so multi-step coding
+        # tasks get the larger tool-round and advisor budgets.
+        is_complex_coding = goal_type in ("code_modify", "full")
+
         return ClassificationResult(
             goal_type=goal_type,  # type: ignore[arg-type]
             confidence=min(max(confidence, 0.0), 1.0),
             tier=2,
             reason=reason,
             is_domain_change=is_domain_change,
+            is_complex_coding=is_complex_coding,
         )
 
     except Exception as exc:

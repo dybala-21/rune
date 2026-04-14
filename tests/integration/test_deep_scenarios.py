@@ -1459,8 +1459,8 @@ class TestComplexMultiSignalScenarios:
             assert key in _MAX_OUTPUT_TOKENS_BY_INTENT, \
                 f"Missing max_output for intent: {key}"
 
-    def test_all_18_requirements_evaluated(self) -> None:
-        """The gate should evaluate all 18 requirements even when some are skipped."""
+    def test_all_19_requirements_evaluated(self) -> None:
+        """The gate should evaluate all 19 requirements even when some are skipped."""
         gate_input = CompletionGateInput(
             intent_resolved=True,
             tool_requirement="write",
@@ -1490,7 +1490,7 @@ class TestComplexMultiSignalScenarios:
             answer_length=500,
         )
         result = evaluate_completion_gate(gate_input)
-        # All 18 requirements should be evaluated
-        assert len(result.requirements) == 18
+        # All 19 requirements should be evaluated (R01 through R19).
+        assert len(result.requirements) == 19
         assert result.outcome == "verified"
         assert result.success

@@ -157,6 +157,22 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
     }
   };
 
+  const handleToggleAdvisor = async () => {
+    if (!config) return;
+    setToggling(true);
+    try {
+      await patchConfig({ advisorEnabled: !config.advisorEnabled });
+      const updated = await fetchConfig();
+      setConfig(updated);
+      setMemoryDraft(toMemoryTuningDraft(updated));
+      setSelectedSafetyPreset(updated.safetyTuning.preset);
+    } catch {
+      // ignore
+    } finally {
+      setToggling(false);
+    }
+  };
+
   const handleSaveMemoryTuning = async () => {
     if (!memoryDraft) return;
     setSavingMemory(true);
@@ -328,6 +344,64 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
                   position: 'absolute',
                   top: 2,
                   left: config.proactiveEnabled ? 16 : 2,
+                  transition: 'left 0.2s',
+                  boxShadow: '0 1px 2px rgba(0,0,0,0.2)',
+                }} />
+              </div>
+            </button>
+          </div>
+        )}
+
+        {/* Advisor toggle */}
+        {config && (
+          <div style={{ padding: '6px 14px', marginBottom: 4 }}>
+            <button
+              onClick={handleToggleAdvisor}
+              disabled={toggling}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 10,
+                width: '100%',
+                padding: '10px 12px',
+                background: 'var(--bg-secondary)',
+                border: '1px solid var(--border-subtle)',
+                borderRadius: 'var(--radius-md)',
+                cursor: toggling ? 'wait' : 'pointer',
+                textAlign: 'left',
+                opacity: toggling ? 0.6 : 1,
+                transition: 'opacity 0.15s',
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke={config.advisorEnabled ? 'var(--accent)' : 'var(--text-muted)'} strokeWidth="1.3" strokeLinecap="round">
+                <path d="M7 1.5 L12 4.5 L12 9.5 L7 12.5 L2 9.5 L2 4.5 Z" />
+                <path d="M7 5 L7 9 M5 7 L9 7" />
+              </svg>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
+                  Advisor
+                </div>
+                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 1 }}>
+                  Stronger-model guidance at key moments
+                </div>
+              </div>
+              <div style={{
+                width: 32,
+                height: 18,
+                borderRadius: 9,
+                background: config.advisorEnabled ? 'var(--accent)' : 'var(--bg-tertiary)',
+                position: 'relative',
+                transition: 'background 0.2s',
+                flexShrink: 0,
+              }}>
+                <div style={{
+                  width: 14,
+                  height: 14,
+                  borderRadius: '50%',
+                  background: 'white',
+                  position: 'absolute',
+                  top: 2,
+                  left: config.advisorEnabled ? 16 : 2,
                   transition: 'left 0.2s',
                   boxShadow: '0 1px 2px rgba(0,0,0,0.2)',
                 }} />

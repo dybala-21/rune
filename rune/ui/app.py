@@ -755,6 +755,71 @@ class RuneApp:
                     f"  [#444444]·[/#444444] [#888888]{summary}[/#888888]"
                 )
 
+    def _handle_advisor_command(self, arg: str) -> None:
+        """Handle /advisor on|off slash command."""
+        try:
+            import os
+
+            from rune.agent.advisor.runtime_toggle import (
+                is_advisor_enabled,
+                set_advisor_enabled,
+            )
+
+            lower = arg.strip().lower()
+            if lower == "on":
+                set_advisor_enabled(True)
+                self.console.print(
+                    "  [#56B6C2]🧭 Advisor enabled.[/#56B6C2]"
+                )
+                if not os.environ.get("RUNE_ADVISOR_MODEL", "").strip():
+                    self.console.print(
+                        "  [#E5C07B]⚠  RUNE_ADVISOR_MODEL not set — "
+                        "advisor won't fire until you configure a model.[/#E5C07B]"
+                    )
+                return
+            if lower == "off":
+                set_advisor_enabled(False)
+                self.console.print(
+                    "  [#888888]🧭 Advisor disabled.[/#888888]"
+                )
+                return
+
+            status = "on" if is_advisor_enabled() else "off"
+            model = os.environ.get("RUNE_ADVISOR_MODEL", "").strip()
+            self.console.print(
+                f"  [#888888]🧭 Advisor toggle: {status}[/#888888]"
+            )
+            if model:
+                self.console.print(
+                    f"  [#888888]   model: {model}[/#888888]"
+                )
+                # Show resolved interaction mode for the current executor
+                try:
+                    from rune.agent.advisor.service import AdvisorConfig
+                    exec_full = f"{self._provider}:{self._model}" if self._model else ""
+                    if exec_full:
+                        cfg = AdvisorConfig.from_env(exec_full)
+                        if cfg.enabled:
+                            self.console.print(
+                                f"  [#888888]   mode:  {cfg.mode}[/#888888]"
+                            )
+                            if cfg.mode == "advice_only":
+                                self.console.print(
+                                    "  [#E5C07B]   note:  non-Claude + strong executor — "
+                                    "advisor effect is weak empirically[/#E5C07B]"
+                                )
+                except Exception:
+                    pass
+            else:
+                self.console.print(
+                    "  [#E5C07B]   model: <unset>  (set RUNE_ADVISOR_MODEL=provider/model)[/#E5C07B]"
+                )
+            self.console.print(
+                "  [#888888]   usage: /advisor on | /advisor off[/#888888]"
+            )
+        except Exception:
+            self.console.print("  [#888888]🧭 Advisor setting unavailable.[/#888888]")
+
     def _handle_learning_command(self, arg: str) -> None:
         """Handle /learning on|off slash command."""
         try:
@@ -941,6 +1006,10 @@ class RuneApp:
 
         if cmd_name == "/learning":
             self._handle_learning_command(cmd_args)
+            return
+
+        if cmd_name == "/advisor":
+            self._handle_advisor_command(cmd_args)
             return
 
         if cmd_name == "/learned":

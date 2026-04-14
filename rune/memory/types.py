@@ -24,6 +24,11 @@ class Episode:
     commitments: str = ""
     duration_ms: float = 0.0
     utility: int = 0
+    # Tier 2 advisor counters (Phase 2a). All default to 0 so existing
+    # Episode construction paths remain backward compatible.
+    advisor_calls: int = 0
+    advisor_followed_count: int = 0
+    advisor_output_tokens: int = 0
 
 
 @dataclass(slots=True)

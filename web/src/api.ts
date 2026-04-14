@@ -210,6 +210,7 @@ export async function unsetEnvVar(key: string, scope: 'user' | 'project'): Promi
 
 export interface ConfigInfo {
   proactiveEnabled: boolean;
+  advisorEnabled: boolean;
   gatewayChannels: string[];
   maxConcurrency: number;
   version: string;
@@ -243,6 +244,7 @@ export async function fetchConfig(): Promise<ConfigInfo> {
 
 export async function patchConfig(params: {
   proactiveEnabled?: boolean;
+  advisorEnabled?: boolean;
   memoryTuning?: {
     scope?: 'user' | 'project';
     preset?: 'speed' | 'balanced' | 'accuracy';

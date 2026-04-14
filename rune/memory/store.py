@@ -241,6 +241,30 @@ CREATE TABLE IF NOT EXISTS runs (
     finished_at TEXT DEFAULT NULL
 );
 
+-- Advisor events: metadata only, outcome updated post-episode.
+CREATE TABLE IF NOT EXISTS advisor_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    trigger TEXT NOT NULL,
+    action TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    output_tokens INTEGER DEFAULT 0,
+    latency_ms INTEGER DEFAULT 0,
+    episode_outcome TEXT DEFAULT '',
+    plan_injected INTEGER DEFAULT 0,
+    stuck_reason TEXT DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    -- v10: advisor mode and compliance verdict persistence
+    advice_mode TEXT DEFAULT '',
+    compliance_verdict TEXT DEFAULT '',
+    expected_tool TEXT DEFAULT '',
+    observed_tools TEXT DEFAULT '',
+    step_at_call INTEGER DEFAULT 0,
+    pre_call_evidence INTEGER DEFAULT 0,
+    post_call_evidence INTEGER DEFAULT 0
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_episodes_timestamp ON episodes(timestamp);
 CREATE INDEX IF NOT EXISTS idx_episodes_conversation ON episodes(conversation_id);
@@ -250,12 +274,15 @@ CREATE INDEX IF NOT EXISTS idx_behavior_ngrams_count ON behavior_ngrams(count DE
 CREATE INDEX IF NOT EXISTS idx_learned_patterns_slot ON learned_patterns(time_slot, day_type);
 CREATE INDEX IF NOT EXISTS idx_cron_jobs_enabled ON cron_jobs(enabled);
 CREATE INDEX IF NOT EXISTS idx_proactive_conv_records_user ON proactive_conversation_records(user_id);
+CREATE INDEX IF NOT EXISTS idx_advisor_events_session ON advisor_events(session_id);
+CREATE INDEX IF NOT EXISTS idx_advisor_events_trigger ON advisor_events(trigger);
+CREATE INDEX IF NOT EXISTS idx_advisor_events_created ON advisor_events(created_at DESC);
 """
 
 
 # MemoryStore
 
-_CURRENT_SCHEMA_VERSION = 7
+_CURRENT_SCHEMA_VERSION = 10
 
 
 class MemoryStore:
@@ -394,6 +421,45 @@ class MemoryStore:
             except apsw.SQLError:
                 pass  # Column already exists
 
+        if current_version < 8:
+            # Add advisor counter columns to episodes
+            for stmt in [
+                "ALTER TABLE episodes ADD COLUMN advisor_calls INTEGER DEFAULT 0",
+                "ALTER TABLE episodes ADD COLUMN advisor_followed_count INTEGER DEFAULT 0",
+                "ALTER TABLE episodes ADD COLUMN advisor_output_tokens INTEGER DEFAULT 0",
+            ]:
+                try:
+                    conn.execute(stmt)
+                except apsw.SQLError:
+                    pass  # Column already exists
+
+        if current_version < 9:
+            # 2b-3: stuck sub-reason column for measuring which specific
+            # stuck condition fired (gate_blocked / stall / no_progress /
+            # wind_down). Enables retroactive P2 effect measurement.
+            try:
+                conn.execute(
+                    "ALTER TABLE advisor_events ADD COLUMN stuck_reason TEXT DEFAULT ''"
+                )
+            except apsw.SQLError:
+                pass  # Column already exists
+
+        if current_version < 10:
+            # Per-call advisor mode and compliance verdict persistence.
+            for stmt in [
+                "ALTER TABLE advisor_events ADD COLUMN advice_mode TEXT DEFAULT ''",
+                "ALTER TABLE advisor_events ADD COLUMN compliance_verdict TEXT DEFAULT ''",
+                "ALTER TABLE advisor_events ADD COLUMN expected_tool TEXT DEFAULT ''",
+                "ALTER TABLE advisor_events ADD COLUMN observed_tools TEXT DEFAULT ''",
+                "ALTER TABLE advisor_events ADD COLUMN step_at_call INTEGER DEFAULT 0",
+                "ALTER TABLE advisor_events ADD COLUMN pre_call_evidence INTEGER DEFAULT 0",
+                "ALTER TABLE advisor_events ADD COLUMN post_call_evidence INTEGER DEFAULT 0",
+            ]:
+                try:
+                    conn.execute(stmt)
+                except apsw.SQLError:
+                    pass  # Column already exists
+
         conn.execute(f"PRAGMA user_version = {_CURRENT_SCHEMA_VERSION}")
         log.info(
             "schema_migrated",
@@ -432,8 +498,9 @@ class MemoryStore:
             """INSERT OR REPLACE INTO episodes
                (id, timestamp, task_summary, intent, plan, result, lessons,
                 embedding, conversation_id, importance,
-                entities, files_touched, commitments, duration_ms, utility)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                entities, files_touched, commitments, duration_ms, utility,
+                advisor_calls, advisor_followed_count, advisor_output_tokens)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 episode.id, episode.timestamp, episode.task_summary,
                 episode.intent, episode.plan, episode.result,
@@ -442,6 +509,9 @@ class MemoryStore:
                 episode.entities, episode.files_touched,
                 episode.commitments, episode.duration_ms,
                 episode.utility,
+                episode.advisor_calls,
+                episode.advisor_followed_count,
+                episode.advisor_output_tokens,
             ),
         )
 
@@ -463,6 +533,13 @@ class MemoryStore:
             ep.duration_ms = r[13] or 0.0
         if len(r) > 14:
             ep.utility = r[14] or 0
+        # Tier 2 advisor counters
+        if len(r) > 15:
+            ep.advisor_calls = r[15] or 0
+        if len(r) > 16:
+            ep.advisor_followed_count = r[16] or 0
+        if len(r) > 17:
+            ep.advisor_output_tokens = r[17] or 0
         return ep
 
     def get_recent_episodes(self, limit: int = 10) -> list[Episode]:
@@ -1301,6 +1378,154 @@ class MemoryStore:
                 (cutoff,),
             )
         return cnt
+
+    # Advisor events (Tier 2)
+
+    def log_advisor_event(
+        self,
+        session_id: str,
+        *,
+        trigger: str,
+        action: str,
+        provider: str,
+        model: str,
+        output_tokens: int = 0,
+        latency_ms: int = 0,
+        plan_injected: bool = False,
+        stuck_reason: str = "",
+        advice_mode: str = "",
+        compliance_verdict: str = "",
+        expected_tool: str = "",
+        observed_tools: str = "",
+        step_at_call: int = 0,
+        pre_call_evidence: int = 0,
+        post_call_evidence: int = 0,
+    ) -> int:
+        """Insert one advisor event. Returns row id."""
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            """INSERT INTO advisor_events
+               (session_id, trigger, action, provider, model,
+                output_tokens, latency_ms, episode_outcome,
+                plan_injected, stuck_reason, created_at,
+                advice_mode, compliance_verdict, expected_tool,
+                observed_tools, step_at_call,
+                pre_call_evidence, post_call_evidence)
+               VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?,
+                       ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                session_id, trigger, action, provider, model,
+                int(output_tokens), int(latency_ms),
+                int(plan_injected), stuck_reason, now,
+                advice_mode, compliance_verdict, expected_tool,
+                observed_tools, int(step_at_call),
+                int(pre_call_evidence), int(post_call_evidence),
+            ),
+        )
+        (row_id,) = self.conn.execute(
+            "SELECT last_insert_rowid()"
+        ).fetchone()
+        return int(row_id)
+
+    def update_advisor_outcome(
+        self,
+        session_id: str,
+        *,
+        outcome: str,
+    ) -> int:
+        """Fill in ``episode_outcome`` for every advisor event in
+        ``session_id``. Returns the number of rows updated."""
+        (before,) = self.conn.execute(
+            "SELECT COUNT(*) FROM advisor_events "
+            "WHERE session_id = ? AND episode_outcome = ''",
+            (session_id,),
+        ).fetchone()
+        if before == 0:
+            return 0
+        self.conn.execute(
+            "UPDATE advisor_events SET episode_outcome = ? "
+            "WHERE session_id = ? AND episode_outcome = ''",
+            (outcome, session_id),
+        )
+        return int(before)
+
+    def get_advisor_stats(
+        self,
+        since_days: int = 30,
+    ) -> dict[str, Any]:
+        """Aggregate advisor KPIs over the recent window."""
+        cutoff = datetime.fromtimestamp(
+            time.time() - since_days * 86400, tz=UTC,
+        ).isoformat()
+
+        # Total calls
+        (total,) = self.conn.execute(
+            "SELECT COUNT(*) FROM advisor_events WHERE created_at >= ?",
+            (cutoff,),
+        ).fetchone()
+
+        # By trigger
+        by_trigger: dict[str, int] = {}
+        for trig, cnt in self.conn.execute(
+            "SELECT trigger, COUNT(*) FROM advisor_events "
+            "WHERE created_at >= ? GROUP BY trigger",
+            (cutoff,),
+        ):
+            by_trigger[trig] = int(cnt)
+
+        # By outcome
+        by_outcome: dict[str, int] = {}
+        for out, cnt in self.conn.execute(
+            "SELECT episode_outcome, COUNT(*) FROM advisor_events "
+            "WHERE created_at >= ? AND episode_outcome != '' "
+            "GROUP BY episode_outcome",
+            (cutoff,),
+        ):
+            by_outcome[out] = int(cnt)
+
+        # Completion rate by trigger (among rows with known outcome)
+        completion_rate: dict[str, float] = {}
+        for trig, rate in self.conn.execute(
+            "SELECT trigger, "
+            "AVG(CASE WHEN episode_outcome='completed' THEN 1.0 ELSE 0.0 END) "
+            "FROM advisor_events "
+            "WHERE created_at >= ? AND episode_outcome != '' "
+            "GROUP BY trigger",
+            (cutoff,),
+        ):
+            completion_rate[trig] = round(float(rate or 0.0), 4)
+
+        # Aggregate token / latency stats
+        row = self.conn.execute(
+            "SELECT AVG(output_tokens), AVG(latency_ms) FROM advisor_events "
+            "WHERE created_at >= ?",
+            (cutoff,),
+        ).fetchone()
+        avg_tokens = float(row[0] or 0.0)
+        avg_latency = float(row[1] or 0.0)
+
+        # Stuck sub-reason breakdown (2b-3). Only counts rows where
+        # trigger='stuck' and stuck_reason is populated; legacy rows
+        # (pre schema v9) with empty stuck_reason are excluded.
+        by_stuck_reason: dict[str, int] = {}
+        for reason, cnt in self.conn.execute(
+            "SELECT stuck_reason, COUNT(*) FROM advisor_events "
+            "WHERE created_at >= ? AND trigger = 'stuck' AND stuck_reason != '' "
+            "GROUP BY stuck_reason",
+            (cutoff,),
+        ):
+            by_stuck_reason[reason] = int(cnt)
+
+        return {
+            "since_days": since_days,
+            "total_calls": int(total),
+            "by_trigger": by_trigger,
+            "by_outcome": by_outcome,
+            "by_stuck_reason": by_stuck_reason,
+            "completion_rate_by_trigger": completion_rate,
+            "avg_output_tokens": round(avg_tokens, 2),
+            "avg_latency_ms": round(avg_latency, 2),
+        }
 
     _MAX_RESULT_ANSWER_CHARS = 10_000
 

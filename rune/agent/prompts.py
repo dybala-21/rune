@@ -460,6 +460,59 @@ Respond in the SAME language the user used. Korean input → Korean output.
 - If memory_search returns nothing, say "기록을 찾지 못했습니다". Do NOT guess or fabricate past activities.
 - NEVER repeat the same information in different wordings."""
 
+
+# Ported from Anthropic's suggested system prompt for the native advisor tool.
+# https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool
+PROMPT_ADVISOR_TIMING = """\
+## Advisor Tool Usage
+
+You have access to an `advisor` tool backed by a stronger reviewer
+model. It takes NO parameters — when you call advisor(), your entire
+conversation history is automatically forwarded. The advisor sees
+the task, every tool call you have made, every result you have seen.
+
+### When to call
+
+Call advisor BEFORE substantive work — before writing, before
+committing to an interpretation, before building on an assumption.
+If the task requires orientation first (finding files, fetching a
+source, seeing what is there), do that, then call advisor.
+Orientation is not substantive work. Writing, editing, and declaring
+an answer are.
+
+Also call advisor:
+- When you believe the task is complete. BEFORE this call, make your
+  deliverable durable: write the file, save the result, commit the
+  change. The advisor call takes time; if the session ends during
+  it, a durable result persists and an unwritten one does not.
+- When stuck — errors recurring, approach not converging, results
+  that do not fit.
+- When considering a change of approach.
+
+On tasks longer than a few steps, call advisor at least once before
+committing to an approach and once before declaring done. On short
+reactive tasks where the next action is dictated by tool output you
+just read, you do not need to keep calling — the advisor adds most
+of its value on the first call, before the approach crystallizes.
+
+### How to treat advice
+
+Give the advice serious weight. If you follow a step and it fails
+empirically, or you have primary-source evidence that contradicts a
+specific claim, adapt. A passing self-test is not evidence the
+advice is wrong — it is evidence your test does not check what the
+advice is checking.
+
+If you have already retrieved data pointing one way and the advisor
+points another: do not silently switch. Surface the conflict in one
+more advisor call — "I found X, you suggest Y, which constraint
+breaks the tie?"
+
+### Conciseness
+
+The advisor should respond in under 100 words and use enumerated
+steps, not explanations."""
+
 # Legacy alias - kept for backward compatibility with existing imports
 AGENT_SYSTEM_PROMPT = PROMPT_CORE
 
@@ -492,6 +545,7 @@ def build_system_prompt(
     mcp_server_names: dict[str, int] | None = None,
     is_deep_research: bool = False,
     defer_browser: bool = False,
+    advisor_native_enabled: bool = False,  # Phase A: Claude native advisor
 ) -> str:
     """Build the full system prompt for an agent run.
 
@@ -625,6 +679,10 @@ def build_system_prompt(
             "- WRONG: \"The issue is X, you should change Y\" → RIGHT: call file_edit "
             "to change Y, then run tests."
         )
+
+    # Native advisor timing guidance (Anthropic pairs only)
+    if advisor_native_enabled:
+        parts.append(PROMPT_ADVISOR_TIMING)
 
     # Goal context
     parts.append(f"\n## Current Task\n\n{goal}")

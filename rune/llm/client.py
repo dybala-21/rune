@@ -167,14 +167,38 @@ class LLMClient:
             Provider.OLLAMA: "ollama/",
         }
         prefix = _PREFIX_MAP.get(effective_provider, "")
+        provider_extra: dict = {}
+
+        if effective_provider == Provider.GEMINI:
+            import os as _os
+            creds = _os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+            if creds and _os.path.isfile(creds):
+                prefix = "vertex_ai/"
+                proj = _os.environ.get("VERTEX_PROJECT") or _os.environ.get(
+                    "VERTEXAI_PROJECT"
+                )
+                loc = (
+                    _os.environ.get("VERTEX_LOCATION")
+                    or _os.environ.get("VERTEXAI_LOCATION")
+                    or "us-central1"
+                )
+                if proj:
+                    provider_extra["vertex_project"] = proj
+                provider_extra["vertex_location"] = loc
+
         if prefix and not resolved_model.startswith(prefix):
             resolved_model = f"{prefix}{resolved_model}"
+
+        # Clamp to model's hard output cap
+        from rune.agent.litellm_adapter import _clamp_max_tokens
+        effective_max_tokens = _clamp_max_tokens(resolved_model, max_tokens)
 
         kwargs: dict = {
             "model": resolved_model,
             "messages": messages,
-            "max_tokens": max_tokens,
+            "max_tokens": effective_max_tokens,
             "timeout": timeout,
+            **provider_extra,
         }
         # gpt-5 models only support temperature=1; skip temperature param for them
         model_lower = resolved_model.lower()
