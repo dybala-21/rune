@@ -7,6 +7,7 @@ from rune.capabilities.web import (
     WebSearchParams,
     _extract_by_selector,
     _html_to_text,
+    _is_path_wipe_redirect,
 )
 
 
@@ -62,3 +63,46 @@ def test_web_fetch_params():
     params2 = WebFetchParams(url="https://example.com", selector=".main", maxLength=1000)
     assert params2.selector == ".main"
     assert params2.max_length == 1000
+
+
+class TestIsPathWipeRedirect:
+    def test_no_redirect_returns_false(self):
+        url = "https://x.com/a/b"
+        assert _is_path_wipe_redirect(url, url) is False
+
+    def test_https_upgrade_is_not_wipe(self):
+        assert _is_path_wipe_redirect(
+            "http://x.com/a/b", "https://x.com/a/b",
+        ) is False
+
+    def test_trailing_slash_is_not_wipe(self):
+        assert _is_path_wipe_redirect(
+            "https://x.com/a/b", "https://x.com/a/b/",
+        ) is False
+
+    def test_canonical_path_prefix_preserved(self):
+        assert _is_path_wipe_redirect(
+            "https://x.com/a/b/c", "https://x.com/a/b",
+        ) is False
+
+    def test_deep_path_to_root_is_wipe(self):
+        assert _is_path_wipe_redirect(
+            "https://yeogi.com/domestic-accommodations/6128",
+            "https://yeogi.com/",
+        ) is True
+
+    def test_deep_path_to_search_is_wipe(self):
+        assert _is_path_wipe_redirect(
+            "https://yeogi.com/domestic-accommodations/6128",
+            "https://yeogi.com/search",
+        ) is True
+
+    def test_shallow_original_not_wipe(self):
+        assert _is_path_wipe_redirect(
+            "https://x.com/a", "https://x.com/",
+        ) is False
+
+    def test_different_domain_deep_to_shallow_is_wipe(self):
+        assert _is_path_wipe_redirect(
+            "https://a.com/x/y/z", "https://b.com/",
+        ) is True

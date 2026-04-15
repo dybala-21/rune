@@ -296,6 +296,9 @@ class RunMetrics:
     policy_checks: int = 0
     policy_fires: int = 0
     policy_trigger_summary: dict[str, int] = field(default_factory=dict)
+    file_pass_count: int = 0
+    file_fail_count: int = 0
+    file_result_ratio: float | None = None
 
 
 async def _run_once(name: str, advisor_env: str | None) -> RunMetrics:
@@ -398,13 +401,53 @@ async def _run_once(name: str, advisor_env: str | None) -> RunMetrics:
     except Exception:
         pass
 
+    # Measure actual file quality by running any .py the agent created.
+    # Bench tasks print PASS: and FAIL: markers plus a final RESULT: N/M.
+    _measure_file_quality(metrics)
+
     return metrics
+
+
+def _measure_file_quality(metrics: RunMetrics) -> None:
+    """Run every .py in the workspace and count PASS/FAIL/RESULT markers."""
+    import re as _re
+    import subprocess as _sp
+    total_pass = 0
+    total_fail = 0
+    best_ratio: float | None = None
+    for py in _WORKSPACE.glob("*.py"):
+        try:
+            r = _sp.run(
+                ["python3", str(py)],
+                capture_output=True, timeout=30,
+            )
+            out = (r.stdout or b"").decode(errors="replace")
+            total_pass += len(_re.findall(r"^PASS:", out, _re.MULTILINE))
+            total_fail += len(_re.findall(r"^FAIL:", out, _re.MULTILINE))
+            m = _re.search(r"RESULT:\s*(\d+)\s*/\s*(\d+)", out)
+            if m:
+                num, den = int(m.group(1)), int(m.group(2))
+                if den > 0:
+                    ratio = num / den
+                    if best_ratio is None or ratio > best_ratio:
+                        best_ratio = ratio
+        except Exception:
+            continue
+    metrics.file_pass_count = total_pass
+    metrics.file_fail_count = total_fail
+    metrics.file_result_ratio = best_ratio
 
 
 def _fmt(v: float, unit: str = "") -> str:
     if isinstance(v, float):
         return f"{v:.1f}{unit}"
     return f"{v}{unit}"
+
+
+def _fmt_ratio(ratio: float | None) -> str:
+    if ratio is None:
+        return "-"
+    return f"{ratio * 100:.0f}%"
 
 
 def _print_comparison(baseline: RunMetrics, advised: RunMetrics) -> None:
@@ -424,6 +467,10 @@ def _print_comparison(baseline: RunMetrics, advised: RunMetrics) -> None:
         ("advisor_off?",   baseline.advisor_disabled_reason or "-",
                            advised.advisor_disabled_reason or "-"),
         ("files_created",  str(len(baseline.files_created)), str(len(advised.files_created))),
+        ("file_pass/fail", f"{baseline.file_pass_count}/{baseline.file_fail_count}",
+                           f"{advised.file_pass_count}/{advised.file_fail_count}"),
+        ("file_result",    _fmt_ratio(baseline.file_result_ratio),
+                           _fmt_ratio(advised.file_result_ratio)),
     ]
 
     col1 = max(len(r[0]) for r in rows)
