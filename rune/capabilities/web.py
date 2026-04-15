@@ -267,6 +267,37 @@ def _get_domain(url: str) -> str:
         return ""
 
 
+def _is_path_wipe_redirect(original_url: str, final_url: str) -> bool:
+    """Return True when the server redirected a deep path to a shallower one
+    that does not share the requested prefix.
+
+    Common case: invalid resource ID lands on the homepage or a search page.
+    Canonicalization redirects (https upgrade, trailing slash, case change)
+    are allowed because the path prefix is preserved.
+    """
+    if original_url == final_url:
+        return False
+    from urllib.parse import urlparse
+    try:
+        orig = urlparse(original_url)
+        final = urlparse(final_url)
+    except Exception:
+        return False
+
+    orig_segments = [p for p in orig.path.split("/") if p]
+    final_segments = [p for p in final.path.split("/") if p]
+
+    if len(orig_segments) < 2:
+        return False
+    if len(final_segments) >= len(orig_segments):
+        return False
+    # Path prefix preserved means canonicalization, not wipe.
+    if orig.path.rstrip("/").startswith(final.path.rstrip("/").rstrip()):
+        if final_segments and orig_segments[: len(final_segments)] == final_segments:
+            return False
+    return True
+
+
 async def web_fetch(params: WebFetchParams) -> CapabilityResult:
     """Fetch a URL and convert HTML to clean text.
 
@@ -304,6 +335,29 @@ async def web_fetch(params: WebFetchParams) -> CapabilityResult:
 
         content_type = resp.headers.get("content-type", "")
         html = resp.text
+        final_url = str(resp.url)
+
+        # Path-wipe redirect detection. Sites commonly serve an invalid
+        # deep path by redirecting to the homepage or a search page,
+        # which returns 200 OK with boilerplate nav content. That looks
+        # like success but is not the requested resource.
+        if _is_path_wipe_redirect(params.url, final_url):
+            if domain:
+                _fetch_failures[domain] = _fetch_failures.get(domain, 0) + 1
+            return CapabilityResult(
+                success=False,
+                error=(
+                    f"URL {params.url} redirected to {final_url}. "
+                    "The requested path was lost, target likely does not exist."
+                ),
+                metadata={
+                    "url": params.url,
+                    "final_url": final_url,
+                    "redirected": True,
+                    "path_wiped": True,
+                    "status_code": resp.status_code,
+                },
+            )
 
         # Extract by selector if provided
         if params.selector:
@@ -342,6 +396,8 @@ async def web_fetch(params: WebFetchParams) -> CapabilityResult:
             output=text,
             metadata={
                 "url": params.url,
+                "final_url": final_url,
+                "redirected": final_url != params.url,
                 "content_type": content_type,
                 "length": len(text),
                 "truncated": truncated,

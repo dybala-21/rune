@@ -80,11 +80,13 @@ Rules:
 # (measured in P0-2 bench), routinely exceeding the original 15s budget on
 # the 'reconcile' trigger. Bumped to 60s to match openai/deepseek reasoning.
 _TIMEOUT_MS: dict[str, int] = {
-    "anthropic":  15_000,
+    # Anthropic Opus reconcile can exceed 15s in practice, 30s covers
+    # observed p95 without risking runaway stalls.
+    "anthropic":  30_000,
     "openai":     60_000,
     "deepseek":   60_000,
     "gemini":     60_000,
-    "xai":        15_000,
+    "xai":        30_000,
     "ollama":    120_000,
     "":           30_000,
 }
