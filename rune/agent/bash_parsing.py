@@ -195,6 +195,11 @@ def is_verification_command(command: str) -> bool:
         # Python-specific linters / type checkers
         if first in ("mypy", "ruff", "flake8", "pylint", "eslint", "tsc"):
             return True
+        # python -m pytest / python -m unittest
+        if first in ("python", "python3") and second == "-m" and third in (
+            "pytest", "unittest", "mypy", "ruff", "flake8", "pylint",
+        ):
+            return True
     return False
 
 

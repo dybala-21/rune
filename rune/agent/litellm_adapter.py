@@ -152,6 +152,13 @@ _PROVIDER_EXTRA: dict[str, dict[str, str]] = {
 }
 
 
+def _is_o_series(model: str) -> bool:
+    """O-series reasoning models (o1/o3/o4) only support temperature=1."""
+    import re as _re
+    base = model.rsplit("/", 1)[-1]
+    return bool(_re.match(r"^o[134](-|$)", base))
+
+
 def _vertex_active() -> bool:
     """True when GOOGLE_APPLICATION_CREDENTIALS points to an existing file."""
     import os as _os
@@ -360,10 +367,11 @@ class StreamResult:
                 "messages": self._messages,
                 "tools": _tools,
                 "stream": True,
-                "temperature": self._temperature,
                 "max_tokens": _effective_max,
                 "stream_options": {"include_usage": True},
             }
+            if not _is_o_series(self._model):
+                _acompletion_kwargs["temperature"] = self._temperature
             if self._extra_headers:
                 _acompletion_kwargs["extra_headers"] = dict(self._extra_headers)
             _acompletion_kwargs.update(self._provider_extra)

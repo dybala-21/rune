@@ -17,9 +17,13 @@
 <p align="center">
   <img alt="Python 3.13+" src="https://img.shields.io/badge/python-3.13%2B-blue?logo=python&logoColor=white" />
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green" />
+  <img alt="Tests" src="https://img.shields.io/badge/tests-2147%20passing-brightgreen" />
+  <img alt="LOC" src="https://img.shields.io/badge/Python-86K%20LOC-blue" />
 </p>
 
 ---
+
+<!-- TODO: replace with asciinema/terminal GIF showing learning effect across two sessions -->
 
 ```
 ─── rune ──────────────────────────────────────────
@@ -32,6 +36,26 @@
   ┃  ▸ bash ruff check .  ✓
 
 ✓ done — steps 1 — tools 3 — tokens 12k
+```
+
+## Why RUNE
+
+Most coding agents make the same mistake twice in two days. They start every session from a blank slate — no memory of what worked, no memory of what failed, no learned conventions.
+
+**RUNE remembers.** Every task is recorded as an episode, scored +1 or -1. Similar future tasks pull past episodes into context. Repeated failures auto-generate prevention rules. The agent measurably improves at tasks it has done before.
+
+```
+First time: "Fix lint in src/auth.py"
+  ↓ tools: file_read → file_edit → bash(ruff)
+  ↓ outcome: ruff still failing - missed a stale import after edit
+  ↓ utility: -1
+  ↓ rule learned: verify_before_complete
+
+Fifth time (similar task in src/users.py)
+  ↓ past episodes injected into context
+  ↓ tools: file_read → file_edit → file_read (verify) → bash(ruff)
+  ↓ outcome: passed first try
+  ↓ utility: +1
 ```
 
 ## Quick Start

@@ -96,7 +96,13 @@ class VectorStore:
     def add(self, embedding: list[float], metadata: VectorMetadata) -> None:
         """Add a single vector with metadata."""
         self._ensure_init()
+        if len(embedding) != self._dim:
+            log.warning("embedding_dim_mismatch", got=len(embedding), expected=self._dim)
+            return
         vec = np.array([embedding], dtype=np.float32)
+        if not np.isfinite(vec).all():
+            log.warning("embedding_contains_nan_inf")
+            return
         self._index.add(vec)
         self._metadata.append(metadata)
 
@@ -107,9 +113,23 @@ class VectorStore:
         self._ensure_init()
         if not embeddings:
             return
-        vecs = np.array(embeddings, dtype=np.float32)
+        valid_embeddings = []
+        valid_metadata = []
+        for emb, meta in zip(embeddings, metadata_list, strict=False):
+            if len(emb) != self._dim:
+                log.warning("embedding_dim_mismatch", got=len(emb), expected=self._dim)
+                continue
+            arr = np.array(emb, dtype=np.float32)
+            if not np.isfinite(arr).all():
+                log.warning("embedding_contains_nan_inf")
+                continue
+            valid_embeddings.append(emb)
+            valid_metadata.append(meta)
+        if not valid_embeddings:
+            return
+        vecs = np.array(valid_embeddings, dtype=np.float32)
         self._index.add(vecs)
-        self._metadata.extend(metadata_list)
+        self._metadata.extend(valid_metadata)
 
     def delete_by_id(self, doc_id: str) -> bool:
         """Mark a vector as deleted by its document ID. Returns True if found."""

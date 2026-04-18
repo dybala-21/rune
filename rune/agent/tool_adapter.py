@@ -51,6 +51,9 @@ STALL_LIMITS: dict[str, Any] = {
         "hardStop": 30,
         "sameFile": 2,
     },
+    "fileWrite": {
+        "sameFile": 6,
+    },
     "bash": {
         "consecutiveFailures": 8,
         "intentRepeat": 8,
@@ -498,6 +501,24 @@ def _build_typed_tool(
                     if opts.on_tool_end is not None:
                         await opts.on_tool_end(cap_name, err)
                     return "[DENIED] User declined the service operation."
+
+        # 2.5 Edit-loop circuit breaker — blocks at tool dispatch level
+        if cap_name in ("file_edit", "file_write") and stall is not None:
+            if hasattr(stall, "file_edit_counts"):
+                _fp = effective_params.get("file_path") or effective_params.get("path", "")
+                if _fp:
+                    _count = stall.file_edit_counts.get(_fp, 0)
+                    _limit = STALL_LIMITS.get("fileWrite", {}).get("sameFile", 3)
+                    if _count >= _limit:
+                        _block_msg = (
+                            f"[BLOCKED] File '{_fp}' has been edited {_count} times. "
+                            "You are stuck in an edit loop. STOP editing this file. "
+                            "Step back and reconsider your entire approach."
+                        )
+                        err = CapabilityResult(success=False, error=_block_msg)
+                        if opts.on_tool_end is not None:
+                            await opts.on_tool_end(cap_name, err)
+                        return _block_msg
 
         # 3. Execute
         start_time = time.monotonic()
@@ -1195,6 +1216,15 @@ def _update_stall_state(
     elif cap_name == "browser_find" and result.success:
         if hasattr(stall, "browser_no_match_count"):
             stall.browser_no_match_count = 0
+
+    # File edit loop tracking (mirrors web_fetch_urls pattern)
+    if cap_name in ("file_edit", "file_write") and hasattr(stall, "file_edit_counts"):
+        fp = params.get("file_path") or params.get("path", "")
+        if fp:
+            stall.file_edit_counts[fp] = stall.file_edit_counts.get(fp, 0) + 1
+            same_file_limit = STALL_LIMITS.get("fileWrite", {}).get("sameFile", 3)
+            if stall.file_edit_counts[fp] >= same_file_limit:
+                stall.stall_warning_issued = True
 
     # General error signature recording (#15)
     if not result.success and result.error and cap_name != "bash_execute":
