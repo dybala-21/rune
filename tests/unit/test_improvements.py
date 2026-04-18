@@ -1,8 +1,11 @@
 """Tests for the three improvements: B (R06 verifications), C (edit-loop), D (cycle guidance)."""
-import pytest
+from rune.agent.completion_gate import (
+    CompletionGateInput,
+    ExecutionEvidenceSnapshot,
+    evaluate_completion_gate,
+)
 from rune.agent.loop import StallState
-from rune.agent.tool_adapter import _update_stall_state, STALL_LIMITS
-from rune.agent.completion_gate import ExecutionEvidenceSnapshot, evaluate_completion_gate, CompletionGateInput
+from rune.agent.tool_adapter import STALL_LIMITS, _update_stall_state
 
 
 class _FakeResult:
@@ -67,7 +70,7 @@ class TestEditLoopBreaker:
         stall = StallState()
         fp = "/tmp/test.py"
 
-        for i in range(5):
+        for _i in range(5):
             _update_stall_state(
                 stall, "file_edit",
                 {"file_path": fp},
@@ -83,7 +86,7 @@ class TestEditLoopBreaker:
         fp = "/tmp/test.py"
         limit = STALL_LIMITS["fileWrite"]["sameFile"]  # 3
 
-        for i in range(limit - 1):
+        for _i in range(limit - 1):
             _update_stall_state(
                 stall, "file_edit", {"file_path": fp},
                 _FakeResult(success=True), 100.0,
@@ -99,7 +102,7 @@ class TestEditLoopBreaker:
     def test_different_files_tracked_separately(self):
         """Different file paths should have independent counters."""
         stall = StallState()
-        for i in range(3):
+        for _i in range(3):
             _update_stall_state(
                 stall, "file_edit", {"file_path": "/tmp/a.py"},
                 _FakeResult(success=True), 100.0,
@@ -116,7 +119,7 @@ class TestEditLoopBreaker:
         stall = StallState()
         fp = "/tmp/test.py"
         limit = STALL_LIMITS["fileWrite"]["sameFile"]
-        for i in range(limit):
+        for _i in range(limit):
             _update_stall_state(
                 stall, "file_write", {"file_path": fp},
                 _FakeResult(success=True), 100.0,
@@ -129,7 +132,7 @@ class TestEditLoopBreaker:
         stall = StallState()
         fp = "/tmp/loop.py"
         limit = STALL_LIMITS["fileWrite"]["sameFile"]
-        for i in range(limit + 2):
+        for _i in range(limit + 2):
             _update_stall_state(
                 stall, "file_edit", {"file_path": fp},
                 _FakeResult(success=True), 100.0,
