@@ -43,7 +43,7 @@ _DANGEROUS_BASH_PATTERNS: list[_DangerRule] = [
     _DangerRule(re.compile(r"mkfs\."), "critical", "Disk formatting command"),
     _DangerRule(re.compile(r"dd\s+.*of=/dev"), "critical", "Direct disk write"),
     # Permissions
-    _DangerRule(re.compile(r"chmod\s+-R?\s*777\s+/"), "critical", "Dangerous permission change"),
+    _DangerRule(re.compile(r"chmod\s+(-R\s+)?777\s+/"), "critical", "Dangerous permission change"),
     _DangerRule(re.compile(r"chown\s+-R?\s+root"), "high", "Ownership change to root"),
     # Network RCE
     _DangerRule(re.compile(r"curl.*\|\s*bash"), "critical", "Remote code execution via curl"),

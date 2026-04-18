@@ -213,6 +213,7 @@ class StallState:
     web_fetch_urls: dict[str, int] = field(default_factory=dict)
     recent_tool_calls: list[str] = field(default_factory=list)
     cycle_detected: bool = False
+    file_edit_counts: dict[str, int] = field(default_factory=dict)
 
     def mark_activity(self, tool_name: str = "") -> None:
         self.consecutive_no_progress = 0
@@ -870,6 +871,11 @@ class NativeAgentLoop(EventEmitter):
                 if result.success:
                     self._tool_call_seq += 1
                     self._last_verify_step = self._tool_call_seq
+                    # R06: count formal verification commands separately
+                    cmd = _last_tool_params.get("command", "")
+                    from rune.agent.bash_parsing import is_verification_command
+                    if cmd and is_verification_command(cmd):
+                        evidence.verifications += 1
             elif cap_name == "web_search":
                 evidence.web_searches += 1
                 self._stall.web_search_count += 1  # (#15)
@@ -2552,6 +2558,28 @@ class NativeAgentLoop(EventEmitter):
                 "[STALL] No progress detected for multiple steps. "
                 "Reconsider your strategy."
             )
+        if self._stall.cycle_detected:
+            parts.append(
+                "[STALL] Repeating tool-call pattern detected. "
+                "Break the cycle — try a fundamentally different approach."
+            )
+        if self._stall.file_edit_counts:
+            same_file_limit = 3
+            for fp, count in self._stall.file_edit_counts.items():
+                if count >= same_file_limit:
+                    parts.append(
+                        f"[STALL] File '{fp}' edited {count} times. "
+                        "Stop editing and reconsider your approach from scratch."
+                    )
+                    break
+        if self._stall.error_signature_counts:
+            total_errors = sum(self._stall.error_signature_counts.values())
+            if total_errors >= 10:
+                parts.append(
+                    f"[STALL] {total_errors} errors across "
+                    f"{len(self._stall.error_signature_counts)} different patterns. "
+                    "You may be stuck. Try a completely different approach."
+                )
         if not parts:
             return None
         return "\n".join(parts)
