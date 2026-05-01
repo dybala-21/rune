@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import statistics
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -282,7 +282,7 @@ class TestRRFStages:
                 type="md_daily", id="today", timestamp=now.isoformat())),
             SearchResult(id="week", score=1.0, metadata=VectorMetadata(
                 type="md_daily", id="week",
-                timestamp=(now.replace(day=max(1, now.day - 7))).isoformat())),
+                timestamp=(now - timedelta(days=7)).isoformat())),
             SearchResult(id="month", score=1.0, metadata=VectorMetadata(
                 type="md_daily", id="month",
                 timestamp="2026-02-16T00:00:00+00:00")),
