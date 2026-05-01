@@ -73,7 +73,7 @@ class TestZone1MemoryMd:
         md = mem_dir / "MEMORY.md"
         md.write_text("# Preferences\n\n- editor: vim\n")
 
-        # Try to save same key to learned.md via fact_consolidator logic
+        # MEMORY.md is user-curated and takes precedence over learned.md.
         assert memory_md_has_key("editor", md) is True
 
 
