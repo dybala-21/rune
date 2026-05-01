@@ -20,10 +20,11 @@ from rune.agent.quality_gate import (
     AgentResult as QAResult,
 )
 from rune.agent.quality_gate import (
-    TaskInfo as QATaskInfo,
+    LLMClientLike,
+    check_task_quality,
 )
 from rune.agent.quality_gate import (
-    check_task_quality,
+    TaskInfo as QATaskInfo,
 )
 from rune.agent.roles import AgentRoleId, get_role
 from rune.agent.task_board import (
@@ -98,6 +99,7 @@ AgentLoopFactory = Callable[
 
 
 # Orchestrator
+
 
 class Orchestrator(EventEmitter):
     """Multi-agent orchestrator with dependency-aware parallel execution,
@@ -324,7 +326,8 @@ class Orchestrator(EventEmitter):
                         # Dynamic expansion: if output contains follow-up
                         # tasks, add them to the board.
                         expanded = self._parse_follow_up_tasks(
-                            result.output, ct.id,
+                            result.output,
+                            ct.id,
                         )
                         for new_task in expanded:
                             try:
@@ -387,7 +390,9 @@ class Orchestrator(EventEmitter):
                     SubTaskResult(
                         task_id=task.id,
                         success=False,
-                        error="Aborted due to earlier failure" if aborted else "Task did not complete",
+                        error="Aborted due to earlier failure"
+                        if aborted
+                        else "Task did not complete",
                     )
                 )
         # Append results from dynamically expanded tasks
@@ -438,7 +443,7 @@ class Orchestrator(EventEmitter):
                     error=result.error,
                 )
                 # Mark remaining tasks as aborted
-                for remaining_task in plan.tasks[idx + 1:]:
+                for remaining_task in plan.tasks[idx + 1 :]:
                     results.append(
                         SubTaskResult(
                             task_id=remaining_task.id,
@@ -476,12 +481,13 @@ class Orchestrator(EventEmitter):
 
             if failure_type == "correctable" and attempt < self._config.max_retries:
                 await self.emit(
-                    "subtask_retry", task.id, failure_type,
-                    attempt + 1, result.error or "",
+                    "subtask_retry",
+                    task.id,
+                    failure_type,
+                    attempt + 1,
+                    result.error or "",
                 )
-                result = await self._corrective_retry(
-                    task, result.error or "", dep_context
-                )
+                result = await self._corrective_retry(task, result.error or "", dep_context)
                 if result.success:
                     return result
             elif failure_type == "unknown" and attempt == 0:
@@ -492,22 +498,26 @@ class Orchestrator(EventEmitter):
                     error=result.error,
                 )
                 await self.emit(
-                    "subtask_retry", task.id, failure_type,
-                    1, result.error or "",
+                    "subtask_retry",
+                    task.id,
+                    failure_type,
+                    1,
+                    result.error or "",
                 )
-                result = await self._corrective_retry(
-                    task, result.error or "", dep_context
-                )
+                result = await self._corrective_retry(task, result.error or "", dep_context)
                 if result.success:
                     return result
                 # Do not retry unknown errors more than once
                 break
             elif failure_type == "transient" and attempt < self._config.max_retries:
                 await self.emit(
-                    "subtask_retry", task.id, failure_type,
-                    attempt + 1, result.error or "",
+                    "subtask_retry",
+                    task.id,
+                    failure_type,
+                    attempt + 1,
+                    result.error or "",
                 )
-                await asyncio.sleep(min(2 ** attempt, 8))
+                await asyncio.sleep(min(2**attempt, 8))
                 continue
             else:
                 break
@@ -564,11 +574,23 @@ class Orchestrator(EventEmitter):
             # Quality gate: catch hollow success before accepting.
             # Skip for stub outputs (no agent_loop_factory) to avoid
             # false positives on short synthetic responses.
-            qc = check_task_quality(
-                QATaskInfo(id=task.id, role=role_id, goal=goal),
-                QAResult(success=True, answer=str(output), duration_ms=duration_ms),
-                threshold=self._config.quality_threshold,
-            ) if self._agent_loop_factory is not None else None
+            qc = None
+            if self._agent_loop_factory is not None:
+                judge_client: LLMClientLike | None = None
+                try:
+                    from typing import cast
+
+                    from rune.llm.client import get_llm_client
+
+                    judge_client = cast(LLMClientLike, get_llm_client())
+                except Exception as exc:
+                    log.debug("orchestrator_quality_judge_unavailable", error=str(exc))
+                qc = await check_task_quality(
+                    QATaskInfo(id=task.id, role=role_id, goal=goal),
+                    QAResult(success=True, answer=str(output), duration_ms=duration_ms),
+                    threshold=self._config.quality_threshold,
+                    llm_client=judge_client,
+                )
             if qc is not None and not qc.passed:
                 log.warning(
                     "orchestrator_quality_gate_failed",
@@ -644,37 +666,66 @@ class Orchestrator(EventEmitter):
 
         # Critical: permission, security, OOM
         critical_patterns = [
-            "permission denied", "access denied", "out of memory",
-            "segmentation fault", "kill signal", "oom",
+            "permission denied",
+            "access denied",
+            "out of memory",
+            "segmentation fault",
+            "kill signal",
+            "oom",
         ]
         if any(p in lower for p in critical_patterns):
             return "critical"
 
         # Systemic: missing dependencies, config errors
         systemic_patterns = [
-            "module not found", "import error", "no such file",
-            "command not found", "configuration error", "not installed",
+            "module not found",
+            "import error",
+            "no such file",
+            "command not found",
+            "configuration error",
+            "not installed",
         ]
         if any(p in lower for p in systemic_patterns):
             return "systemic"
 
         # Transient: network, rate limit, timeout
         transient_patterns = [
-            "timeout", "rate limit", "connection", "network",
-            "temporarily unavailable", "503", "429", "econnreset",
-            "econnrefused", "etimedout",
+            "timeout",
+            "rate limit",
+            "connection",
+            "network",
+            "temporarily unavailable",
+            "503",
+            "429",
+            "econnreset",
+            "econnrefused",
+            "etimedout",
         ]
         if any(p in lower for p in transient_patterns):
             return "transient"
 
         # Correctable: errors that hint at a fixable approach
         correctable_patterns = [
-            "invalid argument", "invalid parameter", "invalid value",
-            "type error", "typeerror", "valueerror", "value error",
-            "key error", "keyerror", "index error", "indexerror",
-            "syntax error", "syntaxerror", "parse error",
-            "missing required", "expected", "unexpected token",
-            "wrong number", "invalid format", "malformed",
+            "invalid argument",
+            "invalid parameter",
+            "invalid value",
+            "type error",
+            "typeerror",
+            "valueerror",
+            "value error",
+            "key error",
+            "keyerror",
+            "index error",
+            "indexerror",
+            "syntax error",
+            "syntaxerror",
+            "parse error",
+            "missing required",
+            "expected",
+            "unexpected token",
+            "wrong number",
+            "invalid format",
+            "malformed",
         ]
         if any(p in lower for p in correctable_patterns):
             return "correctable"
@@ -751,17 +802,11 @@ class Orchestrator(EventEmitter):
 
         try:
             planner_run = await self._agent_loop_factory("planner")
-            failure_summary = "\n".join(
-                f"- Task {r.task_id}: {r.error}" for r in failed_results
-            )
+            failure_summary = "\n".join(f"- Task {r.task_id}: {r.error}" for r in failed_results)
             success_summary = ""
             if succeeded_results:
-                success_summary = (
-                    "\n\nAlready completed tasks (do NOT redo these):\n"
-                    + "\n".join(
-                        f"- Task {r.task_id}: {r.output[:200]}"
-                        for r in succeeded_results
-                    )
+                success_summary = "\n\nAlready completed tasks (do NOT redo these):\n" + "\n".join(
+                    f"- Task {r.task_id}: {r.output[:200]}" for r in succeeded_results
                 )
             raw_plan = await planner_run(
                 f"The following sub-tasks failed during execution of the goal: "
@@ -787,7 +832,8 @@ class Orchestrator(EventEmitter):
 
     @staticmethod
     def _parse_follow_up_tasks(
-        output: str, parent_id: str,
+        output: str,
+        parent_id: str,
     ) -> list[SubTask]:
         """Extract follow-up tasks from a completed subtask's output.
 
@@ -821,12 +867,14 @@ class Orchestrator(EventEmitter):
             for item in raw[: Orchestrator._MAX_FOLLOW_UP_TASKS]:
                 if not isinstance(item, dict) or "description" not in item:
                     continue
-                tasks.append(SubTask(
-                    id=uuid4().hex[:8],
-                    description=item["description"],
-                    role=item.get("role", "executor"),
-                    dependencies=[parent_id],
-                ))
+                tasks.append(
+                    SubTask(
+                        id=uuid4().hex[:8],
+                        description=item["description"],
+                        role=item.get("role", "executor"),
+                        dependencies=[parent_id],
+                    )
+                )
             return tasks
         except Exception:
             return []
