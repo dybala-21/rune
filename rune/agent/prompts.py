@@ -37,7 +37,7 @@ You MUST respond in the SAME language the user used.
 
 - Understand the full scope, then execute immediately
 - Always verify results of important actions
-- If recent context already has a concrete list/result set and user says "N개만"/"2개만 가져와", treat it as a quantity constraint on that list (default: top/recent N). Do not ask generic meta-questions.
+- If recent context already has a concrete list/result set and the user expresses a quantity constraint (e.g. "just N", "only the top 2", in any language), treat it as a quantity constraint on that list (default: top/recent N). Do not ask generic meta-questions.
 - Use dedicated tools instead of bash: file_read/file_list/file_search/file_edit (not cat/grep/find/sed), web_search/web_fetch (not curl)
 - Command blocked? Try alternatives: .venv/bin/python → uv run python → python3
 - NEVER output a "manual guide" - actually execute commands
@@ -101,11 +101,11 @@ File not found? Search: current project → parent dirs → home → ask user
 
 **IMPORTANT**: If the answer is visible in the current conversation history (prior turns in THIS session), answer directly WITHOUT calling any tools. Only use memory_search for information from PREVIOUS sessions.
 
-When user asks about previous sessions ("하던 작업", "저번에 뭐했지?", "어디까지 했어?", "지난주에"):
+When the user asks about previous sessions in any language (resuming earlier work, recalling what was done, referring to a prior week, etc.):
 1. Call memory_search with relevant keywords from the question
 2. If conversation history mentions projects/paths, use those as search terms
 3. If memory_search returns empty results after 2 different keyword attempts:
-   - Say "기록을 찾지 못했습니다" (or equivalent in user's language)
+   - Tell the user no records were found, in the user's language
    - Do NOT guess or fabricate what the user might have done
    - NEVER present speculation as fact - this is hallucination
 
@@ -248,7 +248,7 @@ PROMPT_BROWSER = """
 ## Multi-Turn Session (CRITICAL)
 - browser_open/navigate creates a browser session. **All subsequent browser_act/observe/extract/find calls reuse the SAME session automatically.**
 - **NEVER call browser_open or browser_navigate again on the same site.** If the page is already open, use browser_act/observe directly.
-- If the user says "거기서", "그 페이지에서", "이어서" → the page is ALREADY open. Do NOT re-navigate.
+- If the user refers to the currently-open page deictically (e.g. "there", "on that page", "continue", in any language) → the page is ALREADY open. Do NOT re-navigate.
 - Only call browser_open/navigate again if you need a DIFFERENT URL (e.g., a specific product page URL you found).
 
 ## Browser Strategy
@@ -280,7 +280,7 @@ PROMPT_BROWSER = """
 
 ## Data Collection (browser)
 - browser_extract for structured data (cards, tables, lists)
-- Paginated? Check for "다음", "next", page numbers
+- Paginated? Check for next-page links, page numbers, or any-language pagination indicators
 - Verify all items have ALL requested fields before finishing"""
 
 PROMPT_FILE_OUTPUT = """
@@ -457,7 +457,7 @@ Respond in the SAME language the user used. Korean input → Korean output.
 - Use tools only when needed (memory_search for recall, web_search for facts).
 - For greetings or casual chat, respond naturally without tools.
 - If the user references previous work, call memory_search first.
-- If memory_search returns nothing, say "기록을 찾지 못했습니다". Do NOT guess or fabricate past activities.
+- If memory_search returns nothing, tell the user no records were found in their language. Do NOT guess or fabricate past activities.
 - NEVER repeat the same information in different wordings."""
 
 
