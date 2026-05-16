@@ -196,6 +196,19 @@ class CronExecutionConfig(BaseModel):
     default_timeout_seconds: int = 300
 
 
+# Goal Loop Configuration (the /goal autonomous loop)
+
+class GoalLoopConfig(BaseModel):
+    enabled: bool = True
+    max_iterations: int = 10
+    max_total_tokens: int = 2_000_000  # cost-runaway cap
+    stagnation_window: int = 3  # identical outcomes in a row -> stop
+    evidence_threshold: float = 0.8  # inner-loop evidence_score floor
+    validation_timeout_seconds: int = 600  # per SPEC validation command
+    adversarial_review: bool = True  # ALLOW/BLOCK gate before accepting verified
+    ssc_interval: int = 0  # SSC self-critique every N iters (0 = off, opt-in)
+
+
 # Root Configuration
 
 class RuneConfig(BaseModel):
@@ -213,6 +226,7 @@ class RuneConfig(BaseModel):
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     general: GeneralConfig = Field(default_factory=GeneralConfig)
     cron_execution: CronExecutionConfig = Field(default_factory=CronExecutionConfig)
+    goal_loop: GoalLoopConfig = Field(default_factory=GoalLoopConfig)
 
     # API keys (resolved from config, then env, then None)
     openai_api_key: str | None = Field(default=None, alias="openai_api_key")

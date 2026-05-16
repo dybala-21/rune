@@ -510,6 +510,11 @@ class NativeAgentLoop(EventEmitter):
                         confidence=0.75,
                         tier=2,
                         reason=f"LLM intent fallback: {llm_intent}",
+                        # Tier-2 LLM intent classifier doesn't surface
+                        # email/document detection; default to including
+                        # both prompt sections so multilingual users
+                        # don't lose guidance on this fallback path.
+                        intent_categories=frozenset({"email", "document"}),
                     )
 
             log.info("goal_classified", type=classification.goal_type,

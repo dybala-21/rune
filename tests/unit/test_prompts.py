@@ -141,21 +141,53 @@ class TestBuildSystemPrompt:
         prompt = build_system_prompt(goal="sync calendar", has_mcp_services=False)
         assert "External Service Operations" not in prompt
 
-    def test_email_goal_includes_email_workflow(self):
-        prompt = build_system_prompt(goal="check my gmail inbox")
+    def test_email_intent_includes_email_workflow(self):
+        classification = ClassificationResult(
+            goal_type="full", confidence=0.9, tier=2,
+            intent_categories=frozenset({"email"}),
+        )
+        prompt = build_system_prompt(
+            goal="check my gmail inbox", classification=classification,
+        )
         assert "Email Reading Workflow" in prompt
 
-    def test_non_email_goal_excludes_email_workflow(self):
-        prompt = build_system_prompt(goal="fix the CSS layout")
+    def test_no_email_intent_excludes_email_workflow(self):
+        classification = ClassificationResult(
+            goal_type="code_modify", confidence=0.9, tier=2,
+            intent_categories=frozenset(),
+        )
+        prompt = build_system_prompt(
+            goal="fix the CSS layout", classification=classification,
+        )
         assert "Email Reading Workflow" not in prompt
 
-    def test_document_goal_includes_document_protocol(self):
-        prompt = build_system_prompt(goal="사업 계획서 작성해줘")
+    def test_document_intent_includes_document_protocol(self):
+        classification = ClassificationResult(
+            goal_type="full", confidence=0.9, tier=2,
+            intent_categories=frozenset({"document"}),
+        )
+        prompt = build_system_prompt(
+            goal="사업 계획서 작성해줘", classification=classification,
+        )
         assert "Document Creation Protocol" in prompt
 
-    def test_non_document_goal_excludes_document_protocol(self):
-        prompt = build_system_prompt(goal="fix the bug")
+    def test_no_document_intent_excludes_document_protocol(self):
+        classification = ClassificationResult(
+            goal_type="code_modify", confidence=0.9, tier=2,
+            intent_categories=frozenset(),
+        )
+        prompt = build_system_prompt(
+            goal="fix the bug", classification=classification,
+        )
         assert "Document Creation Protocol" not in prompt
+
+    def test_missing_classification_protective_includes_both(self):
+        # When classification is omitted (e.g. fallback path), include both
+        # sections defensively — losing email/document guidance is worse
+        # than the extra tokens.
+        prompt = build_system_prompt(goal="fix the bug")
+        assert "Email Reading Workflow" in prompt
+        assert "Document Creation Protocol" in prompt
 
     def test_channel_telegram_includes_channel_rules(self):
         prompt = build_system_prompt(goal="test", channel="telegram")

@@ -6,7 +6,7 @@ classifier which natively handles all languages. No regex pre-filtering.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 GoalType = Literal[
@@ -26,6 +26,9 @@ VALID_GOAL_TYPES: set[str] = {
 }
 
 
+_KNOWN_INTENT_CATEGORIES: frozenset[str] = frozenset({"email", "document"})
+
+
 @dataclass(slots=True)
 class ClassificationResult:
     goal_type: GoalType
@@ -41,6 +44,10 @@ class ClassificationResult:
     requires_execution: bool = False
     complexity: str = "simple"  # simple / moderate / complex
     output_expectation: str = "text"  # text / file / either
+    # Orthogonal intent flags (zero or more apply, language-agnostic).
+    # Drives conditional inclusion of PROMPT_EMAIL_WORKFLOW / PROMPT_DOCUMENT
+    # in agent/prompts.py:build_system_prompt.
+    intent_categories: frozenset[str] = field(default_factory=frozenset)
 
 
 # LLM classifier
@@ -62,23 +69,36 @@ _CLASSIFICATION_RULES = """\
 - If the request combines multiple categories → full
 - If evaluating without making changes → research"""
 
+_INTENT_FLAGS = """\
+Intent flags (default: empty list. Only set a flag when the goal explicitly mentions it. Detect across all languages.):
+- email: ONLY when the goal is about email itself — sending mail, reading inbox, replying, drafting an email message. Examples: "check my inbox", "send a mail to X", "メールを書いて", "回复邮件". NOT for: writing a report, generating a file.
+- document: ONLY when the goal is about producing a standalone document — report, proposal, business plan, formal write-up. Examples: "write a project report", "기획서 작성", "報告書を書いて". NOT for: sending an email, code generation.
+
+If the goal combines both (e.g. "email the report"), set both. If neither clearly applies, return []."""
+
+_INTENT_JSON_FIELD = '"intent_categories": [<zero or more of: "email", "document">]'
+
 _TIER2_SYSTEM_PROMPT = f"""\
-You are a goal classifier. Given a user's request, classify it into exactly one category.
+You are a goal classifier. Given a user's request, classify it into exactly one category and detect any applicable intent flags.
 
 Categories:
 {_CLASSIFICATION_CATEGORIES}
+
+{_INTENT_FLAGS}
 
 Rules:
 {_CLASSIFICATION_RULES}
 
-Respond with ONLY a JSON object: {{"goal_type": "<category>", "confidence": <0.0-1.0>, "reason": "<brief reason>"}}
+Respond with ONLY a JSON object: {{"goal_type": "<category>", "confidence": <0.0-1.0>, "reason": "<brief reason>", {_INTENT_JSON_FIELD}}}
 """
 
 _TIER2_SYSTEM_PROMPT_WITH_PREVIOUS = f"""\
-You are a goal classifier. Given a user's request and the previous request context, classify the current request and determine if it is related to the previous one.
+You are a goal classifier. Given a user's request and the previous request context, classify the current request, detect any applicable intent flags, and determine if it is related to the previous one.
 
 Categories:
 {_CLASSIFICATION_CATEGORIES}
+
+{_INTENT_FLAGS}
 
 Rules:
 {_CLASSIFICATION_RULES}
@@ -88,7 +108,7 @@ is_related_to_previous rules:
 - false: the current request is about a completely different topic or task
 - When in doubt, choose false
 
-Respond with ONLY a JSON object: {{"goal_type": "<category>", "confidence": <0.0-1.0>, "reason": "<brief reason>", "is_related_to_previous": true/false}}
+Respond with ONLY a JSON object: {{"goal_type": "<category>", "confidence": <0.0-1.0>, "reason": "<brief reason>", "is_related_to_previous": true/false, {_INTENT_JSON_FIELD}}}
 """
 
 
@@ -126,14 +146,18 @@ async def classify_tier2(
 
         tier = "fast"
 
+        # max_tokens budget covers both visible JSON output (~80 tokens) and
+        # any hidden reasoning the FAST-tier model uses. Reasoning models
+        # (gpt-5-mini, etc.) can otherwise burn the budget on reasoning
+        # alone and return an empty visible response, breaking parsing.
         response = await client.completion(
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
             tier=tier,  # type: ignore[arg-type]
-            max_tokens=256,
-            timeout=10.0,
+            max_tokens=1024,
+            timeout=15.0,
         )
 
         # Extract text from LiteLLM response
@@ -179,6 +203,16 @@ async def classify_tier2(
         # tasks get the larger tool-round and advisor budgets.
         is_complex_coding = goal_type in ("code_modify", "full")
 
+        # Validate intent_categories: keep only known values, ignore typos / hallucinated tags.
+        raw_intents = data.get("intent_categories") or []
+        if not isinstance(raw_intents, list):
+            raw_intents = []
+        intent_categories = frozenset(
+            str(c).strip().lower()
+            for c in raw_intents
+            if isinstance(c, str) and str(c).strip().lower() in _KNOWN_INTENT_CATEGORIES
+        )
+
         return ClassificationResult(
             goal_type=goal_type,  # type: ignore[arg-type]
             confidence=min(max(confidence, 0.0), 1.0),
@@ -186,6 +220,7 @@ async def classify_tier2(
             reason=reason,
             is_domain_change=is_domain_change,
             is_complex_coding=is_complex_coding,
+            intent_categories=intent_categories,
         )
 
     except Exception as exc:
@@ -193,11 +228,15 @@ async def classify_tier2(
         log = get_logger(__name__)
         log.debug("classification_fallback", error=str(exc)[:200])
 
+        # Protective default: when classification fails we don't know the
+        # intent, so include all known prompt sections rather than risk
+        # missing email/document guidance.
         return ClassificationResult(
             goal_type="full",
             confidence=0.5,
             tier=2,
             reason=f"Fallback ({type(exc).__name__})",
+            intent_categories=_KNOWN_INTENT_CATEGORIES,
         )
 
 
