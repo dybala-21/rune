@@ -146,6 +146,13 @@ async def _memory_handler(args: str) -> str | None:
     return f"__ACTION__:memory:{sub}"
 
 
+async def _goal_handler(args: str) -> str | None:
+    goal = args.strip()
+    if not goal:
+        return "Usage: /goal <what to accomplish> - runs an autonomous loop until verified"
+    return f"__ACTION__:goal_loop:{goal}"
+
+
 # Command registry
 
 COMMANDS: dict[str, Command] = {
@@ -270,6 +277,13 @@ COMMANDS: dict[str, Command] = {
         name="/status",
         description="Show agent status",
         handler=_status_handler,
+    ),
+    "/goal": Command(
+        name="/goal",
+        description="Run an autonomous loop until the goal is verified",
+        handler=_goal_handler,
+        aliases=["/g"],
+        usage="/goal <what to accomplish>",
     ),
     # Hidden shortcuts (not shown in /help, but callable and Tab-completable)
     "/compact": Command(

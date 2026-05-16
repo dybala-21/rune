@@ -7,7 +7,6 @@ injectable based on task classification and goal category.
 
 from __future__ import annotations
 
-import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -516,18 +515,6 @@ steps, not explanations."""
 # Legacy alias - kept for backward compatibility with existing imports
 AGENT_SYSTEM_PROMPT = PROMPT_CORE
 
-# Regex for detecting email-related goals
-_EMAIL_RE = re.compile(
-    r"메일|이메일|email|gmail|outlook|inbox|받은\s*편지",
-    re.IGNORECASE,
-)
-
-# Regex for detecting document-related goals
-_DOCUMENT_RE = re.compile(
-    r"문서|보고서|기획서|제안서|사업\s*계획|report|proposal|business\s*plan|document|draft",
-    re.IGNORECASE,
-)
-
 
 # Prompt builders
 
@@ -585,9 +572,17 @@ def build_system_prompt(
     if output_expectation == "file":
         parts.append(PROMPT_FILE_OUTPUT.replace("{cwd}", cwd))
 
+    # Intent flags drive sections 5 and 7. When the field is *missing*
+    # (no classification or older callers), fall back to including both —
+    # losing email/document guidance is worse than spending the extra
+    # tokens. An explicit empty frozenset means "intent classifier
+    # determined neither applies" and is respected.
+    intents = getattr(classification, "intent_categories", None)
+    if intents is None:
+        intents = frozenset({"email", "document"})
+
     # 5. Document creation protocol
-    #    Triggered when goal mentions document-related keywords
-    if _DOCUMENT_RE.search(goal):
+    if "document" in intents:
         parts.append(PROMPT_DOCUMENT.replace("{cwd}", cwd))
 
     # 6. Browser prompt (unless deferred for progressive disclosure)
@@ -595,7 +590,7 @@ def build_system_prompt(
         parts.append(PROMPT_BROWSER)
 
     # 7. Email workflow - dynamic injection
-    if _EMAIL_RE.search(goal):
+    if "email" in intents:
         parts.append(PROMPT_EMAIL_WORKFLOW)
 
     # 8. MCP service safety + connected server list

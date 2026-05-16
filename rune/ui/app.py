@@ -1092,12 +1092,122 @@ class RuneApp:
         elif action.startswith("memory:"):
             sub = action.split(":", 1)[1]
             await self._do_memory_operation(sub)
+        elif action.startswith("goal_loop:"):
+            await self._do_goal_loop(action.split(":", 1)[1])
         else:
             self.renderer.print_system_message(result)
 
     # ===================================================================
     # Action implementations
     # ===================================================================
+
+    async def _do_goal_loop(self, request: str) -> None:
+        """Run the /goal autonomous loop: crystallize then verify-gated loop.
+
+        Blocks the prompt while running (like other long actions); runaway is
+        bounded by the multi-condition stop (max_iter / budget / stagnation).
+        """
+        from pathlib import Path
+
+        from rune.agent.goal_loop import GoalIteration, GoalLoop, GoalLoopConfig
+        from rune.agent.goal_review import (
+            make_adversarial_review_fn,
+            make_ssc_critique_fn,
+        )
+        from rune.agent.goal_runtime import GoalRuntime
+        from rune.agent.goal_spec import crystallize_goal
+        from rune.agent.goal_validate import make_validate_fn
+        from rune.agent.loop import NativeAgentLoop
+        from rune.config import get_config
+
+        cfg = get_config().goal_loop
+        if not cfg.enabled:
+            self.renderer.print_system_message(
+                "/goal is disabled (config goal_loop.enabled=false)."
+            )
+            return
+
+        self.renderer.print_system_message(f"Crystallizing goal: {request[:120]}")
+        cr = await crystallize_goal(request)
+        if cr.ambiguous:
+            qs = "\n".join(f"  - {q}" for q in cr.clarifications)
+            self.renderer.print_system_message(
+                "Goal is too vague to verify automatically. Refine and re-run "
+                f"/goal:\n{qs}"
+            )
+            return
+
+        if (
+            cr.spec.acceptance_criteria
+            and not cr.spec.validation_commands
+            and not cfg.adversarial_review
+        ):
+            self.renderer.print_system_message(
+                "/goal: no validation commands and adversarial review is off, "
+                "so this goal cannot be objectively verified. Enable config "
+                "goal_loop.adversarial_review=true, or refine the goal so "
+                "checkable validation commands can be derived."
+            )
+            return
+
+        self.renderer.print_system_message(
+            f"Spec: {cr.notice}\n"
+            f"Acceptance criteria: {len(cr.spec.acceptance_criteria)} | "
+            f"validation commands: {len(cr.spec.validation_commands)} | "
+            f"max_iter={cfg.max_iterations}"
+        )
+
+        cwd = str(Path.cwd())
+        workspace = Path(cwd) / ".rune" / "goal"
+        runtime = GoalRuntime(NativeAgentLoop(), channel="tui")
+
+        def _render(it: GoalIteration) -> None:
+            self.console.print(
+                f"[dim][goal {it.n}] verdict={it.verdict} "
+                f"reason={it.reason or '-'} evidence={it.evidence:.2f} "
+                f"tokens={it.tokens}[/dim]"
+            )
+
+        self._goal_cancelled = False
+        gl = GoalLoop(
+            GoalLoopConfig(
+                max_iterations=cfg.max_iterations,
+                max_total_tokens=cfg.max_total_tokens,
+                stagnation_window=cfg.stagnation_window,
+                evidence_threshold=cfg.evidence_threshold,
+                adversarial_review=cfg.adversarial_review,
+                ssc_interval=cfg.ssc_interval,
+            ),
+            run_fn=runtime.run_fn,
+            validate_fn=make_validate_fn(
+                cwd=cwd, timeout_s=float(cfg.validation_timeout_seconds)
+            ),
+            persist_fn=runtime.persist_fn,
+            answer_of=runtime.answer_of,
+            on_iteration=_render,
+            review_fn=make_adversarial_review_fn() if cfg.adversarial_review else None,
+            critique_fn=make_ssc_critique_fn() if cfg.ssc_interval > 0 else None,
+            artifact_fn=runtime.make_artifact_fn() if cfg.adversarial_review else None,
+            cancelled=lambda: getattr(self, "_goal_cancelled", False),
+            workspace=workspace,
+        )
+
+        self.renderer.print_system_message("Goal loop started.")
+        try:
+            res = await gl.run(cr.spec)
+        except Exception as exc:
+            log.exception("goal_loop_failed")
+            self.renderer.print_system_message(f"/goal error: {exc}")
+            return
+
+        verdict = "verified" if res.success else f"not verified ({res.stop_cause})"
+        self.renderer.print_system_message(
+            f"/goal finished: {verdict} after {len(res.iterations)} iteration(s). "
+            f"State in {workspace}/(SPEC|fix_plan|progress).md"
+        )
+        if res.final_answer:
+            self.renderer.print_assistant_response(res.final_answer)
+            self._last_response_text = res.final_answer
 
     async def _show_help(self) -> None:
         """Display available commands grouped by category."""
