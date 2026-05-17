@@ -205,8 +205,9 @@ class GoalLoopConfig(BaseModel):
     stagnation_window: int = 3  # identical outcomes in a row -> stop
     evidence_threshold: float = 0.8  # inner-loop evidence_score floor
     validation_timeout_seconds: int = 600  # per SPEC validation command
-    adversarial_review: bool = True  # ALLOW/BLOCK gate before accepting verified
-    ssc_interval: int = 0  # SSC self-critique every N iters (0 = off, opt-in)
+    adversarial_review: bool = True  # run the allow/block gate before accepting
+    ssc_interval: int = 0  # self-critique every N iterations (0 = off, opt-in)
+    inner_token_budget: int = 1_000_000  # per-iteration NativeAgentLoop budget
 
 
 # Root Configuration

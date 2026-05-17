@@ -23,6 +23,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
+from rune.agent.obs_cap import head_tail
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -56,53 +57,83 @@ def _collect_artifact(
     max_total: int,
     per_file: int,
     max_files: int,
+    exclude_names: frozenset[str] = frozenset(),
 ) -> str:
-    """Bounded snapshot of changed source: the files the agent wrote via the
-    file tools, plus any source under *root* modified since *started_at*
-    (covers files written via bash that tool tracking misses). Best-effort."""
+    """Bounded snapshot of the project source for the reviewer. Always
+    includes the project's source (not only files changed this iteration), so
+    the reviewer keeps seeing the real code after it stabilises. Files changed
+    this iteration (tool-written or modified since *started_at*) are shown
+    first; the rest follow most-recent-first (a language/scale-agnostic
+    relevance proxy). ``exclude_names`` drops loop-managed state files
+    (SPEC/plan/progress/feedback) by basename so they never pose as source.
+    Best-effort; bounded by the caps regardless of repo size."""
     rootp = Path(root) if root else Path.cwd()
-    cands: list[Path] = []
-    for fp in sorted(tracked):  # tracked (tool-written) files first
+
+    def _key(p: Path) -> str:
+        try:
+            return str(p.resolve())
+        except OSError:
+            return str(p)
+
+    def _eligible(p: Path) -> bool:
+        if p.name in exclude_names or p.name.endswith(_EXCLUDE_SUFFIX):
+            return False
+        if any(part in _EXCLUDE_DIRS for part in p.parts):
+            return False
+        try:
+            if not p.is_file() or p.stat().st_size > 256 * 1024:
+                return False
+        except OSError:
+            return False
+        return _is_texty(p)
+
+    changed: list[Path] = []
+    changed_keys: set[str] = set()
+    for fp in sorted(tracked):  # tool-written files (this iteration)
         p = Path(fp)
-        cands.append(p if p.is_absolute() else rootp / p)
+        p = p if p.is_absolute() else rootp / p
+        k = _key(p)
+        if k not in changed_keys and _eligible(p):
+            changed_keys.add(k)
+            changed.append(p)
+
+    baseline: list[tuple[float, Path]] = []
     try:
         for dirpath, dirnames, filenames in os.walk(rootp):
             dirnames[:] = [d for d in dirnames if d not in _EXCLUDE_DIRS]
             for name in filenames:
                 p = Path(dirpath) / name
+                if not _eligible(p):
+                    continue
                 try:
-                    if p.stat().st_mtime + 1e-6 >= started_at:
-                        cands.append(p)
+                    mt = p.stat().st_mtime
                 except OSError:
                     continue
+                k = _key(p)
+                if mt + 1e-6 >= started_at:  # changed this iteration
+                    if k not in changed_keys:
+                        changed_keys.add(k)
+                        changed.append(p)
+                else:
+                    baseline.append((mt, p))
     except OSError:
         pass
 
-    # (rel, lines, bytes, content_included) for every changed source file, so
-    # the reviewer still knows what exists when content is capped.
-    manifest: list[tuple[str, int, int, bool]] = []
+    baseline.sort(key=lambda t: t[0], reverse=True)  # most-recent first
+    ordered: list[tuple[Path, bool]] = [(p, True) for p in changed]
+    seen = set(changed_keys)
+    for _mt, p in baseline:
+        k = _key(p)
+        if k not in seen:
+            seen.add(k)
+            ordered.append((p, False))
+
+    # (rel, lines, bytes, content_shown, is_changed) for every file, so the
+    # reviewer knows the full inventory even when content is capped.
+    manifest: list[tuple[str, int, int, bool, bool]] = []
     bodies: list[str] = []
     total = 0
-    seen: set[str] = set()
-    for p in cands:
-        try:
-            key = str(p.resolve())
-        except OSError:
-            key = str(p)
-        if key in seen:
-            continue
-        seen.add(key)
-        if p.name.endswith(_EXCLUDE_SUFFIX) or any(
-            part in _EXCLUDE_DIRS for part in p.parts
-        ):
-            continue
-        try:
-            if not p.is_file() or p.stat().st_size > 256 * 1024:
-                continue
-        except OSError:
-            continue
-        if not _is_texty(p):
-            continue
+    for p, is_changed in ordered:
         try:
             raw = p.read_text("utf-8", "replace")
         except OSError:
@@ -113,20 +144,18 @@ def _collect_artifact(
             rel = p.name
         included = len(bodies) < max_files and total < max_total
         manifest.append(
-            (rel, len(raw.splitlines()), len(raw.encode("utf-8", "replace")), included)
+            (
+                rel,
+                len(raw.splitlines()),
+                len(raw.encode("utf-8", "replace")),
+                included,
+                is_changed,
+            )
         )
         if not included:
             continue
-        text = raw
-        if len(text) > per_file:
-            text = (
-                text[: per_file * 3 // 4]
-                + f"\n... ({len(text)} chars, elided) ...\n"
-                + text[-per_file // 4 :]
-            )
-        block = f"=== {rel} ===\n{text}\n"
-        bodies.append(block)
-        total += len(block)
+        bodies.append(f"=== {rel} ===\n{head_tail(raw, per_file)}\n")
+        total += len(bodies[-1])
 
     if not manifest:
         return ""
@@ -134,12 +163,13 @@ def _collect_artifact(
     shown = sum(1 for m in manifest if m[3])
     man_cap = 60
     head = [
-        f"CHANGED FILES MANIFEST - {len(manifest)} changed source file(s), "
-        f"{shown} with content shown below:"
+        f"SOURCE MANIFEST - {len(manifest)} file(s), {shown} with content shown "
+        f"below ([changed] = modified this iteration):"
     ]
-    for rel, nlines, nbytes, inc in manifest[:man_cap]:
+    for rel, nlines, nbytes, inc, ch in manifest[:man_cap]:
         head.append(
             f"- {rel} ({nlines} lines, {nbytes} B) "
+            f"[{'changed' if ch else 'baseline'}] "
             f"[{'shown' if inc else 'omitted: cap'}]"
         )
     if len(manifest) > man_cap:
@@ -236,10 +266,16 @@ class GoalRuntime:
         return self._last_answer
 
     def make_artifact_fn(
-        self, *, max_total: int = 16384, per_file: int = 4096, max_files: int = 40
+        self,
+        *,
+        max_total: int = 16384,
+        per_file: int = 4096,
+        max_files: int = 40,
+        exclude_names: frozenset[str] = frozenset(),
     ) -> Callable[[], Awaitable[str]]:
-        """GoalLoop ``artifact_fn``: a bounded changed-source snapshot so the
-        reviewer can detect a passing but empty or no-assertion test."""
+        """GoalLoop ``artifact_fn``: a bounded project-source snapshot so the
+        reviewer can judge whether the tests genuinely meet the spec.
+        ``exclude_names`` drops loop-managed state files by basename."""
 
         async def _artifact() -> str:
             root = getattr(self._last_ctx, "workspace_root", "") or os.getcwd()
@@ -251,6 +287,7 @@ class GoalRuntime:
                     max_total=max_total,
                     per_file=per_file,
                     max_files=max_files,
+                    exclude_names=exclude_names,
                 )
             except Exception as exc:  # context only; do not block on failure
                 log.debug("goal_runtime_artifact_failed", error=str(exc)[:200])

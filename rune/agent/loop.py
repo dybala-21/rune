@@ -539,6 +539,10 @@ class NativeAgentLoop(EventEmitter):
             self._token_budget.total = _BUDGET_BY_INTENT.get(
                 budget_intent, 500_000
             )
+            # Optional explicit override (used by /goal for heavy tasks).
+            _budget_override = getattr(self._config, "token_budget_override", None)
+            if _budget_override:
+                self._token_budget.total = int(_budget_override)
             # Output token scaling by intent (#H5)
             self._max_output_tokens = _MAX_OUTPUT_TOKENS_BY_INTENT.get(
                 budget_intent, 8_192

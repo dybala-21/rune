@@ -56,11 +56,14 @@ technically-but-not-meaningfully. If the changed source shows the criteria are \
 genuinely exercised and asserted AND the evidence shows commands passed, \
 allow=true.
 
-The CHANGED SOURCE may begin with a MANIFEST listing every changed file. If \
-the manifest marks files relevant to the acceptance criteria as \
-"omitted: cap" (content not shown) or they appear truncated/elided, the proof \
-is incomplete; lean allow=false (or low confidence) rather than assuming the \
-unseen code is correct.
+The CHANGED SOURCE may begin with a SOURCE MANIFEST listing the project files. \
+Each is tagged [changed] (modified this iteration) or [baseline] (already \
+present, unchanged this iteration) and [shown] or [omitted: cap]. Judge the \
+actual source you can see: do NOT block solely because a file is [baseline] \
+or unchanged this iteration - stable, already-correct code that genuinely \
+meets the criteria is acceptable. Only lean allow=false when a file clearly \
+relevant to the acceptance criteria is "omitted: cap" or truncated so its \
+correctness cannot be verified from what is shown.
 
 Respond with ONLY a JSON object:
 {"allow": true|false, "reason": "<one sentence grounded in evidence/source>"}"""

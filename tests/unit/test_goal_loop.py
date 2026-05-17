@@ -1,4 +1,4 @@
-"""Tests for rune.agent.goal_loop — autonomous Ralph-style outer loop.
+"""Tests for rune.agent.goal_loop - the outer loop.
 
 The core is dependency-injected, so every case is driven by scripted stub
 traces; no LLM / agent stack is touched.
@@ -199,7 +199,7 @@ async def test_persist_called_once_on_failure(tmp_path: Path) -> None:
     res = await loop.run(spec())
 
     # 5 iterations ran, but episodic memory is written exactly once, at the
-    # terminal outcome — no per-iteration anti-example accumulation.
+    # terminal outcome - not once per iteration.
     assert len(res.iterations) == 5
     assert persist.calls == [(False, "wip")]
 
@@ -277,14 +277,14 @@ async def test_runner_exception_is_fail_closed(tmp_path: Path) -> None:
 async def test_files_seeded_and_spec_is_immutable(tmp_path: Path) -> None:
     (tmp_path).mkdir(exist_ok=True)
     spec_path = tmp_path / "SPEC.md"
-    spec_path.write_text("SENTINEL — human edited", encoding="utf-8")
+    spec_path.write_text("SENTINEL - human edited", encoding="utf-8")
 
     runner = ScriptedRunner([verified()])
     loop = GoalLoop(run_fn=runner, workspace=tmp_path)
     await loop.run(spec())
 
     # SPEC is the immutable drift anchor: never overwritten once present.
-    assert spec_path.read_text() == "SENTINEL — human edited"
+    assert spec_path.read_text() == "SENTINEL - human edited"
     assert (tmp_path / "fix_plan.md").exists()
     assert (tmp_path / "progress.md").exists()
     assert "DONE stop_cause=verified" in (tmp_path / "progress.md").read_text()
@@ -570,3 +570,121 @@ async def test_artifact_fn_failure_does_not_block(tmp_path: Path) -> None:
     # fail-closed the candidate (only the LLM verdict is fail-closed).
     assert res.success is True
     assert seen["artifact"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Phase 5.4: failure feedback reflux into the next worker prompt
+# ---------------------------------------------------------------------------
+
+
+async def test_first_prompt_clean_but_has_self_capture_directive(tmp_path: Path) -> None:
+    runner = ScriptedRunner([verified()])
+    loop = GoalLoop(run_fn=runner, workspace=tmp_path)
+    await loop.run(spec())
+    p0 = runner.calls[0][1]
+    assert "[PREVIOUS ATTEMPT FAILED" not in p0  # n==1 -> no reflux block
+    # worker self-capture directive present (path may be relative to cwd)
+    assert "overwrite " in p0 and "feedback.md with their full output" in p0
+
+
+async def test_validation_failure_refluxes_into_next_prompt(tmp_path: Path) -> None:
+    runner = ScriptedRunner([verified()])  # gate says done every iter
+    loop = GoalLoop(
+        GoalLoopConfig(max_iterations=2, stagnation_window=0),
+        run_fn=runner,
+        validate_fn=validator(False, "error[E0599]: no method named on_open"),
+        workspace=tmp_path,
+    )
+    res = await loop.run(spec(validation_commands=["cargo test"]))
+
+    assert res.success is False
+    p2 = runner.calls[1][1]  # iteration 2 prompt
+    assert "[PREVIOUS ATTEMPT FAILED" in p2
+    assert "E0599" in p2  # the actual compiler error refluxed
+    assert "error[E0599]" in (tmp_path / "feedback.md").read_text()
+
+
+async def test_review_block_refluxes(tmp_path: Path) -> None:
+    loop = GoalLoop(
+        GoalLoopConfig(adversarial_review=True, max_iterations=2, stagnation_window=0),
+        run_fn=ScriptedRunner([verified()]),
+        validate_fn=validator(True),
+        review_fn=_review(False, "hollow test: no assertions"),
+        workspace=tmp_path,
+    )
+    runner = loop._run  # type: ignore[attr-defined]
+    await loop.run(spec(validation_commands=["cargo test"]))
+    assert "hollow test: no assertions" in runner.calls[1][1]
+
+
+async def test_token_exhausted_writes_directive_feedback(tmp_path: Path) -> None:
+    exhausted = StubTrace(reason="token_budget_exhausted", evidence_score=0.0)
+    runner = ScriptedRunner([exhausted])
+    loop = GoalLoop(
+        GoalLoopConfig(max_iterations=2, stagnation_window=0),
+        run_fn=runner,
+        workspace=tmp_path,
+    )
+    await loop.run(spec())
+    assert "did not reach validation" in (tmp_path / "feedback.md").read_text()
+    assert "[PREVIOUS ATTEMPT FAILED" in runner.calls[1][1]
+
+
+async def test_adopts_worker_written_feedback(tmp_path: Path) -> None:
+    class WorkerWritesFeedback:
+        def __init__(self) -> None:
+            self.calls: list[tuple[int, str]] = []
+
+        async def __call__(self, prompt: str, iteration: int) -> StubTrace:
+            self.calls.append((iteration, prompt))
+            # Worker self-captures real errors even though loop validation
+            # never runs (token-exhausted style iteration).
+            (tmp_path / "feedback.md").write_text(
+                "WORKER-CAPTURED rustc E0432 unresolved import", encoding="utf-8"
+            )
+            return StubTrace(reason="token_budget_exhausted", evidence_score=0.0)
+
+    runner = WorkerWritesFeedback()
+    loop = GoalLoop(
+        GoalLoopConfig(max_iterations=2, stagnation_window=0),
+        run_fn=runner,
+        workspace=tmp_path,
+    )
+    await loop.run(spec())
+    # iter2 prompt must carry the worker's real errors, not the generic directive
+    assert "WORKER-CAPTURED rustc E0432" in runner.calls[1][1]
+    assert "did not reach validation" not in runner.calls[1][1]
+
+
+async def test_feedback_excerpt_is_bounded(tmp_path: Path) -> None:
+    big = "E" * 50_000
+    runner = ScriptedRunner([verified()])
+    loop = GoalLoop(
+        GoalLoopConfig(
+            max_iterations=2,
+            stagnation_window=0,
+            feedback_inject_chars=1200,
+            feedback_file_max=4096,
+        ),
+        run_fn=runner,
+        validate_fn=validator(False, big),
+        workspace=tmp_path,
+    )
+    await loop.run(spec(validation_commands=["cargo test"]))
+    p2 = runner.calls[1][1]
+    # injected excerpt bounded (block + headtail markers add a little)
+    assert len(p2) < 4000
+    assert "elided" in p2
+    assert len((tmp_path / "feedback.md").read_text()) < 4400
+
+
+async def test_reflux_works_without_workspace() -> None:
+    runner = ScriptedRunner([verified()])
+    loop = GoalLoop(
+        GoalLoopConfig(max_iterations=2, stagnation_window=0),
+        run_fn=runner,
+        validate_fn=validator(False, "boom E0001"),
+        workspace=None,  # in-memory reflux only, no crash
+    )
+    await loop.run(spec(validation_commands=["cargo test"]))
+    assert "E0001" in runner.calls[1][1]
