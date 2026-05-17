@@ -229,6 +229,9 @@ class AgentConfig:
     provider: str = "openai"
     temperature: float = 0.0
     max_tokens: int = 16_384
+    # When set, overrides the intent-scaled per-iteration token budget. Used
+    # by /goal for heavy tasks; None keeps the default intent scaling.
+    token_budget_override: int | None = None
     _overridden: bool = False  # True when --model or --provider CLI flags are used
 
 

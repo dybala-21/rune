@@ -15,7 +15,8 @@ PROJECT.mkdir(parents=True, exist_ok=True)
 os.chdir(PROJECT)
 LOG = PROJECT / "DRIVER_LOG.md"
 
-MODEL = "claude-sonnet-4-5-20250929"  # real Sonnet + in rune cost table
+MODEL = "claude-sonnet-4-5-20250929"  # reflux-measurement: same model as the
+# pre-5.4 baseline failure, to isolate the feedback-reflux trajectory delta
 
 
 def w(s: str) -> None:
@@ -64,7 +65,9 @@ async def main() -> None:
 
     cr.spec.validation_commands = ["cargo build", "cargo test"]
 
-    loop = NativeAgentLoop()
+    from rune.types import AgentConfig
+
+    loop = NativeAgentLoop(config=AgentConfig(token_budget_override=1_000_000))
     rt = GoalRuntime(loop, channel="cli")
     tokens_by_iter: list[int] = []
 
@@ -77,22 +80,30 @@ async def main() -> None:
             f"review_passed={it.review_passed}"
         )
 
+    _glc = GoalLoopConfig(
+        max_iterations=8,
+        max_total_tokens=3_000_000,
+        stagnation_window=3,
+        evidence_threshold=0.8,
+        adversarial_review=True,
+        ssc_interval=0,
+    )
     gl = GoalLoop(
-        GoalLoopConfig(
-            max_iterations=8,
-            max_total_tokens=3_000_000,
-            stagnation_window=3,
-            evidence_threshold=0.8,
-            adversarial_review=True,
-            ssc_interval=0,
-        ),
+        _glc,
         run_fn=rt.run_fn,
         validate_fn=make_validate_fn(cwd=str(PROJECT), timeout_s=900.0),
         persist_fn=rt.persist_fn,
         answer_of=rt.answer_of,
         on_iteration=on_it,
         review_fn=make_adversarial_review_fn(),
-        artifact_fn=rt.make_artifact_fn(),
+        artifact_fn=rt.make_artifact_fn(
+            exclude_names=frozenset({
+                _glc.spec_file,
+                _glc.plan_file,
+                _glc.progress_file,
+                _glc.feedback_file,
+            })
+        ),
         workspace=PROJECT / ".rune" / "goal",
     )
 

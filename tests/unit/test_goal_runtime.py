@@ -1,8 +1,8 @@
-"""Tests for rune.agent.goal_runtime — the poisoning-safe bridge.
+"""Tests for rune.agent.goal_runtime - the runtime bridge.
 
-The key regression: ``post_process`` runs exactly ONCE per /goal loop (at the
-terminal outcome), never per iteration — so a failing loop cannot accumulate
-negative-utility anti-examples (see memory-poisoning-defect).
+Key regression: post_process runs exactly once per /goal loop (at the
+terminal outcome), never per iteration, so a failing loop does not record
+many negative episodes.
 """
 
 from __future__ import annotations
@@ -132,7 +132,7 @@ async def test_post_process_once_on_success(tmp_path) -> None:
 
     assert res.success is True
     assert len(res.iterations) == 3
-    assert len(post.calls) == 1  # ← terminal-only, not 3
+    assert len(post.calls) == 1  # terminal-only, not 3
     assert post.calls[0].success is True
     assert post.calls[0].answer == "partial answer"
 
@@ -150,7 +150,7 @@ async def test_post_process_once_on_failure(tmp_path) -> None:
 
     assert res.success is False
     assert len(res.iterations) == 5
-    assert len(post.calls) == 1  # 5 failed attempts → ONE neutral persistence
+    assert len(post.calls) == 1  # 5 failed attempts -> one neutral persistence
     assert post.calls[0].success is False
 
 
@@ -199,13 +199,16 @@ async def test_cancelled_before_start_skips_post_process(tmp_path) -> None:
     res = await gl.run(spec())
 
     assert res.stop_cause == "cancelled"
-    assert post.calls == []  # nothing ran → no episodic write at all
+    assert post.calls == []  # nothing ran -> no episodic write at all
     assert loop.run_kwargs == []
 
 
 # ---------------------------------------------------------------------------
-# Phase 5.1: changed-file manifest (reviewer always knows what it can't see)
+# Phase 5.1/5.5: source manifest (always include project source; mark
+# changed-this-iteration vs baseline; reviewer always sees the real code)
 # ---------------------------------------------------------------------------
+
+import os as _os  # noqa: E402
 
 from rune.agent.goal_runtime import _collect_artifact  # noqa: E402
 
@@ -220,7 +223,7 @@ async def test_manifest_lists_all_marks_shown_when_small(tmp_path) -> None:
     out = _collect_artifact(
         str(tmp_path), 0.0, set(), max_total=16384, per_file=4096, max_files=40
     )
-    assert "CHANGED FILES MANIFEST - 2 changed source file(s)" in out
+    assert "SOURCE MANIFEST - 2 file(s), 2 with content shown" in out
     assert "- a.go (2 lines," in out and "[shown]" in out
     assert "=== a.go ===" in out and "=== b.go ===" in out
 
@@ -236,20 +239,49 @@ async def test_manifest_marks_omitted_when_over_file_cap(tmp_path) -> None:
     assert "[omitted: cap]" in out  # exists in manifest but body not included
 
 
-async def test_manifest_excludes_lock_and_dot_dirs(tmp_path) -> None:
+async def test_excludes_lock_dot_dirs_and_state_files(tmp_path) -> None:
     _mk(tmp_path / "go.sum", "h1:abc\n")
     (tmp_path / ".rune").mkdir()
     _mk(tmp_path / ".rune" / "progress.md", "secret\n")
+    _mk(tmp_path / "feedback.md", "worker-written validation log\n")  # root!
     _mk(tmp_path / "main.go", "package main\n")
     out = _collect_artifact(
-        str(tmp_path), 0.0, set(), max_total=16384, per_file=4096, max_files=40
+        str(tmp_path),
+        0.0,
+        set(),
+        max_total=16384,
+        per_file=4096,
+        max_files=40,
+        exclude_names=frozenset({"feedback.md", "progress.md", "SPEC.md"}),
     )
-    assert "go.sum" not in out and "progress.md" not in out
+    assert "go.sum" not in out  # suffix-excluded
+    assert "feedback.md" not in out  # 5.5: root state file basename-excluded
+    assert "progress.md" not in out  # .rune-dir + basename
     assert "main.go" in out
 
 
+async def test_baseline_unchanged_source_still_included(tmp_path) -> None:
+    # 5.5 core: a file NOT changed this iteration must still be shown
+    # (tagged [baseline]) so the reviewer keeps seeing the real code; the
+    # changed file is listed first.
+    old = tmp_path / "lib.rs"
+    _mk(old, "fn solution() {}\n")
+    _os.utime(old, (1000, 1000))  # long before started_at -> baseline
+    churn = tmp_path / "notes.txt"
+    _mk(churn, "iteration churn\n")
+    _os.utime(churn, (9_000_000_000, 9_000_000_000))  # after -> changed
+    out = _collect_artifact(
+        str(tmp_path), 5_000_000_000.0, set(),
+        max_total=16384, per_file=4096, max_files=40,
+    )
+    assert "- lib.rs (1 lines," in out and "[baseline]" in out
+    assert "- notes.txt" in out and "[changed]" in out
+    assert "=== lib.rs ===" in out  # real code visible despite being unchanged
+    assert out.index("notes.txt") < out.index("lib.rs")  # changed first
+
+
 async def test_no_candidates_returns_empty(tmp_path) -> None:
-    # nothing modified since far-future started_at, no tracked files
+    # empty workspace -> nothing to scan -> empty artifact
     out = _collect_artifact(
         str(tmp_path), 9e18, set(), max_total=16384, per_file=4096, max_files=40
     )

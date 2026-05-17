@@ -1,4 +1,4 @@
-"""Tests for rune.agent.goal_review — adversarial review + SSC factories.
+"""Tests for rune.agent.goal_review - adversarial review + self-critique.
 
 Stub LLM (litellm-shaped dict); no provider is touched.
 """
@@ -114,12 +114,12 @@ async def test_manifest_reaches_reviewer() -> None:
     stub = StubLLM(json.dumps({"allow": False, "reason": "core file omitted"}))
     fn = make_adversarial_review_fn(llm=stub)
     art = (
-        "CHANGED FILES MANIFEST - 2 changed source file(s), 1 with content shown:\n"
-        "- server.go (400 lines, 12000 B) [omitted: cap]\n"
-        "- x_test.go (10 lines, 120 B) [shown]\n\n=== x_test.go ===\n..."
+        "SOURCE MANIFEST - 2 file(s), 1 with content shown below:\n"
+        "- server.go (400 lines, 12000 B) [baseline] [omitted: cap]\n"
+        "- x_test.go (10 lines, 120 B) [changed] [shown]\n\n=== x_test.go ===\n..."
     )
     allow, _ = await fn(rc(artifact=art))
     sent = stub.last_messages[-1]["content"]
-    assert "CHANGED FILES MANIFEST" in sent
+    assert "SOURCE MANIFEST" in sent
     assert "[omitted: cap]" in sent  # reviewer can see what it cannot see
     assert allow is False

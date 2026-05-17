@@ -1119,6 +1119,7 @@ class RuneApp:
         from rune.agent.goal_validate import make_validate_fn
         from rune.agent.loop import NativeAgentLoop
         from rune.config import get_config
+        from rune.types import AgentConfig
 
         cfg = get_config().goal_loop
         if not cfg.enabled:
@@ -1159,7 +1160,12 @@ class RuneApp:
 
         cwd = str(Path.cwd())
         workspace = Path(cwd) / ".rune" / "goal"
-        runtime = GoalRuntime(NativeAgentLoop(), channel="tui")
+        runtime = GoalRuntime(
+            NativeAgentLoop(
+                config=AgentConfig(token_budget_override=cfg.inner_token_budget)
+            ),
+            channel="tui",
+        )
 
         def _render(it: GoalIteration) -> None:
             self.console.print(
@@ -1169,15 +1175,16 @@ class RuneApp:
             )
 
         self._goal_cancelled = False
+        _glc = GoalLoopConfig(
+            max_iterations=cfg.max_iterations,
+            max_total_tokens=cfg.max_total_tokens,
+            stagnation_window=cfg.stagnation_window,
+            evidence_threshold=cfg.evidence_threshold,
+            adversarial_review=cfg.adversarial_review,
+            ssc_interval=cfg.ssc_interval,
+        )
         gl = GoalLoop(
-            GoalLoopConfig(
-                max_iterations=cfg.max_iterations,
-                max_total_tokens=cfg.max_total_tokens,
-                stagnation_window=cfg.stagnation_window,
-                evidence_threshold=cfg.evidence_threshold,
-                adversarial_review=cfg.adversarial_review,
-                ssc_interval=cfg.ssc_interval,
-            ),
+            _glc,
             run_fn=runtime.run_fn,
             validate_fn=make_validate_fn(
                 cwd=cwd, timeout_s=float(cfg.validation_timeout_seconds)
@@ -1187,7 +1194,18 @@ class RuneApp:
             on_iteration=_render,
             review_fn=make_adversarial_review_fn() if cfg.adversarial_review else None,
             critique_fn=make_ssc_critique_fn() if cfg.ssc_interval > 0 else None,
-            artifact_fn=runtime.make_artifact_fn() if cfg.adversarial_review else None,
+            artifact_fn=(
+                runtime.make_artifact_fn(
+                    exclude_names=frozenset({
+                        _glc.spec_file,
+                        _glc.plan_file,
+                        _glc.progress_file,
+                        _glc.feedback_file,
+                    })
+                )
+                if cfg.adversarial_review
+                else None
+            ),
             cancelled=lambda: getattr(self, "_goal_cancelled", False),
             workspace=workspace,
         )

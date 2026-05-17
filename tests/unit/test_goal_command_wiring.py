@@ -34,6 +34,16 @@ def test_goal_loop_config_defaults_and_wired_into_root() -> None:
     assert gc.adversarial_review is True  # hardened by default (Phase 5)
     assert gc.ssc_interval == 0  # opt-in (per-iteration cost)
 
+    assert gc.inner_token_budget == 1_000_000  # B: per-iteration override
+
     root = RuneConfig()
     assert isinstance(root.goal_loop, GoalLoopConfig)
     assert root.goal_loop.max_total_tokens == 2_000_000
+
+
+def test_agent_config_budget_override_defaults_off() -> None:
+    from rune.types import AgentConfig
+
+    # None keeps the intent-scaled budget (no global regression); /goal sets it.
+    assert AgentConfig().token_budget_override is None
+    assert AgentConfig(token_budget_override=1_000_000).token_budget_override == 1_000_000

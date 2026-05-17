@@ -20,6 +20,7 @@ import litellm
 # (e.g., local ollama models routed via openai/ prefix).
 litellm.suppress_debug_info = True
 
+from rune.agent.obs_cap import mask_stale_tool_messages
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -364,7 +365,9 @@ class StreamResult:
             )
             _acompletion_kwargs: dict[str, Any] = {
                 "model": self._model,
-                "messages": self._messages,
+                # Mask stale tool outputs for the wire only; self._messages
+                # stays full so history/rollover are unaffected.
+                "messages": mask_stale_tool_messages(self._messages),
                 "tools": _tools,
                 "stream": True,
                 "max_tokens": _effective_max,

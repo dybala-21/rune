@@ -13,12 +13,14 @@ be unit-tested with stub traces without importing the agent stack.
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol
 
+from rune.agent.obs_cap import head_tail
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -45,6 +47,9 @@ class GoalLoopConfig:
     spec_file: str = "SPEC.md"
     plan_file: str = "fix_plan.md"
     progress_file: str = "progress.md"
+    feedback_file: str = "feedback.md"  # latest failure only (overwritten)
+    feedback_file_max: int = 4096  # cap when the loop writes feedback.md
+    feedback_inject_chars: int = 1200  # cap for the prompt-injected excerpt
 
 
 @dataclass(slots=True)
@@ -154,6 +159,7 @@ class GoalLoop:
         self._critique = critique_fn
         self._artifact_fn = artifact_fn
         self._ws = Path(workspace) if workspace else None
+        self._last_feedback = ""  # bounded failure excerpt for the next prompt
 
     def _record(self, hist: list[GoalIteration], it: GoalIteration) -> None:
         """Append an iteration and fire the (UI-only) progress callback."""
@@ -231,13 +237,85 @@ class GoalLoop:
         except OSError as exc:
             log.debug("goal_loop_progress_append_failed", error=str(exc)[:200])
 
+    # -- failure feedback reflux ------------------------------------------
+
+    def _feedback_path(self) -> Path | None:
+        return None if self._ws is None else self._ws / self._cfg.feedback_file
+
+    def _feedback_stat(self) -> tuple[float, int] | None:
+        p = self._feedback_path()
+        try:
+            if p is not None and p.is_file():
+                st = p.stat()
+                return (st.st_mtime, st.st_size)
+        except OSError:
+            pass
+        return None
+
+    def _write_feedback(self, kind: str, text: str) -> None:
+        """Overwrite feedback.md with the latest failure (single-latest, not
+        appended) and cache a bounded excerpt for the next prompt."""
+        body = head_tail(text or "", self._cfg.feedback_file_max)
+        self._last_feedback = head_tail(
+            f"[{kind}]\n{text or ''}", self._cfg.feedback_inject_chars
+        )
+        p = self._feedback_path()
+        if p is None:
+            return
+        try:
+            p.write_text(
+                f"# feedback (latest failure only) - {kind}\n\n{body}\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            log.debug("goal_loop_feedback_write_failed", error=str(exc)[:200])
+
+    def _adopt_worker_feedback(self) -> bool:
+        """If the worker overwrote feedback.md itself this iteration, use it
+        as the next prompt's excerpt. Returns True when adopted."""
+        p = self._feedback_path()
+        try:
+            if p is not None and p.is_file():
+                content = p.read_text(encoding="utf-8", errors="replace")
+                if content.strip():
+                    self._last_feedback = head_tail(
+                        content, self._cfg.feedback_inject_chars
+                    )
+                    return True
+        except OSError as exc:
+            log.debug("goal_loop_feedback_read_failed", error=str(exc)[:200])
+        return False
+
+    def _feedback_rel(self) -> str:
+        """Path the worker should overwrite with its validation output. Points
+        at the loop's own feedback file (inside the state dir, which the
+        reviewer artifact excludes) so the worker does not drop a markdown
+        file into the project root and pose it as source."""
+        if self._ws is None:
+            return self._cfg.feedback_file
+        try:
+            return os.path.relpath(
+                self._ws / self._cfg.feedback_file, os.getcwd()
+            )
+        except (OSError, ValueError):
+            return self._cfg.feedback_file
+
     def _build_prompt(self, spec: GoalSpec, n: int) -> str:
+        prefix = ""
+        if n > 1 and self._last_feedback:
+            prefix = (
+                "[PREVIOUS ATTEMPT FAILED - fix exactly this before anything "
+                f"else]\n{self._last_feedback}\n\n"
+            )
         return (
-            f"{spec.goal}\n\n"
+            f"{prefix}{spec.goal}\n\n"
             f"Work ONE unfinished item from @{self._cfg.plan_file} this iteration "
             f"(iteration {n}). Honour the immutable @{self._cfg.spec_file}. When the "
             f"item is done, check it off in @{self._cfg.plan_file} and append a "
-            f"one-line learning to @{self._cfg.progress_file}. Do not start unrelated work."
+            f"one-line learning to @{self._cfg.progress_file}. Before finishing, "
+            f"run the project's validation commands and overwrite "
+            f"{self._feedback_rel()} with their full output. "
+            f"Do not start unrelated work."
         )
 
     # -- main --------------------------------------------------------------
@@ -264,6 +342,8 @@ class GoalLoop:
                 stop_cause = "cancelled"
                 break
 
+            fb_pre = self._feedback_stat()
+            wrote_fb = False
             try:
                 trace = await self._run(self._build_prompt(spec, n), n)
             except Exception as exc:  # on a run error, end the loop
@@ -315,16 +395,34 @@ class GoalLoop:
                         self._append_progress(
                             f"Avoid: adversarial review blocked: {why[:200]}"
                         )
+                        self._write_feedback("adversarial-review-block", why)
+                        wrote_fb = True
                     else:
                         # Inner loop said done but validation fails.
                         it.verdict = "progress"
                         self._append_progress(
                             f"Avoid: validation failed: {detail[:200]}"
                         )
+                        self._write_feedback("validation-failed", detail)
+                        wrote_fb = True
             elif verdict in ("cancelled", "error"):
                 self._record(hist, it)
                 stop_cause = verdict
                 break
+
+            # Feedback reflux: an attempt that did not reach the loop's own
+            # validation (e.g. token_budget_exhausted). Adopt the worker's
+            # self-captured feedback.md if it overwrote it this iteration;
+            # otherwise leave a directive so the next attempt is steered.
+            if not wrote_fb and it.verdict == "progress":
+                changed = self._feedback_stat() != fb_pre
+                if not (changed and self._adopt_worker_feedback()):
+                    self._write_feedback(
+                        "no-validation",
+                        f"previous attempt did not reach validation "
+                        f"(reason={trace.reason or 'unknown'}); reach the SPEC "
+                        f"validation commands faster, avoid over-exploration",
+                    )
 
             self._record(hist, it)
             await self._ssc_critique(spec, last_answer, n)
