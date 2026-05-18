@@ -16,6 +16,7 @@ from rune.bench.aa_manifest import (
 )
 from rune.bench.audit import audit_attempt_dir
 from rune.bench.runner import BenchRunOptions, run_bench_attempt
+from rune.bench.summary import format_summary_csv, summarize_paths
 
 bench_app = typer.Typer(help="Benchmark manifests and run helpers")
 
@@ -203,6 +204,43 @@ def audit_attempt(
     if output is None:
         typer.echo(payload, nl=False)
         return
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(payload, encoding="utf-8")
+    typer.echo(f"Wrote {output}")
+
+
+@bench_app.command("summarize")
+def summarize_bench_results(
+    paths: Annotated[
+        list[Path],
+        typer.Argument(help="Harbor job/trial directories or RUNE attempt artifact directories"),
+    ],
+    output_format: Annotated[
+        str,
+        typer.Option("--format", "-f", help="Output format: json or csv"),
+    ] = "json",
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Write the summary to this path"),
+    ] = None,
+) -> None:
+    """Summarize Harbor trial results and RUNE benchmark attempt artifacts."""
+    if output_format not in {"json", "csv"}:
+        raise typer.BadParameter("--format must be 'json' or 'csv'")
+    missing = [path for path in paths if not path.exists()]
+    if missing:
+        raise typer.BadParameter(f"path does not exist: {missing[0]}")
+
+    summary = summarize_paths(paths)
+    if output_format == "csv":
+        payload = format_summary_csv(summary)
+    else:
+        payload = json.dumps(summary, indent=2, sort_keys=True) + "\n"
+
+    if output is None:
+        typer.echo(payload, nl=False)
+        return
+
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(payload, encoding="utf-8")
     typer.echo(f"Wrote {output}")

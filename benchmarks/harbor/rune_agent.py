@@ -46,6 +46,9 @@ PASSTHROUGH_ENV_KEYS = (
     "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN",
     "AWS_REGION",
+    "UV_CACHE_DIR",
+    "UV_LINK_MODE",
+    "UV_PYTHON",
     "RUNE_MODEL",
     "RUNE_PROVIDER",
     "RUNE_LOG_LEVEL",
@@ -80,6 +83,10 @@ def _env_int(name: str, default: int) -> int:
         return int(os.environ.get(name, str(default)))
     except ValueError:
         return default
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _container_env() -> dict[str, str]:
@@ -161,6 +168,8 @@ class RuneInstalledAgent(BaseInstalledAgent):
             return None
 
     async def install(self, environment: BaseEnvironment) -> None:
+        if _env_flag("RUNE_HARBOR_SKIP_INSTALL"):
+            return
         install_command = os.environ.get("RUNE_HARBOR_INSTALL_CMD", DEFAULT_INSTALL_COMMAND)
         await self.exec_as_agent(environment, command=install_command, env=_container_env())
 

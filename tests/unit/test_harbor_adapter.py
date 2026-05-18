@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from benchmarks.harbor.rune_agent import _container_env, build_rune_bench_command, harbor_task_id
+from benchmarks.harbor.rune_agent import (
+    _container_env,
+    _env_flag,
+    build_rune_bench_command,
+    harbor_task_id,
+)
 
 
 class _Task:
@@ -48,9 +53,17 @@ def test_build_rune_bench_command_quotes_instruction():
 
 def test_container_env_passes_llm_credentials(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "secret")
+    monkeypatch.setenv("UV_CACHE_DIR", "/uv-cache")
     monkeypatch.setenv("UNRELATED_KEY", "ignored")
 
     env = _container_env()
 
     assert env["OPENAI_API_KEY"] == "secret"
+    assert env["UV_CACHE_DIR"] == "/uv-cache"
     assert "UNRELATED_KEY" not in env
+
+
+def test_env_flag_accepts_common_truthy_values(monkeypatch):
+    monkeypatch.setenv("RUNE_HARBOR_SKIP_INSTALL", "yes")
+
+    assert _env_flag("RUNE_HARBOR_SKIP_INSTALL")
