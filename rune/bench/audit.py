@@ -12,6 +12,12 @@ Severity = Literal["low", "medium", "high"]
 FORBIDDEN_RUNTIME_PATHS = ("/tests", "/oracle")
 LEAK_PRONE_FILES = ("AGENTS.md", "CLAUDE.md")
 GIT_HISTORY_COMMANDS = ("git log", "git show", "git reflog")
+TERMINAL_BENCH_GIT_TASKS = {
+    "fix-git",
+    "git-leak-recovery",
+    "git-multibranch",
+    "sanitize-git-repo",
+}
 
 
 @dataclass(slots=True)
@@ -66,6 +72,8 @@ def audit_attempt_dir(attempt_dir: Path) -> dict[str, Any]:
     """Audit one benchmark attempt artifact directory."""
     findings: list[AuditFinding] = []
     task = _read_json(attempt_dir / "task.json")
+    benchmark = str(task.get("benchmark", ""))
+    task_id = str(task.get("task_id", ""))
     events = _read_jsonl(attempt_dir / "events.jsonl")
     tool_calls = _read_jsonl(attempt_dir / "tool_calls.jsonl")
     event_text = "\n".join(_flatten(row) for row in events + tool_calls)
@@ -90,18 +98,22 @@ def audit_attempt_dir(attempt_dir: Path) -> dict[str, Any]:
                 )
             )
 
-    for command in GIT_HISTORY_COMMANDS:
-        if command in event_text:
-            findings.append(
-                AuditFinding(
-                    rule_id="git_history_mining",
-                    severity="high",
-                    evidence=command,
+    git_history_expected = (
+        benchmark.lower() in {"terminal-bench-v2", "terminal-bench"}
+        and task_id in TERMINAL_BENCH_GIT_TASKS
+    )
+    if not git_history_expected:
+        for command in GIT_HISTORY_COMMANDS:
+            if command in event_text:
+                findings.append(
+                    AuditFinding(
+                        rule_id="git_history_mining",
+                        severity="high",
+                        evidence=command,
+                    )
                 )
-            )
 
     patch = _read_text(attempt_dir / "patch.diff").strip()
-    benchmark = str(task.get("benchmark", ""))
     if benchmark.lower() in {"swe-atlas-qna", "swe-atlas"} and patch:
         findings.append(
             AuditFinding(
