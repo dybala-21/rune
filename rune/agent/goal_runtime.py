@@ -37,8 +37,35 @@ class _LoopLike:
     async def run(self, goal: str, **kwargs: Any) -> Any: ...
 
 
-_EXCLUDE_DIRS = {".git", ".rune", "node_modules", "vendor", "__pycache__", ".venv"}
+_EXCLUDE_DIRS = {
+    ".git", ".rune", "node_modules", "vendor", "__pycache__", ".venv",
+    # Build / tooling output: regenerated every run, never hand-written
+    # source. Walking it floods the reviewer artifact with hundreds of
+    # cache files whose fresh mtimes masquerade as "changed this
+    # iteration" and starve the real source - a fully correct project
+    # then fails review on omission alone.
+    "target", "build", "dist", "out", "bin", "obj", "coverage", "htmlcov",
+    ".next", ".nuxt", ".svelte-kit", ".parcel-cache", ".turbo",
+    ".gradle", ".mvn", ".tox", ".nox", ".terraform", ".dart_tool",
+    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", ".eggs",
+    "Pods", "DerivedData", ".idea", ".vscode",
+}
 _EXCLUDE_SUFFIX = (".sum", ".lock")
+# Cache Directory Tagging Standard: a directory holding this file is a
+# tool cache (Cargo target/, etc.). Prune it by content marker so no
+# per-tool directory-name maintenance is needed.
+_CACHE_TAG = "CACHEDIR.TAG"
+# Project-definition files. Acceptance criteria very often hinge on
+# package name / edition / declared dependencies, so these are forced
+# past the byte/file caps and listed first - the reviewer can always
+# verify that class of criteria.
+_ALWAYS_INCLUDE = frozenset({
+    "Cargo.toml", "go.mod", "package.json", "pyproject.toml",
+    "setup.py", "setup.cfg", "requirements.txt", "Makefile",
+    "CMakeLists.txt", "pom.xml", "build.gradle", "build.gradle.kts",
+    "build.sbt", "tsconfig.json", "Gemfile", "composer.json",
+    "pubspec.yaml",
+})
 
 
 def _is_texty(path: Path) -> bool:
@@ -58,6 +85,7 @@ def _collect_artifact(
     per_file: int,
     max_files: int,
     exclude_names: frozenset[str] = frozenset(),
+    per_file_baseline: int | None = None,
 ) -> str:
     """Bounded snapshot of the project source for the reviewer. Always
     includes the project's source (not only files changed this iteration), so
@@ -87,20 +115,26 @@ def _collect_artifact(
             return False
         return _is_texty(p)
 
-    changed: list[Path] = []
-    changed_keys: set[str] = set()
-    for fp in sorted(tracked):  # tool-written files (this iteration)
+    seen: set[str] = set()
+    tracked_changed: list[Path] = []
+    for fp in sorted(tracked):  # agent-written this iteration (reliable)
         p = Path(fp)
         p = p if p.is_absolute() else rootp / p
         k = _key(p)
-        if k not in changed_keys and _eligible(p):
-            changed_keys.add(k)
-            changed.append(p)
+        if k not in seen and _eligible(p):
+            seen.add(k)
+            tracked_changed.append(p)
 
+    # mtime-"changed" is unreliable: build tooling rewrites cache files
+    # with fresh mtimes, so it ranks strictly below agent-written files.
+    mtime_changed: list[tuple[float, Path]] = []
     baseline: list[tuple[float, Path]] = []
     try:
         for dirpath, dirnames, filenames in os.walk(rootp):
             dirnames[:] = [d for d in dirnames if d not in _EXCLUDE_DIRS]
+            if _CACHE_TAG in filenames:  # tool cache dir: prune entirely
+                dirnames[:] = []
+                continue
             for name in filenames:
                 p = Path(dirpath) / name
                 if not _eligible(p):
@@ -110,23 +144,27 @@ def _collect_artifact(
                 except OSError:
                     continue
                 k = _key(p)
+                if k in seen:
+                    continue
+                seen.add(k)
                 if mt + 1e-6 >= started_at:  # changed this iteration
-                    if k not in changed_keys:
-                        changed_keys.add(k)
-                        changed.append(p)
+                    mtime_changed.append((mt, p))
                 else:
                     baseline.append((mt, p))
     except OSError:
         pass
 
-    baseline.sort(key=lambda t: t[0], reverse=True)  # most-recent first
-    ordered: list[tuple[Path, bool]] = [(p, True) for p in changed]
-    seen = set(changed_keys)
-    for _mt, p in baseline:
-        k = _key(p)
-        if k not in seen:
-            seen.add(k)
-            ordered.append((p, False))
+    mtime_changed.sort(key=lambda t: t[0], reverse=True)  # recent first
+    baseline.sort(key=lambda t: t[0], reverse=True)
+    ordered: list[tuple[Path, bool]] = (
+        [(p, True) for p in tracked_changed]
+        + [(p, True) for _mt, p in mtime_changed]
+        + [(p, False) for _mt, p in baseline]
+    )
+    # Project-definition files first and never capped out, so criteria
+    # about package name / edition / dependencies stay verifiable. Sort
+    # is stable, so ordering within each group is preserved.
+    ordered.sort(key=lambda t: t[0].name not in _ALWAYS_INCLUDE)
 
     # (rel, lines, bytes, content_shown, is_changed) for every file, so the
     # reviewer knows the full inventory even when content is capped.
@@ -142,7 +180,19 @@ def _collect_artifact(
             rel = str(p.relative_to(rootp))
         except ValueError:
             rel = p.name
-        included = len(bodies) < max_files and total < max_total
+        forced = p.name in _ALWAYS_INCLUDE
+        # The reviewer most needs this iteration's work (and the
+        # project-definition files) whole; head_tail returns the text
+        # untouched when its limit >= the file size, so a generous limit
+        # for changed/forced files shows them entirely instead of eliding
+        # their middle. Baseline context keeps the tighter limit so a big
+        # stable tree cannot blow the max_total ceiling.
+        lim = (
+            per_file
+            if (is_changed or forced) or per_file_baseline is None
+            else per_file_baseline
+        )
+        included = forced or (len(bodies) < max_files and total < max_total)
         manifest.append(
             (
                 rel,
@@ -154,7 +204,7 @@ def _collect_artifact(
         )
         if not included:
             continue
-        bodies.append(f"=== {rel} ===\n{head_tail(raw, per_file)}\n")
+        bodies.append(f"=== {rel} ===\n{head_tail(raw, lim)}\n")
         total += len(bodies[-1])
 
     if not manifest:
@@ -268,14 +318,19 @@ class GoalRuntime:
     def make_artifact_fn(
         self,
         *,
-        max_total: int = 16384,
-        per_file: int = 4096,
+        max_total: int = 65536,
+        per_file: int = 24576,
+        per_file_baseline: int = 6144,
         max_files: int = 40,
         exclude_names: frozenset[str] = frozenset(),
     ) -> Callable[[], Awaitable[str]]:
         """GoalLoop ``artifact_fn``: a bounded project-source snapshot so the
-        reviewer can judge whether the tests genuinely meet the spec.
-        ``exclude_names`` drops loop-managed state files by basename."""
+        reviewer can judge whether the tests genuinely meet the spec. The
+        budgets are sized so a small project's changed/definition files are
+        shown WHOLE (an elided middle made the reviewer fail-close a correct
+        project); ``per_file_baseline`` keeps unchanged context tighter so a
+        large stable tree still cannot exceed ``max_total``. ``exclude_names``
+        drops loop-managed state files by basename."""
 
         async def _artifact() -> str:
             root = getattr(self._last_ctx, "workspace_root", "") or os.getcwd()
@@ -288,6 +343,7 @@ class GoalRuntime:
                     per_file=per_file,
                     max_files=max_files,
                     exclude_names=exclude_names,
+                    per_file_baseline=per_file_baseline,
                 )
             except Exception as exc:  # context only; do not block on failure
                 log.debug("goal_runtime_artifact_failed", error=str(exc)[:200])

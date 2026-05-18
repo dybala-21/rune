@@ -65,8 +65,19 @@ meets the criteria is acceptable. Only lean allow=false when a file clearly \
 relevant to the acceptance criteria is "omitted: cap" or truncated so its \
 correctness cannot be verified from what is shown.
 
+To block (allow=false) you MUST copy, into a "quote" field, a verbatim \
+substring (>= 12 chars) taken EXACTLY from the DETERMINISTIC EVIDENCE or the \
+CHANGED SOURCE above that proves the problem (e.g. the empty test body, the \
+always-true assertion, the failing line). Do not paraphrase, infer, or \
+describe code that is not shown - if you cannot copy a concrete proving \
+substring from what you were given, respond allow=true. The deterministic \
+evidence already passed; an objection that cannot be grounded in a verbatim \
+quote does not override it.
+
 Respond with ONLY a JSON object:
-{"allow": true|false, "reason": "<one sentence grounded in evidence/source>"}"""
+{"allow": true|false, "reason": "<one sentence grounded in evidence/source>", \
+"quote": "<verbatim proving substring from evidence/source; required when \
+allow=false, else \\"\\">"}"""
 
 _SSC_SYSTEM = """\
 You perform Specification Self-Correction. Inspect whether the work below \
@@ -101,6 +112,14 @@ async def _ask(llm: LLMLike, system: str, user: str, tier: str) -> dict[str, Any
     return data
 
 
+def _norm(s: str) -> str:
+    """Whitespace/case-insensitive form for verbatim-citation matching: a
+    model copying a code line may reflow it, so collapse all whitespace
+    runs and lowercase. Leniency is deliberate - the safe error is to let a
+    genuine block stand, not to honor a fabricated one."""
+    return " ".join((s or "").lower().split())
+
+
 def make_adversarial_review_fn(
     *, llm: LLMLike | None = None, tier: str = "best"
 ) -> Callable[[ReviewContext], Awaitable[tuple[bool, str]]]:
@@ -125,7 +144,28 @@ def make_adversarial_review_fn(
             )
             allow = bool(data.get("allow", False))
             reason = str(data.get("reason") or "").strip()
-            return allow, reason or ("approved" if allow else "blocked by reviewer")
+            if allow:
+                return True, reason or "approved"
+            # A block must be grounded in a verbatim quote of what the
+            # reviewer was actually shown. review_fn is only called AFTER
+            # deterministic validation passed (see GoalLoop), so a block
+            # whose cited evidence is not present is a weak-model
+            # confabulation and must not override the passing gate.
+            quote = _norm(str(data.get("quote") or ""))
+            corpus = _norm(
+                rc.validation_output[:6000] + "\n" + artifact[:20000]
+            )
+            if len(quote) >= 12 and quote in corpus:
+                return False, reason or "blocked by reviewer"
+            log.debug(
+                "adversarial_review_unsubstantiated",
+                reason=reason[:160],
+                quote=str(data.get("quote") or "")[:80],
+            )
+            return True, (
+                f"unsubstantiated reviewer block (no verbatim evidence): "
+                f"{reason}"
+            )[:300]
         except Exception as exc:  # on error return block (GoalLoop blocks)
             log.debug("adversarial_review_fallback", error=str(exc)[:200])
             return False, f"reviewer unavailable ({type(exc).__name__})"
