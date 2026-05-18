@@ -13,6 +13,7 @@ be unit-tested with stub traces without importing the agent stack.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from collections.abc import Awaitable, Callable
@@ -30,6 +31,13 @@ StopCause = Literal[
     "verified", "max_iterations", "budget", "stagnation", "cancelled", "error"
 ]
 
+# Inner-loop reasons that mean "ran out of room without self-reporting
+# completed" - a weak model often burns its whole iteration budget here, so
+# the next prompt is steered to do the minimum and validate.
+_BUDGET_REASONS = frozenset(
+    {"token_budget_exhausted", "max_gate_blocked", "stalled", "no_progress"}
+)
+
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -44,6 +52,9 @@ class GoalLoopConfig:
     evidence_threshold: float = 0.8  # inner-loop evidence_score floor
     adversarial_review: bool = False  # run the allow/block gate before accepting
     ssc_interval: int = 0  # self-critique every N iterations (0 = off)
+    iteration_timeout_s: int = 1200  # in-loop watchdog (0 = off); best-effort
+    max_transient_retries: int = 3  # recoverable inner errors before fatal
+    max_extra_iterations: int = 10  # extra iters allowed while still advancing
     spec_file: str = "SPEC.md"
     plan_file: str = "fix_plan.md"
     progress_file: str = "progress.md"
@@ -71,6 +82,9 @@ class GoalIteration:
     verdict: Verdict
     validation_passed: bool | None = None
     review_passed: bool | None = None
+    recoverable: bool = False  # a transient-error attempt (excluded from progress)
+    fb_hash: int = 0  # hash of the feedback at record time (plateau detection)
+    fb_kind: str = ""  # feedback category at record time (plateau detection)
 
 
 @dataclass(slots=True)
@@ -160,9 +174,13 @@ class GoalLoop:
         self._artifact_fn = artifact_fn
         self._ws = Path(workspace) if workspace else None
         self._last_feedback = ""  # bounded failure excerpt for the next prompt
+        self._last_fb_kind = ""  # feedback category for plateau detection
+        self._last_inner_reason = ""  # prior iter's inner reason (C1 steer)
 
     def _record(self, hist: list[GoalIteration], it: GoalIteration) -> None:
         """Append an iteration and fire the (UI-only) progress callback."""
+        it.fb_hash = hash(self._last_feedback or "")
+        it.fb_kind = self._last_fb_kind
         hist.append(it)
         if self._on_iteration is not None:
             try:
@@ -186,19 +204,113 @@ class GoalLoop:
             return "error"
         return "progress"
 
-    def _is_stagnant(self, hist: list[GoalIteration]) -> bool:
-        """True when the last ``window`` iterations produced an identical
-        outcome signature (reason, evidence, tokens)."""
+    @staticmethod
+    def _progress_rank(it: GoalIteration) -> int:
+        """Ordinal distance toward 'done' (higher = closer). Deterministic,
+        no LLM. Pure feedback churn does not raise this."""
+        if it.review_passed:
+            return 4
+        if it.validation_passed is True:
+            return 3
+        if it.validation_passed is False:
+            return 2
+        return 1  # validation not even reached this iteration
+
+    def _window(self, hist: list[GoalIteration]) -> list[GoalIteration]:
+        """Last ``stagnation_window`` non-recoverable iterations (transient
+        errors are infra noise: neither progress nor plateau)."""
         w = self._cfg.stagnation_window
-        if w <= 0 or len(hist) < w:
+        if w <= 0:
+            return []
+        real = [it for it in hist if not it.recoverable]
+        return real[-w:] if len(real) >= w else []
+
+    def _advancing(self, hist: list[GoalIteration]) -> bool:
+        """Net ordinal improvement across the window (slow but converging)."""
+        win = self._window(hist)
+        return bool(win) and self._progress_rank(win[-1]) > self._progress_rank(
+            win[0]
+        )
+
+    def _plateaued(self, hist: list[GoalIteration]) -> bool:
+        """Truly stuck: window full, no ordinal advance, and the *kind* of
+        failure is unchanged across the window. A repeated
+        adversarial-review block is reworded run to run, so once
+        validation is green yet review keeps rejecting on the same
+        category that is a genuine plateau (the loop cannot satisfy the
+        reviewer and should stop, not burn the whole budget). For other
+        failures the excerpt must be identical too, so a model fixing a
+        *different* error each iteration keeps its full budget."""
+        win = self._window(hist)
+        if not win or self._advancing(hist):
             return False
-        recent = hist[-w:]
+        if any(it.fb_kind != win[0].fb_kind for it in win):
+            return False
+        if win[0].fb_kind == "adversarial-review-block":
+            return all(
+                it.validation_passed is True and not it.review_passed
+                for it in win
+            )
+        return all(it.fb_hash == win[0].fb_hash for it in win)
 
-        def _sig(it: GoalIteration) -> tuple[str, float, int]:
-            return (it.reason, round(it.evidence, 2), it.tokens)
+    @staticmethod
+    def _err_sig(err: str) -> str:
+        return (err or "").strip()[:120]
 
-        first = _sig(recent[0])
-        return all(_sig(it) == first for it in recent)
+    @staticmethod
+    def _classify_error(err: str) -> str:
+        """transient (recoverable: infra/provider/protocol) vs fatal (our-code
+        bug). Structured token/type match, no NL parsing. Unknown -> transient
+        (the harness should absorb infra), but a consecutive identical error
+        is treated as fatal by the caller."""
+        e = (err or "").lower()
+        fatal = (
+            "attributeerror", "keyerror", "typeerror", "nameerror",
+            "indexerror", "importerror", "modulenotfounderror",
+            "notimplementederror", "assertionerror", "zerodivisionerror",
+            "unboundlocalerror",
+        )
+        if any(t in e for t in fatal):
+            return "fatal"
+        return "transient"
+
+    def _handle_inner_error(
+        self,
+        err: str,
+        n: int,
+        hist: list[GoalIteration],
+        transient_retries: int,
+        last_err_sig: str | None,
+    ) -> tuple[str, int, str]:
+        """An inner-run error: 'retry' (record as recoverable, capture feedback,
+        next iteration runs fresh) or 'fatal' (stop). Fatal when the error is a
+        our-code bug class, repeats identically back-to-back, or the transient
+        budget is spent."""
+        sig = self._err_sig(err)
+        is_fatal = (
+            self._classify_error(err) == "fatal"
+            or sig == last_err_sig
+            or transient_retries >= self._cfg.max_transient_retries
+        )
+        if is_fatal:
+            self._record(
+                hist, GoalIteration(n, f"error: {err}"[:120], 0.0, 0, "error")
+            )
+            return ("fatal", transient_retries, sig)
+        self._record(
+            hist,
+            GoalIteration(
+                n, f"error: {err}"[:120], 0.0, 0, "error", recoverable=True
+            ),
+        )
+        self._write_feedback("transient-error", err)
+        log.warning(
+            "goal_loop_transient_recover",
+            iteration=n,
+            retries=transient_retries + 1,
+            error=err[:160],
+        )
+        return ("retry", transient_retries + 1, sig)
 
     # -- workspace state files (best-effort, does not crash the loop) ------
 
@@ -259,6 +371,7 @@ class GoalLoop:
         self._last_feedback = head_tail(
             f"[{kind}]\n{text or ''}", self._cfg.feedback_inject_chars
         )
+        self._last_fb_kind = kind
         p = self._feedback_path()
         if p is None:
             return
@@ -307,6 +420,14 @@ class GoalLoop:
                 "[PREVIOUS ATTEMPT FAILED - fix exactly this before anything "
                 f"else]\n{self._last_feedback}\n\n"
             )
+        if n > 1 and self._last_inner_reason in _BUDGET_REASONS:
+            cmds = ", ".join(spec.validation_commands) or "the validation commands"
+            prefix += (
+                "[BUDGET DISCIPLINE] The previous attempt spent its entire "
+                "budget WITHOUT reaching validation. Do the MINIMUM needed to "
+                f"make these pass, then STOP - no exploration, no refactor: "
+                f"{cmds}\n\n"
+            )
         return (
             f"{prefix}{spec.goal}\n\n"
             f"Work ONE unfinished item from @{self._cfg.plan_file} this iteration "
@@ -337,7 +458,12 @@ class GoalLoop:
         last_answer = ""
         stop_cause: StopCause = "max_iterations"
 
-        for n in range(1, self._cfg.max_iterations + 1):
+        n = 0
+        transient_retries = 0
+        last_err_sig: str | None = None
+        effective_max = self._cfg.max_iterations
+        while n < effective_max:
+            n += 1
             if self._cancelled():
                 stop_cause = "cancelled"
                 break
@@ -345,12 +471,25 @@ class GoalLoop:
             fb_pre = self._feedback_stat()
             wrote_fb = False
             try:
-                trace = await self._run(self._build_prompt(spec, n), n)
-            except Exception as exc:  # on a run error, end the loop
-                log.warning("goal_loop_run_error", iteration=n, error=str(exc)[:200])
-                stop_cause = "error"
-                self._record(hist, GoalIteration(n, f"error: {exc}"[:120], 0.0, 0, "error"))
-                break
+                _coro = self._run(self._build_prompt(spec, n), n)
+                if self._cfg.iteration_timeout_s > 0:
+                    trace = await asyncio.wait_for(
+                        _coro, timeout=self._cfg.iteration_timeout_s
+                    )
+                else:
+                    trace = await _coro
+            except Exception as exc:  # transient -> fresh retry; fatal -> stop
+                action, transient_retries, last_err_sig = self._handle_inner_error(
+                    f"{type(exc).__name__}: {exc}", n, hist,
+                    transient_retries, last_err_sig,
+                )
+                if action == "fatal":
+                    log.warning(
+                        "goal_loop_run_error", iteration=n, error=str(exc)[:200]
+                    )
+                    stop_cause = "error"
+                    break
+                continue  # recovered: next iteration runs with a fresh context
 
             total_tokens += getattr(trace, "total_tokens_used", 0) or 0
             last_answer = self._answer_of(trace) or last_answer
@@ -362,6 +501,7 @@ class GoalLoop:
                 tokens=int(getattr(trace, "total_tokens_used", 0) or 0),
                 verdict=verdict,
             )
+            self._last_inner_reason = trace.reason or ""  # for the C1 steer
 
             if verdict == "verified":
                 # With no validation commands and no reviewer there is no
@@ -377,38 +517,56 @@ class GoalLoop:
                         f"{it.evidence:.2f} < {self._cfg.evidence_threshold})"
                     )
                 else:
-                    passed, detail = await self._run_validation(spec)
-                    it.validation_passed = passed
-                    if passed:
-                        # Review the deterministic validation output, not the
-                        # agent's prose claim (last_answer).
-                        allow, why = await self._adversarial_review(
-                            spec, last_answer, detail
-                        )
-                        it.review_passed = allow
-                        if allow:
-                            self._record(hist, it)
-                            stop_cause = "verified"
-                            break
-                        # Review blocked a test-passing candidate.
-                        it.verdict = "progress"
-                        self._append_progress(
-                            f"Avoid: adversarial review blocked: {why[:200]}"
-                        )
-                        self._write_feedback("adversarial-review-block", why)
-                        wrote_fb = True
-                    else:
-                        # Inner loop said done but validation fails.
-                        it.verdict = "progress"
-                        self._append_progress(
-                            f"Avoid: validation failed: {detail[:200]}"
-                        )
-                        self._write_feedback("validation-failed", detail)
-                        wrote_fb = True
-            elif verdict in ("cancelled", "error"):
+                    accepted, fb_written = await self._try_accept(
+                        spec, it, last_answer, hist
+                    )
+                    if accepted:
+                        self._record(hist, it)
+                        stop_cause = "verified"
+                        break
+                    wrote_fb = wrote_fb or fb_written
+            elif verdict == "cancelled":
                 self._record(hist, it)
-                stop_cause = verdict
+                stop_cause = "cancelled"
                 break
+            elif verdict == "error":
+                action, transient_retries, last_err_sig = self._handle_inner_error(
+                    it.reason, n, hist, transient_retries, last_err_sig
+                )
+                if action == "fatal":
+                    stop_cause = "error"
+                    break
+                continue  # recovered: next iteration runs with a fresh context
+
+            # C2: full decoupling. The loop's own deterministic validation -
+            # not the inner self-report - is the arbiter. When the inner loop
+            # did NOT say "completed" (token_budget_exhausted /
+            # max_gate_blocked / stalled) but produced work, still run
+            # validation: the on-disk result may already pass, so an
+            # inner-gated iteration is not silently discarded. ``wrote_fb``
+            # guards against re-validating the verified branch's own result.
+            if (
+                it.verdict == "progress"
+                and not wrote_fb
+                and not it.recoverable
+                and (
+                    bool(spec.validation_commands)
+                    or (self._cfg.adversarial_review and self._review is not None)
+                )
+            ):
+                accepted, fb_written = await self._try_accept(
+                    spec, it, last_answer, hist
+                )
+                if accepted:
+                    self._record(hist, it)
+                    stop_cause = "verified"
+                    break
+                wrote_fb = wrote_fb or fb_written
+
+            # A normal (non-error) iteration completed: reset the
+            # consecutive-error tracker so "same error twice" means
+            # truly back-to-back.
+            last_err_sig = None
 
             # Feedback reflux: an attempt that did not reach the loop's own
             # validation (e.g. token_budget_exhausted). Adopt the worker's
@@ -430,10 +588,20 @@ class GoalLoop:
             if total_tokens > self._cfg.max_total_tokens:
                 stop_cause = "budget"
                 break
-            if self._is_stagnant(hist):
+            if self._plateaued(hist):
                 stop_cause = "stagnation"
                 break
-            # otherwise continue with a new context
+            # Progress-aware extension: a slow but converging model is not
+            # capped at max_iterations while it is still advancing - bounded
+            # by max_extra_iterations and the inviolable token ceiling.
+            if (
+                n >= effective_max
+                and self._advancing(hist)
+                and total_tokens <= self._cfg.max_total_tokens
+                and (effective_max - self._cfg.max_iterations)
+                < self._cfg.max_extra_iterations
+            ):
+                effective_max += 1
 
         success = stop_cause == "verified"
         # Persist episodic memory once, at the terminal outcome only.
@@ -462,6 +630,36 @@ class GoalLoop:
         except Exception as exc:
             log.debug("goal_loop_validate_error", error=str(exc)[:200])
             return False, f"validator error: {exc}"[:200]
+
+    async def _try_accept(
+        self,
+        spec: GoalSpec,
+        it: GoalIteration,
+        last_answer: str,
+        hist: list[GoalIteration],
+    ) -> tuple[bool, bool]:
+        """Run the loop's own deterministic validation (the real arbiter)
+        and, on pass, the adversarial review. Returns
+        ``(accepted, feedback_written)``. Shared by the inner-"completed"
+        path and the C2 decoupled path, so a budget-exhausted / inner-gated
+        iteration whose on-disk work already passes is not discarded."""
+        passed, detail = await self._run_validation(spec)
+        it.validation_passed = passed
+        if passed:
+            allow, why = await self._adversarial_review(spec, last_answer, detail)
+            it.review_passed = allow
+            if allow:
+                return True, False
+            it.verdict = "progress"
+            self._append_progress(
+                f"Avoid: adversarial review blocked: {why[:200]}"
+            )
+            self._write_feedback("adversarial-review-block", why)
+            return False, True
+        it.verdict = "progress"
+        self._append_progress(f"Avoid: validation failed: {detail[:200]}")
+        self._write_feedback("validation-failed", detail)
+        return False, True
 
     async def _adversarial_review(
         self, spec: GoalSpec, answer: str, evidence: str

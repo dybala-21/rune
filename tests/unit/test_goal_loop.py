@@ -256,7 +256,9 @@ async def test_error_reason_stops_loop(tmp_path: Path) -> None:
     assert res.success is False
 
 
-async def test_runner_exception_is_fail_closed(tmp_path: Path) -> None:
+async def test_repeated_identical_error_is_fatal_fast(tmp_path: Path) -> None:
+    # Phase 6.1: an identical error twice in a row -> fatal (no retry waste),
+    # even though RuntimeError defaults to transient.
     async def boom(prompt: str, iteration: int) -> StubTrace:
         raise RuntimeError("provider down")
 
@@ -266,7 +268,8 @@ async def test_runner_exception_is_fail_closed(tmp_path: Path) -> None:
 
     assert res.stop_cause == "error"
     assert res.success is False
-    assert len(res.iterations) == 1
+    # iter1 = recoverable retry, iter2 = same sig -> fatal. Stops fast.
+    assert len(res.iterations) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -688,3 +691,303 @@ async def test_reflux_works_without_workspace() -> None:
     )
     await loop.run(spec(validation_commands=["cargo test"]))
     assert "E0001" in runner.calls[1][1]
+
+
+# Phase 6.1: iteration-level error / hang recovery
+
+
+async def test_transient_blip_recovers_then_succeeds(tmp_path: Path) -> None:
+    # The harness absorbs a one-off infra blip and still reaches the goal.
+    calls = {"n": 0}
+
+    async def runner(prompt: str, n: int) -> StubTrace:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionError("transient blip")
+        return verified()
+
+    loop = GoalLoop(
+        GoalLoopConfig(stagnation_window=0),
+        run_fn=runner,
+        workspace=tmp_path,
+    )
+    res = await loop.run(spec())
+
+    assert res.success is True
+    assert res.stop_cause == "verified"
+    assert res.iterations[0].recoverable is True  # blip recorded, not fatal
+
+
+async def test_distinct_transient_errors_hit_retry_cap(tmp_path: Path) -> None:
+    async def runner(prompt: str, n: int) -> StubTrace:
+        raise ConnectionError(f"blip {n}")  # different each time
+
+    loop = GoalLoop(
+        GoalLoopConfig(max_transient_retries=3, stagnation_window=0),
+        run_fn=runner,
+        workspace=tmp_path,
+    )
+    res = await loop.run(spec())
+
+    assert res.success is False
+    assert res.stop_cause == "error"
+    assert len(res.iterations) == 4  # 3 recoverable retries, then fatal
+
+
+async def test_fatal_error_type_stops_immediately(tmp_path: Path) -> None:
+    async def runner(prompt: str, n: int) -> StubTrace:
+        raise AttributeError("our-code bug")  # fatal class -> no retry
+
+    loop = GoalLoop(run_fn=runner, workspace=tmp_path)
+    res = await loop.run(spec())
+
+    assert res.stop_cause == "error"
+    assert len(res.iterations) == 1
+
+
+async def test_iteration_watchdog_recovers_from_hang(tmp_path: Path) -> None:
+    import asyncio as _aio
+
+    calls = {"n": 0}
+
+    async def runner(prompt: str, n: int) -> StubTrace:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            await _aio.sleep(5)  # exceeds the 1s watchdog -> TimeoutError
+        return verified()
+
+    loop = GoalLoop(
+        GoalLoopConfig(iteration_timeout_s=1, stagnation_window=0),
+        run_fn=runner,
+        workspace=tmp_path,
+    )
+    res = await loop.run(spec())  # must NOT hang
+
+    assert res.success is True
+    assert res.iterations[0].recoverable is True
+
+
+async def test_transient_recovery_stays_poisoning_safe(tmp_path: Path) -> None:
+    persist = PersistSpy()
+
+    async def runner(prompt: str, n: int) -> StubTrace:
+        raise ConnectionError(f"blip {n}")
+
+    loop = GoalLoop(
+        GoalLoopConfig(max_transient_retries=2, stagnation_window=0),
+        run_fn=runner,
+        persist_fn=persist,
+        workspace=tmp_path,
+    )
+    await loop.run(spec())
+
+    assert len(persist.calls) == 1  # terminal-only persistence unaffected
+
+
+# Phase 6.2: progress-aware stop / extension
+
+
+def _flip_validator(false_times: int):
+    c = {"n": 0}
+
+    async def _v(cmds: list[str]) -> tuple[bool, str]:
+        c["n"] += 1
+        ok = c["n"] > false_times
+        return ok, ("ok" if ok else f"fail {c['n']}")
+
+    return _v
+
+
+def _distinct_validator():
+    c = {"n": 0}
+
+    async def _v(cmds: list[str]) -> tuple[bool, str]:
+        c["n"] += 1
+        return False, f"different error {c['n']}"
+
+    return _v
+
+
+async def test_extends_past_max_iterations_while_advancing(tmp_path: Path) -> None:
+    # Rank climbs val-False(2) -> val-True+review-block(3) -> verified, so the
+    # loop is allowed to exceed max_iterations and still reach success. (With
+    # C2 every iteration validates, so the reviewer - not a skipped
+    # validation - is what defers success past max_iterations here.)
+    c = {"n": 0}
+
+    async def _block_then_allow(_rc):
+        c["n"] += 1
+        return (c["n"] >= 2), ("ok" if c["n"] >= 2 else "blocked once")
+
+    loop = GoalLoop(
+        GoalLoopConfig(
+            max_iterations=2, max_extra_iterations=5, stagnation_window=2,
+            adversarial_review=True,
+        ),
+        run_fn=ScriptedRunner([progress(), verified()]),
+        validate_fn=_flip_validator(1),  # call1 False, then True
+        review_fn=_block_then_allow,
+        workspace=tmp_path,
+    )
+    res = await loop.run(spec(validation_commands=["x"]))
+
+    assert res.success is True
+    assert res.stop_cause == "verified"
+    assert len(res.iterations) > 2  # extended past max_iterations
+
+
+async def test_changing_failure_uses_full_budget_not_early_stop(tmp_path: Path) -> None:
+    # same rank but DIFFERENT failure each iter -> not a plateau; the loop
+    # spends its full max_iterations rather than stopping early.
+    loop = GoalLoop(
+        GoalLoopConfig(max_iterations=3, stagnation_window=2),
+        run_fn=ScriptedRunner([verified()]),
+        validate_fn=_distinct_validator(),
+        workspace=tmp_path,
+    )
+    res = await loop.run(spec(validation_commands=["x"]))
+
+    assert res.stop_cause == "max_iterations"
+    assert len(res.iterations) == 3
+
+
+async def test_identical_failure_is_plateau_stop(tmp_path: Path) -> None:
+    loop = GoalLoop(
+        GoalLoopConfig(max_iterations=10, stagnation_window=2),
+        run_fn=ScriptedRunner([verified()]),
+        validate_fn=validator(False, "the exact same error"),
+        workspace=tmp_path,
+    )
+    res = await loop.run(spec(validation_commands=["x"]))
+
+    assert res.stop_cause == "stagnation"
+    assert len(res.iterations) == 2  # stopped at the window, not at iter 10
+
+
+async def test_reworded_review_block_is_plateau_stop(tmp_path: Path) -> None:
+    # D2 (rust-webrtc live run): validation stays green but the adversarial
+    # reviewer rewords the same objection every iteration, so the feedback
+    # text differs while the category does not. The loop must recognise the
+    # category-level plateau and stop, not burn the full 8-iter / $29 budget.
+    c = {"n": 0}
+
+    async def _reword_review(_rc):
+        c["n"] += 1
+        return False, f"blocked - rephrased differently #{c['n']}"
+
+    loop = GoalLoop(
+        GoalLoopConfig(
+            max_iterations=10, stagnation_window=2, adversarial_review=True
+        ),
+        run_fn=ScriptedRunner([verified()]),
+        validate_fn=validator(True, "ok"),
+        review_fn=_reword_review,
+        workspace=tmp_path,
+    )
+    res = await loop.run(spec(validation_commands=["x"]))
+
+    assert res.success is False
+    assert res.stop_cause == "stagnation"
+    assert len(res.iterations) == 2  # window, not iter 10 / full budget
+
+
+# C2: full decoupling - the loop's deterministic validation is the arbiter,
+# not the inner self-report.
+
+
+def _budget_trace() -> StubTrace:
+    return StubTrace(
+        reason="token_budget_exhausted", evidence_score=0.0, answer="wip"
+    )
+
+
+async def test_c2_budget_exhausted_iter_is_validated_and_verifies(
+    tmp_path: Path,
+) -> None:
+    # inner never said "completed" (token_budget_exhausted) but the on-disk
+    # work passes -> C2 runs validation anyway and the loop verifies.
+    loop = GoalLoop(
+        GoalLoopConfig(max_iterations=3, stagnation_window=0,
+                       adversarial_review=True),
+        run_fn=ScriptedRunner([_budget_trace()]),
+        validate_fn=validator(True, "ok"),
+        review_fn=_review(True),
+        workspace=tmp_path,
+    )
+    res = await loop.run(spec(validation_commands=["x"]))
+
+    assert res.success is True
+    assert res.stop_cause == "verified"
+    assert len(res.iterations) == 1
+    assert res.iterations[0].validation_passed is True
+    assert res.iterations[0].review_passed is True
+
+
+async def test_c2_budget_exhausted_fail_gives_validation_feedback(
+    tmp_path: Path,
+) -> None:
+    # validation actually run (not the opaque "no-validation" steer) so the
+    # reflux carries the real error.
+    loop = GoalLoop(
+        GoalLoopConfig(max_iterations=1, stagnation_window=0,
+                       adversarial_review=True),
+        run_fn=ScriptedRunner([_budget_trace()]),
+        validate_fn=validator(False, "cargo: boom"),
+        review_fn=_review(True),
+        workspace=tmp_path,
+    )
+    res = await loop.run(spec(validation_commands=["x"]))
+
+    assert res.success is False
+    assert res.iterations[0].validation_passed is False
+    assert res.iterations[0].fb_kind == "validation-failed"
+
+
+async def test_c2_skipped_when_no_objective_check(tmp_path: Path) -> None:
+    # no validation commands and no reviewer -> C2 must NOT run; the
+    # pre-existing no-validation steer path is preserved.
+    loop = GoalLoop(
+        GoalLoopConfig(max_iterations=1, stagnation_window=0),
+        run_fn=ScriptedRunner([_budget_trace()]),
+        validate_fn=validator(True, "ok"),
+        workspace=tmp_path,
+    )
+    res = await loop.run(spec())  # no validation_commands
+
+    assert res.iterations[0].validation_passed is None  # never validated
+    assert res.iterations[0].fb_kind == "no-validation"
+
+
+# C1: budget-discipline steer in the next prompt after a budget-exhausted iter.
+
+
+async def test_c1_budget_steer_injected_after_exhaustion(tmp_path: Path) -> None:
+    runner = ScriptedRunner([_budget_trace()])  # repeats; reason in _BUDGET
+    loop = GoalLoop(
+        GoalLoopConfig(max_iterations=2, stagnation_window=0,
+                       adversarial_review=True),
+        run_fn=runner,
+        validate_fn=validator(False, "x"),  # never verify -> iter2 runs
+        review_fn=_review(True),
+        workspace=tmp_path,
+    )
+    await loop.run(spec(validation_commands=["cargo build"]))
+
+    prompt2 = runner.calls[1][1]  # the iteration-2 prompt
+    assert "[BUDGET DISCIPLINE]" in prompt2
+    assert "cargo build" in prompt2
+
+
+async def test_c1_no_steer_on_normal_progress(tmp_path: Path) -> None:
+    runner = ScriptedRunner([progress()])  # reason="" -> not a budget reason
+    loop = GoalLoop(
+        GoalLoopConfig(max_iterations=2, stagnation_window=0,
+                       adversarial_review=True),
+        run_fn=runner,
+        validate_fn=validator(False, "x"),
+        review_fn=_review(True),
+        workspace=tmp_path,
+    )
+    await loop.run(spec(validation_commands=["cargo build"]))
+
+    assert "[BUDGET DISCIPLINE]" not in runner.calls[1][1]

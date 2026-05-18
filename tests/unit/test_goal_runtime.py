@@ -286,3 +286,116 @@ async def test_no_candidates_returns_empty(tmp_path) -> None:
         str(tmp_path), 9e18, set(), max_total=16384, per_file=4096, max_files=40
     )
     assert out == ""
+
+
+# F1/F2/F3: build-output dirs must not starve real source out of the
+# reviewer artifact (a target/ flood once buried Cargo.toml).
+
+
+async def test_build_output_dir_excluded_and_manifest_forced(tmp_path) -> None:
+    _mk(tmp_path / "Cargo.toml", '[package]\nname = "x"\nedition = "2021"\n')
+    (tmp_path / "src").mkdir()
+    _mk(tmp_path / "src" / "lib.rs", "fn main() {}\n")
+    tgt = tmp_path / "target" / "debug" / ".fingerprint"
+    tgt.mkdir(parents=True)
+    (tmp_path / "target" / "CACHEDIR.TAG").write_text("Signature\n")
+    for i in range(200):  # the flood
+        _mk(tgt / f"junk{i}.json", '{"rustc":' + str(i) + "}\n")
+    _os.utime(tmp_path / "Cargo.toml", (1000, 1000))  # unchanged -> baseline
+    out = _collect_artifact(
+        str(tmp_path), 5_000_000_000.0, set(),
+        max_total=16384, per_file=4096, max_files=40,
+    )
+    assert "target/" not in out and "junk" not in out  # flood excluded
+    assert "=== Cargo.toml ===" in out  # forced past the cap despite baseline
+    assert "name = \"x\"" in out
+    assert "=== src/lib.rs ===" in out
+
+
+async def test_cachedir_tag_prunes_unknown_named_cache_dir(tmp_path) -> None:
+    # a cache dir whose name is NOT in _EXCLUDE_DIRS is still pruned by the
+    # CACHEDIR.TAG content marker (no per-tool name maintenance).
+    _mk(tmp_path / "main.go", "package main\n")
+    weird = tmp_path / "weirdcache"
+    weird.mkdir()
+    (weird / "CACHEDIR.TAG").write_text("Signature: ...\n")
+    _mk(weird / "huge.go", "package x\n" + "// junk\n" * 500)
+    out = _collect_artifact(
+        str(tmp_path), 0.0, set(), max_total=16384, per_file=4096, max_files=40
+    )
+    assert "main.go" in out
+    assert "weirdcache" not in out and "huge.go" not in out
+
+
+async def test_manifest_file_forced_past_file_cap(tmp_path) -> None:
+    # non-forced files exhaust the file cap; the project-definition file is
+    # still shown (its criteria must stay verifiable) and listed first.
+    _mk(tmp_path / "Cargo.toml", '[package]\nname = "rust_webrtc"\n')
+    for i in range(6):
+        _mk(tmp_path / f"s{i}.rs", f"// source {i}\n")
+    out = _collect_artifact(
+        str(tmp_path), 0.0, set(), max_total=16384, per_file=4096, max_files=2
+    )
+    assert "=== Cargo.toml ===" in out and 'name = "rust_webrtc"' in out
+    assert "[omitted: cap]" in out  # some non-forced gated out by max_files
+    assert out.index("Cargo.toml") < out.index("s0.rs")  # forced listed first
+
+
+async def test_tracked_outranks_newer_mtime_file(tmp_path) -> None:
+    # the agent-written file (tracked) must rank above a non-tracked file
+    # with a newer mtime, so regenerated artifacts never preempt real edits.
+    edited = tmp_path / "edited.go"
+    _mk(edited, "package x // agent wrote this\n")
+    _os.utime(edited, (1000, 1000))  # OLD mtime
+    regen = tmp_path / "regen.go"
+    _mk(regen, "package y // build regenerated\n")
+    _os.utime(regen, (9_000_000_000, 9_000_000_000))  # NEW mtime
+    out = _collect_artifact(
+        str(tmp_path), 0.0, {str(edited)},
+        max_total=16384, per_file=4096, max_files=40,
+    )
+    assert out.index("edited.go") < out.index("regen.go")
+
+
+# F5: a small project's changed/definition files must be shown whole;
+# a too-small per-file cap once mid-elided the only source file.
+
+_F5 = dict(max_total=65536, per_file=24576, per_file_baseline=6144)  # shipped
+
+
+async def test_changed_source_shown_whole_no_mid_elision(tmp_path) -> None:
+    body = "fn a() {}\n" + "// signaling wiring\n" * 500 + "fn END_MARK() {}\n"
+    assert 5000 < len(body) < 24576  # realistic single source file
+    _mk(tmp_path / "lib.rs", body)
+    out = _collect_artifact(
+        str(tmp_path), 0.0, {str(tmp_path / "lib.rs")}, max_files=40, **_F5
+    )
+    assert "fn END_MARK() {}" in out  # tail present -> not middle-elided
+    assert "elided" not in out  # head_tail untouched (limit >= file size)
+
+
+async def test_baseline_capped_tighter_than_changed(tmp_path) -> None:
+    # marker sits at the CENTRE so the head/tail-keeping elision drops it
+    # only when the (smaller) baseline limit applies.
+    base = tmp_path / "old.rs"  # ~9009 chars, "BASE_MID" at the centre
+    _mk(base, "H" * 4500 + "BASE_MID" + "T" * 4500)
+    _os.utime(base, (1000, 1000))  # baseline
+    chg = tmp_path / "new.rs"
+    _mk(chg, "H" * 4500 + "CHG_MID" + "T" * 4500)
+    _os.utime(chg, (9_000_000_000, 9_000_000_000))  # changed
+    out = _collect_artifact(
+        str(tmp_path), 5_000_000_000.0, set(), max_files=40, **_F5
+    )
+    assert "CHG_MID" in out  # changed: whole at per_file=24576
+    assert "BASE_MID" not in out and "elided" in out  # baseline elided at 6144
+
+
+async def test_max_total_ceiling_still_bounds(tmp_path) -> None:
+    for i in range(8):  # 8 x ~20KB changed files, all whole would be ~160KB
+        _mk(tmp_path / f"big{i}.rs", f"// {i}\n" + "z" * 20000)
+    out = _collect_artifact(
+        str(tmp_path), 0.0, set(), max_files=40, **_F5
+    )
+    body = out.split("\n\n", 1)[1]
+    assert len(body) <= _F5["max_total"]  # hard ceiling holds
+    assert "[omitted: cap]" in out  # excess files bounded out
