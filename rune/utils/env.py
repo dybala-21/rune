@@ -14,13 +14,24 @@ import contextlib
 import os
 from pathlib import Path
 
+from rune.utils.paths import rune_home
+
 # ============================================================================
 # Paths
 # ============================================================================
 
-_HOME = Path.home()
-USER_ENV_PATH = _HOME / ".rune" / ".env"
 PROJECT_ENV_PATH = Path.cwd() / ".rune" / ".env"
+
+
+def _user_env_path() -> Path:
+    return rune_home() / ".env"
+
+
+def _project_env_path() -> Path:
+    return Path.cwd() / ".rune" / ".env"
+
+
+USER_ENV_PATH = _user_env_path()
 
 _SENSITIVE_DIR_MODE = 0o700
 _SENSITIVE_FILE_MODE = 0o600
@@ -109,8 +120,8 @@ def load_env() -> EnvConfig:
 
     Returns the merged config (project overrides user).
     """
-    user_env = _read_env_file(USER_ENV_PATH)
-    project_env = _read_env_file(PROJECT_ENV_PATH)
+    user_env = _read_env_file(_user_env_path())
+    project_env = _read_env_file(_project_env_path())
 
     merged = {**user_env, **project_env}
 
@@ -135,11 +146,11 @@ def get_env(key: str) -> str | None:
     if val:
         return val
 
-    project_env = _read_env_file(PROJECT_ENV_PATH)
+    project_env = _read_env_file(_project_env_path())
     if key in project_env:
         return project_env[key]
 
-    user_env = _read_env_file(USER_ENV_PATH)
+    user_env = _read_env_file(_user_env_path())
     return user_env.get(key)
 
 
@@ -156,7 +167,7 @@ def set_env(key: str, value: str, scope: str = "user") -> None:
         value: The variable value.
         scope: ``"user"`` for ``~/.rune/.env`` or ``"project"`` for ``.rune/.env``.
     """
-    file_path = USER_ENV_PATH if scope == "user" else PROJECT_ENV_PATH
+    file_path = _user_env_path() if scope == "user" else _project_env_path()
     _ensure_sensitive_dir(file_path.parent)
 
     existing = _read_env_file(file_path)
@@ -175,7 +186,7 @@ def unset_env(key: str, scope: str = "user") -> None:
         key: The variable name to remove.
         scope: ``"user"`` or ``"project"``.
     """
-    file_path = USER_ENV_PATH if scope == "user" else PROJECT_ENV_PATH
+    file_path = _user_env_path() if scope == "user" else _project_env_path()
 
     existing = _read_env_file(file_path)
     existing.pop(key, None)
@@ -210,8 +221,8 @@ def list_env() -> dict[str, EnvConfig]:
 
     Returns a dict with keys ``"user"``, ``"project"``, and ``"merged"``.
     """
-    user = _read_env_file(USER_ENV_PATH)
-    project = _read_env_file(PROJECT_ENV_PATH)
+    user = _read_env_file(_user_env_path())
+    project = _read_env_file(_project_env_path())
     merged = {**user, **project}
     return {"user": user, "project": project, "merged": merged}
 

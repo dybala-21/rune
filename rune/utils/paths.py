@@ -65,8 +65,13 @@ def is_hidden_path(p: str | Path) -> bool:
 # RUNE-specific paths
 
 def rune_home() -> Path:
-    """Return ~/.rune, the user-level RUNE configuration directory."""
-    d = _HOME / ".rune"
+    """Return the user-level RUNE configuration directory.
+
+    Benchmark and test harnesses can set ``RUNE_HOME`` to isolate memory,
+    credentials, logs, and derived caches without changing the process HOME.
+    """
+    override = os.environ.get("RUNE_HOME", "").strip()
+    d = Path(os.path.expandvars(os.path.expanduser(override))) if override else _HOME / ".rune"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

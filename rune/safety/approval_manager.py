@@ -10,10 +10,10 @@ import contextlib
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Literal
 
 from rune.utils.logger import get_logger
+from rune.utils.paths import rune_home
 
 log = get_logger(__name__)
 
@@ -132,7 +132,7 @@ def _normalize_prompt_decision(decision: ApprovalPromptDecision) -> tuple[bool, 
 
 async def _persist_always_allow_group(group: str) -> None:
     """Write always-allow group to ~/.rune/config.yaml."""
-    config_dir = Path.home() / ".rune"
+    config_dir = rune_home()
     config_path = config_dir / "config.yaml"
 
     try:

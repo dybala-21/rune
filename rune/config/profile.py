@@ -11,13 +11,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from rune.utils.logger import get_logger
-from rune.utils.paths import expand_path
+from rune.utils.paths import expand_path, rune_home
 
 log = get_logger(__name__)
-
-# Default config directory (can be overridden).
-_DEFAULT_CONFIG_DIR = Path.home() / ".rune"
-
 
 # ============================================================================
 # Data Models
@@ -200,7 +196,7 @@ class ProfileLoader:
     """
 
     def __init__(self, config_dir: Path | None = None) -> None:
-        self._config_dir = config_dir or _DEFAULT_CONFIG_DIR
+        self._config_dir = config_dir or rune_home()
         self._user_profile: UserProfile | None = None
         self._persona_config: PersonaConfig | None = None
         self._initialized = False

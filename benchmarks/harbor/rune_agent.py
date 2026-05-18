@@ -1,0 +1,206 @@
+"""Harbor installed-agent adapter for RUNE.
+
+This module is intentionally importable without Harbor installed so unit tests
+can validate command construction in the normal RUNE dev environment. Harbor
+will provide the real base classes at benchmark runtime.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shlex
+from pathlib import Path
+from typing import Any
+
+try:  # pragma: no cover - exercised by Harbor, not unit tests.
+    from harbor.agents.installed.base import BaseInstalledAgent, with_prompt_template
+    from harbor.environments.base import BaseEnvironment
+    from harbor.models.agent.context import AgentContext
+except ModuleNotFoundError:  # pragma: no cover - lets local tests import this file.
+    BaseEnvironment = Any  # type: ignore[misc, assignment]
+    AgentContext = Any  # type: ignore[misc, assignment]
+
+    class BaseInstalledAgent:  # type: ignore[no-redef]
+        pass
+
+    def with_prompt_template(fn: Any) -> Any:  # type: ignore[no-redef]
+        return fn
+
+
+DEFAULT_INSTALL_COMMAND = "python3 -m pip install --user rune-ai"
+DEFAULT_RUN_ROOT = Path("/logs/agent/rune")
+DEFAULT_RUNE_HOME = Path("/logs/agent/rune_home")
+PASSTHROUGH_ENV_KEYS = (
+    "OPENAI_API_KEY",
+    "OPENAI_ADMIN_KEY",
+    "OPENAI_BASE_URL",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "VERTEX_PROJECT",
+    "VERTEX_LOCATION",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_REGION",
+    "RUNE_MODEL",
+    "RUNE_PROVIDER",
+    "RUNE_LOG_LEVEL",
+)
+
+
+def _shell_join(command: list[str]) -> str:
+    return " ".join(shlex.quote(part) for part in command)
+
+
+def _context_value(context: Any, *names: str) -> str | None:
+    for name in names:
+        value = context.get(name) if isinstance(context, dict) else getattr(context, name, None)
+        if isinstance(value, str) and value:
+            return value
+        if value is not None:
+            if isinstance(value, dict):
+                nested = value.get("id") or value.get("name") or value.get("path")
+            else:
+                nested = (
+                    getattr(value, "id", None)
+                    or getattr(value, "name", None)
+                    or getattr(value, "path", None)
+                )
+            if isinstance(nested, str) and nested:
+                return nested
+    return None
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _container_env() -> dict[str, str]:
+    return {key: value for key in PASSTHROUGH_ENV_KEYS if (value := os.environ.get(key))}
+
+
+def harbor_task_id(context: Any) -> str:
+    """Best-effort task ID extraction across Harbor context versions."""
+    return (
+        _context_value(context, "task_id", "task_name", "id", "name")
+        or _context_value(getattr(context, "config", None), "task_id", "task_name", "task")
+        or _context_value(getattr(context, "task", None), "id", "name")
+        or "harbor-task"
+    )
+
+
+def build_rune_bench_command(
+    *,
+    instruction: str,
+    benchmark: str,
+    task_id: str,
+    run_root: Path = DEFAULT_RUN_ROOT,
+    rune_home: Path = DEFAULT_RUNE_HOME,
+    cwd: Path = Path("/app"),
+    model: str | None = None,
+    provider: str | None = None,
+    memory_mode: str = "default",
+    attempt_index: int = 1,
+) -> str:
+    """Build the command Harbor should execute inside the task container."""
+    command = [
+        "rune",
+        "bench",
+        "run",
+        "--benchmark",
+        benchmark,
+        "--task-id",
+        task_id,
+        "--instruction",
+        instruction,
+        "--output-dir",
+        str(run_root),
+        "--attempt-index",
+        str(attempt_index),
+        "--rune-home",
+        str(rune_home),
+        "--cwd",
+        str(cwd),
+        "--memory-mode",
+        memory_mode,
+    ]
+    if model:
+        command.extend(["--model", model])
+    if provider:
+        command.extend(["--provider", provider])
+
+    return (
+        f"mkdir -p {_shell_join([str(run_root), str(rune_home)])} && "
+        'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH" && '
+        f"export RUNE_HOME={shlex.quote(str(rune_home))} && "
+        f"cd {shlex.quote(str(cwd))} && "
+        f"{_shell_join(command)}"
+    )
+
+
+class RuneInstalledAgent(BaseInstalledAgent):
+    """Run RUNE as a Harbor installed agent."""
+
+    @staticmethod
+    def name() -> str:
+        return "rune"
+
+    def version(self) -> str | None:
+        try:
+            from rune import __version__
+
+            return __version__
+        except Exception:
+            return None
+
+    async def install(self, environment: BaseEnvironment) -> None:
+        install_command = os.environ.get("RUNE_HARBOR_INSTALL_CMD", DEFAULT_INSTALL_COMMAND)
+        await self.exec_as_agent(environment, command=install_command, env=_container_env())
+
+    @with_prompt_template
+    async def run(
+        self,
+        instruction: str,
+        environment: BaseEnvironment,
+        context: AgentContext,
+    ) -> None:
+        benchmark = os.environ.get("RUNE_HARBOR_BENCHMARK", "terminal-bench-v2")
+        task_id = os.environ.get("RUNE_HARBOR_TASK_ID") or harbor_task_id(context)
+        model = os.environ.get("RUNE_HARBOR_MODEL") or os.environ.get("RUNE_MODEL")
+        provider = os.environ.get("RUNE_HARBOR_PROVIDER") or os.environ.get("RUNE_PROVIDER")
+        memory_mode = os.environ.get("RUNE_HARBOR_MEMORY_MODE", "default")
+        attempt_index = _env_int("RUNE_HARBOR_ATTEMPT_INDEX", 1)
+        command = build_rune_bench_command(
+            instruction=instruction,
+            benchmark=benchmark,
+            task_id=task_id,
+            model=model,
+            provider=provider,
+            memory_mode=memory_mode,
+            attempt_index=attempt_index,
+        )
+        await self.exec_as_agent(environment, command=command, env=_container_env())
+
+    def populate_context_post_run(self, context: AgentContext) -> None:
+        """Best-effort expose RUNE artifacts to Harbor context consumers."""
+        artifact_root = DEFAULT_RUN_ROOT
+        try:
+            latest = max(artifact_root.glob("*/*/attempt-*"), key=lambda path: path.stat().st_mtime)
+        except Exception:
+            return
+
+        final_answer = latest / "final_answer.txt"
+        completion_trace = latest / "completion_trace.json"
+        if final_answer.exists():
+            with final_answer.open(encoding="utf-8") as f:
+                context.output = f.read()
+        if completion_trace.exists():
+            with completion_trace.open(encoding="utf-8") as f:
+                context.rune_completion_trace = json.load(f)
