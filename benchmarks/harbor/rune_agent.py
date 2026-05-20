@@ -28,9 +28,15 @@ except ModuleNotFoundError:  # pragma: no cover - lets local tests import this f
         return fn
 
 
-DEFAULT_INSTALL_COMMAND = "python3 -m pip install --user rune-ai"
+DEFAULT_INSTALL_COMMAND = (
+    "if [ -x /rune-src/benchmarks/harbor/install_rune.sh ]; then "
+    "/rune-src/benchmarks/harbor/install_rune.sh; "
+    "else python3 -m pip install --user rune-ai; fi"
+)
 DEFAULT_RUN_ROOT = Path("/logs/agent/rune")
 DEFAULT_RUNE_HOME = Path("/logs/agent/rune_home")
+DEFAULT_RUNE_VENV = Path("/logs/agent/rune_venv")
+DEFAULT_INSTALL_FINGERPRINT = Path("/logs/agent/rune_install_fingerprint.json")
 PASSTHROUGH_ENV_KEYS = (
     "OPENAI_API_KEY",
     "OPENAI_ADMIN_KEY",
@@ -52,6 +58,19 @@ PASSTHROUGH_ENV_KEYS = (
     "RUNE_MODEL",
     "RUNE_PROVIDER",
     "RUNE_LOG_LEVEL",
+    "RUNE_HARBOR_INSTALL_MODE",
+    "RUNE_HARBOR_WHEELHOUSE",
+    "RUNE_HARBOR_AGENT_VARIANT_ID",
+    "RUNE_BENCH_AGENT_VARIANT_ID",
+    "RUNE_BENCH_EXPECT_AGENT_VARIANT_ID",
+    "RUNE_BENCH_EXPECT_INSTALL_MODE",
+    "RUNE_BENCH_EXPECT_PROMPT_POLICY",
+    "RUNE_BENCH_EXPECT_SOURCE_GIT_SHA",
+    "RUNE_BENCH_EXPECT_WHEELHOUSE_SHA256",
+    "RUNE_BENCH_REQUIRE_FINGERPRINT",
+    "RUNE_BENCH_SOURCE_GIT_SHA",
+    "RUNE_BENCH_SOURCE_DIFF_SHA256",
+    "RUNE_BENCH_WHEELHOUSE_SHA256",
 )
 
 
@@ -110,21 +129,25 @@ def build_rune_bench_command(
     task_id: str,
     run_root: Path = DEFAULT_RUN_ROOT,
     rune_home: Path = DEFAULT_RUNE_HOME,
+    rune_venv: Path = DEFAULT_RUNE_VENV,
+    install_fingerprint: Path = DEFAULT_INSTALL_FINGERPRINT,
     cwd: Path = Path("/app"),
     model: str | None = None,
     provider: str | None = None,
     memory_mode: str = "default",
+    agent_variant_id: str | None = None,
     attempt_index: int = 1,
 ) -> str:
     """Build the command Harbor should execute inside the task container."""
-    command = [
+    command_prefix = [
         "rune",
         "bench",
         "run",
         "--benchmark",
         benchmark,
         "--task-id",
-        task_id,
+    ]
+    command_suffix = [
         "--instruction",
         instruction,
         "--output-dir",
@@ -138,17 +161,22 @@ def build_rune_bench_command(
         "--memory-mode",
         memory_mode,
     ]
+    if agent_variant_id:
+        command_suffix.extend(["--agent-variant-id", agent_variant_id])
     if model:
-        command.extend(["--model", model])
+        command_suffix.extend(["--model", model])
     if provider:
-        command.extend(["--provider", provider])
+        command_suffix.extend(["--provider", provider])
 
     return (
         f"mkdir -p {_shell_join([str(run_root), str(rune_home)])} && "
-        'export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH" && '
+        f'export PATH="{shlex.quote(str(rune_venv))}/bin:/uv-cache/bin:'
+        '$HOME/.local/bin:$HOME/.cargo/bin:$PATH" && '
         f"export RUNE_HOME={shlex.quote(str(rune_home))} && "
+        f"export RUNE_BENCH_INSTALL_FINGERPRINT={shlex.quote(str(install_fingerprint))} && "
+        f"RUNE_BENCH_TASK_ID=${{RUNE_HARBOR_TASK_ID:-{shlex.quote(task_id)}}} && "
         f"cd {shlex.quote(str(cwd))} && "
-        f"{_shell_join(command)}"
+        f'{_shell_join(command_prefix)} "$RUNE_BENCH_TASK_ID" {_shell_join(command_suffix)}'
     )
 
 
@@ -185,6 +213,9 @@ class RuneInstalledAgent(BaseInstalledAgent):
         model = os.environ.get("RUNE_HARBOR_MODEL") or os.environ.get("RUNE_MODEL")
         provider = os.environ.get("RUNE_HARBOR_PROVIDER") or os.environ.get("RUNE_PROVIDER")
         memory_mode = os.environ.get("RUNE_HARBOR_MEMORY_MODE", "default")
+        agent_variant_id = os.environ.get("RUNE_HARBOR_AGENT_VARIANT_ID") or os.environ.get(
+            "RUNE_BENCH_AGENT_VARIANT_ID"
+        )
         attempt_index = _env_int("RUNE_HARBOR_ATTEMPT_INDEX", 1)
         command = build_rune_bench_command(
             instruction=instruction,
@@ -193,6 +224,7 @@ class RuneInstalledAgent(BaseInstalledAgent):
             model=model,
             provider=provider,
             memory_mode=memory_mode,
+            agent_variant_id=agent_variant_id,
             attempt_index=attempt_index,
         )
         await self.exec_as_agent(environment, command=command, env=_container_env())

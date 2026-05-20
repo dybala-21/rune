@@ -10,7 +10,14 @@ from rune.bench.aa_manifest import (
     build_artificial_analysis_manifest,
     validate_manifest,
 )
-from rune.bench.runner import _filesystem_diff, _filesystem_status, _git_diff, _snapshot_files
+from rune.bench.runner import (
+    BenchRunOptions,
+    _filesystem_diff,
+    _filesystem_status,
+    _git_diff,
+    _snapshot_files,
+    build_agent_instruction,
+)
 from rune.cli.main import app
 
 
@@ -88,6 +95,67 @@ def test_bench_run_dry_run_writes_attempt_artifacts(tmp_path):
     assert json.loads((attempt_dir / "task.json").read_text())["attempt_index"] == 2
     assert (attempt_dir / "task.json").exists()
     assert (attempt_dir / "agent_config.json").exists()
+    assert (attempt_dir / "fingerprint.json").exists()
+    assert (attempt_dir / "fingerprint_gate.json").exists()
+    agent_config = json.loads((attempt_dir / "agent_config.json").read_text())
+    assert agent_config["benchmark_prompt_policy"] == "aa-coding-agent-v1"
+    fingerprint = json.loads((attempt_dir / "fingerprint.json").read_text())
+    assert fingerprint["benchmark_prompt_policy"] == "aa-coding-agent-v1"
+    fingerprint_gate = json.loads((attempt_dir / "fingerprint_gate.json").read_text())
+    assert fingerprint_gate["valid"] is True
+    effective_instruction = (attempt_dir / "effective_instruction.txt").read_text()
+    assert "unattended coding-agent benchmark" in effective_instruction
+    assert "Do not inspect hidden evaluator paths" in effective_instruction
+    assert "write hello" in effective_instruction
+
+
+def test_bench_run_fingerprint_gate_stops_required_invalid_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("RUNE_BENCH_REQUIRE_FINGERPRINT", "1")
+    monkeypatch.setenv("RUNE_BENCH_EXPECT_INSTALL_MODE", "wheelhouse")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "bench",
+            "run",
+            "--benchmark",
+            "terminal-bench-v2",
+            "--task-id",
+            "smoke",
+            "--instruction",
+            "write hello",
+            "--output-dir",
+            str(tmp_path),
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code == 0
+    attempt_dir = next((tmp_path / "terminal-bench-v2" / "smoke").iterdir())
+    trace = json.loads((attempt_dir / "completion_trace.json").read_text())
+    gate = json.loads((attempt_dir / "fingerprint_gate.json").read_text())
+    assert trace["reason"] == "fingerprint_gate_failed"
+    assert gate["valid"] is False
+
+
+def test_build_agent_instruction_preserves_task_instruction(tmp_path):
+    options = BenchRunOptions(
+        benchmark="terminal-bench-v2",
+        task_id="sample-task",
+        instruction="create /app/out.txt",
+        output_dir=tmp_path,
+        rune_home=tmp_path / "home",
+        cwd=tmp_path,
+    )
+
+    instruction = build_agent_instruction(options)
+
+    assert "Task ID: sample-task" in instruction
+    assert "Do not finish with a partial solution" in instruction
+    assert "Do not inspect VCS history" in instruction
+    assert "clean-process smoke test" in instruction
+    assert "support natural positional usage" in instruction
+    assert instruction.endswith("create /app/out.txt")
 
 
 def test_terminal_smoke_command_prints_harbor_commands():

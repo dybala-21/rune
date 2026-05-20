@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -17,6 +18,10 @@ TERMINAL_BENCH_GIT_TASKS = {
     "git-leak-recovery",
     "git-multibranch",
     "sanitize-git-repo",
+}
+FORBIDDEN_RUNTIME_PATH_RE = {
+    path: re.compile(rf"(?<![A-Za-z0-9_./-]){re.escape(path)}(?:/|(?=[\s\"'\\,}}\]]|$))")
+    for path in FORBIDDEN_RUNTIME_PATHS
 }
 
 
@@ -79,7 +84,7 @@ def audit_attempt_dir(attempt_dir: Path) -> dict[str, Any]:
     event_text = "\n".join(_flatten(row) for row in events + tool_calls)
 
     for path in FORBIDDEN_RUNTIME_PATHS:
-        if path in event_text:
+        if FORBIDDEN_RUNTIME_PATH_RE[path].search(event_text):
             findings.append(
                 AuditFinding(
                     rule_id="forbidden_runtime_path",

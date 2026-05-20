@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 import difflib
 import hashlib
+import importlib.metadata
 import json
 import os
+import platform
 import subprocess
+import sys
 import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -25,6 +28,25 @@ _SNAPSHOT_EXCLUDE_DIRS = {
     "venv",
 }
 _TEXT_DIFF_MAX_BYTES = 1_000_000
+BENCHMARK_PROMPT_POLICY = "aa-coding-agent-v1"
+DEFAULT_INSTALL_FINGERPRINT_PATH = Path("/logs/agent/rune_install_fingerprint.json")
+BENCHMARK_INSTRUCTION_PREFIX = """You are running in an unattended coding-agent benchmark.
+
+Benchmark rules and operating constraints:
+- Complete the task end-to-end in this container. Do not ask follow-up questions.
+- Do not finish with a partial solution, a blocker report, or a request for the user to continue.
+- If a required compiler, runtime, package manager, or utility is missing, install it when possible.
+- Use only task files and public resources. Do not inspect hidden evaluator paths such as /tests or /oracle.
+- Do not inspect VCS history with commands such as git log, git show, git blame, or reflog
+  unless the task explicitly asks you to use repository history.
+- Run available in-workspace checks, examples, or self-written sanity tests before finalizing.
+- Before finalizing, run at least one clean-process smoke test through the public entrypoint
+  using the required command or function name and likely evaluator call style.
+- Match the requested file paths, function signatures, command names, output formats, and argument order exactly.
+- When a public function or CLI is named without a full signature, support natural positional usage
+  and common named aliases in addition to your preferred named-argument style.
+- If your current approach fails a check, keep debugging within the benchmark budget instead of stopping.
+"""
 
 
 @dataclass(slots=True)
@@ -47,6 +69,7 @@ class BenchRunOptions:
     provider: str | None = None
     memory_mode: str = "default"
     dry_run: bool = False
+    agent_variant_id: str | None = None
 
 
 def _safe_path_part(value: str) -> str:
@@ -74,6 +97,187 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = "".join(json.dumps(_jsonable(row), sort_keys=True) + "\n" for row in rows)
     path.write_text(payload, encoding="utf-8")
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _run_short_command(command: list[str], *, cwd: Path | None = None) -> dict[str, Any]:
+    try:
+        result = subprocess.run(
+            command,
+            cwd=str(cwd) if cwd is not None else None,
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    return {
+        "ok": result.returncode == 0,
+        "returncode": result.returncode,
+        "stdout": result.stdout.strip(),
+        "stderr": result.stderr.strip(),
+    }
+
+
+def _selected_env(keys: tuple[str, ...]) -> dict[str, str]:
+    return {key: value for key in keys if (value := os.environ.get(key))}
+
+
+def _install_fingerprint_path() -> Path:
+    raw_path = os.environ.get("RUNE_BENCH_INSTALL_FINGERPRINT")
+    return Path(raw_path) if raw_path else DEFAULT_INSTALL_FINGERPRINT_PATH
+
+
+def collect_runtime_fingerprint(options: BenchRunOptions) -> dict[str, Any]:
+    """Collect enough provenance to prove which RUNE executable ran this attempt."""
+    rune_file: str | None
+    rune_version: str | None
+    rune_import_error: str | None
+    try:
+        import rune
+    except Exception as exc:  # pragma: no cover - impossible in normal runner execution.
+        rune_file = None
+        rune_version = None
+        rune_import_error = str(exc)
+    else:
+        rune_file = getattr(rune, "__file__", None)
+        rune_version = getattr(rune, "__version__", None)
+        rune_import_error = None
+
+    try:
+        package_version = importlib.metadata.version("rune-ai")
+    except importlib.metadata.PackageNotFoundError:
+        package_version = None
+
+    install_fingerprint_path = _install_fingerprint_path()
+    install_fingerprint = _read_json(install_fingerprint_path)
+
+    return {
+        "agent": "rune",
+        "agent_variant_id": options.agent_variant_id
+        or os.environ.get("RUNE_BENCH_AGENT_VARIANT_ID"),
+        "benchmark": options.benchmark,
+        "task_id": options.task_id,
+        "attempt_index": options.attempt_index,
+        "benchmark_prompt_policy": BENCHMARK_PROMPT_POLICY,
+        "python": {
+            "executable": sys.executable,
+            "version": sys.version,
+            "platform": platform.platform(),
+        },
+        "rune": {
+            "module_file": rune_file,
+            "module_version": rune_version,
+            "package_version": package_version,
+            "import_error": rune_import_error,
+            "cli_version": _run_short_command(["rune", "--version"]),
+        },
+        "install_fingerprint_path": str(install_fingerprint_path),
+        "install_fingerprint": install_fingerprint,
+        "env": _selected_env(
+            (
+                "RUNE_BENCH_AGENT_VARIANT_ID",
+                "RUNE_BENCH_EXPECT_AGENT_VARIANT_ID",
+                "RUNE_BENCH_EXPECT_INSTALL_MODE",
+                "RUNE_BENCH_EXPECT_PROMPT_POLICY",
+                "RUNE_BENCH_EXPECT_SOURCE_GIT_SHA",
+                "RUNE_BENCH_EXPECT_WHEELHOUSE_SHA256",
+                "RUNE_BENCH_REQUIRE_FINGERPRINT",
+                "RUNE_MODEL",
+                "RUNE_PROVIDER",
+            )
+        ),
+    }
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def evaluate_fingerprint_gate(fingerprint: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate optional expected provenance values for official benchmark runs."""
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    if fingerprint.get("benchmark_prompt_policy") != BENCHMARK_PROMPT_POLICY:
+        errors.append("benchmark prompt policy mismatch")
+
+    if not fingerprint.get("rune", {}).get("module_file"):
+        errors.append("missing runtime rune module file")
+
+    expected_policy = os.environ.get("RUNE_BENCH_EXPECT_PROMPT_POLICY")
+    if expected_policy and expected_policy != BENCHMARK_PROMPT_POLICY:
+        errors.append(
+            f"expected prompt policy {expected_policy!r}, got {BENCHMARK_PROMPT_POLICY!r}"
+        )
+
+    expected_variant = os.environ.get("RUNE_BENCH_EXPECT_AGENT_VARIANT_ID")
+    actual_variant = fingerprint.get("agent_variant_id")
+    if expected_variant and actual_variant != expected_variant:
+        errors.append(f"expected agent variant {expected_variant!r}, got {actual_variant!r}")
+
+    install = fingerprint.get("install_fingerprint")
+    install = install if isinstance(install, dict) else {}
+
+    expected_install_mode = os.environ.get("RUNE_BENCH_EXPECT_INSTALL_MODE")
+    actual_install_mode = install.get("install_mode")
+    if expected_install_mode and actual_install_mode != expected_install_mode:
+        errors.append(
+            f"expected install mode {expected_install_mode!r}, got {actual_install_mode!r}"
+        )
+
+    expected_source_git_sha = os.environ.get("RUNE_BENCH_EXPECT_SOURCE_GIT_SHA")
+    actual_source_git_sha = install.get("source_git_sha")
+    if expected_source_git_sha and actual_source_git_sha != expected_source_git_sha:
+        errors.append(
+            f"expected source git sha {expected_source_git_sha!r}, got {actual_source_git_sha!r}"
+        )
+
+    expected_wheelhouse_sha = os.environ.get("RUNE_BENCH_EXPECT_WHEELHOUSE_SHA256")
+    actual_wheelhouse_sha = install.get("wheelhouse_sha256")
+    if expected_wheelhouse_sha and actual_wheelhouse_sha != expected_wheelhouse_sha:
+        errors.append(
+            f"expected wheelhouse sha256 {expected_wheelhouse_sha!r}, "
+            f"got {actual_wheelhouse_sha!r}"
+        )
+
+    if _env_flag("RUNE_BENCH_REQUIRE_FINGERPRINT"):
+        if not actual_variant:
+            errors.append("RUNE_BENCH_REQUIRE_FINGERPRINT requires agent_variant_id")
+        if not actual_install_mode:
+            errors.append("RUNE_BENCH_REQUIRE_FINGERPRINT requires install_mode")
+        if actual_install_mode == "wheelhouse" and not actual_wheelhouse_sha:
+            errors.append("wheelhouse install requires wheelhouse_sha256")
+        if not install:
+            errors.append("RUNE_BENCH_REQUIRE_FINGERPRINT requires install_fingerprint")
+    elif not install:
+        warnings.append("install_fingerprint not found; run is acceptable only for local smoke tests")
+
+    return {
+        "valid": not errors,
+        "required": _env_flag("RUNE_BENCH_REQUIRE_FINGERPRINT"),
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+
+def build_agent_instruction(options: BenchRunOptions) -> str:
+    """Return the benchmark policy prompt plus the task instruction."""
+    return (
+        f"{BENCHMARK_INSTRUCTION_PREFIX}\n"
+        f"Benchmark: {options.benchmark}\n"
+        f"Task ID: {options.task_id}\n\n"
+        "Task instruction:\n"
+        f"{options.instruction}"
+    )
 
 
 def _git_diff(cwd: Path) -> str:
@@ -283,11 +487,18 @@ def write_attempt_inputs(attempt_dir: Path, options: BenchRunOptions) -> None:
             "model": options.model,
             "provider": options.provider,
             "memory_mode": options.memory_mode,
+            "benchmark_prompt_policy": BENCHMARK_PROMPT_POLICY,
+            "agent_variant_id": options.agent_variant_id
+            or os.environ.get("RUNE_BENCH_AGENT_VARIANT_ID"),
             "attempt_index": options.attempt_index,
             "rune_home": str(options.rune_home),
             "cwd": str(options.cwd),
             "dry_run": options.dry_run,
         },
+    )
+    (attempt_dir / "effective_instruction.txt").write_text(
+        build_agent_instruction(options),
+        encoding="utf-8",
     )
 
 
@@ -295,6 +506,26 @@ def run_bench_attempt(options: BenchRunOptions) -> Path:
     """Run one benchmark attempt and return its artifact directory."""
     attempt_dir = create_attempt_dir(options)
     write_attempt_inputs(attempt_dir, options)
+    fingerprint = collect_runtime_fingerprint(options)
+    fingerprint_gate = evaluate_fingerprint_gate(fingerprint)
+    _write_json(attempt_dir / "fingerprint.json", fingerprint)
+    _write_json(attempt_dir / "fingerprint_gate.json", fingerprint_gate)
+    if fingerprint_gate["required"] and not fingerprint_gate["valid"]:
+        _write_json(
+            attempt_dir / "completion_trace.json",
+            {
+                "reason": "fingerprint_gate_failed",
+                "errors": fingerprint_gate["errors"],
+            },
+        )
+        _write_json(attempt_dir / "timing.json", {"agent_wall_time_ms": 0})
+        _write_json(attempt_dir / "audit.json", {"source_diff_present": False})
+        _write_jsonl(attempt_dir / "events.jsonl", [])
+        _write_jsonl(attempt_dir / "tool_calls.jsonl", [])
+        _write_jsonl(attempt_dir / "model_usage.jsonl", [])
+        (attempt_dir / "final_answer.txt").write_text("", encoding="utf-8")
+        (attempt_dir / "patch.diff").write_text("", encoding="utf-8")
+        return attempt_dir
     if options.dry_run:
         _write_json(attempt_dir / "completion_trace.json", {"reason": "dry_run"})
         _write_json(attempt_dir / "timing.json", {"agent_wall_time_ms": 0})
@@ -414,7 +645,8 @@ async def _run_agent(options: BenchRunOptions, attempt_dir: Path) -> None:
             except Exception as exc:
                 events.append({"event": "memory_context_error", "error": str(exc)})
 
-        trace = await loop.run(options.instruction, context=run_context)
+        agent_instruction = build_agent_instruction(options)
+        trace = await loop.run(agent_instruction, context=run_context)
         agent_wall_time_ms = int((time.monotonic() - start) * 1000)
         final_answer = "".join(output_parts)
         if options.memory_mode != "off" and final_answer.strip():
@@ -428,7 +660,7 @@ async def _run_agent(options: BenchRunOptions, attempt_dir: Path) -> None:
                 await post_process_agent_result(
                     PostProcessInput(
                         context=AgentContext(
-                            goal=options.instruction,
+                            goal=agent_instruction,
                             original_goal=options.instruction,
                             channel="bench",
                             workspace_root=str(options.cwd),

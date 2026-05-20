@@ -23,6 +23,12 @@ CSV_COLUMNS = [
     "tool_call_count",
     "audit_finding_count",
     "audit_high_severity_count",
+    "fingerprint_gate_valid",
+    "agent_variant_id",
+    "install_mode",
+    "wheelhouse_sha256",
+    "source_git_sha",
+    "source_diff_sha256",
     "patch_bytes",
     "final_answer_chars",
     "duration_ms",
@@ -190,6 +196,12 @@ def _attempt_metrics(attempt_dir: Path | None) -> dict[str, Any]:
             "tool_call_count": None,
             "audit_finding_count": None,
             "audit_high_severity_count": None,
+            "fingerprint_gate_valid": None,
+            "agent_variant_id": None,
+            "install_mode": None,
+            "wheelhouse_sha256": None,
+            "source_git_sha": None,
+            "source_diff_sha256": None,
             "patch_bytes": None,
             "final_answer_chars": None,
         }
@@ -198,6 +210,10 @@ def _attempt_metrics(attempt_dir: Path | None) -> dict[str, Any]:
     timing = _read_json(attempt_dir / "timing.json")
     patch = _read_text(attempt_dir / "patch.diff")
     final_answer = _read_text(attempt_dir / "final_answer.txt")
+    fingerprint = _read_json(attempt_dir / "fingerprint.json")
+    fingerprint_gate = _read_json(attempt_dir / "fingerprint_gate.json")
+    install = fingerprint.get("install_fingerprint")
+    install = install if isinstance(install, dict) else {}
     audit = audit_attempt_dir(attempt_dir)
 
     return {
@@ -208,6 +224,12 @@ def _attempt_metrics(attempt_dir: Path | None) -> dict[str, Any]:
         "tool_call_count": _jsonl_count(attempt_dir / "tool_calls.jsonl"),
         "audit_finding_count": audit.get("finding_count"),
         "audit_high_severity_count": audit.get("high_severity_count"),
+        "fingerprint_gate_valid": fingerprint_gate.get("valid"),
+        "agent_variant_id": fingerprint.get("agent_variant_id"),
+        "install_mode": install.get("install_mode"),
+        "wheelhouse_sha256": install.get("wheelhouse_sha256"),
+        "source_git_sha": install.get("source_git_sha"),
+        "source_diff_sha256": install.get("source_diff_sha256"),
         "patch_bytes": len(patch.encode("utf-8")),
         "final_answer_chars": len(final_answer),
     }
@@ -344,6 +366,9 @@ def _aggregate_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             int(row["audit_high_severity_count"])
             for row in rows
             if isinstance(row.get("audit_high_severity_count"), int)
+        ),
+        "fingerprint_invalid_count": sum(
+            1 for row in rows if row.get("fingerprint_gate_valid") is False
         ),
         "rows": rows,
     }

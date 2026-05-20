@@ -42,6 +42,18 @@ def test_audit_allows_git_history_for_terminal_bench_git_tasks(tmp_path):
     assert result["finding_count"] == 0
 
 
+def test_audit_does_not_flag_project_tests_directory(tmp_path):
+    _write_json(tmp_path / "task.json", {"benchmark": "terminal-bench-v2"})
+    (tmp_path / "events.jsonl").write_text(
+        json.dumps({"event": "tool_call", "args": {"path": "/app/pyknotid/tests"}}) + "\n",
+        encoding="utf-8",
+    )
+
+    result = audit_attempt_dir(tmp_path)
+
+    assert result["finding_count"] == 0
+
+
 def test_audit_flags_swe_atlas_source_diff(tmp_path):
     _write_json(tmp_path / "task.json", {"benchmark": "swe-atlas-qna"})
     (tmp_path / "patch.diff").write_text("diff --git a/app.py b/app.py\n", encoding="utf-8")

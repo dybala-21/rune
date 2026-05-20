@@ -109,6 +109,10 @@ def run_attempt(
         str,
         typer.Option("--memory-mode", help="default or off"),
     ] = "default",
+    agent_variant_id: Annotated[
+        str | None,
+        typer.Option("--agent-variant-id", help="Stable agent variant ID for provenance"),
+    ] = None,
     dry_run: Annotated[
         bool,
         typer.Option("--dry-run", help="Write artifacts without invoking the agent"),
@@ -153,6 +157,7 @@ def run_attempt(
             model=model,
             provider=provider,
             memory_mode=memory_mode,
+            agent_variant_id=agent_variant_id,
             dry_run=dry_run,
         )
     )

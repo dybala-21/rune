@@ -28,6 +28,19 @@ def _write_attempt(attempt_dir, benchmark="terminal-bench-v2", task_id="cancel-a
         },
     )
     _write_json(attempt_dir / "timing.json", {"agent_wall_time_ms": 2500})
+    _write_json(
+        attempt_dir / "fingerprint.json",
+        {
+            "agent_variant_id": "rune-aa-terminal-v1",
+            "install_fingerprint": {
+                "install_mode": "wheelhouse",
+                "wheelhouse_sha256": "abc123",
+                "source_git_sha": "deadbeef",
+                "source_diff_sha256": "diff123",
+            },
+        },
+    )
+    _write_json(attempt_dir / "fingerprint_gate.json", {"valid": True})
     (attempt_dir / "tool_calls.jsonl").write_text(
         json.dumps({"event": "tool_call", "name": "exec"}) + "\n"
         + json.dumps({"event": "tool_call", "name": "exec"}) + "\n",
@@ -92,11 +105,17 @@ def test_summarize_harbor_job_with_rune_attempt(tmp_path):
     assert summary["mean_reward"] == 1.0
     assert summary["total_tokens_used"] == 1234
     assert summary["total_tool_calls"] == 2
+    assert summary["fingerprint_invalid_count"] == 0
     row = summary["rows"][0]
     assert row["benchmark"] == "terminal-bench-v2"
     assert row["task_id"] == "cancel-async-tasks"
     assert row["duration_ms"] == 10000
     assert row["environment_setup_ms"] == 1500
+    assert row["fingerprint_gate_valid"] is True
+    assert row["agent_variant_id"] == "rune-aa-terminal-v1"
+    assert row["install_mode"] == "wheelhouse"
+    assert row["source_git_sha"] == "deadbeef"
+    assert row["source_diff_sha256"] == "diff123"
     assert row["attempt_dir"] == str(attempt_dir)
 
 

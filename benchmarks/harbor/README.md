@@ -2,7 +2,7 @@
 
 This directory contains the RUNE adapter for Harbor/Terminal-Bench smoke runs.
 
-Example:
+Development smoke example:
 
 ```bash
 harbor run \
@@ -21,20 +21,36 @@ rune bench run --benchmark terminal-bench-v2 --task-id <task> --attempt-index <n
 Useful environment overrides:
 
 ```bash
-export RUNE_HARBOR_INSTALL_CMD="python3 -m pip install --user rune-ai"
+export RUNE_HARBOR_INSTALL_MODE="auto"    # auto, wheelhouse, source, or pip
+export RUNE_HARBOR_WHEELHOUSE="/rune-wheelhouse"
 export RUNE_HARBOR_MODEL="gpt-5.4"
 export RUNE_HARBOR_PROVIDER="openai"
 export RUNE_HARBOR_MEMORY_MODE="default"  # or off
 export RUNE_HARBOR_ATTEMPT_INDEX="1"
 export RUNE_HARBOR_TASK_ID="adaptive-rejection-sampler"
+export RUNE_HARBOR_AGENT_VARIANT_ID="rune-aa-terminal-v1"
 export RUNE_HARBOR_SKIP_INSTALL="0"       # set to 1 only if the task image already has rune
 ```
 
 Artifacts are written under `/logs/agent/rune` and RUNE state is isolated under
-`/logs/agent/rune_home`.
+`/logs/agent/rune_home`. The installed RUNE runtime lives in
+`/logs/agent/rune_venv`, and install provenance is written to
+`/logs/agent/rune_install_fingerprint.json`.
 
-To reduce repeated `uv tool install` time across Harbor trials, mount a host uv
-cache and pass `UV_CACHE_DIR` through the agent environment:
+## Official Wheelhouse Mode
+
+For score-bearing benchmark runs, build a read-only wheelhouse and force the
+agent to install from it:
+
+```bash
+benchmarks/harbor/build_wheelhouse.sh /tmp/rune-wheelhouse
+```
+
+Build this wheelhouse on the same target platform as the benchmark task
+containers, normally Linux/amd64 for Terminal-Bench. Do not use a macOS-built
+wheelhouse for official Harbor runs.
+
+Mount the wheelhouse read-only and require fingerprint fields:
 
 ```bash
 mkdir -p /tmp/rune-harbor-uv-cache
@@ -43,7 +59,33 @@ harbor run \
   -d terminal-bench@2.0 \
   --include-task-name adaptive-rejection-sampler \
   --agent-env RUNE_HARBOR_TASK_ID=adaptive-rejection-sampler \
-  --agent-env UV_CACHE_DIR=/uv-cache \
-  --mounts '[{"type":"bind","source":"/tmp/rune-harbor-uv-cache","target":"/uv-cache"}]' \
+  --agent-env RUNE_HARBOR_INSTALL_MODE=wheelhouse \
+  --agent-env RUNE_HARBOR_AGENT_VARIANT_ID=rune-aa-terminal-v1 \
+  --agent-env RUNE_BENCH_REQUIRE_FINGERPRINT=1 \
+  --agent-env RUNE_BENCH_EXPECT_INSTALL_MODE=wheelhouse \
+  --agent-env RUNE_BENCH_EXPECT_WHEELHOUSE_SHA256=<wheelhouse-manifest-sha256> \
+  --mounts '[{"type":"bind","source":"/tmp/rune-wheelhouse","target":"/rune-wheelhouse","read_only":true},{"type":"bind","source":"/tmp/rune-harbor-uv-cache","target":"/uv-cache"}]' \
+  --agent-import-path benchmarks.harbor.rune_agent:RuneInstalledAgent
+```
+
+The RUNE attempt artifacts include `fingerprint.json` and
+`fingerprint_gate.json`. Treat any run with `fingerprint_gate.valid=false` as an
+invalid benchmark attempt and rerun it after fixing provenance.
+
+## Source Fallback Mode
+
+For local development, mount `/rune-src`; `auto` mode installs from source when
+no wheelhouse is mounted. This is convenient for smoke tests but should not be
+mixed into official score calculations:
+
+```bash
+mkdir -p /tmp/rune-harbor-uv-cache
+
+harbor run \
+  -d terminal-bench@2.0 \
+  --include-task-name adaptive-rejection-sampler \
+  --agent-env RUNE_HARBOR_TASK_ID=adaptive-rejection-sampler \
+  --agent-env RUNE_HARBOR_INSTALL_MODE=source \
+  --mounts '[{"type":"bind","source":"/path/to/rune","target":"/rune-src","read_only":true},{"type":"bind","source":"/tmp/rune-harbor-uv-cache","target":"/uv-cache"}]' \
   --agent-import-path benchmarks.harbor.rune_agent:RuneInstalledAgent
 ```
