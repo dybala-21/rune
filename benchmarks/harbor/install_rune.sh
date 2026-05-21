@@ -69,6 +69,8 @@ install_into_venv() {
     wheelhouse)
       uv pip install \
         --python "$RUNE_VENV/bin/python" \
+        --reinstall-package rune-ai \
+        --refresh-package rune-ai \
         --no-index \
         --find-links "$RUNE_WHEELHOUSE" \
         rune-ai

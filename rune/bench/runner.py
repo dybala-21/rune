@@ -190,7 +190,10 @@ def collect_runtime_fingerprint(options: BenchRunOptions) -> dict[str, Any]:
                 "RUNE_BENCH_EXPECT_PROMPT_POLICY",
                 "RUNE_BENCH_EXPECT_SOURCE_GIT_SHA",
                 "RUNE_BENCH_EXPECT_WHEELHOUSE_SHA256",
+                "RUNE_BENCH_BLOCK_VCS_HISTORY",
+                "RUNE_BENCH_ALLOW_VCS_HISTORY",
                 "RUNE_BENCH_REQUIRE_FINGERPRINT",
+                "RUNE_BENCH_TASK_ID",
                 "RUNE_MODEL",
                 "RUNE_PROVIDER",
             )

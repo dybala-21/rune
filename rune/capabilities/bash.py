@@ -48,6 +48,17 @@ _READINESS_MARKERS = re.compile(
     r"|\bserver started\b|\bready to accept\b",
     re.IGNORECASE,
 )
+_BENCHMARK_VCS_HISTORY_SUBCOMMANDS = {"log", "show", "blame", "reflog"}
+_GIT_GLOBAL_OPTIONS_WITH_VALUES = {
+    "-C",
+    "-c",
+    "--config-env",
+    "--exec-path",
+    "--git-dir",
+    "--namespace",
+    "--super-prefix",
+    "--work-tree",
+}
 
 # Managed-process tracking
 
@@ -76,6 +87,51 @@ def _kill_process_group(pid: int, sig: int = signal.SIGTERM) -> None:
         return
     with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
         os.killpg(os.getpgid(pid), sig)
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _git_subcommand(tokens: list[str]) -> str | None:
+    if not tokens or os.path.basename(tokens[0]) != "git":
+        return None
+
+    idx = 1
+    while idx < len(tokens):
+        token = tokens[idx]
+        if token in _GIT_GLOBAL_OPTIONS_WITH_VALUES:
+            idx += 2
+            continue
+        if token.startswith("--") and "=" in token:
+            idx += 1
+            continue
+        if token.startswith("-"):
+            idx += 1
+            continue
+        return token
+    return None
+
+
+def blocked_benchmark_vcs_history_command(command: str) -> str | None:
+    """Return the blocked git history subcommand when benchmark guard applies."""
+    if not _env_flag("RUNE_BENCH_BLOCK_VCS_HISTORY"):
+        return None
+    if _env_flag("RUNE_BENCH_ALLOW_VCS_HISTORY"):
+        return None
+
+    from rune.agent.bash_parsing import (
+        split_shell_segments,
+        split_shell_tokens,
+        strip_leading_env_assignments,
+    )
+
+    for segment in split_shell_segments(command):
+        tokens = strip_leading_env_assignments(split_shell_tokens(segment))
+        subcommand = _git_subcommand(tokens)
+        if subcommand in _BENCHMARK_VCS_HISTORY_SUBCOMMANDS:
+            return f"git {subcommand}"
+    return None
 
 
 def _is_process_alive(pid: int) -> bool:
@@ -599,6 +655,18 @@ async def managed_service_stop(params: ServiceStopParams) -> CapabilityResult:
 
 async def bash_execute(params: BashParams) -> CapabilityResult:
     """Execute a shell command with safety validation."""
+    if blocked := blocked_benchmark_vcs_history_command(params.command):
+        return CapabilityResult(
+            success=False,
+            error=(
+                "Command blocked by benchmark policy: "
+                f"{blocked} inspects VCS history. Use the working tree, files, "
+                "and public task resources unless this benchmark task explicitly "
+                "allows repository history."
+            ),
+            metadata={"benchmark_policy_block": "vcs_history", "command": blocked},
+        )
+
     guardian = get_guardian()
 
     # Validate command through Guardian

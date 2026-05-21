@@ -48,7 +48,7 @@ def test_build_rune_bench_command_quotes_instruction():
     assert 'export PATH="/logs/agent/rune_venv/bin:/uv-cache/bin:' in command
     assert "RUNE_BENCH_INSTALL_FINGERPRINT=/logs/agent/rune_install_fingerprint.json" in command
     assert "--benchmark terminal-bench-v2" in command
-    assert 'RUNE_BENCH_TASK_ID=${RUNE_HARBOR_TASK_ID:-adaptive-rejection-sampler}' in command
+    assert 'export RUNE_BENCH_TASK_ID=${RUNE_HARBOR_TASK_ID:-adaptive-rejection-sampler}' in command
     assert '--task-id "$RUNE_BENCH_TASK_ID"' in command
     assert "--attempt-index 1" in command
     assert "--model gpt-5.4" in command
@@ -60,6 +60,7 @@ def test_container_env_passes_llm_credentials(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "secret")
     monkeypatch.setenv("UV_CACHE_DIR", "/uv-cache")
     monkeypatch.setenv("RUNE_BENCH_REQUIRE_FINGERPRINT", "1")
+    monkeypatch.setenv("RUNE_BENCH_BLOCK_VCS_HISTORY", "1")
     monkeypatch.setenv("UNRELATED_KEY", "ignored")
 
     env = _container_env()
@@ -67,6 +68,7 @@ def test_container_env_passes_llm_credentials(monkeypatch):
     assert env["OPENAI_API_KEY"] == "secret"
     assert env["UV_CACHE_DIR"] == "/uv-cache"
     assert env["RUNE_BENCH_REQUIRE_FINGERPRINT"] == "1"
+    assert env["RUNE_BENCH_BLOCK_VCS_HISTORY"] == "1"
     assert "UNRELATED_KEY" not in env
 
 
@@ -88,6 +90,7 @@ def test_install_script_uses_attempt_local_venv_and_fingerprint():
     assert "RUNE_INSTALL_FINGERPRINT" in script
     assert "--no-index" in script
     assert "--find-links" in script
+    assert "--refresh-package rune-ai" in script
     assert "wheelhouse_sha256" in script
 
 

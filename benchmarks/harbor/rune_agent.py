@@ -67,7 +67,10 @@ PASSTHROUGH_ENV_KEYS = (
     "RUNE_BENCH_EXPECT_PROMPT_POLICY",
     "RUNE_BENCH_EXPECT_SOURCE_GIT_SHA",
     "RUNE_BENCH_EXPECT_WHEELHOUSE_SHA256",
+    "RUNE_BENCH_BLOCK_VCS_HISTORY",
+    "RUNE_BENCH_ALLOW_VCS_HISTORY",
     "RUNE_BENCH_REQUIRE_FINGERPRINT",
+    "RUNE_BENCH_TASK_ID",
     "RUNE_BENCH_SOURCE_GIT_SHA",
     "RUNE_BENCH_SOURCE_DIFF_SHA256",
     "RUNE_BENCH_WHEELHOUSE_SHA256",
@@ -174,7 +177,7 @@ def build_rune_bench_command(
         '$HOME/.local/bin:$HOME/.cargo/bin:$PATH" && '
         f"export RUNE_HOME={shlex.quote(str(rune_home))} && "
         f"export RUNE_BENCH_INSTALL_FINGERPRINT={shlex.quote(str(install_fingerprint))} && "
-        f"RUNE_BENCH_TASK_ID=${{RUNE_HARBOR_TASK_ID:-{shlex.quote(task_id)}}} && "
+        f"export RUNE_BENCH_TASK_ID=${{RUNE_HARBOR_TASK_ID:-{shlex.quote(task_id)}}} && "
         f"cd {shlex.quote(str(cwd))} && "
         f'{_shell_join(command_prefix)} "$RUNE_BENCH_TASK_ID" {_shell_join(command_suffix)}'
     )
