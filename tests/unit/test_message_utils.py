@@ -71,14 +71,21 @@ class TestValidateToolPairs:
             _tool("orphan2"),  # orphan after pair consumed
         ]
         result = validate_tool_pairs(msgs)
-        # orphan dropped, valid pair kept, orphan2 dropped
-        # After assistant with tool_calls, first tool is valid.
-        # But "orphan2" — assistant's tool_calls flag resets after tool role ends?
-        # Let's trace: asst sets has_pending=True, tool("a") passes,
-        # tool("orphan2") — has_pending is still True because we only reset on non-tool/non-assistant
-        # Hmm, this means orphan2 would pass. That's actually correct behavior
-        # since OpenAI allows multiple tool results after one assistant tool_calls.
-        assert len(result) == 3  # orphan dropped, [asst, tool, tool] kept
+        assert len(result) == 2  # orphan dropped, [asst, tool] kept
+        assert result[0]["role"] == "assistant"
+        assert result[1]["tool_call_id"] == "a"
+
+    def test_missing_tool_result_synthesized(self):
+        msgs = [
+            _asst("a", "b"),
+            _tool("a"),
+            _user("next turn"),
+        ]
+        result = validate_tool_pairs(msgs)
+        assert [msg_role(m) for m in result] == ["assistant", "tool", "tool", "user"]
+        assert result[1]["tool_call_id"] == "a"
+        assert result[2]["tool_call_id"] == "b"
+        assert "omitted" in result[2]["content"]
 
     def test_empty_list(self):
         assert validate_tool_pairs([]) == []
@@ -123,3 +130,26 @@ class TestCompactMessagesAtomic:
         # Should keep just the last turn (user "recent")
         assert len(result) == 1
         assert result[0]["content"] == "recent"
+
+    def test_token_trim_preserves_recent_multi_tool_turn(self, monkeypatch):
+        from rune.agent.loop import NativeAgentLoop
+
+        loop = NativeAgentLoop()
+        loop._activity_phase = "exploration"
+        monkeypatch.setitem(loop._TOKEN_CAPS, "exploration", 220)
+        monkeypatch.setattr(loop, "_get_budget_proportional_cap", lambda: 220)
+        msgs = [
+            _user("goal"),
+            _user("old " * 2000),
+            _user("mid"),
+            _user("recent"),
+            _asst("a", "b", "c"),
+            _tool("a"),
+            _tool("b"),
+            _tool("c"),
+        ]
+
+        result = loop._trim_to_token_cap(msgs)
+        roles = [msg_role(m) for m in result[-4:]]
+        assert roles == ["assistant", "tool", "tool", "tool"]
+        assert [m.get("tool_call_id") for m in result[-3:]] == ["a", "b", "c"]

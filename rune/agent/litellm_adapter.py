@@ -20,6 +20,7 @@ import litellm
 # (e.g., local ollama models routed via openai/ prefix).
 litellm.suppress_debug_info = True
 
+from rune.agent.message_utils import validate_tool_pairs
 from rune.agent.obs_cap import mask_stale_tool_messages
 from rune.utils.logger import get_logger
 
@@ -367,7 +368,7 @@ class StreamResult:
                 "model": self._model,
                 # Mask stale tool outputs for the wire only; self._messages
                 # stays full so history/rollover are unaffected.
-                "messages": mask_stale_tool_messages(self._messages),
+                "messages": mask_stale_tool_messages(validate_tool_pairs(self._messages)),
                 "tools": _tools,
                 "stream": True,
                 "max_tokens": _effective_max,
@@ -597,12 +598,12 @@ class StreamResult:
             else:
                 batches.append((is_ro, [tc]))
 
-        for is_concurrent, batch in batches:
-            # Collect nudge messages to append AFTER all tool results
-            # (Anthropic requires all tool_result blocks before any
-            # other message type).
-            deferred_nudges: list[str] = []
+        # Collect nudge messages and append them only after all tool results
+        # for this assistant turn. OpenAI requires every tool_call_id to be
+        # answered by contiguous tool messages before any user/system message.
+        deferred_nudges: list[str] = []
 
+        for is_concurrent, batch in batches:
             if is_concurrent and len(batch) > 1:
                 # Run read-only tools concurrently
                 async def _run_one(tc_data: dict[str, Any]) -> tuple[str, str, str]:
@@ -655,10 +656,9 @@ class StreamResult:
                     if nudge:
                         deferred_nudges.append(nudge)
 
-            # Append nudges after ALL tool results for this batch
-            for nudge_text in deferred_nudges:
-                self._messages.append({"role": "user", "content": nudge_text})
-                log.info("policy_tool_loop_nudge")
+        for nudge_text in deferred_nudges:
+            self._messages.append({"role": "user", "content": nudge_text})
+            log.info("policy_tool_loop_nudge")
 
     async def _execute_tool(self, name: str, params: dict[str, Any]) -> str:
         """Execute a tool by name and return string result.
