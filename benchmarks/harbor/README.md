@@ -30,12 +30,19 @@ export RUNE_HARBOR_ATTEMPT_INDEX="1"
 export RUNE_HARBOR_TASK_ID="adaptive-rejection-sampler"
 export RUNE_HARBOR_AGENT_VARIANT_ID="rune-aa-terminal-v1"
 export RUNE_HARBOR_SKIP_INSTALL="0"       # set to 1 only if the task image already has rune
+export RUNE_HARBOR_PASS_ENV=""            # comma/space-separated extra env keys, if needed
 ```
 
 Artifacts are written under `/logs/agent/rune` and RUNE state is isolated under
 `/logs/agent/rune_home`. The installed RUNE runtime lives in
 `/logs/agent/rune_venv`, and install provenance is written to
 `/logs/agent/rune_install_fingerprint.json`.
+
+The adapter only forwards credential variables for the selected provider
+(`RUNE_HARBOR_PROVIDER` or `RUNE_PROVIDER`). If no provider is set, it forwards
+a credential only when exactly one known provider credential is present in the
+host environment. Use `RUNE_HARBOR_PASS_ENV` for any additional variables that
+must be exposed to the task container.
 
 ## Official Wheelhouse Mode
 
@@ -60,6 +67,8 @@ harbor run \
   --include-task-name adaptive-rejection-sampler \
   --agent-env RUNE_HARBOR_TASK_ID=adaptive-rejection-sampler \
   --agent-env RUNE_HARBOR_INSTALL_MODE=wheelhouse \
+  --agent-env RUNE_HARBOR_PROVIDER=openai \
+  --agent-env RUNE_HARBOR_MODEL=gpt-5.4 \
   --agent-env RUNE_HARBOR_AGENT_VARIANT_ID=rune-aa-terminal-v1 \
   --agent-env RUNE_BENCH_REQUIRE_FINGERPRINT=1 \
   --agent-env RUNE_BENCH_EXPECT_INSTALL_MODE=wheelhouse \

@@ -10,6 +10,27 @@ from benchmarks.harbor.rune_agent import (
     harbor_task_id,
 )
 
+_CREDENTIAL_ENV_KEYS = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_REGION",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "VERTEX_PROJECT",
+    "VERTEX_LOCATION",
+)
+
+
+def _clear_credential_env(monkeypatch):
+    for key in _CREDENTIAL_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+
 
 class _Task:
     id = "task-from-nested"
@@ -71,6 +92,7 @@ def test_build_rune_bench_command_quotes_instruction():
 
 def test_container_env_passes_llm_credentials(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "secret")
+    monkeypatch.setenv("RUNE_HARBOR_PROVIDER", "openai")
     monkeypatch.setenv("UV_CACHE_DIR", "/uv-cache")
     monkeypatch.setenv("RUNE_BENCH_REQUIRE_FINGERPRINT", "1")
     monkeypatch.setenv("RUNE_BENCH_BLOCK_VCS_HISTORY", "1")
@@ -85,6 +107,41 @@ def test_container_env_passes_llm_credentials(monkeypatch):
     assert env["RUNE_BENCH_BLOCK_VCS_HISTORY"] == "1"
     assert env["RUNE_BENCH_EXPECT_SOURCE_DIFF_SHA256"] == "abc123"
     assert "UNRELATED_KEY" not in env
+
+
+def test_container_env_does_not_pass_unselected_provider_credentials(monkeypatch):
+    monkeypatch.setenv("RUNE_HARBOR_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-secret")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "aws-secret")
+
+    env = _container_env()
+
+    assert env["OPENAI_API_KEY"] == "openai-secret"
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "AWS_SECRET_ACCESS_KEY" not in env
+
+
+def test_container_env_allows_explicit_extra_env(monkeypatch):
+    monkeypatch.setenv("RUNE_HARBOR_PROVIDER", "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-secret")
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("RUNE_HARBOR_PASS_ENV", "AWS_REGION,INVALID-NAME")
+
+    env = _container_env()
+
+    assert env["OPENAI_API_KEY"] == "openai-secret"
+    assert env["AWS_REGION"] == "us-east-1"
+    assert "INVALID-NAME" not in env
+
+
+def test_container_env_passes_single_credential_when_provider_unset(monkeypatch):
+    _clear_credential_env(monkeypatch)
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-secret")
+
+    env = _container_env()
+
+    assert env["GEMINI_API_KEY"] == "gemini-secret"
 
 
 def test_env_flag_accepts_common_truthy_values(monkeypatch):

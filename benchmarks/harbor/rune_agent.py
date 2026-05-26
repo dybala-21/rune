@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 from pathlib import Path
 from typing import Any
@@ -40,21 +41,7 @@ DEFAULT_RUN_ROOT = Path("/logs/agent/rune")
 DEFAULT_RUNE_HOME = Path("/logs/agent/rune_home")
 DEFAULT_RUNE_VENV = Path("/logs/agent/rune_venv")
 DEFAULT_INSTALL_FINGERPRINT = Path("/logs/agent/rune_install_fingerprint.json")
-PASSTHROUGH_ENV_KEYS = (
-    "OPENAI_API_KEY",
-    "OPENAI_ADMIN_KEY",
-    "OPENAI_BASE_URL",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_BASE_URL",
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-    "GOOGLE_APPLICATION_CREDENTIALS",
-    "VERTEX_PROJECT",
-    "VERTEX_LOCATION",
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_SESSION_TOKEN",
-    "AWS_REGION",
+CONTROL_ENV_KEYS = (
     "UV_CACHE_DIR",
     "UV_LINK_MODE",
     "UV_PYTHON",
@@ -79,6 +66,34 @@ PASSTHROUGH_ENV_KEYS = (
     "RUNE_BENCH_SOURCE_DIFF_SHA256",
     "RUNE_BENCH_WHEELHOUSE_SHA256",
 )
+PROVIDER_ENV_KEYS = {
+    "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"),
+    "bedrock": (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_REGION",
+    ),
+    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    "google": (
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "VERTEX_PROJECT",
+        "VERTEX_LOCATION",
+    ),
+    "openai": ("OPENAI_API_KEY", "OPENAI_BASE_URL"),
+    "vertex": (
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "VERTEX_PROJECT",
+        "VERTEX_LOCATION",
+        "GOOGLE_API_KEY",
+    ),
+}
+_KNOWN_CREDENTIAL_ENV_KEYS = tuple(
+    sorted({key for keys in PROVIDER_ENV_KEYS.values() for key in keys})
+)
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _shell_join(command: list[str]) -> str:
@@ -130,8 +145,40 @@ def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _provider_key() -> str | None:
+    raw = os.environ.get("RUNE_HARBOR_PROVIDER") or os.environ.get("RUNE_PROVIDER")
+    if not raw:
+        return None
+    provider = raw.strip().lower().replace("_", "-")
+    aliases = {
+        "anthropic-bedrock": "bedrock",
+        "aws-bedrock": "bedrock",
+        "google-vertex": "vertex",
+        "vertex-ai": "vertex",
+    }
+    return aliases.get(provider, provider)
+
+
+def _credential_env_keys() -> tuple[str, ...]:
+    provider = _provider_key()
+    if provider in PROVIDER_ENV_KEYS:
+        return PROVIDER_ENV_KEYS[provider]
+
+    present = [key for key in _KNOWN_CREDENTIAL_ENV_KEYS if os.environ.get(key)]
+    if len(present) == 1:
+        return (present[0],)
+    return ()
+
+
+def _explicit_env_keys() -> tuple[str, ...]:
+    raw = os.environ.get("RUNE_HARBOR_PASS_ENV", "")
+    keys = raw.replace(",", " ").split()
+    return tuple(key for key in keys if _ENV_NAME_RE.fullmatch(key))
+
+
 def _container_env() -> dict[str, str]:
-    return {key: value for key in PASSTHROUGH_ENV_KEYS if (value := os.environ.get(key))}
+    keys = (*CONTROL_ENV_KEYS, *_credential_env_keys(), *_explicit_env_keys())
+    return {key: value for key in keys if (value := os.environ.get(key))}
 
 
 def harbor_task_id(context: Any) -> str:
