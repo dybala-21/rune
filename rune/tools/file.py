@@ -16,21 +16,26 @@ from typing import Any
 from rune.tools.base import Tool
 from rune.types import Domain, RiskLevel, ToolResult
 from rune.utils.logger import get_logger
+from rune.utils.paths import rune_data
 
 log = get_logger(__name__)
 
 # Trash settings (mirrors TS TRASH_DIR / TRASH_RETENTION_DAYS)
-_TRASH_DIR = Path.home() / ".rune" / "data" / "trash"
 _TRASH_RETENTION_DAYS = 7
+
+
+def _trash_dir() -> Path:
+    return rune_data() / "trash"
 
 
 def cleanup_trash(retention_days: int = _TRASH_RETENTION_DAYS) -> int:
     """Remove trash entries older than *retention_days*. Returns count removed."""
-    if not _TRASH_DIR.is_dir():
+    trash_dir = _trash_dir()
+    if not trash_dir.is_dir():
         return 0
     cutoff = time.time() - retention_days * 86400
     removed = 0
-    for entry in _TRASH_DIR.iterdir():
+    for entry in trash_dir.iterdir():
         try:
             if entry.stat().st_mtime < cutoff:
                 if entry.is_dir():
@@ -298,10 +303,11 @@ class FileTool(Tool):
             return self.failure(f"Path not found: {path_str}")
 
         # Prepare trash destination
-        _TRASH_DIR.mkdir(parents=True, exist_ok=True)
+        trash_dir = _trash_dir()
+        trash_dir.mkdir(parents=True, exist_ok=True)
         ts = int(time.time() * 1000)
         trash_name = f"{ts}_{os.path.basename(path_str)}"
-        trash_path = _TRASH_DIR / trash_name
+        trash_path = trash_dir / trash_name
 
         shutil.move(path_str, str(trash_path))
         log.info("file_trashed", original=path_str, trash=str(trash_path))

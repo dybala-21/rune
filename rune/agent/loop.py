@@ -2329,54 +2329,59 @@ class NativeAgentLoop(EventEmitter):
         if estimated <= cap:
             return messages
 
-        keep_recent = 3
+        keep_recent_turns = 3
+        turns = _group_into_turns(messages)
 
-        # If we don't have enough messages to trim, return as-is
-        if len(messages) <= keep_recent:
+        # If we don't have enough turns to trim, return as-is
+        if len(turns) <= keep_recent_turns:
             return messages
 
-        # Split into tail (recent) and head (older)
-        tail = messages[-keep_recent:]
+        # Split into tail/head by atomic turns so assistant tool_calls are never
+        # separated from their tool results.
+        tail_turns = turns[-keep_recent_turns:]
+        tail = [msg for turn in tail_turns for msg in turn.messages]
         tail_tokens = sum(self._estimate_tokens(m) for m in tail)
 
         # If tail alone exceeds cap, we can't trim - return as-is
         if tail_tokens > cap:
             return messages
 
-        head = messages[:-keep_recent]
+        head_turns = turns[:-keep_recent_turns]
 
         # Pin the first message (original goal/user request)
-        pinned_first = head[0] if head else None
-        pinned_tokens = self._estimate_tokens(pinned_first) if pinned_first else 0
+        pinned_first = head_turns[0] if head_turns else None
+        pinned_tokens = (
+            sum(self._estimate_tokens(m) for m in pinned_first.messages)
+            if pinned_first
+            else 0
+        )
         budget_for_head = cap - tail_tokens - 50  # 50 = summary placeholder
         budget_after_pin = budget_for_head - pinned_tokens
 
-        # Group remaining head messages into atomic turns
-        rest_head = head[1:]
-        turns = _group_into_turns(rest_head)
+        rest_turns = head_turns[1:]
 
         # Compute token estimates for each turn
-        for turn in turns:
+        for turn in rest_turns:
             turn.token_estimate = sum(
                 self._estimate_tokens(m) for m in turn.messages
             )
 
         # Fill from newest turns backward
         head_tokens = 0
-        keep_from_turn_idx = len(turns)  # default: drop all turns
-        for i in range(len(turns) - 1, -1, -1):
-            if head_tokens + turns[i].token_estimate > budget_after_pin:
+        keep_from_turn_idx = len(rest_turns)  # default: drop all turns
+        for i in range(len(rest_turns) - 1, -1, -1):
+            if head_tokens + rest_turns[i].token_estimate > budget_after_pin:
                 break
-            head_tokens += turns[i].token_estimate
+            head_tokens += rest_turns[i].token_estimate
             keep_from_turn_idx = i
 
         # Flatten kept turns back into messages
         kept_msgs: list[Any] = []
-        for turn in turns[keep_from_turn_idx:]:
+        for turn in rest_turns[keep_from_turn_idx:]:
             kept_msgs.extend(turn.messages)
 
         dropped_count = sum(
-            len(t.messages) for t in turns[:keep_from_turn_idx]
+            len(t.messages) for t in rest_turns[:keep_from_turn_idx]
         )
 
         if dropped_count == 0:
@@ -2395,10 +2400,11 @@ class NativeAgentLoop(EventEmitter):
         # Reassemble: pinned first + summary + kept head turns + tail
         trimmed: list[Any] = []
         if pinned_first is not None:
-            trimmed.append(pinned_first)
+            trimmed.extend(pinned_first.messages)
         trimmed.append(summary_msg)
         trimmed.extend(kept_msgs)
         trimmed.extend(tail)
+        trimmed = _validate_tool_pairs(trimmed)
 
         new_estimate = sum(self._estimate_tokens(m) for m in trimmed)
         log.info(

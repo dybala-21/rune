@@ -27,6 +27,7 @@ from rune.memory.vector import (
     get_vector_store,
 )
 from rune.utils.logger import get_logger
+from rune.utils.paths import rune_home
 
 log = get_logger(__name__)
 
@@ -103,7 +104,7 @@ class MemoryManager:
             ]
 
         # Also load global rules.md if it exists
-        global_rules = memory_dir_path / "rules.md" if (memory_dir_path := Path.home() / ".rune" / "memory").exists() else None
+        global_rules = memory_dir_path / "rules.md" if (memory_dir_path := rune_home() / "memory").exists() else None
         if not self._working.safety_rules and global_rules and global_rules.exists():
             try:
                 rules = await loop.run_in_executor(None, parse_rules_md, global_rules)

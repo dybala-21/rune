@@ -15,6 +15,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from rune.utils.paths import rune_home
+
 # Types
 
 @dataclass(slots=True)
@@ -41,13 +43,14 @@ class SandboxResult:
 
 def get_default_config() -> SandboxConfig:
     home = str(Path.home())
+    rune_config_home = str(rune_home())
     workspace = os.getcwd()
     tmp = tempfile.gettempdir()
 
     return SandboxConfig(
         enabled=True,
         allow_network=False,
-        writable_paths=[workspace, os.path.join(home, ".rune"), tmp],
+        writable_paths=[workspace, rune_config_home, tmp],
         readable_paths=[
             "/usr", "/bin", "/lib", "/lib64",
             "/System/Library", "/opt/homebrew",
