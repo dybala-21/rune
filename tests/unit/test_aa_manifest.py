@@ -17,6 +17,7 @@ from rune.bench.runner import (
     _git_diff,
     _snapshot_files,
     build_agent_instruction,
+    evaluate_fingerprint_gate,
 )
 from rune.cli.main import app
 
@@ -136,6 +137,24 @@ def test_bench_run_fingerprint_gate_stops_required_invalid_run(tmp_path, monkeyp
     gate = json.loads((attempt_dir / "fingerprint_gate.json").read_text())
     assert trace["reason"] == "fingerprint_gate_failed"
     assert gate["valid"] is False
+
+
+def test_fingerprint_gate_checks_source_diff(monkeypatch):
+    monkeypatch.setenv("RUNE_BENCH_EXPECT_SOURCE_DIFF_SHA256", "clean")
+
+    gate = evaluate_fingerprint_gate(
+        {
+            "benchmark_prompt_policy": "aa-coding-agent-v1",
+            "rune": {"module_file": "/venv/rune/__init__.py"},
+            "install_fingerprint": {
+                "install_mode": "wheelhouse",
+                "source_diff_sha256": "dirty",
+            },
+        }
+    )
+
+    assert gate["valid"] is False
+    assert any("source diff sha256" in error for error in gate["errors"])
 
 
 def test_build_agent_instruction_preserves_task_instruction(tmp_path):

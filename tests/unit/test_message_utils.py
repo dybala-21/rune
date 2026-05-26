@@ -118,8 +118,7 @@ class TestCompactMessagesAtomic:
         result = NativeAgentLoop._compact_messages_atomic(msgs, keep_last=10)
         assert len(result) == 3
 
-    def test_old_bug_multi_tool_keep1(self):
-        """The OLD buggy backward-walk would break this. Verify the fix."""
+    def test_compaction_keeps_turn_boundaries_when_only_latest_turn_survives(self):
         from rune.agent.loop import NativeAgentLoop
         msgs = [
             _user("old"),
@@ -127,7 +126,6 @@ class TestCompactMessagesAtomic:
             _user("recent"),
         ]
         result = NativeAgentLoop._compact_messages_atomic(msgs, keep_last=1)
-        # Should keep just the last turn (user "recent")
         assert len(result) == 1
         assert result[0]["content"] == "recent"
 

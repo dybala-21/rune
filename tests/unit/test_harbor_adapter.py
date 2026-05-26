@@ -20,11 +20,20 @@ class _Context:
 
 
 class _TaskId:
-    path = "task-from-path"
+    path = "/terminal-bench/tasks/task-from-path"
 
 
 class _PathContext:
     task_id = _TaskId()
+
+
+class _MixedTaskId:
+    id = 123
+    path = "/terminal-bench/tasks/task-from-fallback-path"
+
+
+class _MixedPathContext:
+    task_id = _MixedTaskId()
 
 
 def test_harbor_task_id_reads_nested_task_id():
@@ -33,6 +42,10 @@ def test_harbor_task_id_reads_nested_task_id():
 
 def test_harbor_task_id_reads_task_path():
     assert harbor_task_id(_PathContext()) == "task-from-path"
+
+
+def test_harbor_task_id_skips_non_string_nested_fields():
+    assert harbor_task_id(_MixedPathContext()) == "task-from-fallback-path"
 
 
 def test_build_rune_bench_command_quotes_instruction():
@@ -61,6 +74,7 @@ def test_container_env_passes_llm_credentials(monkeypatch):
     monkeypatch.setenv("UV_CACHE_DIR", "/uv-cache")
     monkeypatch.setenv("RUNE_BENCH_REQUIRE_FINGERPRINT", "1")
     monkeypatch.setenv("RUNE_BENCH_BLOCK_VCS_HISTORY", "1")
+    monkeypatch.setenv("RUNE_BENCH_EXPECT_SOURCE_DIFF_SHA256", "abc123")
     monkeypatch.setenv("UNRELATED_KEY", "ignored")
 
     env = _container_env()
@@ -69,6 +83,7 @@ def test_container_env_passes_llm_credentials(monkeypatch):
     assert env["UV_CACHE_DIR"] == "/uv-cache"
     assert env["RUNE_BENCH_REQUIRE_FINGERPRINT"] == "1"
     assert env["RUNE_BENCH_BLOCK_VCS_HISTORY"] == "1"
+    assert env["RUNE_BENCH_EXPECT_SOURCE_DIFF_SHA256"] == "abc123"
     assert "UNRELATED_KEY" not in env
 
 

@@ -13,21 +13,28 @@ def _write_json(path, value):
     path.write_text(json.dumps(value), encoding="utf-8")
 
 
-def _write_attempt(attempt_dir, benchmark="terminal-bench-v2", task_id="cancel-async-tasks"):
+def _write_attempt(
+    attempt_dir,
+    benchmark="terminal-bench-v2",
+    task_id="cancel-async-tasks",
+    *,
+    completion=True,
+):
     _write_json(
         attempt_dir / "task.json",
         {"benchmark": benchmark, "task_id": task_id, "attempt_index": 1},
     )
-    _write_json(
-        attempt_dir / "completion_trace.json",
-        {
-            "reason": "completed",
-            "final_step": 1,
-            "total_tokens_used": 1234,
-            "evidence_score": 0.0,
-        },
-    )
-    _write_json(attempt_dir / "timing.json", {"agent_wall_time_ms": 2500})
+    if completion:
+        _write_json(
+            attempt_dir / "completion_trace.json",
+            {
+                "reason": "completed",
+                "final_step": 1,
+                "total_tokens_used": 1234,
+                "evidence_score": 0.0,
+            },
+        )
+        _write_json(attempt_dir / "timing.json", {"agent_wall_time_ms": 2500})
     _write_json(
         attempt_dir / "fingerprint.json",
         {
@@ -117,6 +124,49 @@ def test_summarize_harbor_job_with_rune_attempt(tmp_path):
     assert row["source_git_sha"] == "deadbeef"
     assert row["source_diff_sha256"] == "diff123"
     assert row["attempt_dir"] == str(attempt_dir)
+
+
+def test_summarize_harbor_timeout_with_fingerprint_only_attempt(tmp_path):
+    job_dir = tmp_path / "job"
+    trial_dir = job_dir / "crack-7z-hash__abc123"
+    attempt_dir = (
+        trial_dir
+        / "agent"
+        / "rune"
+        / "terminal-bench-v2"
+        / "crack-7z-hash"
+        / "attempt-001"
+    )
+    _write_attempt(attempt_dir, task_id="crack-7z-hash", completion=False)
+    _write_json(
+        trial_dir / "result.json",
+        {
+            "task_name": "crack-7z-hash",
+            "trial_name": "crack-7z-hash__abc123",
+            "task_id": {"path": str(tmp_path / "cache" / "hash" / "crack-7z-hash")},
+            "source": "terminal-bench",
+            "config": {
+                "trials_dir": str(job_dir),
+                "verifier": {"disable": False},
+            },
+            "verifier_result": {"rewards": {"reward": 0.0}},
+            "exception_info": {
+                "type": "AgentTimeoutError",
+                "message": "Agent execution timed out after 900.0 seconds",
+            },
+        },
+    )
+
+    summary = summarize_paths([job_dir])
+
+    assert summary["count"] == 1
+    assert summary["failed"] == 1
+    row = summary["rows"][0]
+    assert row["task_id"] == "crack-7z-hash"
+    assert row["attempt_dir"] == str(attempt_dir)
+    assert row["fingerprint_gate_valid"] is True
+    assert row["trace_reason"] is None
+    assert row["exception_type"] == "AgentTimeoutError"
 
 
 def test_summarize_direct_attempt_runs_audit(tmp_path):

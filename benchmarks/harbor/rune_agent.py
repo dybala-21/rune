@@ -14,17 +14,20 @@ from pathlib import Path
 from typing import Any
 
 try:  # pragma: no cover - exercised by Harbor, not unit tests.
-    from harbor.agents.installed.base import BaseInstalledAgent, with_prompt_template
-    from harbor.environments.base import BaseEnvironment
-    from harbor.models.agent.context import AgentContext
+    from harbor.agents.installed.base import (  # type: ignore[import-not-found]
+        BaseInstalledAgent,
+        with_prompt_template,
+    )
+    from harbor.environments.base import BaseEnvironment  # type: ignore[import-not-found]
+    from harbor.models.agent.context import AgentContext  # type: ignore[import-not-found]
 except ModuleNotFoundError:  # pragma: no cover - lets local tests import this file.
-    BaseEnvironment = Any  # type: ignore[misc, assignment]
-    AgentContext = Any  # type: ignore[misc, assignment]
+    BaseEnvironment = Any
+    AgentContext = Any
 
     class BaseInstalledAgent:  # type: ignore[no-redef]
         pass
 
-    def with_prompt_template(fn: Any) -> Any:  # type: ignore[no-redef]
+    def with_prompt_template(fn: Any) -> Any:
         return fn
 
 
@@ -66,6 +69,7 @@ PASSTHROUGH_ENV_KEYS = (
     "RUNE_BENCH_EXPECT_INSTALL_MODE",
     "RUNE_BENCH_EXPECT_PROMPT_POLICY",
     "RUNE_BENCH_EXPECT_SOURCE_GIT_SHA",
+    "RUNE_BENCH_EXPECT_SOURCE_DIFF_SHA256",
     "RUNE_BENCH_EXPECT_WHEELHOUSE_SHA256",
     "RUNE_BENCH_BLOCK_VCS_HISTORY",
     "RUNE_BENCH_ALLOW_VCS_HISTORY",
@@ -81,22 +85,37 @@ def _shell_join(command: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in command)
 
 
+def _double_quoted_path_part(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
+
+
+def _normalise_context_value(name: str, value: str) -> str:
+    if name == "path":
+        return Path(value).name
+    return value
+
+
+def _nested_context_value(value: Any) -> tuple[str, str] | None:
+    for key in ("id", "name", "path"):
+        if isinstance(value, dict):
+            nested = value.get(key)
+        else:
+            nested = getattr(value, key, None)
+        if isinstance(nested, str) and nested:
+            return key, nested
+    return None
+
+
 def _context_value(context: Any, *names: str) -> str | None:
     for name in names:
         value = context.get(name) if isinstance(context, dict) else getattr(context, name, None)
         if isinstance(value, str) and value:
-            return value
+            return _normalise_context_value(name, value)
         if value is not None:
-            if isinstance(value, dict):
-                nested = value.get("id") or value.get("name") or value.get("path")
-            else:
-                nested = (
-                    getattr(value, "id", None)
-                    or getattr(value, "name", None)
-                    or getattr(value, "path", None)
-                )
-            if isinstance(nested, str) and nested:
-                return nested
+            nested_pair = _nested_context_value(value)
+            if nested_pair is not None:
+                nested_name, nested = nested_pair
+                return _normalise_context_value(nested_name, nested)
     return None
 
 
@@ -116,7 +135,7 @@ def _container_env() -> dict[str, str]:
 
 
 def harbor_task_id(context: Any) -> str:
-    """Best-effort task ID extraction across Harbor context versions."""
+    """Extract a stable task ID across Harbor context versions."""
     return (
         _context_value(context, "task_id", "task_name", "id", "name")
         or _context_value(getattr(context, "config", None), "task_id", "task_name", "task")
@@ -171,9 +190,10 @@ def build_rune_bench_command(
     if provider:
         command_suffix.extend(["--provider", provider])
 
+    rune_venv_bin = _double_quoted_path_part(str(rune_venv / "bin"))
     return (
         f"mkdir -p {_shell_join([str(run_root), str(rune_home)])} && "
-        f'export PATH="{shlex.quote(str(rune_venv))}/bin:/uv-cache/bin:'
+        f'export PATH="{rune_venv_bin}:/uv-cache/bin:'
         '$HOME/.local/bin:$HOME/.cargo/bin:$PATH" && '
         f"export RUNE_HOME={shlex.quote(str(rune_home))} && "
         f"export RUNE_BENCH_INSTALL_FINGERPRINT={shlex.quote(str(install_fingerprint))} && "
@@ -183,7 +203,7 @@ def build_rune_bench_command(
     )
 
 
-class RuneInstalledAgent(BaseInstalledAgent):
+class RuneInstalledAgent(BaseInstalledAgent):  # type: ignore[misc]
     """Run RUNE as a Harbor installed agent."""
 
     @staticmethod
@@ -204,7 +224,7 @@ class RuneInstalledAgent(BaseInstalledAgent):
         install_command = os.environ.get("RUNE_HARBOR_INSTALL_CMD", DEFAULT_INSTALL_COMMAND)
         await self.exec_as_agent(environment, command=install_command, env=_container_env())
 
-    @with_prompt_template
+    @with_prompt_template  # type: ignore[untyped-decorator]
     async def run(
         self,
         instruction: str,
@@ -233,7 +253,7 @@ class RuneInstalledAgent(BaseInstalledAgent):
         await self.exec_as_agent(environment, command=command, env=_container_env())
 
     def populate_context_post_run(self, context: AgentContext) -> None:
-        """Best-effort expose RUNE artifacts to Harbor context consumers."""
+        """Expose the latest RUNE artifacts to Harbor context consumers when present."""
         artifact_root = DEFAULT_RUN_ROOT
         try:
             latest = max(artifact_root.glob("*/*/attempt-*"), key=lambda path: path.stat().st_mtime)

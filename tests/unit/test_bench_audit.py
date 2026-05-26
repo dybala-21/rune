@@ -30,6 +30,23 @@ def test_audit_flags_forbidden_paths_and_git_history(tmp_path):
     assert result["high_severity_count"] == 2
 
 
+def test_audit_parses_git_history_commands_without_show_ref_false_positive(tmp_path):
+    _write_json(tmp_path / "task.json", {"benchmark": "terminal-bench-v2"})
+    (tmp_path / "events.jsonl").write_text(
+        json.dumps({"event": "tool_call", "args": {"command": "git show-ref --heads"}})
+        + "\n"
+        + json.dumps({"event": "tool_call", "args": {"command": "git -C /app/repo show HEAD"}})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = audit_attempt_dir(tmp_path)
+
+    findings = [finding for finding in result["findings"] if finding["rule_id"] == "git_history_mining"]
+    assert len(findings) == 1
+    assert findings[0]["evidence"] == "git show"
+
+
 def test_audit_allows_git_history_for_terminal_bench_git_tasks(tmp_path):
     _write_json(tmp_path / "task.json", {"benchmark": "terminal-bench-v2", "task_id": "fix-git"})
     (tmp_path / "events.jsonl").write_text(

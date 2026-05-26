@@ -39,8 +39,8 @@ Artifacts are written under `/logs/agent/rune` and RUNE state is isolated under
 
 ## Official Wheelhouse Mode
 
-For score-bearing benchmark runs, build a read-only wheelhouse and force the
-agent to install from it:
+For benchmark runs used in score calculations, build a read-only wheelhouse and
+force the agent to install from it:
 
 ```bash
 benchmarks/harbor/build_wheelhouse.sh /tmp/rune-wheelhouse
@@ -75,8 +75,8 @@ invalid benchmark attempt and rerun it after fixing provenance.
 ## Source Fallback Mode
 
 For local development, mount `/rune-src`; `auto` mode installs from source when
-no wheelhouse is mounted. This is convenient for smoke tests but should not be
-mixed into official score calculations:
+no wheelhouse is mounted. Use this for smoke tests only; do not mix source-mode
+runs into official score calculations:
 
 ```bash
 mkdir -p /tmp/rune-harbor-uv-cache

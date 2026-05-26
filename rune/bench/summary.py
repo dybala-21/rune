@@ -93,7 +93,11 @@ def _duration_ms(section: Any) -> int | None:
 
 
 def _is_attempt_dir(path: Path) -> bool:
-    return (path / "task.json").is_file() and (path / "completion_trace.json").is_file()
+    return (path / "task.json").is_file() and (
+        (path / "completion_trace.json").is_file()
+        or (path / "fingerprint.json").is_file()
+        or (path / "fingerprint_gate.json").is_file()
+    )
 
 
 def _iter_attempt_dirs(path: Path) -> Iterable[Path]:
@@ -143,7 +147,7 @@ def _task_id_from_harbor_result(result: dict[str, Any]) -> str | None:
     if isinstance(task_id, dict):
         path = task_id.get("path")
         if isinstance(path, str) and path:
-            return path
+            return Path(path).name
     task_name = result.get("task_name")
     return task_name if isinstance(task_name, str) and task_name else None
 

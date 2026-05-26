@@ -12,7 +12,17 @@ Severity = Literal["low", "medium", "high"]
 
 FORBIDDEN_RUNTIME_PATHS = ("/tests", "/oracle")
 LEAK_PRONE_FILES = ("AGENTS.md", "CLAUDE.md")
-GIT_HISTORY_COMMANDS = ("git log", "git show", "git reflog")
+GIT_HISTORY_SUBCOMMANDS = ("blame", "log", "reflog", "show")
+GIT_GLOBAL_OPTIONS_WITH_VALUES = {
+    "-C",
+    "-c",
+    "--config-env",
+    "--exec-path",
+    "--git-dir",
+    "--namespace",
+    "--super-prefix",
+    "--work-tree",
+}
 TERMINAL_BENCH_GIT_TASKS = {
     "fix-git",
     "git-leak-recovery",
@@ -73,6 +83,52 @@ def _flatten(value: Any) -> str:
         return str(value)
 
 
+def _event_command(row: dict[str, Any]) -> str | None:
+    for container_key in ("params", "args"):
+        container = row.get(container_key)
+        if isinstance(container, dict):
+            command = container.get("command") or container.get("cmd")
+            if isinstance(command, str) and command.strip():
+                return command
+    command = row.get("command") or row.get("cmd")
+    return command if isinstance(command, str) and command.strip() else None
+
+
+def _git_subcommand(tokens: list[str]) -> str | None:
+    if not tokens or Path(tokens[0]).name != "git":
+        return None
+
+    idx = 1
+    while idx < len(tokens):
+        token = tokens[idx]
+        if token in GIT_GLOBAL_OPTIONS_WITH_VALUES:
+            idx += 2
+            continue
+        if token.startswith("--") and "=" in token:
+            idx += 1
+            continue
+        if token.startswith("-"):
+            idx += 1
+            continue
+        return token
+    return None
+
+
+def _git_history_command(command: str) -> str | None:
+    from rune.agent.bash_parsing import (
+        split_shell_segments,
+        split_shell_tokens,
+        strip_leading_env_assignments,
+    )
+
+    for segment in split_shell_segments(command):
+        tokens = strip_leading_env_assignments(split_shell_tokens(segment))
+        subcommand = _git_subcommand(tokens)
+        if subcommand in GIT_HISTORY_SUBCOMMANDS:
+            return f"git {subcommand}"
+    return None
+
+
 def audit_attempt_dir(attempt_dir: Path) -> dict[str, Any]:
     """Audit one benchmark attempt artifact directory."""
     findings: list[AuditFinding] = []
@@ -108,15 +164,35 @@ def audit_attempt_dir(attempt_dir: Path) -> dict[str, Any]:
         and task_id in TERMINAL_BENCH_GIT_TASKS
     )
     if not git_history_expected:
-        for command in GIT_HISTORY_COMMANDS:
-            if command in event_text:
-                findings.append(
-                    AuditFinding(
-                        rule_id="git_history_mining",
-                        severity="high",
-                        evidence=command,
-                    )
+        seen_history_commands: set[str] = set()
+        for row in events + tool_calls:
+            command = _event_command(row)
+            if not command:
+                continue
+            if history_command := _git_history_command(command):
+                seen_history_commands.add(history_command)
+
+        for command in sorted(seen_history_commands):
+            findings.append(
+                AuditFinding(
+                    rule_id="git_history_mining",
+                    severity="high",
+                    evidence=command,
                 )
+            )
+
+        if not seen_history_commands:
+            for command in GIT_HISTORY_SUBCOMMANDS:
+                pattern = re.compile(rf"(?<![A-Za-z0-9_.-])git\s+{command}(?:\s|$)")
+                if pattern.search(event_text):
+                    findings.append(
+                        AuditFinding(
+                            rule_id="git_history_mining",
+                            severity="high",
+                            evidence=f"git {command}",
+                        )
+                    )
+                    break
 
     patch = _read_text(attempt_dir / "patch.diff").strip()
     if benchmark.lower() in {"swe-atlas-qna", "swe-atlas"} and patch:

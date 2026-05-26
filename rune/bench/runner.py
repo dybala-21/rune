@@ -1,4 +1,4 @@
-"""Minimal local benchmark runner for RUNE agent attempts."""
+"""Local benchmark runner for RUNE agent attempts."""
 
 from __future__ import annotations
 
@@ -189,6 +189,7 @@ def collect_runtime_fingerprint(options: BenchRunOptions) -> dict[str, Any]:
                 "RUNE_BENCH_EXPECT_INSTALL_MODE",
                 "RUNE_BENCH_EXPECT_PROMPT_POLICY",
                 "RUNE_BENCH_EXPECT_SOURCE_GIT_SHA",
+                "RUNE_BENCH_EXPECT_SOURCE_DIFF_SHA256",
                 "RUNE_BENCH_EXPECT_WHEELHOUSE_SHA256",
                 "RUNE_BENCH_BLOCK_VCS_HISTORY",
                 "RUNE_BENCH_ALLOW_VCS_HISTORY",
@@ -242,6 +243,14 @@ def evaluate_fingerprint_gate(fingerprint: dict[str, Any]) -> dict[str, Any]:
     if expected_source_git_sha and actual_source_git_sha != expected_source_git_sha:
         errors.append(
             f"expected source git sha {expected_source_git_sha!r}, got {actual_source_git_sha!r}"
+        )
+
+    expected_source_diff_sha = os.environ.get("RUNE_BENCH_EXPECT_SOURCE_DIFF_SHA256")
+    actual_source_diff_sha = install.get("source_diff_sha256")
+    if expected_source_diff_sha and actual_source_diff_sha != expected_source_diff_sha:
+        errors.append(
+            f"expected source diff sha256 {expected_source_diff_sha!r}, "
+            f"got {actual_source_diff_sha!r}"
         )
 
     expected_wheelhouse_sha = os.environ.get("RUNE_BENCH_EXPECT_WHEELHOUSE_SHA256")
