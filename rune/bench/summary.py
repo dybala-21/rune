@@ -20,6 +20,11 @@ CSV_COLUMNS = [
     "passed",
     "trace_reason",
     "total_tokens_used",
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_tokens",
+    "reasoning_tokens",
+    "output_tokens",
     "tool_call_count",
     "audit_finding_count",
     "audit_high_severity_count",
@@ -71,6 +76,24 @@ def _jsonl_count(path: Path) -> int:
     except OSError:
         pass
     return count
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    value = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(value, dict):
+                    rows.append(value)
+    except OSError:
+        pass
+    return rows
 
 
 def _parse_datetime(value: Any) -> datetime | None:
@@ -190,12 +213,37 @@ def _verifier_disabled(result: dict[str, Any]) -> bool | None:
     return disabled if isinstance(disabled, bool) else None
 
 
+def _jsonl_int_sum(rows: list[dict[str, Any]], key: str) -> int | None:
+    values: list[int] = []
+    for row in rows:
+        value = row.get(key)
+        if isinstance(value, int):
+            values.append(value)
+    return sum(values) if values else None
+
+
+def _model_usage_metrics(path: Path) -> dict[str, int | None]:
+    rows = [row for row in _read_jsonl(path) if row.get("event") == "model_usage"]
+    return {
+        "input_tokens": _jsonl_int_sum(rows, "input_tokens"),
+        "cached_input_tokens": _jsonl_int_sum(rows, "cached_input_tokens"),
+        "cache_write_tokens": _jsonl_int_sum(rows, "cache_write_tokens"),
+        "reasoning_tokens": _jsonl_int_sum(rows, "reasoning_tokens"),
+        "output_tokens": _jsonl_int_sum(rows, "output_tokens"),
+    }
+
+
 def _attempt_metrics(attempt_dir: Path | None) -> dict[str, Any]:
     if attempt_dir is None:
         return {
             "trace_reason": None,
             "trace_final_step": None,
             "total_tokens_used": None,
+            "input_tokens": None,
+            "cached_input_tokens": None,
+            "cache_write_tokens": None,
+            "reasoning_tokens": None,
+            "output_tokens": None,
             "agent_wall_time_ms": None,
             "tool_call_count": None,
             "audit_finding_count": None,
@@ -219,11 +267,13 @@ def _attempt_metrics(attempt_dir: Path | None) -> dict[str, Any]:
     install = fingerprint.get("install_fingerprint")
     install = install if isinstance(install, dict) else {}
     audit = audit_attempt_dir(attempt_dir)
+    usage = _model_usage_metrics(attempt_dir / "model_usage.jsonl")
 
     return {
         "trace_reason": trace.get("reason"),
         "trace_final_step": trace.get("final_step"),
         "total_tokens_used": trace.get("total_tokens_used"),
+        **usage,
         "agent_wall_time_ms": timing.get("agent_wall_time_ms"),
         "tool_call_count": _jsonl_count(attempt_dir / "tool_calls.jsonl"),
         "audit_finding_count": audit.get("finding_count"),
@@ -355,6 +405,31 @@ def _aggregate_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             int(row["total_tokens_used"])
             for row in rows
             if isinstance(row.get("total_tokens_used"), int)
+        ),
+        "total_input_tokens": sum(
+            int(row["input_tokens"])
+            for row in rows
+            if isinstance(row.get("input_tokens"), int)
+        ),
+        "total_cached_input_tokens": sum(
+            int(row["cached_input_tokens"])
+            for row in rows
+            if isinstance(row.get("cached_input_tokens"), int)
+        ),
+        "total_cache_write_tokens": sum(
+            int(row["cache_write_tokens"])
+            for row in rows
+            if isinstance(row.get("cache_write_tokens"), int)
+        ),
+        "total_reasoning_tokens": sum(
+            int(row["reasoning_tokens"])
+            for row in rows
+            if isinstance(row.get("reasoning_tokens"), int)
+        ),
+        "total_output_tokens": sum(
+            int(row["output_tokens"])
+            for row in rows
+            if isinstance(row.get("output_tokens"), int)
         ),
         "total_tool_calls": sum(
             int(row["tool_call_count"])

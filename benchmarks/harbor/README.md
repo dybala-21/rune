@@ -29,6 +29,8 @@ export RUNE_HARBOR_MEMORY_MODE="default"  # or off
 export RUNE_HARBOR_ATTEMPT_INDEX="1"
 export RUNE_HARBOR_TASK_ID="adaptive-rejection-sampler"
 export RUNE_HARBOR_AGENT_VARIANT_ID="rune-aa-terminal-v1"
+export RUNE_HARBOR_MAX_STEPS="80"         # optional benchmark safety cap
+export RUNE_HARBOR_TIMEOUT_SECONDS="900"  # optional per-attempt wall-time cap
 export RUNE_HARBOR_SKIP_INSTALL="0"       # set to 1 only if the task image already has rune
 export RUNE_HARBOR_PASS_ENV=""            # comma/space-separated extra env keys, if needed
 ```
@@ -70,6 +72,8 @@ harbor run \
   --agent-env RUNE_HARBOR_PROVIDER=openai \
   --agent-env RUNE_HARBOR_MODEL=gpt-5.4 \
   --agent-env RUNE_HARBOR_AGENT_VARIANT_ID=rune-aa-terminal-v1 \
+  --agent-env RUNE_HARBOR_MAX_STEPS=80 \
+  --agent-env RUNE_HARBOR_TIMEOUT_SECONDS=900 \
   --agent-env RUNE_BENCH_REQUIRE_FINGERPRINT=1 \
   --agent-env RUNE_BENCH_EXPECT_INSTALL_MODE=wheelhouse \
   --agent-env RUNE_BENCH_EXPECT_WHEELHOUSE_SHA256=<wheelhouse-manifest-sha256> \

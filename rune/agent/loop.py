@@ -359,6 +359,10 @@ class NativeAgentLoop(EventEmitter):
     def step(self) -> int:
         return self._step
 
+    @property
+    def tokens_used(self) -> int:
+        return self._token_budget.used
+
     def set_approval_callback(
         self, cb: Callable[[str, str], Awaitable[bool]] | None
     ) -> None:
@@ -1307,12 +1311,31 @@ class NativeAgentLoop(EventEmitter):
                     usage = result.usage()
                     request_tokens = getattr(usage, "input_tokens", 0) or getattr(usage, "request_tokens", 0) or 0
                     response_tokens = getattr(usage, "output_tokens", 0) or getattr(usage, "response_tokens", 0) or 0
+                    cached_input_tokens = getattr(usage, "cached_input_tokens", 0) or 0
+                    cache_write_tokens = getattr(usage, "cache_write_tokens", 0) or 0
+                    reasoning_tokens = getattr(usage, "reasoning_tokens", 0) or 0
                     step_tokens = request_tokens + response_tokens
                     self._token_budget.used += step_tokens
                     trace.total_tokens_used = self._token_budget.used
                     await self.emit(
                         "step_tokens", self._step, step_tokens,
                         self._token_budget.used, self._token_budget.total,
+                    )
+                    await self.emit(
+                        "model_usage",
+                        {
+                            "step": self._step,
+                            "model": model,
+                            "input_tokens": max(0, request_tokens - cached_input_tokens),
+                            "raw_input_tokens": request_tokens,
+                            "cached_input_tokens": cached_input_tokens,
+                            "cache_write_tokens": cache_write_tokens,
+                            "reasoning_tokens": reasoning_tokens,
+                            "output_tokens": response_tokens,
+                            "step_tokens": step_tokens,
+                            "total_tokens": self._token_budget.used,
+                            "token_budget": self._token_budget.total,
+                        },
                     )
                 except Exception:
                     pass

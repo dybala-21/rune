@@ -76,6 +76,8 @@ def test_build_rune_bench_command_quotes_instruction():
         task_id="adaptive-rejection-sampler",
         model="gpt-5.4",
         provider="openai",
+        max_steps=80,
+        timeout_seconds=900,
     )
 
     assert "export RUNE_HOME=/logs/agent/rune_home" in command
@@ -87,6 +89,8 @@ def test_build_rune_bench_command_quotes_instruction():
     assert "--attempt-index 1" in command
     assert "--model gpt-5.4" in command
     assert "--provider openai" in command
+    assert "--max-steps 80" in command
+    assert "--timeout-seconds 900" in command
     assert "'write '\"'\"'hello world'\"'\"''" in command
 
 

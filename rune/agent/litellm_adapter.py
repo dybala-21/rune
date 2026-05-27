@@ -36,6 +36,9 @@ class StreamUsage:
     output_tokens: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    cached_input_tokens: int = 0
+    cache_write_tokens: int = 0
+    reasoning_tokens: int = 0
 
 
 @dataclass(slots=True)
@@ -131,6 +134,44 @@ def _build_tool_lookup(tools: list[Any]) -> dict[str, Any]:
             if api_name != name:
                 lookup[api_name] = fn
     return lookup
+
+
+def _usage_value(value: Any, name: str) -> Any:
+    if isinstance(value, dict):
+        return value.get(name)
+    return getattr(value, name, None)
+
+
+def _coerce_usage_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _nested_usage_int(usage: Any, path: tuple[str, ...]) -> int:
+    value = usage
+    for name in path:
+        value = _usage_value(value, name)
+        if value is None:
+            return 0
+    return _coerce_usage_int(value)
+
+
+def _usage_int(
+    usage: Any,
+    *names: str,
+    nested: tuple[tuple[str, ...], ...] = (),
+) -> int:
+    for name in names:
+        value = _coerce_usage_int(_usage_value(usage, name))
+        if value:
+            return value
+    for path in nested:
+        value = _nested_usage_int(usage, path)
+        if value:
+            return value
+    return 0
 
 
 # Provider prefix resolution
@@ -751,10 +792,42 @@ class StreamResult:
 
     def _update_usage(self, usage: Any) -> None:
         """Extract token counts; parse native advisor events when beta is active."""
-        self._usage.input_tokens += getattr(usage, "prompt_tokens", 0) or 0
-        self._usage.output_tokens += getattr(usage, "completion_tokens", 0) or 0
+        self._usage.input_tokens += _usage_int(usage, "prompt_tokens", "input_tokens")
+        self._usage.output_tokens += _usage_int(usage, "completion_tokens", "output_tokens")
         self._usage.prompt_tokens = self._usage.input_tokens
         self._usage.completion_tokens = self._usage.output_tokens
+        self._usage.cached_input_tokens += _usage_int(
+            usage,
+            "cached_tokens",
+            "cache_read_input_tokens",
+            "cache_read_tokens",
+            nested=(
+                ("prompt_tokens_details", "cached_tokens"),
+                ("prompt_tokens_details", "cache_read_input_tokens"),
+                ("input_token_details", "cache_read"),
+                ("input_token_details", "cached_tokens"),
+            ),
+        )
+        self._usage.cache_write_tokens += _usage_int(
+            usage,
+            "cache_creation_input_tokens",
+            "cache_write_input_tokens",
+            "cache_write_tokens",
+            nested=(
+                ("prompt_tokens_details", "cache_creation_tokens"),
+                ("prompt_tokens_details", "cache_write_tokens"),
+                ("input_token_details", "cache_creation"),
+                ("input_token_details", "cache_write"),
+            ),
+        )
+        self._usage.reasoning_tokens += _usage_int(
+            usage,
+            "reasoning_tokens",
+            nested=(
+                ("completion_tokens_details", "reasoning_tokens"),
+                ("output_token_details", "reasoning_tokens"),
+            ),
+        )
         if self._extra_headers.get("anthropic-beta"):
             from rune.agent.advisor.native_tool import (
                 extract_synthetic_events_from_usage,

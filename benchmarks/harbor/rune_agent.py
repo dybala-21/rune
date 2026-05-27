@@ -65,6 +65,8 @@ CONTROL_ENV_KEYS = (
     "RUNE_BENCH_SOURCE_GIT_SHA",
     "RUNE_BENCH_SOURCE_DIFF_SHA256",
     "RUNE_BENCH_WHEELHOUSE_SHA256",
+    "RUNE_HARBOR_MAX_STEPS",
+    "RUNE_HARBOR_TIMEOUT_SECONDS",
 )
 PROVIDER_ENV_KEYS = {
     "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"),
@@ -141,6 +143,17 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_int_optional(name: str) -> int | None:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
 def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -206,6 +219,8 @@ def build_rune_bench_command(
     memory_mode: str = "default",
     agent_variant_id: str | None = None,
     attempt_index: int = 1,
+    max_steps: int | None = None,
+    timeout_seconds: int | None = None,
 ) -> str:
     """Build the command Harbor should execute inside the task container."""
     command_prefix = [
@@ -236,6 +251,10 @@ def build_rune_bench_command(
         command_suffix.extend(["--model", model])
     if provider:
         command_suffix.extend(["--provider", provider])
+    if max_steps:
+        command_suffix.extend(["--max-steps", str(max_steps)])
+    if timeout_seconds:
+        command_suffix.extend(["--timeout-seconds", str(timeout_seconds)])
 
     rune_venv_bin = _double_quoted_path_part(str(rune_venv / "bin"))
     return (
@@ -287,6 +306,8 @@ class RuneInstalledAgent(BaseInstalledAgent):  # type: ignore[misc]
             "RUNE_BENCH_AGENT_VARIANT_ID"
         )
         attempt_index = _env_int("RUNE_HARBOR_ATTEMPT_INDEX", 1)
+        max_steps = _env_int_optional("RUNE_HARBOR_MAX_STEPS")
+        timeout_seconds = _env_int_optional("RUNE_HARBOR_TIMEOUT_SECONDS")
         command = build_rune_bench_command(
             instruction=instruction,
             benchmark=benchmark,
@@ -296,6 +317,8 @@ class RuneInstalledAgent(BaseInstalledAgent):  # type: ignore[misc]
             memory_mode=memory_mode,
             agent_variant_id=agent_variant_id,
             attempt_index=attempt_index,
+            max_steps=max_steps,
+            timeout_seconds=timeout_seconds,
         )
         await self.exec_as_agent(environment, command=command, env=_container_env())
 
