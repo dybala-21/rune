@@ -218,7 +218,7 @@ def test_bench_run_rejects_invalid_safety_caps(tmp_path):
     )
 
     assert result.exit_code != 0
-    assert "--max-steps must be >= 1" in result.output
+    assert not (tmp_path / "terminal-bench-v2" / "smoke").exists()
 
 
 def test_git_diff_includes_untracked_files(tmp_path):
