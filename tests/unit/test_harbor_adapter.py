@@ -4,6 +4,7 @@ from pathlib import Path
 
 from benchmarks.harbor.rune_agent import (
     DEFAULT_INSTALL_COMMAND,
+    _agent_env_from_context,
     _container_env,
     _env_flag,
     build_rune_bench_command,
@@ -57,6 +58,26 @@ class _MixedPathContext:
     task_id = _MixedTaskId()
 
 
+class _PathTask:
+    path = "/terminal-bench/tasks/task-from-task-path"
+
+
+class _TaskPathContext:
+    task = _PathTask()
+
+
+class _AgentConfig:
+    env = {"RUNE_HARBOR_MODEL": "gpt-5.4", "RUNE_HARBOR_MAX_STEPS": "60"}
+
+
+class _RuntimeConfig:
+    agent = _AgentConfig()
+
+
+class _RuntimeContext:
+    config = _RuntimeConfig()
+
+
 def test_harbor_task_id_reads_nested_task_id():
     assert harbor_task_id(_Context()) == "task-from-nested"
 
@@ -67,6 +88,17 @@ def test_harbor_task_id_reads_task_path():
 
 def test_harbor_task_id_skips_non_string_nested_fields():
     assert harbor_task_id(_MixedPathContext()) == "task-from-fallback-path"
+
+
+def test_harbor_task_id_reads_context_task_path():
+    assert harbor_task_id(_TaskPathContext()) == "task-from-task-path"
+
+
+def test_agent_env_from_context_reads_runtime_config():
+    env = _agent_env_from_context(_RuntimeContext())
+
+    assert env["RUNE_HARBOR_MODEL"] == "gpt-5.4"
+    assert env["RUNE_HARBOR_MAX_STEPS"] == "60"
 
 
 def test_build_rune_bench_command_quotes_instruction():
@@ -111,6 +143,26 @@ def test_container_env_passes_llm_credentials(monkeypatch):
     assert env["RUNE_BENCH_BLOCK_VCS_HISTORY"] == "1"
     assert env["RUNE_BENCH_EXPECT_SOURCE_DIFF_SHA256"] == "abc123"
     assert "UNRELATED_KEY" not in env
+
+
+def test_container_env_merges_harbor_agent_env(monkeypatch):
+    _clear_credential_env(monkeypatch)
+    monkeypatch.setenv("OPENAI_API_KEY", "secret")
+
+    env = _container_env(
+        {
+            "RUNE_HARBOR_PROVIDER": "openai",
+            "RUNE_HARBOR_MODEL": "gpt-5.4",
+            "RUNE_HARBOR_TASK_ID": "configure-git-webserver",
+            "RUNE_HARBOR_MAX_STEPS": "60",
+        }
+    )
+
+    assert env["OPENAI_API_KEY"] == "secret"
+    assert env["RUNE_HARBOR_PROVIDER"] == "openai"
+    assert env["RUNE_HARBOR_MODEL"] == "gpt-5.4"
+    assert env["RUNE_HARBOR_TASK_ID"] == "configure-git-webserver"
+    assert env["RUNE_HARBOR_MAX_STEPS"] == "60"
 
 
 def test_container_env_does_not_pass_unselected_provider_credentials(monkeypatch):

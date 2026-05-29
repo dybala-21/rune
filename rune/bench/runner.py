@@ -28,13 +28,17 @@ _SNAPSHOT_EXCLUDE_DIRS = {
     "venv",
 }
 _TEXT_DIFF_MAX_BYTES = 1_000_000
-BENCHMARK_PROMPT_POLICY = "aa-coding-agent-v1"
+_PATCH_DIFF_MAX_BYTES = 1_000_000
+_PATCH_DIFF_TRUNCATED_MARKER = "\n\n[patch.diff truncated by rune bench artifact cap]\n"
+BENCHMARK_PROMPT_POLICY = "aa-coding-agent-v2"
 DEFAULT_INSTALL_FINGERPRINT_PATH = Path("/logs/agent/rune_install_fingerprint.json")
 BENCHMARK_INSTRUCTION_PREFIX = """You are running in an unattended coding-agent benchmark.
 
 Benchmark rules and operating constraints:
 - Complete the task end-to-end in this container. Do not ask follow-up questions.
 - Do not finish with a partial solution, a blocker report, or a request for the user to continue.
+- Do not claim that a command or tool was blocked unless the tool result explicitly says it was blocked.
+  A failing command is diagnostic evidence; read the failure, fix the first concrete error, and retry.
 - If a required compiler, runtime, package manager, or utility is missing, install it when possible.
 - Use only task files and public resources. Do not inspect hidden evaluator paths such as /tests or /oracle.
 - Do not inspect VCS history with commands such as git log, git show, git blame, or reflog
@@ -42,6 +46,9 @@ Benchmark rules and operating constraints:
 - Run available in-workspace checks, examples, or self-written sanity tests before finalizing.
 - Before finalizing, run at least one clean-process smoke test through the public entrypoint
   using the required command or function name and likely evaluator call style.
+- If a public check fails, focus on the first failing assertion or error before broad rewrites.
+- When the token budget is getting low, stop exploring and ship the simplest complete artifact that
+  satisfies the requested paths, signatures, commands, and smoke test.
 - Match the requested file paths, function signatures, command names, output formats, and argument order exactly.
 - When a public function or CLI is named without a full signature, support natural positional usage
   and common named aliases in addition to your preferred named-argument style.
@@ -208,6 +215,33 @@ def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_int(name: str, default: int) -> int:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _clip_text_bytes(text: str, max_bytes: int) -> str:
+    data = text.encode("utf-8")
+    if len(data) <= max_bytes:
+        return text
+    return data[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _clip_patch_diff(diff: str) -> str:
+    max_bytes = _env_int("RUNE_BENCH_PATCH_DIFF_MAX_BYTES", _PATCH_DIFF_MAX_BYTES)
+    marker_bytes = len(_PATCH_DIFF_TRUNCATED_MARKER.encode("utf-8"))
+    if len(diff.encode("utf-8")) <= max_bytes:
+        return diff
+    body_limit = max(0, max_bytes - marker_bytes)
+    return _clip_text_bytes(diff, body_limit) + _PATCH_DIFF_TRUNCATED_MARKER
+
+
 def evaluate_fingerprint_gate(fingerprint: dict[str, Any]) -> dict[str, Any]:
     """Evaluate optional expected provenance values for official benchmark runs."""
     errors: list[str] = []
@@ -310,6 +344,8 @@ def _git_diff(cwd: Path) -> str:
         return ""
 
     diff = result.stdout
+    if len(diff.encode("utf-8")) >= _env_int("RUNE_BENCH_PATCH_DIFF_MAX_BYTES", _PATCH_DIFF_MAX_BYTES):
+        return _clip_patch_diff(diff)
     for rel_path in _git_untracked_files(cwd):
         try:
             untracked = subprocess.run(
@@ -324,7 +360,12 @@ def _git_diff(cwd: Path) -> str:
             continue
         if untracked.stdout:
             diff += "\n" + untracked.stdout
-    return diff
+            if (
+                len(diff.encode("utf-8"))
+                >= _env_int("RUNE_BENCH_PATCH_DIFF_MAX_BYTES", _PATCH_DIFF_MAX_BYTES)
+            ):
+                return _clip_patch_diff(diff)
+    return _clip_patch_diff(diff)
 
 
 def _git_untracked_files(cwd: Path) -> list[str]:
@@ -469,7 +510,13 @@ def _filesystem_diff(cwd: Path, before: dict[str, FileSnapshot]) -> str:
             )
         else:
             chunks.append(f"Binary file {rel_path} changed ({old.size} -> {new.size} bytes)\n")
-    return "".join(chunks)
+        current = "".join(chunks)
+        if (
+            len(current.encode("utf-8"))
+            >= _env_int("RUNE_BENCH_PATCH_DIFF_MAX_BYTES", _PATCH_DIFF_MAX_BYTES)
+        ):
+            return _clip_patch_diff(current)
+    return _clip_patch_diff("".join(chunks))
 
 
 def create_attempt_dir(options: BenchRunOptions) -> Path:
@@ -559,6 +606,7 @@ def run_bench_attempt(options: BenchRunOptions) -> Path:
 
 async def _run_agent(options: BenchRunOptions, attempt_dir: Path) -> None:
     old_rune_home = os.environ.get("RUNE_HOME")
+    old_capture_failed_tool_output = os.environ.get("RUNE_BENCH_CAPTURE_FAILED_TOOL_OUTPUT")
     old_cwd = Path.cwd()
     start = time.monotonic()
     output_parts: list[str] = []
@@ -567,6 +615,7 @@ async def _run_agent(options: BenchRunOptions, attempt_dir: Path) -> None:
     model_usage: list[dict[str, Any]] = []
 
     os.environ["RUNE_HOME"] = str(options.rune_home)
+    os.environ.setdefault("RUNE_BENCH_CAPTURE_FAILED_TOOL_OUTPUT", "1")
     options.rune_home.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -758,6 +807,7 @@ async def _run_agent(options: BenchRunOptions, attempt_dir: Path) -> None:
             {
                 "source_diff_present": bool(diff.strip()),
                 "git_status_present": bool(git_status.strip()),
+                "patch_diff_truncated": _PATCH_DIFF_TRUNCATED_MARKER.strip() in diff,
             },
         )
 
@@ -767,3 +817,7 @@ async def _run_agent(options: BenchRunOptions, attempt_dir: Path) -> None:
             os.environ.pop("RUNE_HOME", None)
         else:
             os.environ["RUNE_HOME"] = old_rune_home
+        if old_capture_failed_tool_output is None:
+            os.environ.pop("RUNE_BENCH_CAPTURE_FAILED_TOOL_OUTPUT", None)
+        else:
+            os.environ["RUNE_BENCH_CAPTURE_FAILED_TOOL_OUTPUT"] = old_capture_failed_tool_output
