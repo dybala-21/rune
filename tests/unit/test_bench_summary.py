@@ -53,6 +53,20 @@ def _write_attempt(
         + json.dumps({"event": "tool_call", "name": "exec"}) + "\n",
         encoding="utf-8",
     )
+    (attempt_dir / "model_usage.jsonl").write_text(
+        json.dumps(
+            {
+                "event": "model_usage",
+                "input_tokens": 900,
+                "cached_input_tokens": 100,
+                "cache_write_tokens": 25,
+                "reasoning_tokens": 50,
+                "output_tokens": 200,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     (attempt_dir / "events.jsonl").write_text("", encoding="utf-8")
     (attempt_dir / "patch.diff").write_text("diff --git a/app.py b/app.py\n", encoding="utf-8")
     (attempt_dir / "final_answer.txt").write_text("done", encoding="utf-8")
@@ -111,11 +125,21 @@ def test_summarize_harbor_job_with_rune_attempt(tmp_path):
     assert summary["passed"] == 1
     assert summary["mean_reward"] == 1.0
     assert summary["total_tokens_used"] == 1234
+    assert summary["total_input_tokens"] == 900
+    assert summary["total_cached_input_tokens"] == 100
+    assert summary["total_cache_write_tokens"] == 25
+    assert summary["total_reasoning_tokens"] == 50
+    assert summary["total_output_tokens"] == 200
     assert summary["total_tool_calls"] == 2
     assert summary["fingerprint_invalid_count"] == 0
     row = summary["rows"][0]
     assert row["benchmark"] == "terminal-bench-v2"
     assert row["task_id"] == "cancel-async-tasks"
+    assert row["input_tokens"] == 900
+    assert row["cached_input_tokens"] == 100
+    assert row["cache_write_tokens"] == 25
+    assert row["reasoning_tokens"] == 50
+    assert row["output_tokens"] == 200
     assert row["duration_ms"] == 10000
     assert row["environment_setup_ms"] == 1500
     assert row["fingerprint_gate_valid"] is True

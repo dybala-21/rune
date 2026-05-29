@@ -117,6 +117,14 @@ def run_attempt(
         bool,
         typer.Option("--dry-run", help="Write artifacts without invoking the agent"),
     ] = False,
+    max_steps: Annotated[
+        int | None,
+        typer.Option("--max-steps", help="Override agent max iterations for this attempt"),
+    ] = None,
+    timeout_seconds: Annotated[
+        int | None,
+        typer.Option("--timeout-seconds", help="Abort this attempt after N seconds"),
+    ] = None,
 ) -> None:
     """Run one local RUNE benchmark attempt and write structured artifacts."""
     if not benchmark:
@@ -131,6 +139,10 @@ def run_attempt(
         raise typer.BadParameter("--attempt-index must be >= 1")
     if memory_mode not in {"default", "off"}:
         raise typer.BadParameter("--memory-mode must be 'default' or 'off'")
+    if max_steps is not None and max_steps < 1:
+        raise typer.BadParameter("--max-steps must be >= 1")
+    if timeout_seconds is not None and timeout_seconds < 1:
+        raise typer.BadParameter("--timeout-seconds must be >= 1")
 
     loaded_instruction = (
         instruction_file.read_text(encoding="utf-8") if instruction_file is not None else instruction
@@ -159,6 +171,8 @@ def run_attempt(
             memory_mode=memory_mode,
             agent_variant_id=agent_variant_id,
             dry_run=dry_run,
+            max_steps=max_steps,
+            timeout_seconds=timeout_seconds,
         )
     )
     typer.echo(f"Wrote {attempt_dir}")

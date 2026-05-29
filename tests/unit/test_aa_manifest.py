@@ -84,6 +84,10 @@ def test_bench_run_dry_run_writes_attempt_artifacts(tmp_path):
             str(tmp_path),
             "--attempt-index",
             "2",
+            "--max-steps",
+            "7",
+            "--timeout-seconds",
+            "30",
             "--dry-run",
         ],
     )
@@ -100,6 +104,8 @@ def test_bench_run_dry_run_writes_attempt_artifacts(tmp_path):
     assert (attempt_dir / "fingerprint_gate.json").exists()
     agent_config = json.loads((attempt_dir / "agent_config.json").read_text())
     assert agent_config["benchmark_prompt_policy"] == "aa-coding-agent-v1"
+    assert agent_config["max_steps"] == 7
+    assert agent_config["timeout_seconds"] == 30
     fingerprint = json.loads((attempt_dir / "fingerprint.json").read_text())
     assert fingerprint["benchmark_prompt_policy"] == "aa-coding-agent-v1"
     fingerprint_gate = json.loads((attempt_dir / "fingerprint_gate.json").read_text())
@@ -189,6 +195,30 @@ def test_terminal_smoke_command_prints_harbor_commands():
     assert "adaptive-rejection-sampler" in lines[0]
     assert "--agent-env RUNE_HARBOR_TASK_ID=adaptive-rejection-sampler" in lines[0]
     assert "benchmarks.harbor.rune_agent:RuneInstalledAgent" in lines[0]
+
+
+def test_bench_run_rejects_invalid_safety_caps(tmp_path):
+    result = CliRunner().invoke(
+        app,
+        [
+            "bench",
+            "run",
+            "--benchmark",
+            "terminal-bench-v2",
+            "--task-id",
+            "smoke",
+            "--instruction",
+            "write hello",
+            "--output-dir",
+            str(tmp_path),
+            "--max-steps",
+            "0",
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert not (tmp_path / "terminal-bench-v2" / "smoke").exists()
 
 
 def test_git_diff_includes_untracked_files(tmp_path):

@@ -70,6 +70,8 @@ class BenchRunOptions:
     memory_mode: str = "default"
     dry_run: bool = False
     agent_variant_id: str | None = None
+    max_steps: int | None = None
+    timeout_seconds: int | None = None
 
 
 def _safe_path_part(value: str) -> str:
@@ -506,6 +508,8 @@ def write_attempt_inputs(attempt_dir: Path, options: BenchRunOptions) -> None:
             "rune_home": str(options.rune_home),
             "cwd": str(options.cwd),
             "dry_run": options.dry_run,
+            "max_steps": options.max_steps,
+            "timeout_seconds": options.timeout_seconds,
         },
     )
     (attempt_dir / "effective_instruction.txt").write_text(
@@ -569,7 +573,7 @@ async def _run_agent(options: BenchRunOptions, attempt_dir: Path) -> None:
         os.chdir(options.cwd)
 
         from rune.agent.loop import NativeAgentLoop
-        from rune.types import AgentConfig
+        from rune.types import AgentConfig, CompletionTrace
 
         config = AgentConfig()
         if options.model:
@@ -578,6 +582,10 @@ async def _run_agent(options: BenchRunOptions, attempt_dir: Path) -> None:
             config.provider = options.provider
         if options.model or options.provider:
             config._overridden = True
+        if options.max_steps:
+            config.max_iterations = options.max_steps
+        if options.timeout_seconds:
+            config.timeout_seconds = options.timeout_seconds
 
         loop = NativeAgentLoop(config=config)
 
@@ -636,6 +644,10 @@ async def _run_agent(options: BenchRunOptions, attempt_dir: Path) -> None:
                 }
             )
 
+        async def _on_model_usage(usage: dict[str, Any]) -> None:
+            row = {"event": "model_usage", **_jsonable(usage)}
+            model_usage.append(row)
+
         loop.set_approval_callback(_approval)
         loop.set_ask_user_callback(_ask_user)
         loop.on("step", _on_step)
@@ -643,6 +655,7 @@ async def _run_agent(options: BenchRunOptions, attempt_dir: Path) -> None:
         loop.on("tool_call", _on_tool_call)
         loop.on("tool_result", _on_tool_result)
         loop.on("step_tokens", _on_step_tokens)
+        loop.on("model_usage", _on_model_usage)
 
         run_context: dict[str, Any] = {"workspace_root": str(options.cwd)}
         use_git_diff = _is_git_repo(options.cwd)
@@ -658,7 +671,42 @@ async def _run_agent(options: BenchRunOptions, attempt_dir: Path) -> None:
                 events.append({"event": "memory_context_error", "error": str(exc)})
 
         agent_instruction = build_agent_instruction(options)
-        trace = await loop.run(agent_instruction, context=run_context)
+        try:
+            if options.timeout_seconds:
+                trace = await asyncio.wait_for(
+                    loop.run(
+                        agent_instruction,
+                        context=run_context,
+                        max_steps=options.max_steps,
+                    ),
+                    timeout=options.timeout_seconds,
+                )
+                if trace.reason == "cancelled":
+                    trace.reason = "timeout"
+                    events.append(
+                        {
+                            "event": "timeout",
+                            "timeout_seconds": options.timeout_seconds,
+                        }
+                    )
+            else:
+                trace = await loop.run(
+                    agent_instruction,
+                    context=run_context,
+                    max_steps=options.max_steps,
+                )
+        except TimeoutError:
+            trace = CompletionTrace(
+                reason="timeout",
+                final_step=loop.step,
+                total_tokens_used=loop.tokens_used,
+            )
+            events.append(
+                {
+                    "event": "timeout",
+                    "timeout_seconds": options.timeout_seconds,
+                }
+            )
         agent_wall_time_ms = int((time.monotonic() - start) * 1000)
         final_answer = "".join(output_parts)
         if options.memory_mode != "off" and final_answer.strip():
