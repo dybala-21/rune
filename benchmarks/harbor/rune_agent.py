@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shlex
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,11 @@ CONTROL_ENV_KEYS = (
     "RUNE_LOG_LEVEL",
     "RUNE_HARBOR_INSTALL_MODE",
     "RUNE_HARBOR_WHEELHOUSE",
+    "RUNE_HARBOR_BENCHMARK",
+    "RUNE_HARBOR_TASK_ID",
+    "RUNE_HARBOR_MODEL",
+    "RUNE_HARBOR_PROVIDER",
+    "RUNE_HARBOR_MEMORY_MODE",
     "RUNE_HARBOR_AGENT_VARIANT_ID",
     "RUNE_BENCH_AGENT_VARIANT_ID",
     "RUNE_BENCH_EXPECT_AGENT_VARIANT_ID",
@@ -136,6 +142,42 @@ def _context_value(context: Any, *names: str) -> str | None:
     return None
 
 
+def _raw_context_value(context: Any, name: str) -> Any:
+    if isinstance(context, dict):
+        return context.get(name)
+    return getattr(context, name, None)
+
+
+def _env_mapping(value: Any) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {
+        str(key): str(item)
+        for key, item in value.items()
+        if isinstance(key, str) and item is not None
+    }
+
+
+def _agent_env_from_context(context: Any) -> dict[str, str]:
+    """Return Harbor agent env entries when available on the runtime context."""
+    config = _raw_context_value(context, "config")
+    agent = _raw_context_value(config, "agent")
+    agent_env = _env_mapping(_raw_context_value(agent, "env"))
+    if agent_env:
+        return agent_env
+
+    agents = _raw_context_value(config, "agents")
+    if isinstance(agents, list) and agents:
+        first_agent = agents[0]
+        return _env_mapping(_raw_context_value(first_agent, "env"))
+    return {}
+
+
+def _env_value(env: Mapping[str, str], key: str) -> str | None:
+    value = env.get(key) or os.environ.get(key)
+    return value if value else None
+
+
 def _env_int(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name, str(default)))
@@ -143,8 +185,16 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def _env_int_optional(name: str) -> int | None:
-    raw = os.environ.get(name)
+def _env_int_value(name: str, default: int, env: Mapping[str, str] | None = None) -> int:
+    raw = (env or {}).get(name) or os.environ.get(name, str(default))
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _env_int_optional(name: str, env: Mapping[str, str] | None = None) -> int | None:
+    raw = (env or {}).get(name) or os.environ.get(name)
     if raw is None or not raw.strip():
         return None
     try:
@@ -158,8 +208,14 @@ def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _provider_key() -> str | None:
-    raw = os.environ.get("RUNE_HARBOR_PROVIDER") or os.environ.get("RUNE_PROVIDER")
+def _provider_key(env: Mapping[str, str] | None = None) -> str | None:
+    merged = env or {}
+    raw = (
+        merged.get("RUNE_HARBOR_PROVIDER")
+        or os.environ.get("RUNE_HARBOR_PROVIDER")
+        or merged.get("RUNE_PROVIDER")
+        or os.environ.get("RUNE_PROVIDER")
+    )
     if not raw:
         return None
     provider = raw.strip().lower().replace("_", "-")
@@ -172,26 +228,28 @@ def _provider_key() -> str | None:
     return aliases.get(provider, provider)
 
 
-def _credential_env_keys() -> tuple[str, ...]:
-    provider = _provider_key()
+def _credential_env_keys(env: Mapping[str, str] | None = None) -> tuple[str, ...]:
+    provider = _provider_key(env)
     if provider in PROVIDER_ENV_KEYS:
         return PROVIDER_ENV_KEYS[provider]
 
-    present = [key for key in _KNOWN_CREDENTIAL_ENV_KEYS if os.environ.get(key)]
+    merged = env or {}
+    present = [key for key in _KNOWN_CREDENTIAL_ENV_KEYS if merged.get(key) or os.environ.get(key)]
     if len(present) == 1:
         return (present[0],)
     return ()
 
 
-def _explicit_env_keys() -> tuple[str, ...]:
-    raw = os.environ.get("RUNE_HARBOR_PASS_ENV", "")
+def _explicit_env_keys(env: Mapping[str, str] | None = None) -> tuple[str, ...]:
+    raw = (env or {}).get("RUNE_HARBOR_PASS_ENV") or os.environ.get("RUNE_HARBOR_PASS_ENV", "")
     keys = raw.replace(",", " ").split()
     return tuple(key for key in keys if _ENV_NAME_RE.fullmatch(key))
 
 
-def _container_env() -> dict[str, str]:
-    keys = (*CONTROL_ENV_KEYS, *_credential_env_keys(), *_explicit_env_keys())
-    return {key: value for key in keys if (value := os.environ.get(key))}
+def _container_env(extra_env: Mapping[str, str] | None = None) -> dict[str, str]:
+    merged = {**os.environ, **dict(extra_env or {})}
+    keys = (*CONTROL_ENV_KEYS, *_credential_env_keys(merged), *_explicit_env_keys(merged))
+    return {key: value for key in keys if (value := merged.get(key))}
 
 
 def harbor_task_id(context: Any) -> str:
@@ -199,7 +257,7 @@ def harbor_task_id(context: Any) -> str:
     return (
         _context_value(context, "task_id", "task_name", "id", "name")
         or _context_value(getattr(context, "config", None), "task_id", "task_name", "task")
-        or _context_value(getattr(context, "task", None), "id", "name")
+        or _context_value(getattr(context, "task", None), "id", "name", "path")
         or "harbor-task"
     )
 
@@ -297,17 +355,22 @@ class RuneInstalledAgent(BaseInstalledAgent):  # type: ignore[misc]
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
-        benchmark = os.environ.get("RUNE_HARBOR_BENCHMARK", "terminal-bench-v2")
-        task_id = os.environ.get("RUNE_HARBOR_TASK_ID") or harbor_task_id(context)
-        model = os.environ.get("RUNE_HARBOR_MODEL") or os.environ.get("RUNE_MODEL")
-        provider = os.environ.get("RUNE_HARBOR_PROVIDER") or os.environ.get("RUNE_PROVIDER")
-        memory_mode = os.environ.get("RUNE_HARBOR_MEMORY_MODE", "default")
-        agent_variant_id = os.environ.get("RUNE_HARBOR_AGENT_VARIANT_ID") or os.environ.get(
-            "RUNE_BENCH_AGENT_VARIANT_ID"
+        agent_env = _agent_env_from_context(context)
+        benchmark = _env_value(agent_env, "RUNE_HARBOR_BENCHMARK") or "terminal-bench-v2"
+        task_id = _env_value(agent_env, "RUNE_HARBOR_TASK_ID") or harbor_task_id(context)
+        model = _env_value(agent_env, "RUNE_HARBOR_MODEL") or _env_value(agent_env, "RUNE_MODEL")
+        provider = _env_value(agent_env, "RUNE_HARBOR_PROVIDER") or _env_value(
+            agent_env,
+            "RUNE_PROVIDER",
         )
-        attempt_index = _env_int("RUNE_HARBOR_ATTEMPT_INDEX", 1)
-        max_steps = _env_int_optional("RUNE_HARBOR_MAX_STEPS")
-        timeout_seconds = _env_int_optional("RUNE_HARBOR_TIMEOUT_SECONDS")
+        memory_mode = _env_value(agent_env, "RUNE_HARBOR_MEMORY_MODE") or "default"
+        agent_variant_id = _env_value(
+            agent_env,
+            "RUNE_HARBOR_AGENT_VARIANT_ID",
+        ) or _env_value(agent_env, "RUNE_BENCH_AGENT_VARIANT_ID")
+        attempt_index = _env_int_value("RUNE_HARBOR_ATTEMPT_INDEX", 1, agent_env)
+        max_steps = _env_int_optional("RUNE_HARBOR_MAX_STEPS", agent_env)
+        timeout_seconds = _env_int_optional("RUNE_HARBOR_TIMEOUT_SECONDS", agent_env)
         command = build_rune_bench_command(
             instruction=instruction,
             benchmark=benchmark,
@@ -320,7 +383,7 @@ class RuneInstalledAgent(BaseInstalledAgent):  # type: ignore[misc]
             max_steps=max_steps,
             timeout_seconds=timeout_seconds,
         )
-        await self.exec_as_agent(environment, command=command, env=_container_env())
+        await self.exec_as_agent(environment, command=command, env=_container_env(agent_env))
 
     def populate_context_post_run(self, context: AgentContext) -> None:
         """Expose the latest RUNE artifacts to Harbor context consumers when present."""

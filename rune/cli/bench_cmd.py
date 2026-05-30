@@ -14,6 +14,7 @@ from rune.bench.aa_manifest import (
     build_artificial_analysis_manifest,
     validate_manifest,
 )
+from rune.bench.aa_score import DEFAULT_COMPONENT, format_score_text, score_paths
 from rune.bench.audit import audit_attempt_dir
 from rune.bench.runner import BenchRunOptions, run_bench_attempt
 from rune.bench.summary import format_summary_csv, summarize_paths
@@ -62,6 +63,62 @@ def write_aa_matrix(
             if row["component"].lower() == key or row["benchmark"].lower() == key
         ]
     payload = json.dumps(matrix, indent=2, sort_keys=True) + "\n"
+
+    if output is None:
+        typer.echo(payload, nl=False)
+        return
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(payload, encoding="utf-8")
+    typer.echo(f"Wrote {output}")
+
+
+@bench_app.command("aa-score")
+def score_aa_results(
+    paths: Annotated[
+        list[Path],
+        typer.Argument(help="Harbor job/trial directories or RUNE attempt artifact directories"),
+    ],
+    component: Annotated[
+        str,
+        typer.Option("--component", "-c", help="AA component name or benchmark slug"),
+    ] = DEFAULT_COMPONENT,
+    output_format: Annotated[
+        str,
+        typer.Option("--format", "-f", help="Output format: json or text"),
+    ] = "json",
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Write the score report to this path"),
+    ] = None,
+    allow_missing_fingerprint: Annotated[
+        bool,
+        typer.Option(
+            "--allow-missing-fingerprint",
+            help="Score exploratory runs without requiring fingerprint_gate.valid=true",
+        ),
+    ] = False,
+) -> None:
+    """Calculate an Artificial Analysis component score report."""
+    if output_format not in {"json", "text"}:
+        raise typer.BadParameter("--format must be 'json' or 'text'")
+    missing = [path for path in paths if not path.exists()]
+    if missing:
+        raise typer.BadParameter(f"path does not exist: {missing[0]}")
+
+    try:
+        report = score_paths(
+            paths,
+            component=component,
+            require_fingerprint=not allow_missing_fingerprint,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    if output_format == "text":
+        payload = format_score_text(report)
+    else:
+        payload = json.dumps(report, indent=2, sort_keys=True) + "\n"
 
     if output is None:
         typer.echo(payload, nl=False)

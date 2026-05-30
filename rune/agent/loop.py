@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import os
 import re
 import time
 import uuid
@@ -108,6 +109,73 @@ _MAX_OUTPUT_TOKENS_BY_INTENT: dict[str, int] = {
     "complex_coding": 8_192,
     "multi_task": 8_192,
 }
+
+_FAILED_TOOL_OUTPUT_TAIL_BYTES = 4_000
+_FAILED_TOOL_NUDGE_TAIL_BYTES = 1_200
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _tail_text(text: str, max_bytes: int) -> str:
+    data = text.encode("utf-8", errors="replace")
+    if len(data) <= max_bytes:
+        return text
+    return data[-max_bytes:].decode("utf-8", errors="ignore")
+
+
+def _tool_result_event_payload(cap_name: str, result: CapabilityResult) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "name": cap_name,
+        "success": result.success,
+        "output_length": len(result.output or ""),
+    }
+    if result.error:
+        payload["error_length"] = len(result.error)
+
+    if not result.success and _env_flag("RUNE_BENCH_CAPTURE_FAILED_TOOL_OUTPUT"):
+        tail_bytes = _env_int(
+            "RUNE_BENCH_FAILED_TOOL_OUTPUT_TAIL_BYTES",
+            _FAILED_TOOL_OUTPUT_TAIL_BYTES,
+        )
+        if result.output:
+            payload["output_tail"] = _tail_text(result.output, tail_bytes)
+            payload["output_tail_truncated"] = (
+                len(result.output.encode("utf-8", errors="replace")) > tail_bytes
+            )
+        if result.error:
+            payload["error_tail"] = _tail_text(result.error, min(tail_bytes, 2_000))
+            payload["error_tail_truncated"] = (
+                len(result.error.encode("utf-8", errors="replace")) > min(tail_bytes, 2_000)
+            )
+    return payload
+
+
+def _failed_tool_nudge(cap_name: str, result: CapabilityResult) -> str:
+    parts: list[str] = []
+    if result.error:
+        parts.append(f"error: {_tail_text(result.error, _FAILED_TOOL_NUDGE_TAIL_BYTES)}")
+    if result.output:
+        parts.append(f"output tail: {_tail_text(result.output, _FAILED_TOOL_NUDGE_TAIL_BYTES)}")
+    if not parts:
+        parts.append("no output captured")
+    return (
+        "[SYSTEM] Most recent failed tool result for "
+        f"{cap_name}. Use this concrete failure before retrying or finalizing:\n"
+        + "\n".join(parts)
+    )
 
 
 def _effective_max_steps(budget: int) -> int:
@@ -341,6 +409,7 @@ class NativeAgentLoop(EventEmitter):
         # Cross-step tool failure persistence (#P4) — streak only, not blocked groups.
         # Blocked groups are re-derived each step from the streak.
         self._persistent_fail_streak: dict[str, int] = {}
+        self._recent_failed_tool_nudge: str = ""
         # Injected callbacks (set from CLI / controller)
         self._approval_callback: Callable[[str, str], Awaitable[bool]] | None = None
         self._ask_user_callback: Any = None  # AskUserCallback
@@ -398,10 +467,23 @@ class NativeAgentLoop(EventEmitter):
         self._cognitive_cache = None
         # Reset cross-step failure state (#P4)
         self._persistent_fail_streak.clear()
+        self._recent_failed_tool_nudge = ""
         # Rehydration
         self._rehydration_recorder = None
         self._rehydration_trigger = None
         self._gate_blocked_count = 0
+
+    def _benchmark_completion_blocker(self) -> str | None:
+        if not _env_flag("RUNE_BENCH_CAPTURE_FAILED_TOOL_OUTPUT"):
+            return None
+        if not self._recent_failed_tool_nudge:
+            return None
+        return (
+            "[Completion Gate] A recent tool failed and no later successful "
+            "verification command cleared it. Fix or explicitly verify the failure before "
+            "finalizing.\n"
+            + self._recent_failed_tool_nudge
+        )
 
     async def run(
         self,
@@ -911,11 +993,16 @@ class NativeAgentLoop(EventEmitter):
                 # Also record in stall state
                 self._stall.record_error(sig)
 
-            await self.emit("tool_result", {
-                "name": cap_name,
-                "success": result.success,
-                "output_length": len(result.output or ""),
-            })
+            if _env_flag("RUNE_BENCH_CAPTURE_FAILED_TOOL_OUTPUT"):
+                if not result.success:
+                    self._recent_failed_tool_nudge = _failed_tool_nudge(cap_name, result)
+                elif cap_name == "bash_execute" and self._recent_failed_tool_nudge:
+                    cmd = _last_tool_params.get("command", "")
+                    from rune.agent.bash_parsing import is_verification_command
+                    if cmd and is_verification_command(cmd):
+                        self._recent_failed_tool_nudge = ""
+
+            await self.emit("tool_result", _tool_result_event_payload(cap_name, result))
 
         # Build PydanticAI agent and tool set
 
@@ -1606,11 +1693,16 @@ class NativeAgentLoop(EventEmitter):
                             f"show the real output before declaring done.",
                         )
                     else:
-                        log.info("final_answer_detected", step=self._step,
-                                 text_len=len(output_text), evidence=total_evidence)
-                        trace.reason = "completed"
-                        trace.final_step = self._step
-                        break
+                        blocker = self._benchmark_completion_blocker()
+                        if blocker:
+                            log.info("benchmark_failed_tool_fastpath_block", step=self._step)
+                            messages = self._inject_system_message(messages, blocker)
+                        else:
+                            log.info("final_answer_detected", step=self._step,
+                                     text_len=len(output_text), evidence=total_evidence)
+                            trace.reason = "completed"
+                            trace.final_step = self._step
+                            break
 
                 # completion gate (full 18-requirement integration)
                 intent_contract = resolve_intent_contract(classification, classification.confidence)
@@ -1628,10 +1720,15 @@ class NativeAgentLoop(EventEmitter):
                 # regardless of tool_requirement — if the LLM chose to answer
                 # without tools, respect that decision.
                 if total_evidence == 0 and output_text and output_text.strip():
-                    log.info("text_only_complete", step=self._step, text_len=len(output_text))
-                    trace.reason = "completed"
-                    trace.final_step = self._step
-                    break
+                    blocker = self._benchmark_completion_blocker()
+                    if blocker:
+                        log.info("benchmark_failed_tool_text_only_block", step=self._step)
+                        messages = self._inject_system_message(messages, blocker)
+                    else:
+                        log.info("text_only_complete", step=self._step, text_len=len(output_text))
+                        trace.reason = "completed"
+                        trace.final_step = self._step
+                        break
 
                 if total_evidence == 0 and output_text and intent_contract.tool_requirement == "none":
                     effective_tool_req = "none"
@@ -1694,10 +1791,15 @@ class NativeAgentLoop(EventEmitter):
                 gate_result = evaluate_completion_gate(gate_input)
 
                 if gate_result.outcome == "verified":
-                    trace.reason = "completed"
-                    trace.final_step = self._step
-                    trace.evidence_score = 1.0
-                    break
+                    blocker = self._benchmark_completion_blocker()
+                    if blocker:
+                        log.info("benchmark_failed_tool_verified_block", step=self._step)
+                        messages = self._inject_system_message(messages, blocker)
+                    else:
+                        trace.reason = "completed"
+                        trace.final_step = self._step
+                        trace.evidence_score = 1.0
+                        break
 
                 # If blocked, let the loop continue — but limit repeats
                 # to prevent infinite loops when requirements can't be met.
@@ -1777,11 +1879,16 @@ class NativeAgentLoop(EventEmitter):
                             "You must write/edit code files to complete this task.",
                         )
                     else:
-                        log.info("partial_completion_accepted", step=self._step)
-                        trace.reason = "completed"
-                        trace.final_step = self._step
-                        trace.evidence_score = 0.8
-                        break
+                        blocker = self._benchmark_completion_blocker()
+                        if blocker:
+                            log.info("benchmark_failed_tool_partial_block", step=self._step)
+                            messages = self._inject_system_message(messages, blocker)
+                        else:
+                            log.info("partial_completion_accepted", step=self._step)
+                            trace.reason = "completed"
+                            trace.final_step = self._step
+                            trace.evidence_score = 0.8
+                            break
 
             except Exception as exc:
                 reason = classify_error(exc)
@@ -2508,12 +2615,16 @@ class NativeAgentLoop(EventEmitter):
         if nudge_msg:
             messages = self._inject_system_message(messages, nudge_msg)
 
-        # 3. Stall guidance
+        # 3. Benchmark failure context
+        if _env_flag("RUNE_BENCH_CAPTURE_FAILED_TOOL_OUTPUT") and self._recent_failed_tool_nudge:
+            messages = self._inject_system_message(messages, self._recent_failed_tool_nudge)
+
+        # 4. Stall guidance
         stall_guidance = self._get_stall_guidance()
         if stall_guidance:
             messages = self._inject_system_message(messages, stall_guidance)
 
-        # 4. Workspace guard
+        # 5. Workspace guard
         if workspace_root:
             # Check last tool call if it was bash
             if self._stall.last_tool_call == "bash_execute":
@@ -2523,20 +2634,20 @@ class NativeAgentLoop(EventEmitter):
                 if warning:
                     messages = self._inject_system_message(messages, warning)
 
-        # 5. Execution nudges
+        # 6. Execution nudges
         nudges = self._get_execution_nudges()
         for n in nudges:
             messages = self._inject_system_message(messages, n)
 
-        # 6. Knowledge inventory at milestone steps (#5)
+        # 7. Knowledge inventory at milestone steps (#5)
         inventory = self._maybe_inject_knowledge_inventory()
         if inventory:
             messages = self._inject_system_message(messages, inventory)
 
-        # 7. Vision cache integration (#3): replace duplicate images with text
+        # 8. Vision cache integration (#3): replace duplicate images with text
         self._apply_vision_cache(messages)
 
-        # 8. Token-based trimming (#H4): trim messages to fit within phase cap
+        # 9. Token-based trimming (#H4): trim messages to fit within phase cap
         messages = self._trim_to_token_cap(messages)
 
         return messages

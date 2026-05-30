@@ -103,16 +103,17 @@ def test_bench_run_dry_run_writes_attempt_artifacts(tmp_path):
     assert (attempt_dir / "fingerprint.json").exists()
     assert (attempt_dir / "fingerprint_gate.json").exists()
     agent_config = json.loads((attempt_dir / "agent_config.json").read_text())
-    assert agent_config["benchmark_prompt_policy"] == "aa-coding-agent-v1"
+    assert agent_config["benchmark_prompt_policy"] == "aa-coding-agent-v2"
     assert agent_config["max_steps"] == 7
     assert agent_config["timeout_seconds"] == 30
     fingerprint = json.loads((attempt_dir / "fingerprint.json").read_text())
-    assert fingerprint["benchmark_prompt_policy"] == "aa-coding-agent-v1"
+    assert fingerprint["benchmark_prompt_policy"] == "aa-coding-agent-v2"
     fingerprint_gate = json.loads((attempt_dir / "fingerprint_gate.json").read_text())
     assert fingerprint_gate["valid"] is True
     effective_instruction = (attempt_dir / "effective_instruction.txt").read_text()
     assert "unattended coding-agent benchmark" in effective_instruction
     assert "Do not inspect hidden evaluator paths" in effective_instruction
+    assert "Do not claim that a command or tool was blocked" in effective_instruction
     assert "write hello" in effective_instruction
 
 
@@ -150,7 +151,7 @@ def test_fingerprint_gate_checks_source_diff(monkeypatch):
 
     gate = evaluate_fingerprint_gate(
         {
-            "benchmark_prompt_policy": "aa-coding-agent-v1",
+            "benchmark_prompt_policy": "aa-coding-agent-v2",
             "rune": {"module_file": "/venv/rune/__init__.py"},
             "install_fingerprint": {
                 "install_mode": "wheelhouse",
@@ -179,6 +180,7 @@ def test_build_agent_instruction_preserves_task_instruction(tmp_path):
     assert "Do not finish with a partial solution" in instruction
     assert "Do not inspect VCS history" in instruction
     assert "clean-process smoke test" in instruction
+    assert "first failing assertion" in instruction
     assert "support natural positional usage" in instruction
     assert instruction.endswith("create /app/out.txt")
 
@@ -229,6 +231,17 @@ def test_git_diff_includes_untracked_files(tmp_path):
 
     assert "created.txt" in diff
     assert "+hello" in diff
+
+
+def test_git_diff_caps_large_untracked_artifacts(tmp_path, monkeypatch):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    monkeypatch.setenv("RUNE_BENCH_PATCH_DIFF_MAX_BYTES", "200")
+    (tmp_path / "large.txt").write_text("x" * 1000, encoding="utf-8")
+
+    diff = _git_diff(tmp_path)
+
+    assert "patch.diff truncated" in diff
+    assert len(diff.encode("utf-8")) <= 200
 
 
 def test_filesystem_diff_tracks_non_git_created_files(tmp_path):
