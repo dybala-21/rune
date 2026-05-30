@@ -178,6 +178,10 @@ def _failed_tool_nudge(cap_name: str, result: CapabilityResult) -> str:
     )
 
 
+def _should_clear_failed_tool_nudge(cap_name: str, result: CapabilityResult) -> bool:
+    return result.success and cap_name == "bash_execute"
+
+
 def _effective_max_steps(budget: int) -> int:
     """Scale max steps based on token budget size."""
     if budget >= 800_000:
@@ -480,7 +484,7 @@ class NativeAgentLoop(EventEmitter):
             return None
         return (
             "[Completion Gate] A recent tool failed and no later successful "
-            "verification command cleared it. Fix or explicitly verify the failure before "
+            "command cleared it. Fix or explicitly verify the failure before "
             "finalizing.\n"
             + self._recent_failed_tool_nudge
         )
@@ -996,11 +1000,11 @@ class NativeAgentLoop(EventEmitter):
             if _env_flag("RUNE_BENCH_CAPTURE_FAILED_TOOL_OUTPUT"):
                 if not result.success:
                     self._recent_failed_tool_nudge = _failed_tool_nudge(cap_name, result)
-                elif cap_name == "bash_execute" and self._recent_failed_tool_nudge:
-                    cmd = _last_tool_params.get("command", "")
-                    from rune.agent.bash_parsing import is_verification_command
-                    if cmd and is_verification_command(cmd):
-                        self._recent_failed_tool_nudge = ""
+                elif (
+                    self._recent_failed_tool_nudge
+                    and _should_clear_failed_tool_nudge(cap_name, result)
+                ):
+                    self._recent_failed_tool_nudge = ""
 
             await self.emit("tool_result", _tool_result_event_payload(cap_name, result))
 

@@ -30,7 +30,7 @@ _SNAPSHOT_EXCLUDE_DIRS = {
 _TEXT_DIFF_MAX_BYTES = 1_000_000
 _PATCH_DIFF_MAX_BYTES = 1_000_000
 _PATCH_DIFF_TRUNCATED_MARKER = "\n\n[patch.diff truncated by rune bench artifact cap]\n"
-BENCHMARK_PROMPT_POLICY = "aa-coding-agent-v2"
+BENCHMARK_PROMPT_POLICY = "aa-coding-agent-v3"
 DEFAULT_INSTALL_FINGERPRINT_PATH = Path("/logs/agent/rune_install_fingerprint.json")
 BENCHMARK_INSTRUCTION_PREFIX = """You are running in an unattended coding-agent benchmark.
 
@@ -49,6 +49,14 @@ Benchmark rules and operating constraints:
 - If a public check fails, focus on the first failing assertion or error before broad rewrites.
 - When the token budget is getting low, stop exploring and ship the simplest complete artifact that
   satisfies the requested paths, signatures, commands, and smoke test.
+- For dataset, counting, or leaderboard-style tasks, read the dataset README, schema, configs,
+  and split names before computing. Use the exact labels and fields requested by the task.
+  Do not expand a requested category into related categories unless the README or schema explicitly
+  defines that mapping.
+- For tokenizer-counting tasks, record the exact tokenizer, dataset config, split, filter predicate,
+  counted text fields, and row count in your own verification output before writing the final answer.
+- For tasks requiring a final answer file, write only the requested payload, then read that file back
+  in a clean command and verify format constraints such as integer-only output before finalizing.
 - Match the requested file paths, function signatures, command names, output formats, and argument order exactly.
 - When a public function or CLI is named without a full signature, support natural positional usage
   and common named aliases in addition to your preferred named-argument style.

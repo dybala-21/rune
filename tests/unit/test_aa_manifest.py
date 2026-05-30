@@ -103,17 +103,18 @@ def test_bench_run_dry_run_writes_attempt_artifacts(tmp_path):
     assert (attempt_dir / "fingerprint.json").exists()
     assert (attempt_dir / "fingerprint_gate.json").exists()
     agent_config = json.loads((attempt_dir / "agent_config.json").read_text())
-    assert agent_config["benchmark_prompt_policy"] == "aa-coding-agent-v2"
+    assert agent_config["benchmark_prompt_policy"] == "aa-coding-agent-v3"
     assert agent_config["max_steps"] == 7
     assert agent_config["timeout_seconds"] == 30
     fingerprint = json.loads((attempt_dir / "fingerprint.json").read_text())
-    assert fingerprint["benchmark_prompt_policy"] == "aa-coding-agent-v2"
+    assert fingerprint["benchmark_prompt_policy"] == "aa-coding-agent-v3"
     fingerprint_gate = json.loads((attempt_dir / "fingerprint_gate.json").read_text())
     assert fingerprint_gate["valid"] is True
     effective_instruction = (attempt_dir / "effective_instruction.txt").read_text()
     assert "unattended coding-agent benchmark" in effective_instruction
     assert "Do not inspect hidden evaluator paths" in effective_instruction
     assert "Do not claim that a command or tool was blocked" in effective_instruction
+    assert "Do not expand a requested category into related categories" in effective_instruction
     assert "write hello" in effective_instruction
 
 
@@ -151,7 +152,7 @@ def test_fingerprint_gate_checks_source_diff(monkeypatch):
 
     gate = evaluate_fingerprint_gate(
         {
-            "benchmark_prompt_policy": "aa-coding-agent-v2",
+            "benchmark_prompt_policy": "aa-coding-agent-v3",
             "rune": {"module_file": "/venv/rune/__init__.py"},
             "install_fingerprint": {
                 "install_mode": "wheelhouse",
@@ -181,6 +182,8 @@ def test_build_agent_instruction_preserves_task_instruction(tmp_path):
     assert "Do not inspect VCS history" in instruction
     assert "clean-process smoke test" in instruction
     assert "first failing assertion" in instruction
+    assert "dataset README" in instruction
+    assert "read that file back" in instruction
     assert "support natural positional usage" in instruction
     assert instruction.endswith("create /app/out.txt")
 
