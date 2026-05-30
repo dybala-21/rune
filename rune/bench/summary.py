@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import io
 import json
@@ -380,7 +381,13 @@ def summarize_paths(paths: Iterable[Path]) -> dict[str, Any]:
             row = _row_from_harbor_result(result_file)
             rows.append(row)
             if row.get("attempt_dir"):
-                seen_attempt_dirs.add(Path(str(row["attempt_dir"])).resolve())
+                attempt_dir = Path(str(row["attempt_dir"]))
+                seen_attempt_dirs.add(attempt_dir.resolve())
+                trial_dir = row.get("trial_dir")
+                if isinstance(trial_dir, str):
+                    with contextlib.suppress(ValueError):
+                        rel_attempt = attempt_dir.relative_to(Path(trial_dir) / "agent")
+                        seen_attempt_dirs.add((Path(trial_dir) / "artifacts" / rel_attempt).resolve())
 
     for path in input_paths:
         for attempt_dir in _iter_attempt_dirs(path):

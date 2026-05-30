@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from pytest import MonkeyPatch
 
-from rune.agent.loop import NativeAgentLoop, _failed_tool_nudge, _tool_result_event_payload
+from rune.agent.loop import (
+    NativeAgentLoop,
+    _failed_tool_nudge,
+    _should_clear_failed_tool_nudge,
+    _tool_result_event_payload,
+)
 from rune.types import CapabilityResult
 
 
@@ -72,3 +77,18 @@ def test_benchmark_completion_blocker_requires_recent_failure_and_env(
     assert blocker is not None
     assert "recent tool failed" in blocker
     assert "failed command output" in blocker
+
+
+def test_failed_tool_nudge_clears_after_successful_bash() -> None:
+    assert _should_clear_failed_tool_nudge(
+        "bash_execute",
+        CapabilityResult(success=True, output="ok"),
+    )
+    assert not _should_clear_failed_tool_nudge(
+        "bash_execute",
+        CapabilityResult(success=False, error="still failed"),
+    )
+    assert not _should_clear_failed_tool_nudge(
+        "file_write",
+        CapabilityResult(success=True, output="wrote file"),
+    )
