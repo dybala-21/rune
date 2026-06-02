@@ -9,6 +9,8 @@ from rune.agent.tool_adapter import (
     STALL_LIMITS,
     StallState,
     ToolAdapterOptions,
+    _cap_benchmark_bash_timeout,
+    _enforce_benchmark_status_markers,
     _format_tool_output,
     _update_stall_state,
     get_effective_stall_limits,
@@ -224,6 +226,65 @@ class TestFormatToolOutput:
         output = _format_tool_output("web_fetch", {"url": "http://x"}, result)
         assert head_marker in output
         assert tail_marker in output
+
+
+class TestBenchmarkStatusMarkers:
+    def test_strict_status_marker_disabled_by_default(self, monkeypatch):
+        monkeypatch.delenv("RUNE_BENCH_STRICT_STATUS_MARKERS", raising=False)
+        result = CapabilityResult(success=True, output="SAMPLE_CMP:1\n")
+
+        enforced = _enforce_benchmark_status_markers(result)
+
+        assert enforced.success is True
+
+    def test_strict_status_marker_promotes_masked_failure(self, monkeypatch):
+        monkeypatch.setenv("RUNE_BENCH_STRICT_STATUS_MARKERS", "1")
+        result = CapabilityResult(success=True, output="setup ok\nFULL_CMP:1\n")
+
+        enforced = _enforce_benchmark_status_markers(result)
+
+        assert enforced.success is False
+        assert "FULL_CMP:1" in (enforced.error or "")
+        assert enforced.output == result.output
+        assert enforced.metadata["strictStatusMarkers"] == ["FULL_CMP:1"]
+
+    def test_strict_status_marker_ignores_zero_status(self, monkeypatch):
+        monkeypatch.setenv("RUNE_BENCH_STRICT_STATUS_MARKERS", "1")
+        result = CapabilityResult(success=True, output="SAMPLE_CMP:0\n")
+
+        enforced = _enforce_benchmark_status_markers(result)
+
+        assert enforced.success is True
+
+
+class TestBenchmarkBashTimeoutCap:
+    def test_timeout_cap_disabled_by_default(self, monkeypatch):
+        monkeypatch.delenv("RUNE_BENCH_BASH_TIMEOUT_CAP_MS", raising=False)
+        params = {"command": "sleep 5", "timeout": 600000}
+
+        capped = _cap_benchmark_bash_timeout(params)
+
+        assert capped is params
+        assert capped["timeout"] == 600000
+
+    def test_timeout_cap_clips_large_timeout(self, monkeypatch):
+        monkeypatch.setenv("RUNE_BENCH_BASH_TIMEOUT_CAP_MS", "120000")
+        params = {"command": "sleep 5", "timeout": 600000}
+
+        capped = _cap_benchmark_bash_timeout(params)
+
+        assert capped is not params
+        assert capped["timeout"] == 120000
+        assert params["timeout"] == 600000
+
+    def test_timeout_cap_keeps_smaller_timeout(self, monkeypatch):
+        monkeypatch.setenv("RUNE_BENCH_BASH_TIMEOUT_CAP_MS", "120000")
+        params = {"command": "sleep 5", "timeout": 60000}
+
+        capped = _cap_benchmark_bash_timeout(params)
+
+        assert capped is params
+        assert capped["timeout"] == 60000
 
 
 class TestBashPreflightSnapshot:

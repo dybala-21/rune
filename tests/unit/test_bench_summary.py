@@ -150,6 +150,49 @@ def test_summarize_harbor_job_with_rune_attempt(tmp_path):
     assert row["attempt_dir"] == str(attempt_dir)
 
 
+def test_summarize_harbor_job_ignores_downloaded_artifact_mirror(tmp_path):
+    job_dir = tmp_path / "job"
+    trial_dir = job_dir / "cancel-async-tasks__abc123"
+    attempt_dir = (
+        trial_dir
+        / "agent"
+        / "rune"
+        / "terminal-bench-v2"
+        / "cancel-async-tasks"
+        / "attempt-001"
+    )
+    artifact_attempt_dir = (
+        trial_dir
+        / "artifacts"
+        / "rune"
+        / "terminal-bench-v2"
+        / "cancel-async-tasks"
+        / "attempt-001"
+    )
+    _write_attempt(attempt_dir)
+    _write_attempt(artifact_attempt_dir)
+    _write_json(
+        trial_dir / "result.json",
+        {
+            "task_name": "cancel-async-tasks",
+            "trial_name": "cancel-async-tasks__abc123",
+            "task_id": {"path": "cancel-async-tasks"},
+            "source": "terminal-bench",
+            "config": {
+                "trials_dir": str(job_dir),
+                "verifier": {"disable": False},
+            },
+            "verifier_result": {"rewards": {"reward": 1.0}},
+            "exception_info": None,
+        },
+    )
+
+    summary = summarize_paths([job_dir])
+
+    assert summary["count"] == 1
+    assert summary["rows"][0]["attempt_dir"] == str(attempt_dir)
+
+
 def test_summarize_harbor_timeout_with_fingerprint_only_attempt(tmp_path):
     job_dir = tmp_path / "job"
     trial_dir = job_dir / "crack-7z-hash__abc123"

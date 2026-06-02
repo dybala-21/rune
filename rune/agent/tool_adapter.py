@@ -22,11 +22,16 @@ from rune.agent.cognitive_cache import SessionToolCache
 from rune.capabilities.output_prefixes import (
     BASH_CMD_PREFIX,
     BASH_EXIT_PREFIX,
+    BLOCKED_PREFIX,
+    DENIED_PREFIX,
+    ERROR_PREFIX,
     FILE_READ_PATH_PREFIX,
 )
 from rune.capabilities.registry import CapabilityRegistry, get_capability_registry
 from rune.capabilities.types import CapabilityDefinition
 from rune.types import CapabilityResult
+from rune.utils.env import env_flag as _env_flag
+from rune.utils.env import env_int as _env_int
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -278,6 +283,27 @@ _SMART_EXPAND_MAX_LINES = 500
 # Maximum tool output size (~30KB ≈ 7500 tokens)
 MAX_TOOL_OUTPUT_CHARS = 30_000
 
+_BENCH_STRICT_STATUS_MARKERS_ENV = "RUNE_BENCH_STRICT_STATUS_MARKERS"
+_BENCH_BASH_TIMEOUT_CAP_MS_ENV = "RUNE_BENCH_BASH_TIMEOUT_CAP_MS"
+_STRICT_STATUS_MARKER_RE = re.compile(
+    r"(?im)^\s*([A-Z][A-Z0-9_]{1,64})\s*[:=]\s*([1-9]\d*)\s*$"
+)
+_STRICT_STATUS_MARKER_NAMES = frozenset({
+    "CMP",
+    "DIFF",
+    "EXIT",
+    "FULL_CMP",
+    "SAMPLE_CMP",
+    "SMOKE_CMP",
+    "VERIFY_CMP",
+})
+_STRICT_STATUS_MARKER_SUFFIXES = (
+    "_CMP",
+    "_DIFF",
+    "_EXIT",
+    "_STATUS",
+)
+
 
 def is_mcp_write_operation(cap_name: str) -> bool:
     """Detect whether an MCP capability name represents a write operation.
@@ -292,6 +318,64 @@ def is_mcp_write_operation(cap_name: str) -> bool:
         return False
     tool_name = ".".join(parts[2:])
     return bool(_MCP_WRITE_PATTERN.search(tool_name))
+
+
+def _cap_benchmark_bash_timeout(params: dict[str, Any]) -> dict[str, Any]:
+    cap_ms = _env_int(_BENCH_BASH_TIMEOUT_CAP_MS_ENV)
+    if cap_ms is None:
+        return params
+    raw_timeout = params.get("timeout")
+    if raw_timeout is None:
+        return params
+    try:
+        timeout_ms = int(raw_timeout)
+    except (TypeError, ValueError):
+        return params
+    if timeout_ms <= cap_ms:
+        return params
+    capped = dict(params)
+    capped["timeout"] = cap_ms
+    return capped
+
+
+def _is_strict_status_marker(name: str) -> bool:
+    marker = name.upper()
+    return marker in _STRICT_STATUS_MARKER_NAMES or marker.endswith(_STRICT_STATUS_MARKER_SUFFIXES)
+
+
+def _enforce_benchmark_status_markers(result: CapabilityResult) -> CapabilityResult:
+    """Treat benchmark smoke-check status markers as failures when enabled."""
+    if not result.success or not _env_flag(_BENCH_STRICT_STATUS_MARKERS_ENV):
+        return result
+
+    markers: list[str] = []
+    for match in _STRICT_STATUS_MARKER_RE.finditer(result.output or ""):
+        name = match.group(1).upper()
+        if _is_strict_status_marker(name):
+            markers.append(f"{name}:{match.group(2)}")
+
+    if not markers:
+        return result
+
+    suggestions = list(result.suggestions)
+    suggestions.extend(
+        [
+            "Make smoke checks exit non-zero when a comparison or status marker is non-zero.",
+            "Use 'cmp -s actual expected || { echo mismatch; exit 1; }' instead of masking the failure with a final printf.",
+        ]
+    )
+    metadata = dict(result.metadata)
+    metadata["strictStatusMarkers"] = markers
+    return CapabilityResult(
+        success=False,
+        output=result.output,
+        error=(
+            "Bash command reported non-zero benchmark status marker(s): "
+            + ", ".join(markers)
+        ),
+        suggestions=suggestions,
+        metadata=metadata,
+    )
 
 
 # build_tool_set
@@ -431,6 +515,9 @@ def _build_typed_tool(
                 effective_params["maxLength"] = adaptive_max
                 effective_params["max_length"] = adaptive_max
 
+        if cap_name == _BASH_CAPABILITY:
+            effective_params = _cap_benchmark_bash_timeout(effective_params)
+
         # 1. Cognitive cache check
         if cache is not None:
             cache_key = cache.generate_key(cap_name, effective_params)
@@ -472,14 +559,14 @@ def _build_typed_tool(
                         err = CapabilityResult(success=False, error=guard_result.reason)
                         if opts.on_tool_end is not None:
                             await opts.on_tool_end(cap_name, err)
-                        return f"[DENIED] {guard_result.reason}{deny_hint}"
+                        return f"{DENIED_PREFIX} {guard_result.reason}{deny_hint}"
                     # Approved, reset denial counter
                     _consecutive_denials[0] = 0
                 else:
                     err = CapabilityResult(success=False, error=guard_result.reason)
                     if opts.on_tool_end is not None:
                         await opts.on_tool_end(cap_name, err)
-                    return f"[BLOCKED] Guardian requires approval: {guard_result.reason}"
+                    return f"{BLOCKED_PREFIX} Guardian requires approval: {guard_result.reason}"
 
         # -- Feature 3: MCP write operation approval guard -------
         if cap_name.startswith("mcp.") and opts.approval_callback is not None:
@@ -500,7 +587,7 @@ def _build_typed_tool(
                     )
                     if opts.on_tool_end is not None:
                         await opts.on_tool_end(cap_name, err)
-                    return "[DENIED] User declined the service operation."
+                    return f"{DENIED_PREFIX} User declined the service operation."
 
         # 2.5 Edit-loop circuit breaker — blocks at tool dispatch level
         if cap_name in ("file_edit", "file_write") and stall is not None:
@@ -511,7 +598,7 @@ def _build_typed_tool(
                     _limit = STALL_LIMITS.get("fileWrite", {}).get("sameFile", 3)
                     if _count >= _limit:
                         _block_msg = (
-                            f"[BLOCKED] File '{_fp}' has been edited {_count} times. "
+                            f"{BLOCKED_PREFIX} File '{_fp}' has been edited {_count} times. "
                             "You are stuck in an edit loop. STOP editing this file. "
                             "Step back and reconsider your entire approach."
                         )
@@ -527,6 +614,8 @@ def _build_typed_tool(
         except Exception as exc:
             result = CapabilityResult(success=False, error=f"Execution error: {exc}")
         elapsed_ms = (time.monotonic() - start_time) * 1000
+        if cap_name == _BASH_CAPABILITY:
+            result = _enforce_benchmark_status_markers(result)
 
         # Feature 1: Reset denials on successful bash execution
         if cap_name == _BASH_CAPABILITY and result.success:
@@ -667,7 +756,7 @@ def _format_tool_output(
                 exit_code = result.metadata.get("exitCode", 1)
             if isinstance(command, str):
                 parts.append(f"{BASH_CMD_PREFIX}{command}{BASH_EXIT_PREFIX}{exit_code}]")
-        parts.append(f"[ERROR] {result.error or 'Unknown error'}")
+        parts.append(f"{ERROR_PREFIX} {result.error or 'Unknown error'}")
         if result.output:
             parts.append(result.output)
 

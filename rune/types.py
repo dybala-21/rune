@@ -242,6 +242,9 @@ class CompletionTrace:
     final_step: int = 0
     total_tokens_used: int = 0
     evidence_score: float = 0.0
+    # Evidence Gate decision history (None when the gate is disabled). Surfaced
+    # here because structlog events are not captured in benchmark containers.
+    evidence_gate: dict[str, Any] | None = None
 
 
 # LLM
