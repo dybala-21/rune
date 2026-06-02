@@ -73,6 +73,13 @@ CONTROL_ENV_KEYS = (
     "RUNE_BENCH_WHEELHOUSE_SHA256",
     "RUNE_HARBOR_MAX_STEPS",
     "RUNE_HARBOR_TIMEOUT_SECONDS",
+    # Optional per-turn write/execute cap (off by default in the runner). Must
+    # be forwarded so an operator can enable it from `harbor run --agent-env`
+    # for a canary without editing the runner defaults.
+    "RUNE_BENCH_MAX_WRITE_EXEC_PER_TURN",
+    # Optional Evidence Gate (output-correctness re-verification before finalize;
+    # off by default). Forwarded so a canary can toggle it via --agent-env.
+    "RUNE_BENCH_EVIDENCE_GATE",
 )
 PROVIDER_ENV_KEYS = {
     "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"),
@@ -176,13 +183,6 @@ def _agent_env_from_context(context: Any) -> dict[str, str]:
 def _env_value(env: Mapping[str, str], key: str) -> str | None:
     value = env.get(key) or os.environ.get(key)
     return value if value else None
-
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.environ.get(name, str(default)))
-    except ValueError:
-        return default
 
 
 def _env_int_value(name: str, default: int, env: Mapping[str, str] | None = None) -> int:

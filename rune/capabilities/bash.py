@@ -36,6 +36,7 @@ from rune.safety.execution_policy import (
 )
 from rune.safety.guardian import get_guardian
 from rune.types import CapabilityResult, Domain, RiskLevel
+from rune.utils.env import env_flag as _env_flag
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -87,10 +88,6 @@ def _kill_process_group(pid: int, sig: int = signal.SIGTERM) -> None:
         return
     with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
         os.killpg(os.getpgid(pid), sig)
-
-
-def _env_flag(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _git_subcommand(tokens: list[str]) -> str | None:

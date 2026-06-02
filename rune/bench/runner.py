@@ -17,6 +17,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from rune.utils.env import env_flag as _env_flag
+from rune.utils.env import env_int as _env_int
+
 _SNAPSHOT_EXCLUDE_DIRS = {
     ".git",
     ".hg",
@@ -30,7 +33,7 @@ _SNAPSHOT_EXCLUDE_DIRS = {
 _TEXT_DIFF_MAX_BYTES = 1_000_000
 _PATCH_DIFF_MAX_BYTES = 1_000_000
 _PATCH_DIFF_TRUNCATED_MARKER = "\n\n[patch.diff truncated by rune bench artifact cap]\n"
-BENCHMARK_PROMPT_POLICY = "aa-coding-agent-v3"
+BENCHMARK_PROMPT_POLICY = "aa-coding-agent-v8"
 DEFAULT_INSTALL_FINGERPRINT_PATH = Path("/logs/agent/rune_install_fingerprint.json")
 BENCHMARK_INSTRUCTION_PREFIX = """You are running in an unattended coding-agent benchmark.
 
@@ -57,6 +60,52 @@ Benchmark rules and operating constraints:
   counted text fields, and row count in your own verification output before writing the final answer.
 - For tasks requiring a final answer file, write only the requested payload, then read that file back
   in a clean command and verify format constraints such as integer-only output before finalizing.
+- For constrained editing or macro/script-generation tasks, treat the required output file as the
+  deliverable. Use only the commands, syntax, and side effects allowed by the task. Do not add helper
+  files or alternate entrypoints unless the task permits them.
+- For exact-output transformation tasks, create a small public-input smoke check that runs the
+  required artifact in the same style as the evaluator, then compare the produced output against the
+  expected public output before finalizing.
+- Smoke checks must fail the command when verification fails. Do not mask a failing comparison by
+  printing a status code after a semicolon; use an explicit non-zero exit for mismatches.
+- For large Vim macro or text-transformation tasks, use only the macro registers, replay commands,
+  and keystroke or Ex syntax the task explicitly allows; do not invent helper files or extra
+  entrypoints. When a macro register is built with setreg(), remember the string is parsed twice:
+  once by Vim's string literal rules and again as keystrokes. In a double-quoted setreg string only
+  \\<CR>, \\t, \\\\ and similar are special, so a regex like \\s or \\( must be written so the
+  backslash survives into the pattern (single-quoted strings or doubled backslashes) — a dropped
+  backslash silently changes the pattern and the substitution then matches nothing.
+- A headless run such as `vim -Nu NONE -n -Es ... -S script.vim` exits non-zero if any replayed
+  command errors (e.g. :s reporting "Pattern not found"). Before the full file, replay each macro on
+  one real public row, confirm the row transforms exactly and Vim exits 0, and only then run the
+  whole file. Preserve and reorder every source field as required; do not drop fields. Verify the
+  final output matches the expected bytes, not merely that the script runs. Remove any temporary
+  sample/work files you created before finalizing.
+- Stay inside the task's allowed-syntax list even when a richer construct looks easier. If the task
+  bans scripting/function calls (e.g. Vimscript functions such as substitute(), toupper(), or
+  expression-register tricks like <C-R>=...), do not smuggle them into a macro; express the transform
+  with the permitted substitution/keystroke primitives only. A macro that runs but uses a forbidden
+  construct, or that produces different bytes, still fails — prefer the simplest allowed form that
+  matched your single-row replay test.
+- Shape reference for a setreg-based substitution macro replayed by a per-line command (adapt the
+  pattern/replacement to the task; this is the FORM to copy, not the content):
+    RIGHT:  call setreg('a', ":s/PATTERN/REPLACEMENT/\\<CR>")   then   :%normal! @a
+            - line-local :s (matches the current line each replay), NOT :%s
+            - every regex backslash doubled in the double-quoted string (\\s \\( \\) \\1), only \\<CR> for the Enter key
+            - replacement is plain text/backrefs; end the command exactly at the closing /\\<CR> with no trailing flags or stray keys
+    WRONG:  ":%s/.../.../\\<CR>"   (whole-file substitute run once per line = O(N^2), times out on large input)
+    WRONG:  ":s/.../.../+j" or trailing keystrokes after \\<CR>   (illegal :s flag / not a well-formed allowed command)
+    WRONG:  "...<C-R>=substitute(@\",...)..."   (Vimscript function — banned when the task says no scripting)
+    WRONG:  ":s/\\s*\\(...\\)/.../"  written with single backslashes in a double-quoted string  (backslashes dropped, pattern matches nothing)
+- Do not increase benchmark smoke-test timeouts to hide a slow approach. If a full-file smoke check
+  times out, simplify the artifact or verify on smaller public samples before retrying.
+- Do not schedule multiple alternative artifact writes and verification attempts in one response.
+  Write one candidate, run a public smoke check, wait for the result, and only then decide the next
+  edit. A failed smoke check is new evidence, not permission to keep guessing in the same turn.
+- Exact-output smoke checks must show the first mismatching public row or byte range when they fail.
+  For field-reordering tasks, preserve every requested field until the sample output proves the final
+  order, delimiters, trimming, casing, and suffix are exact.
+- Remove temporary public smoke-test files before finalizing unless the task asks for them.
 - Match the requested file paths, function signatures, command names, output formats, and argument order exactly.
 - When a public function or CLI is named without a full signature, support natural positional usage
   and common named aliases in addition to your preferred named-argument style.
@@ -217,21 +266,6 @@ def collect_runtime_fingerprint(options: BenchRunOptions) -> dict[str, Any]:
             )
         ),
     }
-
-
-def _env_flag(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _env_int(name: str, default: int) -> int:
-    raw_value = os.environ.get(name)
-    if raw_value is None:
-        return default
-    try:
-        value = int(raw_value)
-    except ValueError:
-        return default
-    return value if value > 0 else default
 
 
 def _clip_text_bytes(text: str, max_bytes: int) -> str:
@@ -615,6 +649,11 @@ def run_bench_attempt(options: BenchRunOptions) -> Path:
 async def _run_agent(options: BenchRunOptions, attempt_dir: Path) -> None:
     old_rune_home = os.environ.get("RUNE_HOME")
     old_capture_failed_tool_output = os.environ.get("RUNE_BENCH_CAPTURE_FAILED_TOOL_OUTPUT")
+    old_strict_status_markers = os.environ.get("RUNE_BENCH_STRICT_STATUS_MARKERS")
+    old_bash_timeout_cap = os.environ.get("RUNE_BENCH_BASH_TIMEOUT_CAP_MS")
+    old_stop_batch_on_tool_failure = os.environ.get("RUNE_BENCH_STOP_BATCH_ON_TOOL_FAILURE")
+    old_max_write_exec_per_turn = os.environ.get("RUNE_BENCH_MAX_WRITE_EXEC_PER_TURN")
+    old_evidence_gate = os.environ.get("RUNE_BENCH_EVIDENCE_GATE")
     old_cwd = Path.cwd()
     start = time.monotonic()
     output_parts: list[str] = []
@@ -624,6 +663,9 @@ async def _run_agent(options: BenchRunOptions, attempt_dir: Path) -> None:
 
     os.environ["RUNE_HOME"] = str(options.rune_home)
     os.environ.setdefault("RUNE_BENCH_CAPTURE_FAILED_TOOL_OUTPUT", "1")
+    os.environ.setdefault("RUNE_BENCH_STRICT_STATUS_MARKERS", "1")
+    os.environ.setdefault("RUNE_BENCH_BASH_TIMEOUT_CAP_MS", "120000")
+    os.environ.setdefault("RUNE_BENCH_STOP_BATCH_ON_TOOL_FAILURE", "1")
     options.rune_home.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -829,3 +871,23 @@ async def _run_agent(options: BenchRunOptions, attempt_dir: Path) -> None:
             os.environ.pop("RUNE_BENCH_CAPTURE_FAILED_TOOL_OUTPUT", None)
         else:
             os.environ["RUNE_BENCH_CAPTURE_FAILED_TOOL_OUTPUT"] = old_capture_failed_tool_output
+        if old_strict_status_markers is None:
+            os.environ.pop("RUNE_BENCH_STRICT_STATUS_MARKERS", None)
+        else:
+            os.environ["RUNE_BENCH_STRICT_STATUS_MARKERS"] = old_strict_status_markers
+        if old_bash_timeout_cap is None:
+            os.environ.pop("RUNE_BENCH_BASH_TIMEOUT_CAP_MS", None)
+        else:
+            os.environ["RUNE_BENCH_BASH_TIMEOUT_CAP_MS"] = old_bash_timeout_cap
+        if old_stop_batch_on_tool_failure is None:
+            os.environ.pop("RUNE_BENCH_STOP_BATCH_ON_TOOL_FAILURE", None)
+        else:
+            os.environ["RUNE_BENCH_STOP_BATCH_ON_TOOL_FAILURE"] = old_stop_batch_on_tool_failure
+        if old_max_write_exec_per_turn is None:
+            os.environ.pop("RUNE_BENCH_MAX_WRITE_EXEC_PER_TURN", None)
+        else:
+            os.environ["RUNE_BENCH_MAX_WRITE_EXEC_PER_TURN"] = old_max_write_exec_per_turn
+        if old_evidence_gate is None:
+            os.environ.pop("RUNE_BENCH_EVIDENCE_GATE", None)
+        else:
+            os.environ["RUNE_BENCH_EVIDENCE_GATE"] = old_evidence_gate

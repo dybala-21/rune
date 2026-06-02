@@ -33,6 +33,10 @@ export RUNE_HARBOR_MAX_STEPS="80"         # optional benchmark safety cap
 export RUNE_HARBOR_TIMEOUT_SECONDS="900"  # optional per-attempt wall-time cap
 export RUNE_HARBOR_SKIP_INSTALL="0"       # set to 1 only if the task image already has rune
 export RUNE_HARBOR_PASS_ENV=""            # comma/space-separated extra env keys, if needed
+export RUNE_BENCH_MAX_WRITE_EXEC_PER_TURN=""  # optional: cap serial write/exec tool calls per
+                                              # assistant turn (off when empty/<=0). Set e.g. 2
+                                              # to stop one model turn from queuing many artifact
+                                              # writes before reading any tool feedback.
 ```
 
 Artifacts are written under `/logs/agent/rune` and RUNE state is isolated under

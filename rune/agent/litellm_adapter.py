@@ -22,9 +22,49 @@ litellm.suppress_debug_info = True
 
 from rune.agent.message_utils import validate_tool_pairs
 from rune.agent.obs_cap import mask_stale_tool_messages
+from rune.capabilities.output_prefixes import looks_like_failure_output
+from rune.utils.env import env_flag as _env_flag
+from rune.utils.env import env_int as _env_int
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
+
+_BENCH_STOP_BATCH_ON_TOOL_FAILURE_ENV = "RUNE_BENCH_STOP_BATCH_ON_TOOL_FAILURE"
+# Optional per-assistant-turn cap on serial write/execute tool calls. Off by
+# default (unset/<=0). When set to N>0, only the first N write/execute calls in
+# a turn run; the rest are skipped so the model must read their results before
+# scheduling more. Counters the v6/v7 single-turn tool explosion where one
+# response queued many alternative artifact writes before any feedback.
+_BENCH_MAX_WRITE_EXEC_PER_TURN_ENV = "RUNE_BENCH_MAX_WRITE_EXEC_PER_TURN"
+_STOP_BATCH_FAILURE_TOOLS = frozenset({
+    "bash_execute",
+    "file_delete",
+    "file_edit",
+    "file_write",
+})
+# Tools subject to the per-turn cap — same mutating/executing set as the
+# failure-stop list.
+_WRITE_EXEC_TOOLS = _STOP_BATCH_FAILURE_TOOLS
+
+
+def _looks_like_tool_failure(result: str) -> bool:
+    return looks_like_failure_output(result)
+
+
+def _skipped_after_batch_failure_message(tool_name: str) -> str:
+    return (
+        "[BLOCKED] Skipped this tool because an earlier write/execute tool in the same "
+        "assistant turn failed. Read the failed tool result first, then issue a new "
+        f"{tool_name} call only after choosing the next fix."
+    )
+
+
+def _skipped_after_write_exec_cap_message(tool_name: str, cap: int) -> str:
+    return (
+        f"[BLOCKED] Skipped this tool: the per-turn write/execute limit ({cap}) was "
+        "reached. Read the results of the writes/commands already issued in this turn, "
+        f"then decide the next {tool_name} call in your following response."
+    )
 
 
 # Usage tracking
@@ -643,8 +683,24 @@ class StreamResult:
         # for this assistant turn. OpenAI requires every tool_call_id to be
         # answered by contiguous tool messages before any user/system message.
         deferred_nudges: list[str] = []
+        stop_after_failure = _env_flag(_BENCH_STOP_BATCH_ON_TOOL_FAILURE_ENV)
+        batch_failure_seen = False
+        # Per-turn write/execute cap (off by default; None when unset/<=0).
+        write_exec_cap = _env_int(_BENCH_MAX_WRITE_EXEC_PER_TURN_ENV)
+        write_exec_count = 0
 
         for is_concurrent, batch in batches:
+            if batch_failure_seen:
+                for tc_data in batch:
+                    fn = tc_data["function"]["name"]
+                    tc_id = tc_data["id"]
+                    self._messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": _skipped_after_batch_failure_message(fn),
+                    })
+                continue
+
             if is_concurrent and len(batch) > 1:
                 # Run read-only tools concurrently
                 async def _run_one(tc_data: dict[str, Any]) -> tuple[str, str, str]:
@@ -681,6 +737,28 @@ class StreamResult:
                     fn = tc_data["function"]["name"]
                     args_str = tc_data["function"]["arguments"]
                     tc_id = tc_data["id"]
+                    if batch_failure_seen:
+                        self._messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc_id,
+                            "content": _skipped_after_batch_failure_message(fn),
+                        })
+                        continue
+                    is_write_exec = fn in _WRITE_EXEC_TOOLS
+                    if (
+                        write_exec_cap is not None
+                        and is_write_exec
+                        and write_exec_count >= write_exec_cap
+                    ):
+                        self._messages.append({
+                            "role": "tool",
+                            "tool_call_id": tc_id,
+                            "content": _skipped_after_write_exec_cap_message(fn, write_exec_cap),
+                        })
+                        log.info("bench_write_exec_cap_skip", tool=fn, cap=write_exec_cap)
+                        continue
+                    if is_write_exec:
+                        write_exec_count += 1
                     try:
                         args = json.loads(args_str) if args_str else {}
                     except (json.JSONDecodeError, TypeError):
@@ -696,6 +774,12 @@ class StreamResult:
                     nudge = self._policy.record_tool_call(fn)
                     if nudge:
                         deferred_nudges.append(nudge)
+                    if (
+                        stop_after_failure
+                        and fn in _STOP_BATCH_FAILURE_TOOLS
+                        and _looks_like_tool_failure(res)
+                    ):
+                        batch_failure_seen = True
 
         for nudge_text in deferred_nudges:
             self._messages.append({"role": "user", "content": nudge_text})
@@ -760,12 +844,7 @@ class StreamResult:
             # Reset fail streak on success.
             # Also treat "NO CHANGES DETECTED" as failure — the action
             # technically executed but had no effect (phantom click).
-            is_failure = (
-                "[ERROR]" in result_str[:300]
-                or "Element not found" in result_str[:300]
-                or "NO CHANGES DETECTED" in result_str
-                or result_str.startswith("Error")
-            )
+            is_failure = _looks_like_tool_failure(result_str)
             if is_failure:
                 streak = self._tool_fail_streak.get(name, 0) + 1
                 self._tool_fail_streak[name] = streak

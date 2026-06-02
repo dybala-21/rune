@@ -155,6 +155,7 @@ def test_container_env_merges_harbor_agent_env(monkeypatch):
             "RUNE_HARBOR_MODEL": "gpt-5.4",
             "RUNE_HARBOR_TASK_ID": "configure-git-webserver",
             "RUNE_HARBOR_MAX_STEPS": "60",
+            "RUNE_BENCH_MAX_WRITE_EXEC_PER_TURN": "2",
         }
     )
 
@@ -163,6 +164,9 @@ def test_container_env_merges_harbor_agent_env(monkeypatch):
     assert env["RUNE_HARBOR_MODEL"] == "gpt-5.4"
     assert env["RUNE_HARBOR_TASK_ID"] == "configure-git-webserver"
     assert env["RUNE_HARBOR_MAX_STEPS"] == "60"
+    # Forwarded so a canary can enable the per-turn write/execute cap from
+    # `harbor run --agent-env` without editing the runner defaults.
+    assert env["RUNE_BENCH_MAX_WRITE_EXEC_PER_TURN"] == "2"
 
 
 def test_container_env_does_not_pass_unselected_provider_credentials(monkeypatch):

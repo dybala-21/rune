@@ -68,6 +68,8 @@ from rune.types import (
     CapabilityResult,
     CompletionTrace,
 )
+from rune.utils.env import env_flag as _env_flag
+from rune.utils.env import env_int as _env_int
 from rune.utils.events import EventEmitter
 from rune.utils.logger import get_logger
 
@@ -112,21 +114,6 @@ _MAX_OUTPUT_TOKENS_BY_INTENT: dict[str, int] = {
 
 _FAILED_TOOL_OUTPUT_TAIL_BYTES = 4_000
 _FAILED_TOOL_NUDGE_TAIL_BYTES = 1_200
-
-
-def _env_flag(name: str) -> bool:
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _env_int(name: str, default: int) -> int:
-    raw_value = os.environ.get(name)
-    if raw_value is None:
-        return default
-    try:
-        value = int(raw_value)
-    except ValueError:
-        return default
-    return value if value > 0 else default
 
 
 def _tail_text(text: str, max_bytes: int) -> str:
@@ -423,6 +410,7 @@ class NativeAgentLoop(EventEmitter):
         self._rehydration_recorder: Any = None
         self._rehydration_trigger: Any = None
         self._gate_blocked_count: int = 0
+        self._evidence_gate: Any = None
 
     @property
     def status(self) -> AgentStatus:
@@ -476,18 +464,41 @@ class NativeAgentLoop(EventEmitter):
         self._rehydration_recorder = None
         self._rehydration_trigger = None
         self._gate_blocked_count = 0
+        # Evidence Gate (benchmark output-correctness verification; opt-in)
+        self._evidence_gate = None
 
-    def _benchmark_completion_blocker(self) -> str | None:
-        if not _env_flag("RUNE_BENCH_CAPTURE_FAILED_TOOL_OUTPUT"):
-            return None
-        if not self._recent_failed_tool_nudge:
-            return None
-        return (
-            "[Completion Gate] A recent tool failed and no later successful "
-            "command cleared it. Fix or explicitly verify the failure before "
-            "finalizing.\n"
-            + self._recent_failed_tool_nudge
-        )
+    async def _benchmark_completion_blocker(self) -> str | None:
+        # 1. Recent unresolved tool failure (behavioral evidence).
+        if _env_flag("RUNE_BENCH_CAPTURE_FAILED_TOOL_OUTPUT") and self._recent_failed_tool_nudge:
+            return (
+                "[Completion Gate] A recent tool failed and no later successful "
+                "command cleared it. Fix or explicitly verify the failure before "
+                "finalizing.\n"
+                + self._recent_failed_tool_nudge
+            )
+        # 2. Evidence Gate: re-verify the produced artifact against the task's
+        #    own success criteria before allowing finalization (opt-in).
+        _state, message = await self._evidence_verdict()
+        if _state == "fail" and message:
+            log.info("evidence_gate_block", step=self._step)
+            return message
+        return None
+
+    async def _evidence_verdict(self) -> tuple[str, str | None]:
+        """Return the Evidence Gate verdict: ``("pass"|"fail"|"skip", message)``.
+
+        ``"skip"`` when the gate is disabled or inconclusive. Never raises —
+        verification failure is treated as ``"skip"`` so it cannot turn a real
+        success into a false block.
+        """
+        if self._evidence_gate is None:
+            return "skip", None
+        try:
+            state, message = await self._evidence_gate.verdict()
+            return str(state), message
+        except Exception as exc:  # never let verification crash finalize
+            log.warning("evidence_gate_check_error", error=str(exc)[:120])
+            return "skip", None
 
     async def run(
         self,
@@ -569,6 +580,14 @@ class NativeAgentLoop(EventEmitter):
                 previous_goal=_prev_goal,
                 previous_goal_type=_prev_goal_type,
             )
+
+            # Evidence Gate: re-verify the artifact against the task's own
+            # success criteria before finalizing (benchmark-only, opt-in). Built
+            # once here so the LLM check extraction is cached for the run.
+            from rune.agent.evidence_gate import EvidenceGate, evidence_gate_enabled
+            if evidence_gate_enabled():
+                import os as _os
+                self._evidence_gate = EvidenceGate(goal, _os.getcwd())
 
             # Mark as continuation only when history exists AND domain hasn't changed
             if message_history:
@@ -694,6 +713,11 @@ class NativeAgentLoop(EventEmitter):
                 system_prompt_len=len(system_prompt),
                 tools_count=len(tools),
             )
+            if self._evidence_gate is not None:
+                try:
+                    trace.evidence_gate = self._evidence_gate.summary()
+                except Exception:  # observability must never break the run
+                    trace.evidence_gate = None
             await self.emit("completed", trace)
 
             return trace
@@ -754,8 +778,6 @@ class NativeAgentLoop(EventEmitter):
         context: dict[str, Any] | None = None,
     ) -> str:
         """Build the system prompt for the agent using the canonical prompt builder."""
-        import os
-
         # Map GoalType → goal_category for prompt assembly
         from rune.config.defaults import TOKEN_OPTIMIZATION_ENABLED
         if TOKEN_OPTIMIZATION_ENABLED:
@@ -1697,7 +1719,7 @@ class NativeAgentLoop(EventEmitter):
                             f"show the real output before declaring done.",
                         )
                     else:
-                        blocker = self._benchmark_completion_blocker()
+                        blocker = await self._benchmark_completion_blocker()
                         if blocker:
                             log.info("benchmark_failed_tool_fastpath_block", step=self._step)
                             messages = self._inject_system_message(messages, blocker)
@@ -1724,7 +1746,7 @@ class NativeAgentLoop(EventEmitter):
                 # regardless of tool_requirement — if the LLM chose to answer
                 # without tools, respect that decision.
                 if total_evidence == 0 and output_text and output_text.strip():
-                    blocker = self._benchmark_completion_blocker()
+                    blocker = await self._benchmark_completion_blocker()
                     if blocker:
                         log.info("benchmark_failed_tool_text_only_block", step=self._step)
                         messages = self._inject_system_message(messages, blocker)
@@ -1795,7 +1817,7 @@ class NativeAgentLoop(EventEmitter):
                 gate_result = evaluate_completion_gate(gate_input)
 
                 if gate_result.outcome == "verified":
-                    blocker = self._benchmark_completion_blocker()
+                    blocker = await self._benchmark_completion_blocker()
                     if blocker:
                         log.info("benchmark_failed_tool_verified_block", step=self._step)
                         messages = self._inject_system_message(messages, blocker)
@@ -1808,6 +1830,23 @@ class NativeAgentLoop(EventEmitter):
                 # If blocked, let the loop continue — but limit repeats
                 # to prevent infinite loops when requirements can't be met.
                 if gate_result.outcome == "blocked":
+                    # Evidence Gate override: behavioral requirements are weaker
+                    # than a passing outcome check. If the produced artifact
+                    # actually satisfies the task's own success criteria, accept
+                    # completion even though some behavioral requirement is unmet
+                    # (e.g. "not enough reads"). A failing check instead injects
+                    # first-mismatch evidence and keeps the loop going.
+                    _ev_state, _ev_msg = await self._evidence_verdict()
+                    if _ev_state == "pass":
+                        log.info("evidence_gate_override_blocked", step=self._step)
+                        trace.reason = "completed"
+                        trace.final_step = self._step
+                        trace.evidence_score = 1.0
+                        break
+                    if _ev_state == "fail" and _ev_msg:
+                        log.info("evidence_gate_block", step=self._step)
+                        messages = self._inject_system_message(messages, _ev_msg)
+
                     _gate_blocked_count += 1
                     self._gate_blocked_count = _gate_blocked_count
                     log.debug(
@@ -1860,6 +1899,18 @@ class NativeAgentLoop(EventEmitter):
                                 advice_mode=advisor_service.mode,
                             )
                     if _gate_blocked_count >= 5:
+                        # Last chance before giving up: if the artifact now
+                        # actually satisfies the task's success criteria, accept
+                        # it. The correct artifact is often written on the final
+                        # iteration, after which no further finalize attempt
+                        # would re-run the Evidence Gate.
+                        _ev_state2, _ = await self._evidence_verdict()
+                        if _ev_state2 == "pass":
+                            log.info("evidence_gate_override_maxblocked", step=self._step)
+                            trace.reason = "completed"
+                            trace.final_step = self._step
+                            trace.evidence_score = 1.0
+                            break
                         log.warning("max_gate_blocked", step=self._step,
                                     count=_gate_blocked_count)
                         trace.reason = "max_gate_blocked"
@@ -1883,7 +1934,7 @@ class NativeAgentLoop(EventEmitter):
                             "You must write/edit code files to complete this task.",
                         )
                     else:
-                        blocker = self._benchmark_completion_blocker()
+                        blocker = await self._benchmark_completion_blocker()
                         if blocker:
                             log.info("benchmark_failed_tool_partial_block", step=self._step)
                             messages = self._inject_system_message(messages, blocker)

@@ -13,8 +13,38 @@ from __future__ import annotations
 import contextlib
 import os
 from pathlib import Path
+from typing import overload
 
 from rune.utils.paths import rune_home
+
+# Typed getters (shared across agent/bench/capabilities modules)
+
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def env_flag(name: str) -> bool:
+    """Return True when ``name`` is set to a truthy value (1/true/yes/on)."""
+    return os.environ.get(name, "").strip().lower() in _TRUTHY
+
+
+@overload
+def env_int(name: str, default: int) -> int: ...
+@overload
+def env_int(name: str, default: None = ...) -> int | None: ...
+def env_int(name: str, default: int | None = None) -> int | None:
+    """Return ``name`` as a positive int, else ``default``.
+
+    Falls back to ``default`` when the variable is unset, non-numeric, or
+    not strictly positive. With no ``default`` the fallback is ``None``.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
 
 # ============================================================================
 # Paths
