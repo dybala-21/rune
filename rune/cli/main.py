@@ -193,6 +193,25 @@ def _handle_voice_mode(
 
 # Non-interactive message handling
 
+
+def _applied_rules_note(mem_ctx: str) -> str | None:
+    """One-line summary of the learned rules in this run's memory context,
+    or None if there are none."""
+    marker = "## Learned Rules"
+    if not mem_ctx or marker not in mem_ctx:
+        return None
+    section = mem_ctx.split(marker, 1)[1].split("\n##", 1)[0]
+    keys = [
+        ln[2:].split(":", 1)[0].strip()
+        for ln in section.splitlines()
+        if ln.startswith("- ") and ":" in ln
+    ]
+    if not keys:
+        return None
+    head = ", ".join(keys[:3])
+    more = f" (+{len(keys) - 3} more)" if len(keys) > 3 else ""
+    return f"🧠 applying {len(keys)} learned rule(s): {head}{more}"
+
 def _handle_non_interactive(
     message: str,
     model: str | None = None,
@@ -267,14 +286,28 @@ def _handle_non_interactive(
             goal=message, channel="cli",
         ))
 
+        # Classify once: goal_type drives both rule injection and learning,
+        # so they share one key.
+        classification = None
+        goal_type: str | None = None
+        try:
+            from rune.agent.goal_classifier import classify_goal
+            classification = await classify_goal(message)
+            goal_type = classification.goal_type
+        except Exception:
+            pass
+
         # Build memory context for self-improving
         run_context: dict = {"workspace_root": ctx.workspace_root}
         try:
             from rune.memory.manager import get_memory_manager
             mgr = get_memory_manager()
-            mem_ctx = await mgr.build_memory_context(message)
+            mem_ctx = await mgr.build_memory_context(message, classification)
             if mem_ctx:
                 run_context["memory_context"] = mem_ctx
+                _note = _applied_rules_note(mem_ctx)
+                if _note:
+                    console.print(f"[dim]{_note}[/dim]")
         except Exception:
             pass
 
@@ -286,13 +319,31 @@ def _handle_non_interactive(
             console.print(f"[dim]({trace.reason})[/dim]")
 
         try:
-            await post_process_agent_result(PostProcessInput(
+            _learned = await post_process_agent_result(PostProcessInput(
                 context=ctx,
                 success=(trace.reason == "completed"),
                 answer="".join(output_parts),
+                reason=trace.reason,
+                evidence_gate=trace.evidence_gate,
+                classification_hint=goal_type,
             ))
+            # Show what was learned from this run.
+            if _learned:
+                _head = ", ".join(_learned[:3])
+                _more = f" (+{len(_learned) - 3} more)" if len(_learned) > 3 else ""
+                console.print(
+                    f"[dim]📚 learned {len(_learned)} new rule(s): {_head}{_more}[/dim]"
+                )
         except Exception:
             pass  # best-effort memory save
+
+        # A one-shot run is a whole session; flush its events into the daily
+        # tier on exit (else promotion never runs). No-op if no events.
+        try:
+            from rune.memory.manager import get_memory_manager
+            await get_memory_manager().promote_memories()
+        except Exception:
+            pass
 
         # Cleanup MCP servers
         try:
@@ -466,6 +517,8 @@ def _simple_repl(model: str | None = None, provider: str | None = None) -> None:
                 context=ctx,
                 success=(trace.reason == "completed"),
                 answer=answer,
+                reason=trace.reason,
+                evidence_gate=trace.evidence_gate,
             ))
 
     console.print("[dim]Type your message. /exit to quit, /help for commands.[/dim]\n")

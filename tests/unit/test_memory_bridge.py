@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from rune.agent.memory_bridge import (
+    _select_crisp_signal,
     detect_languages,
     detect_tools,
     extract_intent_from_goal,
@@ -12,6 +13,41 @@ from rune.agent.memory_bridge import (
     generate_skill_name,
 )
 from rune.types import Domain
+
+
+class TestSelectCrispSignal:
+    """The crisp learning signal must be the actual mismatch, not agent prose."""
+
+    def test_evidence_gate_fail_fires_even_on_success(self):
+        # "Loop succeeded but output wrong": the gate caught a wrong artifact.
+        gate = {"last_verdict": "fail", "last_evidence": "expected 3 got 5"}
+        assert _select_crisp_signal(True, "completed", gate) == "expected 3 got 5"
+
+    def test_evidence_gate_pass_yields_nothing_on_success(self):
+        gate = {"last_verdict": "pass", "last_evidence": ""}
+        assert _select_crisp_signal(True, "completed", gate) == ""
+
+    def test_crisp_loop_reason_used_on_failure(self):
+        assert _select_crisp_signal(False, "max_gate_blocked", None) == "max_gate_blocked"
+
+    def test_non_crisp_loop_reason_yields_nothing(self):
+        assert _select_crisp_signal(False, "stalled", None) == ""
+        assert _select_crisp_signal(False, "token_budget_exhausted", None) == ""
+
+    def test_success_without_gate_fail_yields_nothing(self):
+        # Never learn from a plain successful run, and never from prose.
+        assert _select_crisp_signal(True, "completed", None) == ""
+
+    def test_empty_evidence_falls_back_to_reason(self):
+        gate = {"last_verdict": "fail", "last_evidence": ""}
+        assert _select_crisp_signal(False, "max_gate_blocked", gate) == "max_gate_blocked"
+
+    def test_quality_meta_is_not_a_signal(self):
+        # Quality Gate meta issues (too-short / action-evidence) are NOT a crisp
+        # signal — A/B showed they yield correctness-irrelevant rules. A
+        # completed run with no Evidence Gate fail learns nothing.
+        assert _select_crisp_signal(True, "completed", None) == ""
+        assert _select_crisp_signal(True, "completed", {"last_verdict": "pass"}) == ""
 
 
 class TestFormatRelativeTime:
