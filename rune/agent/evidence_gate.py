@@ -98,13 +98,17 @@ async def extract_success_check(instruction: str) -> str | None:
     """
     try:
         from rune.llm.client import get_llm_client
+        from rune.types import ModelTier
 
+        # Use the best tier (not the active task model) so the check is at
+        # least as reliable as the model that produced the artifact.
         client = get_llm_client()
         response = await client.completion(
             messages=[
                 {"role": "system", "content": _EXTRACT_SYSTEM},
                 {"role": "user", "content": f"Task:\n{instruction}\n\nVerification script:"},
             ],
+            tier=ModelTier.BEST,
             max_tokens=900,
             timeout=30.0,
         )

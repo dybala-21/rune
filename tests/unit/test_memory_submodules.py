@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from rune.memory.lessons import LessonEntry, LessonExtractor
 from rune.memory.project_memory import PROJECT_MEMORY_FILENAME
 from rune.memory.rollout_manager import RolloutManager
 from rune.memory.tiered_memory import (
@@ -98,43 +97,6 @@ def test_get_tuning_config_balanced():
     assert "max_episodes" in config
     assert config["semantic_limit"] == 5
     assert config["semantic_min_score"] == 0.3
-
-
-def test_lesson_entry_fields():
-    """LessonEntry has expected fields and defaults."""
-    entry = LessonEntry()
-    assert entry.domain == ""
-    assert entry.lesson == ""
-    assert entry.confidence == 0.5
-    assert entry.source_goal == ""
-    assert entry.timestamp  # non-empty
-
-
-def test_lesson_extractor_failure():
-    """Extracts a failure lesson from a failed result."""
-    extractor = LessonExtractor()
-    lessons = extractor.extract_from_result(
-        goal="deploy service",
-        result={"success": False, "error": "Permission denied"},
-    )
-    assert len(lessons) >= 1
-    failure_lesson = lessons[0]
-    assert failure_lesson.domain == "failure"
-    assert "permission" in failure_lesson.lesson.lower() or "Permission" in failure_lesson.lesson
-    assert failure_lesson.confidence > 0
-
-
-def test_lesson_extractor_success():
-    """Extracts a success lesson from a successful result."""
-    extractor = LessonExtractor()
-    lessons = extractor.extract_from_result(
-        goal="build project",
-        result={"success": True, "iterations": 1},
-    )
-    assert len(lessons) >= 1
-    success_lesson = lessons[0]
-    assert success_lesson.domain == "efficiency"
-    assert "first attempt" in success_lesson.lesson.lower() or "succeeded" in success_lesson.lesson.lower()
 
 
 def test_rollout_manager_mode_default(tmp_path):

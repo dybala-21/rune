@@ -2,6 +2,9 @@
 
 Ported from src/memory/promotion-engine.ts - scores, filters, compacts,
 and promotes episode candidates based on quality metrics and rollout mode.
+
+Not wired into any execution path. Quality-score based promotion/compaction,
+complementary to TieredMemory's time-based flow. Kept for future opt-in use.
 """
 
 from __future__ import annotations

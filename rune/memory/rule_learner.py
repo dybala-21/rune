@@ -36,6 +36,41 @@ _SOFT_CAP = 30
 _RULE_CATEGORY_PREFIX = "rule:"
 _CONFIDENCE_UP = 0.03
 _CONFIDENCE_DOWN = 0.05
+# Token budget for rule generation. A reasoning fast-tier model spends hidden
+# reasoning tokens against this cap, so a small value (e.g. 50) can be used up
+# before any rule text is emitted, returning an empty completion.
+_RULE_GEN_MAX_TOKENS = 600
+# Crisp single-failure learning: a rule from one failure, used only when the
+# signal is crisp. Starts at the injection threshold so the rule is usable
+# immediately, but is still demoted by outcome feedback if it proves wrong.
+_CRISP_INITIAL_CONFIDENCE = _INJECTION_THRESHOLD
+# Environment-dependent failures are not crisp: a rule learned from them does
+# not generalize, since the next run may have a different environment.
+_NON_CRISP_ERROR_MARKERS = (
+    "timed out",
+    "timeout",
+    "connection",
+    "network",
+    "econnrefused",
+    "etimedout",
+    "permission denied",
+    "rate limit",
+    "503",
+    "502",
+    "temporarily unavailable",
+)
+# Loop-end reasons that are not crisp: resource, exploration, or control
+# outcomes that do not identify a reproducible mistake. A rule learned from
+# "ran out of steps" would not generalize.
+_NON_CRISP_LOOP_REASONS = frozenset({
+    "stalled",
+    "no_progress",
+    "token_budget_exhausted",
+    "max_iterations",
+    "cancelled",
+    "advisor_abort",
+    "no_pydantic_ai",
+})
 
 
 def _error_signature(tool_name: str, error_message: str) -> str:
@@ -103,35 +138,44 @@ def find_repeated_failures(
 
 
 async def generate_rule_from_failure(
-    failure_pattern: dict[str, Any],
+    tool_name: str,
+    error_sample: str,
     domain: str,
+    *,
+    occurrences: int = 1,
 ) -> str | None:
-    """Ask LLM to generate a one-line prevention rule from a failure pattern.
+    """Ask the LLM for a one-line prevention rule from a failure.
 
-    Returns the rule text, or None if LLM fails.
+    Shared by both learning paths (occurrences>=2 repeated, ==1 crisp). Steers
+    toward a general rule and lets the model decline with NONE. Returns the rule
+    text, or None on decline/empty/error.
     """
     try:
         from rune.llm.client import get_llm_client
+        from rune.types import ModelTier
 
-        tool_name = failure_pattern["tool_name"]
-        error_sample = failure_pattern["error_sample"]
-        count = failure_pattern["count"]
-
+        seen = (
+            "once with a clear, reproducible error"
+            if occurrences <= 1
+            else f"{occurrences} times with the same pattern"
+        )
         prompt = (
-            f"An AI coding agent failed {count} times with the same pattern:\n"
+            f"An AI coding agent failed {seen}.\n"
             f"Tool: {tool_name}\n"
             f"Error: {error_sample}\n\n"
-            f"Write ONE short rule (under 15 words) that would prevent this failure. "
-            f"Format: key_name: rule description\n"
-            f"Example: verify_before_edit: re-read file before file_edit to avoid stale content\n"
-            f"Rule:"
+            "Write ONE short, GENERAL rule (under 15 words) that prevents this "
+            "class of failure on similar future tasks, not a fix specific to "
+            "this one file or value. If no general rule applies, reply NONE.\n"
+            "Format: key_name: rule description\n"
+            "Example: close_brackets: ensure every opened bracket is closed before saving\n"
+            "Rule:"
         )
 
         client = get_llm_client()
         response = await client.completion(
             messages=[{"role": "user", "content": prompt}],
-            tier="fast",
-            max_tokens=50,
+            tier=ModelTier.FAST,
+            max_tokens=_RULE_GEN_MAX_TOKENS,
         )
 
         # Extract text from response
@@ -146,10 +190,8 @@ async def generate_rule_from_failure(
             except (AttributeError, IndexError):
                 pass
 
-        rule_text = (text or "").strip()
-        # Clean up: remove leading "- " or bullet points
-        rule_text = rule_text.lstrip("- •").strip()
-        if not rule_text or len(rule_text) < 5:
+        rule_text = (text or "").strip().lstrip("- •").strip()
+        if not rule_text or len(rule_text) < 5 or rule_text.upper().startswith("NONE"):
             return None
         return rule_text
 
@@ -193,7 +235,10 @@ async def learn_from_failures(store: Any, domain: str = "code_modify") -> list[s
             continue
 
         # Generate rule via LLM
-        rule_text = await generate_rule_from_failure(pattern, domain)
+        rule_text = await generate_rule_from_failure(
+            pattern["tool_name"], pattern["error_sample"], domain,
+            occurrences=pattern["count"],
+        )
         if rule_text is None:
             continue
 
@@ -238,6 +283,106 @@ async def learn_from_failures(store: Any, domain: str = "code_modify") -> list[s
         )
 
     return new_rules
+
+
+def is_crisp_failure(error_message: str) -> bool:
+    """Return True when a failure signal is crisp enough to learn from a single
+    occurrence.
+
+    Crisp means deterministic and reproducible (the same input fails the same
+    way). Environment-dependent failures (network, timeout, permission, rate
+    limit, transient HTTP) are not crisp: a rule learned from them does not
+    generalize, since the next run may have a different environment.
+    """
+    if not error_message or not error_message.strip():
+        return False
+    lowered = error_message.lower()
+    return not any(marker in lowered for marker in _NON_CRISP_ERROR_MARKERS)
+
+
+def is_crisp_loop_reason(reason: str) -> bool:
+    """Return True when an agent-loop end *reason* is a crisp, actionable
+    failure (a reproducible mistake) rather than a resource/exploration/control
+    outcome.
+
+    A success reason ("completed"/"verified") is never a learnable failure.
+    Resource and control reasons (stalled, out of steps/budget, cancelled) are
+    excluded. Anything else defers to ``is_crisp_failure`` so that an
+    ``error: <env failure>`` reason (network, timeout) is still rejected.
+    """
+    r = (reason or "").strip().lower()
+    if not r or r in ("completed", "verified"):
+        return False
+    head = r.split(":", 1)[0].strip()  # "error: connection refused" -> "error"
+    if head in _NON_CRISP_LOOP_REASONS:
+        return False
+    return is_crisp_failure(reason)
+
+
+async def learn_from_crisp_failure(
+    tool_name: str,
+    error_message: str,
+    domain: str = "code_modify",
+) -> str | None:
+    """Learn a prevention rule from a single crisp failure.
+
+    Unlike ``learn_from_failures`` (which needs the pattern to repeat), this
+    fires on one occurrence, but only for crisp signals. The new rule starts at
+    ``_CRISP_INITIAL_CONFIDENCE`` (the injection threshold) so it is usable
+    immediately, and it stays subject to outcome-feedback demotion, the soft
+    cap, the suppressed list, and the domain/relevance gate, so a wrongly
+    learned rule drops out of injection on its next negative outcome.
+
+    Returns the new rule key, or None when the failure is not crisp, a rule
+    already exists, the cap is hit, or generation fails.
+    """
+    if not is_crisp_failure(error_message):
+        return None
+
+    meta = load_fact_meta()
+    existing_rules = sum(1 for k in meta if k.startswith(_RULE_CATEGORY_PREFIX))
+    if existing_rules >= _SOFT_CAP:
+        log.debug("crisp_rule_cap_reached", count=existing_rules)
+        return None
+
+    sig = _error_signature(tool_name, error_message)
+    rule_key = f"{_RULE_CATEGORY_PREFIX}{domain}:{sig}"
+    if rule_key in meta or rule_key in load_suppressed():
+        return None
+
+    rule_text = await generate_rule_from_failure(
+        tool_name, error_message[:300], domain, occurrences=1
+    )
+    if rule_text is None:
+        return None
+
+    if ":" in rule_text:
+        key_part, value_part = rule_text.split(":", 1)
+        key_part = key_part.strip().replace(" ", "_")[:40]
+        value_part = value_part.strip()
+    else:
+        key_part = sig
+        value_part = rule_text
+
+    save_learned_fact(
+        category=f"rule:{domain}",
+        key=key_part,
+        value=value_part,
+        confidence=_CRISP_INITIAL_CONFIDENCE,
+    )
+    update_fact_meta(rule_key, {
+        "confidence": _CRISP_INITIAL_CONFIDENCE,
+        "hit_count": 0,
+        "eval_count": 0,
+        "source": "crisp_failure",
+        "created_at": datetime.now(UTC).isoformat(),
+        "failure_signature": sig,
+        "failure_count": 1,
+        "human_key": key_part,
+        "category": f"rule:{domain}",
+    })
+    log.info("crisp_rule_learned", domain=domain, key=key_part, value=value_part[:80])
+    return key_part
 
 
 def _find_meta_key(
@@ -329,7 +474,9 @@ def update_rules_from_outcome(
             continue
         if entry.get("category") != category:
             continue
-        if entry.get("source") != "rule_learner":
+        # Demote rules from both learners on negative outcomes. This is what
+        # lets a wrongly-learned one-shot rule fall back out of injection.
+        if entry.get("source") not in ("rule_learner", "crisp_failure"):
             continue
 
         # Relevance check: rule keywords must appear in task context
@@ -372,7 +519,7 @@ def decay_unused_rules() -> int:
     for key, entry in list(meta.items()):
         if not key.startswith(_RULE_CATEGORY_PREFIX):
             continue
-        if entry.get("source") != "rule_learner":
+        if entry.get("source") not in ("rule_learner", "crisp_failure"):
             continue
         if entry.get("hit_count", 0) > 0:
             continue

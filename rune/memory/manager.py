@@ -394,6 +394,14 @@ class MemoryManager:
         try:
             from rune.memory.rule_learner import get_rules_for_domain
             domain = getattr(classification, "goal_type", None) if classification else None
+            if domain is None and goal:
+                # Most callers pass no classification; classify here so rules
+                # inject on every path. On failure, skip injection.
+                try:
+                    from rune.agent.goal_classifier import classify_goal
+                    domain = (await classify_goal(goal)).goal_type
+                except Exception:
+                    domain = None
             if domain:
                 rules = get_rules_for_domain(domain)
                 if rules:

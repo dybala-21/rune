@@ -1822,10 +1822,26 @@ class NativeAgentLoop(EventEmitter):
                         log.info("benchmark_failed_tool_verified_block", step=self._step)
                         messages = self._inject_system_message(messages, blocker)
                     else:
-                        trace.reason = "completed"
-                        trace.final_step = self._step
-                        trace.evidence_score = 1.0
-                        break
+                        # Behavior done != output correct. If the Evidence Gate
+                        # is active, re-verify before finalizing: a fail injects
+                        # evidence and continues; skip/off finalizes as before.
+                        _ev_state, _ev_msg = await self._evidence_verdict()
+                        if _ev_state == "fail" and _ev_msg:
+                            log.info("evidence_gate_block_on_verified", step=self._step)
+                            messages = self._inject_system_message(messages, _ev_msg)
+                            _gate_blocked_count += 1
+                            self._gate_blocked_count = _gate_blocked_count
+                            if _gate_blocked_count >= 5:
+                                log.warning("max_gate_blocked", step=self._step,
+                                            count=_gate_blocked_count)
+                                trace.reason = "max_gate_blocked"
+                                trace.final_step = self._step
+                                break
+                        else:
+                            trace.reason = "completed"
+                            trace.final_step = self._step
+                            trace.evidence_score = 1.0
+                            break
 
                 # If blocked, let the loop continue — but limit repeats
                 # to prevent infinite loops when requirements can't be met.

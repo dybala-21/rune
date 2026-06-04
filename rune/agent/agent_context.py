@@ -79,6 +79,11 @@ class PostProcessInput:
     error: str | None = None
     changed_files: list[str] = field(default_factory=list)
     duration_ms: float = 0.0
+    # From the loop's CompletionTrace, for crisp learning.
+    reason: str = ""
+    evidence_gate: dict[str, Any] | None = None
+    # goal_type used as the rule domain, so learning matches injection.
+    classification_hint: str | None = None
 
 
 # Helpers
@@ -295,13 +300,17 @@ async def prepare_agent_context(
     )
 
 
-async def post_process_agent_result(inp: PostProcessInput) -> None:
+async def post_process_agent_result(inp: PostProcessInput) -> list[str]:
     """Post-process agent result: save assistant turn + episodic memory.
 
     Retries assistant turn save up to ASSISTANT_TURN_SAVE_MAX_ATTEMPTS times.
+    Returns the rule keys newly learned during this turn (for surfacing
+    "just learned X" to the user); empty when nothing was learned.
     """
-    if not inp.answer:
-        return
+    # Skip only an empty *successful* turn. An empty failed turn still carries a
+    # learning signal (failure reason / Evidence Gate verdict).
+    if not inp.answer and inp.success:
+        return []
 
     # Save assistant turn with retry
     for attempt in range(1, ASSISTANT_TURN_SAVE_MAX_ATTEMPTS + 1):
@@ -311,11 +320,17 @@ async def post_process_agent_result(inp: PostProcessInput) -> None:
             from rune.memory.manager import get_memory_manager
 
             manager = get_memory_manager()
-            await save_agent_result_to_memory(
+            learned = await save_agent_result_to_memory(
                 goal=inp.context.goal or inp.context.original_goal,
-                result={"output": inp.answer, "success": inp.success},
+                result={
+                    "output": inp.answer,
+                    "success": inp.success,
+                    "reason": inp.reason,
+                    "evidence_gate": inp.evidence_gate,
+                },
                 memory_manager=manager,
                 conversation_id=inp.context.conversation_id,
+                classification_hint=inp.classification_hint,
             )
             if attempt > 1:
                 log.warning(
@@ -323,7 +338,7 @@ async def post_process_agent_result(inp: PostProcessInput) -> None:
                     conversation_id=inp.context.conversation_id,
                     attempt=attempt,
                 )
-            return
+            return learned or []
         except Exception as exc:
             log.warning(
                 "assistant_turn_save_failed",
@@ -339,3 +354,4 @@ async def post_process_agent_result(inp: PostProcessInput) -> None:
         "assistant_turn_save_exhausted",
         conversation_id=inp.context.conversation_id,
     )
+    return []

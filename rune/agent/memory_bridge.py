@@ -18,6 +18,7 @@ from rune.memory.store import Episode
 from rune.skills.registry import get_skill_registry
 from rune.skills.types import Skill
 from rune.types import Domain, Intent
+from rune.utils.env import env_flag as _env_flag
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -397,33 +398,70 @@ def _extract_files_from_text(text: str) -> list[str]:
     return list(dict.fromkeys(paths))[:20]  # dedup, limit 20
 
 
+def _select_crisp_signal(
+    success: bool,
+    failure_reason: str,
+    evidence_gate: dict[str, Any] | None,
+) -> str:
+    """Pick the crisp learning signal: Evidence Gate "fail" evidence, else a
+    crisp loop reason. Returns "" if neither applies.
+
+    Quality Gate issues are excluded: they reflect process, not correctness.
+    """
+    from rune.memory.rule_learner import is_crisp_loop_reason
+
+    if evidence_gate is not None and evidence_gate.get("last_verdict") == "fail":
+        evidence = str(evidence_gate.get("last_evidence", "") or "").strip()
+        if evidence:
+            return evidence
+    if not success and is_crisp_loop_reason(failure_reason):
+        return failure_reason
+    return ""
+
+
 async def save_agent_result_to_memory(
     goal: str,
     result: Any,
     memory_manager: Any,
     conversation_id: str = "",
     classification_hint: str | None = None,
-) -> None:
+) -> list[str]:
     """Save an agent execution result to episodic memory.
 
     Creates an Episode with task summary, intent, result text, and files.
     Structured extraction (commitments, lessons, entities) is handled by
     background consolidation via LLM - no regex patterns.
+
+    Returns the list of rule keys newly learned during this save (for
+    surfacing "just learned X" to the user); empty when nothing was learned.
     """
+    learned_keys: list[str] = []
     try:
         result_text = ""
         success = False
         lessons = ""
         duration_ms = 0.0
+        # Crisp-learning signal, distinct from result_text (the answer prose):
+        # the loop-end reason and the Evidence Gate verdict summary.
+        failure_reason = ""
+        evidence_gate: dict[str, Any] | None = None
 
         if hasattr(result, "reason"):
             result_text = str(result.reason)
             success = result.reason in ("completed", "verified")
             duration_ms = getattr(result, "duration_ms", 0.0) or 0.0
+            failure_reason = str(result.reason)
+            _eg = getattr(result, "evidence_gate", None)
+            evidence_gate = _eg if isinstance(_eg, dict) else None
         elif isinstance(result, dict):
-            result_text = str(result.get("reason", result.get("output", "")))
+            # Prefer the answer output for the episode record; the loop-end
+            # reason is captured separately for crisp learning below.
+            result_text = str(result.get("output", result.get("reason", "")))
             success = result.get("success", False)
             duration_ms = result.get("duration_ms", 0.0) or 0.0
+            failure_reason = str(result.get("reason", "") or "")
+            _eg = result.get("evidence_gate")
+            evidence_gate = _eg if isinstance(_eg, dict) else None
         else:
             result_text = str(result)
 
@@ -501,22 +539,54 @@ async def save_agent_result_to_memory(
         except Exception:
             pass  # Pattern tracking must never block episode saving
 
-        # Rule outcome feedback: update confidence of active rules
-        domain = intent.domain or "code_modify"
+        # Use goal_type as the rule domain so learning matches injection
+        # (build_memory_context injects via get_rules_for_domain(goal_type)).
+        # The hint carries it when available; else classify here.
+        domain = classification_hint
+        if not domain:
+            try:
+                from rune.agent.goal_classifier import classify_goal
+                domain = (await classify_goal(goal)).goal_type
+            except Exception:
+                domain = None
+        domain = domain or "code_modify"
         try:
             from rune.memory.rule_learner import update_rules_from_outcome
             update_rules_from_outcome(domain, success, goal=goal, error_message=result_text[:300])
         except Exception:
             pass  # Rule feedback must never block episode saving
 
-        # Rule Learner: trigger on failure
+        # Rule Learner (conservative path): repeated-failure learning triggers
+        # only on a failed loop and needs the same pattern to recur.
         if not success:
             try:
                 from rune.memory.rule_learner import learn_from_failures
                 from rune.memory.store import get_memory_store
-                await learn_from_failures(get_memory_store(), domain)
+                learned_keys.extend(
+                    await learn_from_failures(get_memory_store(), domain) or []
+                )
             except Exception:
                 pass  # Rule learning must never block episode saving
+
+        # Crisp single-failure learning (gated by RUNE_CRISP_LEARNING);
+        # signal chosen by _select_crisp_signal.
+        if _env_flag("RUNE_CRISP_LEARNING"):
+            try:
+                from rune.memory.rule_learner import learn_from_crisp_failure
+
+                crisp_signal = _select_crisp_signal(
+                    success, failure_reason, evidence_gate
+                )
+                if crisp_signal:
+                    _crisp_key = await learn_from_crisp_failure(
+                        tool_name=domain,
+                        error_message=crisp_signal,
+                        domain=domain,
+                    )
+                    if _crisp_key:
+                        learned_keys.append(_crisp_key)
+            except Exception:
+                pass  # Crisp learning must never block episode saving
 
         # Write daily log entry (markdown)
         try:
@@ -555,6 +625,8 @@ async def save_agent_result_to_memory(
 
     except Exception as exc:
         log.warning("save_agent_result_failed", error=str(exc))
+
+    return learned_keys
 
 
 # Artifact extraction from execution history
@@ -1034,6 +1106,9 @@ async def maybe_generate_skill(
     refiner: LLMRefiner | None = None,
 ) -> dict[str, Any] | None:
     """Attempt to generate a reusable skill from a successful execution.
+
+    Not wired into any execution path: it auto-registers skills, which is
+    unverified. Kept for future opt-in use.
 
     When a ``trace`` (list of :class:`ToolTraceEntry`) is provided the
     function uses local pattern matching to extract a generalised skill
