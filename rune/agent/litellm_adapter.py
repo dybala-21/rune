@@ -242,6 +242,16 @@ def _is_o_series(model: str) -> bool:
     return bool(_re.match(r"^o[134](-|$)", base))
 
 
+def _rejects_temperature(model: str) -> bool:
+    """True for reasoning models that reject temperature != 1: o1/o3/o4 and the
+    gpt-5 family (but not gpt-5.x point releases like gpt-5.1, which allow it).
+    """
+    if _is_o_series(model):
+        return True
+    base = model.rsplit("/", 1)[-1].lower()
+    return "gpt-5" in base and "gpt-5." not in base
+
+
 def _vertex_active() -> bool:
     """True when GOOGLE_APPLICATION_CREDENTIALS points to an existing file."""
     import os as _os
@@ -455,7 +465,7 @@ class StreamResult:
                 "max_tokens": _effective_max,
                 "stream_options": {"include_usage": True},
             }
-            if not _is_o_series(self._model):
+            if not _rejects_temperature(self._model):
                 _acompletion_kwargs["temperature"] = self._temperature
             if self._extra_headers:
                 _acompletion_kwargs["extra_headers"] = dict(self._extra_headers)

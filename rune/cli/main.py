@@ -173,6 +173,10 @@ def _handle_voice_mode(
                     mem_ctx = await mgr.build_memory_context(text)
                     if mem_ctx:
                         run_context["memory_context"] = mem_ctx
+                        from rune.agent.memory_bridge import format_applied_rules_note
+                        _note = format_applied_rules_note(mem_ctx)
+                        if _note:
+                            console.print(f"[dim]{_note}[/dim]")
                 except Exception:
                     pass
 
@@ -193,24 +197,6 @@ def _handle_voice_mode(
 
 # Non-interactive message handling
 
-
-def _applied_rules_note(mem_ctx: str) -> str | None:
-    """One-line summary of the learned rules in this run's memory context,
-    or None if there are none."""
-    marker = "## Learned Rules"
-    if not mem_ctx or marker not in mem_ctx:
-        return None
-    section = mem_ctx.split(marker, 1)[1].split("\n##", 1)[0]
-    keys = [
-        ln[2:].split(":", 1)[0].strip()
-        for ln in section.splitlines()
-        if ln.startswith("- ") and ":" in ln
-    ]
-    if not keys:
-        return None
-    head = ", ".join(keys[:3])
-    more = f" (+{len(keys) - 3} more)" if len(keys) > 3 else ""
-    return f"🧠 applying {len(keys)} learned rule(s): {head}{more}"
 
 def _handle_non_interactive(
     message: str,
@@ -305,7 +291,8 @@ def _handle_non_interactive(
             mem_ctx = await mgr.build_memory_context(message, classification)
             if mem_ctx:
                 run_context["memory_context"] = mem_ctx
-                _note = _applied_rules_note(mem_ctx)
+                from rune.agent.memory_bridge import format_applied_rules_note
+                _note = format_applied_rules_note(mem_ctx)
                 if _note:
                     console.print(f"[dim]{_note}[/dim]")
         except Exception:
@@ -328,12 +315,10 @@ def _handle_non_interactive(
                 classification_hint=goal_type,
             ))
             # Show what was learned from this run.
-            if _learned:
-                _head = ", ".join(_learned[:3])
-                _more = f" (+{len(_learned) - 3} more)" if len(_learned) > 3 else ""
-                console.print(
-                    f"[dim]📚 learned {len(_learned)} new rule(s): {_head}{_more}[/dim]"
-                )
+            from rune.agent.memory_bridge import format_learned_rules_note
+            _ln = format_learned_rules_note(_learned)
+            if _ln:
+                console.print(f"[dim]{_ln}[/dim]")
         except Exception:
             pass  # best-effort memory save
 

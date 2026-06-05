@@ -959,6 +959,12 @@ class AgentLoopController:
                     mem_ctx = await mgr.build_memory_context(goal)
                     if mem_ctx:
                         run_context["memory_context"] = mem_ctx
+                        from rune.agent.memory_bridge import (
+                            format_applied_rules_note,
+                        )
+                        _note = format_applied_rules_note(mem_ctx)
+                        if _note:
+                            self._renderer.print_learning_note(_note)
                 except Exception:
                     pass  # Memory context is best-effort
             except Exception as exc:
@@ -1006,11 +1012,15 @@ class AgentLoopController:
                         PostProcessInput,
                         post_process_agent_result,
                     )
-                    await post_process_agent_result(PostProcessInput(
+                    learned = await post_process_agent_result(PostProcessInput(
                         context=ctx,
                         success=getattr(trace, "success", True),
                         answer=answer,
                     ))
+                    from rune.agent.memory_bridge import format_learned_rules_note
+                    _ln = format_learned_rules_note(learned)
+                    if _ln:
+                        self._renderer.print_learning_note(_ln)
                 except Exception as exc:
                     log.debug("post_process_skipped", error=str(exc)[:200])
 

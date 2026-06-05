@@ -1,8 +1,19 @@
-"""Tests for self-improving visibility in the CLI (applied-rules note)."""
+"""Tests for self-improving visibility notes (applied / learned rules)."""
 
 from __future__ import annotations
 
-from rune.cli.main import _applied_rules_note
+from rune.agent.memory_bridge import (
+    format_applied_rules_note as _applied_rules_note,
+)
+from rune.agent.memory_bridge import (
+    format_learned_rules_note,
+)
+
+
+def test_learned_note_summarises_and_truncates():
+    assert format_learned_rules_note([]) is None
+    note = format_learned_rules_note([f"r{i}" for i in range(5)])
+    assert note is not None and "5 new rule" in note and "more" in note
 
 
 def test_summarises_learned_rules_block():

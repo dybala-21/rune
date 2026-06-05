@@ -491,6 +491,7 @@ class RuneApp:
         self._install_main_sigint_handler(loop)
         self._print_welcome()
         self._show_learning_notice()
+        self._print_session_briefing()
 
         # Start channel adapters in background (Telegram, Discord, etc.)
         asyncio.create_task(self._start_channel_adapters())
@@ -727,6 +728,10 @@ class RuneApp:
         except Exception:
             return
 
+        # Separate self-learned rules from plain facts.
+        rules = [f for f in facts if f.get("category", "").startswith("rule:")]
+        knows = [f for f in facts if not f.get("category", "").startswith("rule:")]
+
         # Only show briefing if there's something to show
         if not facts and not episodes:
             return
@@ -734,12 +739,23 @@ class RuneApp:
         self.console.print()
 
         # Top facts by confidence
-        if facts:
-            top = sorted(facts, key=lambda f: -f["confidence"])[:self._MAX_BRIEFING_ITEMS]
+        if knows:
+            top = sorted(knows, key=lambda f: -f["confidence"])[:self._MAX_BRIEFING_ITEMS]
             self.console.print("  [#555555]Knows:[/#555555]")
             for f in top:
                 val = f["value"][:60]
                 conf = int(f["confidence"] * 100)
+                self.console.print(
+                    f"  [#444444]·[/#444444] [#888888]{val}[/#888888] "
+                    f"[#555555]({conf}%)[/#555555]"
+                )
+
+        # Rules learned from past mistakes (self-improvement)
+        if rules:
+            self.console.print("  [#555555]Improved:[/#555555]")
+            for r in sorted(rules, key=lambda f: -f["confidence"])[:3]:
+                val = r["value"][:60]
+                conf = int(r["confidence"] * 100)
                 self.console.print(
                     f"  [#444444]·[/#444444] [#888888]{val}[/#888888] "
                     f"[#555555]({conf}%)[/#555555]"
