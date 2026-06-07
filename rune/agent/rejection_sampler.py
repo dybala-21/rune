@@ -21,17 +21,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Generic, TypeVar
 
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
 
-T = TypeVar("T")
-
 
 @dataclass
-class Attempt(Generic[T]):
+class Attempt[T]:
     """One sampled candidate and the verifier's verdict on it."""
 
     index: int
@@ -40,7 +37,7 @@ class Attempt(Generic[T]):
 
 
 @dataclass
-class RejectionResult(Generic[T]):
+class RejectionResult[T]:
     """Outcome of a best-of-K run."""
 
     selected: T | None  # first candidate the verifier accepted, else None
@@ -56,7 +53,7 @@ class RejectionResult(Generic[T]):
         return sum(1 for a in self.attempts if a.passed)
 
 
-async def solve_with_rejection(
+async def solve_with_rejection[T](
     run_attempt: Callable[[int], Awaitable[T]],
     verify: Callable[[T], Awaitable[bool]],
     k: int,
@@ -99,7 +96,7 @@ async def solve_with_rejection(
     )
 
 
-async def sample_parallel(
+async def sample_parallel[T](
     run_attempt: Callable[[int], Awaitable[T]],
     verify: Callable[[T], Awaitable[bool]],
     k: int,
@@ -117,7 +114,7 @@ async def sample_parallel(
     verdicts = await asyncio.gather(*(verify(c) for c in candidates))
     attempts = [
         Attempt(index=i, candidate=c, passed=v)
-        for i, (c, v) in enumerate(zip(candidates, verdicts))
+        for i, (c, v) in enumerate(zip(candidates, verdicts, strict=True))
     ]
     chosen = next((a for a in attempts if a.passed), None)
     log.info(

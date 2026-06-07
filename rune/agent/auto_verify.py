@@ -70,7 +70,7 @@ async def run_verify(
 
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except (TimeoutError, asyncio.TimeoutError):
+    except TimeoutError:
         log.debug("auto_verify_timeout", timeout_s=timeout)
         with contextlib.suppress(Exception):
             proc.kill()
