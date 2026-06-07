@@ -284,6 +284,14 @@ class Renderer:
         except Exception:
             self._safe_print(f"\u26a0 {content}")
 
+    def print_learning_note(self, content: str) -> None:
+        """Print a dim self-improving note. No warning glyph (*content* carries
+        its own marker)."""
+        try:
+            self._safe_print(Text.from_markup(f"[#666666]{content}[/#666666]"))
+        except Exception:
+            self._safe_print(content)
+
     def print_proactive(
         self,
         body: str,

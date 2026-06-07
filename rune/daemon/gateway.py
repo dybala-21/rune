@@ -979,12 +979,16 @@ class ChannelGateway:
 
             # 6. Post-process (memory persistence)
             try:
-                await post_process_agent_result(PostProcessInput(
+                learned = await post_process_agent_result(PostProcessInput(
                     context=agent_ctx,
                     success=trace.reason == "completed",
                     answer=response,
                     duration_ms=duration_ms,
                 ))
+                from rune.agent.memory_bridge import format_learned_rules_note
+                _ln = format_learned_rules_note(learned)
+                if _ln:
+                    response = f"{_ln}\n\n{response}"
             except Exception as exc:
                 log.debug("gateway_post_process_failed", error=str(exc)[:100])
 

@@ -398,6 +398,33 @@ def _extract_files_from_text(text: str) -> list[str]:
     return list(dict.fromkeys(paths))[:20]  # dedup, limit 20
 
 
+def format_applied_rules_note(mem_ctx: str) -> str | None:
+    """One-line summary of the learned rules in a memory context, or None."""
+    marker = "## Learned Rules"
+    if not mem_ctx or marker not in mem_ctx:
+        return None
+    section = mem_ctx.split(marker, 1)[1].split("\n##", 1)[0]
+    keys = [
+        ln[2:].split(":", 1)[0].strip()
+        for ln in section.splitlines()
+        if ln.startswith("- ") and ":" in ln
+    ]
+    if not keys:
+        return None
+    head = ", ".join(keys[:3])
+    more = f" (+{len(keys) - 3} more)" if len(keys) > 3 else ""
+    return f"🧠 applying {len(keys)} learned rule(s): {head}{more}"
+
+
+def format_learned_rules_note(keys: list[str]) -> str | None:
+    """One-line summary of newly learned rule keys, or None."""
+    if not keys:
+        return None
+    head = ", ".join(keys[:3])
+    more = f" (+{len(keys) - 3} more)" if len(keys) > 3 else ""
+    return f"📚 learned {len(keys)} new rule(s): {head}{more}"
+
+
 def _select_crisp_signal(
     success: bool,
     failure_reason: str,

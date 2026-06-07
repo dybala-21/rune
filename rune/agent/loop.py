@@ -500,6 +500,48 @@ class NativeAgentLoop(EventEmitter):
             log.warning("evidence_gate_check_error", error=str(exc)[:120])
             return "skip", None
 
+    async def _auto_verify(self) -> tuple[str, str]:
+        """Run the project's fast verifier (lint/typecheck) after edits.
+
+        Returns ``("pass"|"fail"|"skip", evidence)``; ``"skip"`` when no
+        verify command is detected. Never raises.
+        """
+        import os as _os
+
+        from rune.agent.auto_verify import detect_verify_command, run_verify
+        cmd = detect_verify_command(_os.getcwd())
+        if not cmd:
+            return "skip", ""
+        return await run_verify(cmd, _os.getcwd())
+
+    async def _auto_verify_gate(
+        self, messages: list[Any], blocked_count: int
+    ) -> tuple[bool, list[Any], int]:
+        """Shared post-edit auto-verify gate for every code-producing completion
+        path. Returns ``(ok, messages, blocked_count)``:
+
+        - ``ok=True``: pass / skip / disabled — the caller may finalize.
+        - ``ok=False``: the check failed; the problem is injected into
+          *messages* and *blocked_count* is incremented. The caller should
+          ``continue`` so the agent self-fixes, or finalize as
+          ``max_gate_blocked`` when the returned count hits the cap.
+        """
+        if not _env_flag("RUNE_AUTO_VERIFY"):
+            return True, messages, blocked_count
+        state, msg = await self._auto_verify()
+        if state == "fail" and msg:
+            log.info("auto_verify_block", step=self._step)
+            self._auto_verify_failure = msg
+            messages = self._inject_system_message(
+                messages,
+                "[Auto-Verify] The project's check failed after your edits. "
+                f"Fix this before finishing:\n{msg}",
+            )
+            blocked_count += 1
+            self._gate_blocked_count = blocked_count
+            return False, messages, blocked_count
+        return True, messages, blocked_count
+
     async def run(
         self,
         goal: str,
@@ -1724,6 +1766,17 @@ class NativeAgentLoop(EventEmitter):
                             log.info("benchmark_failed_tool_fastpath_block", step=self._step)
                             messages = self._inject_system_message(messages, blocker)
                         else:
+                            # Post-edit auto-verify before fast-path completion.
+                            _avok, messages, _gate_blocked_count = \
+                                await self._auto_verify_gate(messages, _gate_blocked_count)
+                            if not _avok:
+                                if _gate_blocked_count >= 5:
+                                    log.warning("max_gate_blocked", step=self._step,
+                                                count=_gate_blocked_count)
+                                    trace.reason = "max_gate_blocked"
+                                    trace.final_step = self._step
+                                    break
+                                continue
                             log.info("final_answer_detected", step=self._step,
                                      text_len=len(output_text), evidence=total_evidence)
                             trace.reason = "completed"
@@ -1822,6 +1875,17 @@ class NativeAgentLoop(EventEmitter):
                         log.info("benchmark_failed_tool_verified_block", step=self._step)
                         messages = self._inject_system_message(messages, blocker)
                     else:
+                        # Post-edit auto-verify, then Evidence Gate, before final.
+                        _avok, messages, _gate_blocked_count = \
+                            await self._auto_verify_gate(messages, _gate_blocked_count)
+                        if not _avok:
+                            if _gate_blocked_count >= 5:
+                                log.warning("max_gate_blocked", step=self._step,
+                                            count=_gate_blocked_count)
+                                trace.reason = "max_gate_blocked"
+                                trace.final_step = self._step
+                                break
+                            continue
                         # Behavior done != output correct. If the Evidence Gate
                         # is active, re-verify before finalizing: a fail injects
                         # evidence and continues; skip/off finalizes as before.
@@ -1852,6 +1916,16 @@ class NativeAgentLoop(EventEmitter):
                     # completion even though some behavioral requirement is unmet
                     # (e.g. "not enough reads"). A failing check instead injects
                     # first-mismatch evidence and keeps the loop going.
+                    _avok, messages, _gate_blocked_count = \
+                        await self._auto_verify_gate(messages, _gate_blocked_count)
+                    if not _avok:
+                        if _gate_blocked_count >= 5:
+                            log.warning("max_gate_blocked", step=self._step,
+                                        count=_gate_blocked_count)
+                            trace.reason = "max_gate_blocked"
+                            trace.final_step = self._step
+                            break
+                        continue
                     _ev_state, _ev_msg = await self._evidence_verdict()
                     if _ev_state == "pass":
                         log.info("evidence_gate_override_blocked", step=self._step)
@@ -1920,6 +1994,14 @@ class NativeAgentLoop(EventEmitter):
                         # it. The correct artifact is often written on the final
                         # iteration, after which no further finalize attempt
                         # would re-run the Evidence Gate.
+                        # Auto-verify last: a fail at the block cap means broken
+                        # code, so give up rather than retry.
+                        _avok, _, _ = await self._auto_verify_gate(
+                            messages, _gate_blocked_count)
+                        if not _avok:
+                            trace.reason = "max_gate_blocked"
+                            trace.final_step = self._step
+                            break
                         _ev_state2, _ = await self._evidence_verdict()
                         if _ev_state2 == "pass":
                             log.info("evidence_gate_override_maxblocked", step=self._step)
@@ -1955,6 +2037,16 @@ class NativeAgentLoop(EventEmitter):
                             log.info("benchmark_failed_tool_partial_block", step=self._step)
                             messages = self._inject_system_message(messages, blocker)
                         else:
+                            _avok, messages, _gate_blocked_count = \
+                                await self._auto_verify_gate(messages, _gate_blocked_count)
+                            if not _avok:
+                                if _gate_blocked_count >= 5:
+                                    log.warning("max_gate_blocked", step=self._step,
+                                                count=_gate_blocked_count)
+                                    trace.reason = "max_gate_blocked"
+                                    trace.final_step = self._step
+                                    break
+                                continue
                             log.info("partial_completion_accepted", step=self._step)
                             trace.reason = "completed"
                             trace.final_step = self._step
