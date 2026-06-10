@@ -676,7 +676,7 @@ async def test_learn_from_failures_caps_llm_calls(monkeypatch):
 @pytest.mark.asyncio
 async def test_best_of_learns_from_failed_attempts_on_solve(monkeypatch, tmp_path):
     # Two attempts: #0 fails (has evidence), #1 passes → solve learns from #0.
-    works = [str((tmp_path / f"w{i}")) for i in range(2)]
+    works = [str(tmp_path / f"w{i}") for i in range(2)]
     for w in works:
         os.makedirs(w)
 
@@ -703,7 +703,8 @@ async def test_best_of_learns_from_failed_attempts_on_solve(monkeypatch, tmp_pat
     monkeypatch.setattr(best_of, "_record_winner", AsyncMock(return_value=True))
     monkeypatch.setattr(best_of, "_learn_from_failures", fake_learn)
     monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
-    dest = tmp_path / "dest"; dest.mkdir()
+    dest = tmp_path / "dest"
+    dest.mkdir()
     monkeypatch.chdir(dest)
 
     code = await _best_of_async("fix calc", 2, None, None, report=lambda s, **kw: None)
