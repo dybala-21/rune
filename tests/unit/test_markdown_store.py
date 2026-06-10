@@ -84,6 +84,22 @@ class TestLearnedMd:
         assert facts[0]["value"] == "neovim"
         assert facts[0]["confidence"] == 0.9
 
+    def test_same_key_different_category_coexist(self, mem_dir: Path) -> None:
+        # A rule in one domain must not clobber a same-keyed rule in
+        # another. Update is unique by (category, key).
+        path = mem_dir / "learned.md"
+        save_learned_fact("rule:code_modify", "int_division", "truncate", 0.9, path)
+        save_learned_fact("rule:full", "int_division", "floor", 0.9, path)
+        facts = parse_learned_md(path)
+        by_cat = {f["category"]: f["value"] for f in facts}
+        assert by_cat == {"rule:code_modify": "truncate", "rule:full": "floor"}
+        # but updating the SAME (category, key) still replaces in place
+        save_learned_fact("rule:code_modify", "int_division", "trunc2", 0.95, path)
+        facts = parse_learned_md(path)
+        assert len([f for f in facts if f["key"] == "int_division"]) == 2
+        cm = next(f for f in facts if f["category"] == "rule:code_modify")
+        assert cm["value"] == "trunc2"
+
     def test_has_key(self, mem_dir: Path) -> None:
         path = mem_dir / "learned.md"
         save_learned_fact("preference", "editor", "vim", 0.8, path)

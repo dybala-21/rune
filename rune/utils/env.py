@@ -46,6 +46,17 @@ def env_int(name: str, default: int | None = None) -> int | None:
         return default
     return value if value > 0 else default
 
+
+def env_float(name: str, default: float) -> float:
+    """Return ``name`` as a float, else ``default`` (unset or non-numeric)."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
 # ============================================================================
 # Paths
 # ============================================================================

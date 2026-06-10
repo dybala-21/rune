@@ -154,10 +154,22 @@ async def make_evidence_gate_verifier(
         # explainable (rather than silently failing).
         log.info("rejection_eg_verifier_no_check")
 
+    # Keep each failed candidate's mismatch evidence (keyed by cwd) so callers
+    # can learn a correctness rule from it (best-of failure-driven learning).
+    evidence_by_cwd: dict[str, str] = {}
+
     async def verify(cwd: str) -> bool:
         if not script:
             return False
-        state, _ = await run_evidence_check(script, cwd)
+        state, evidence = await run_evidence_check(script, cwd)
+        if state == "fail" and evidence:
+            evidence_by_cwd[cwd] = evidence
         return state == "pass"
 
+    # Expose whether a mechanical check exists so callers can distinguish
+    # "checked but every candidate failed" from "no check could be built, so
+    # best-of-K structurally cannot select anything" — two very different
+    # outcomes that otherwise both look like 0/K passed.
+    verify.has_check = bool(script)  # type: ignore[attr-defined]
+    verify.evidence_by_cwd = evidence_by_cwd  # type: ignore[attr-defined]
     return verify

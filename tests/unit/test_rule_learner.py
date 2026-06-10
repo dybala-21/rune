@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import pytest
 
+import rune.memory.rule_learner as rule_learner
 from rune.memory.rule_learner import (
     _error_signature,
     decay_unused_rules,
     find_repeated_failures,
+    get_relevant_rules,
     get_rules_for_domain,
 )
 from rune.memory.store import MemoryStore
@@ -111,6 +113,66 @@ class TestGetRulesForDomain:
     def test_max_10_rules(self):
         rules = get_rules_for_domain("code_modify")
         assert len(rules) <= 10
+
+
+class TestGetRelevantRules:
+    """Hybrid retrieval: exact-domain (precise) + semantic (robust to the LLM
+    classifier drifting between valid goal_type enums)."""
+
+    _CANDS = [
+        # exact-domain but semantically DISSIMILAR to the goal
+        {"key": "A", "value": "exact", "confidence": 0.7, "domain": "code_modify", "hit_count": 0},
+        # OTHER domain but semantically SIMILAR (the drift case we must catch)
+        {"key": "B", "value": "floor division", "confidence": 0.9, "domain": "full", "hit_count": 0},
+        # other domain AND dissimilar → must be excluded
+        {"key": "C", "value": "click", "confidence": 0.65, "domain": "browser", "hit_count": 0},
+    ]
+    # goal=[1,0]; A=[0,1] (cos 0), B=[1,0] (cos 1), C=[0,1] (cos 0)
+    _VECS = [[1.0, 0.0], [0.0, 1.0], [1.0, 0.0], [0.0, 1.0]]
+
+    def _patch(self, monkeypatch, vecs=None, raise_embed=False):
+        monkeypatch.setattr(rule_learner, "_resolved_rule_candidates", lambda: list(self._CANDS))
+
+        class _FakeMgr:
+            async def embed_batch(self, texts):
+                if raise_embed:
+                    raise RuntimeError("no embedding provider")
+                return vecs if vecs is not None else self_vecs
+
+        self_vecs = self._VECS
+        import rune.memory.manager as mgr_mod
+        monkeypatch.setattr(mgr_mod, "get_memory_manager", lambda: _FakeMgr())
+
+    @pytest.mark.asyncio
+    async def test_includes_exact_and_semantic(self, monkeypatch):
+        self._patch(monkeypatch)
+        rules = await get_relevant_rules("compute calc", domain="code_modify")
+        keys = {r["key"] for r in rules}
+        assert "A" in keys  # exact-domain, even though dissimilar
+        assert "B" in keys  # cross-domain but semantically similar (drift caught)
+        assert "C" not in keys  # cross-domain + dissimilar
+        # sorted by confidence desc → B (0.9) before A (0.7)
+        assert [r["key"] for r in rules][:2] == ["B", "A"]
+
+    @pytest.mark.asyncio
+    async def test_semantic_catches_rule_when_domain_mismatches(self, monkeypatch):
+        # Classifier returned the WRONG enum ('full' instead of code_modify):
+        # exact-domain finds nothing, semantic still surfaces the similar rule.
+        self._patch(monkeypatch)
+        rules = await get_relevant_rules("compute calc", domain="research")
+        keys = {r["key"] for r in rules}
+        assert keys == {"B"}  # only the semantically-similar one
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_exact_when_embedding_unavailable(self, monkeypatch):
+        self._patch(monkeypatch, raise_embed=True)
+        rules = await get_relevant_rules("compute calc", domain="code_modify")
+        assert {r["key"] for r in rules} == {"A"}  # exact-domain only
+
+    @pytest.mark.asyncio
+    async def test_no_candidates_returns_empty(self, monkeypatch):
+        monkeypatch.setattr(rule_learner, "_resolved_rule_candidates", lambda: [])
+        assert await get_relevant_rules("x", domain="code_modify") == []
 
 
 class TestDecayUnusedRules:

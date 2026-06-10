@@ -327,6 +327,7 @@ async def post_process_agent_result(inp: PostProcessInput) -> list[str]:
                     "success": inp.success,
                     "reason": inp.reason,
                     "evidence_gate": inp.evidence_gate,
+                    "changed_files": inp.changed_files,
                 },
                 memory_manager=manager,
                 conversation_id=inp.context.conversation_id,

@@ -86,6 +86,23 @@ def main(
     voice: Annotated[
         bool, typer.Option("--voice", help="Voice input mode (speak instead of type)")
     ] = False,
+    best_of: Annotated[
+        int,
+        typer.Option(
+            "--best-of",
+            help="Non-interactive only: run K independent fresh attempts and keep "
+            "the first one the Evidence Gate verifies (best-of-K). 1 = single run.",
+        ),
+    ] = 1,
+    include_cwd: Annotated[
+        bool,
+        typer.Option(
+            "--include-cwd",
+            help="best-of only: seed each attempt with a copy of the working tree "
+            "so it can EDIT existing files; the winner's changes are written back "
+            "(originals backed up). Default: greenfield (empty dir, new files only).",
+        ),
+    ] = False,
 ) -> None:
     """RUNE - AI Development Environment.
 
@@ -105,7 +122,23 @@ def main(
         if voice:
             _handle_voice_mode(model=model, provider=provider)
         elif message:
-            _handle_non_interactive(message, model=model, provider=provider)
+            # Recursion guard: a best-of attempt subprocess sets RUNE_IN_BEST_OF,
+            # so even if --best-of ever leaks into a child it collapses to a
+            # single run instead of fanning out again.
+            effective_best_of = best_of
+            if best_of < 1:
+                console.print("[red]--best-of must be >= 1.[/red]")
+                raise typer.Exit(2)
+            if best_of > 1 and os.environ.get("RUNE_IN_BEST_OF"):
+                effective_best_of = 1
+            if effective_best_of > 1:
+                from rune.cli.best_of import run_best_of
+                run_best_of(
+                    message, effective_best_of, model=model, provider=provider,
+                    seed_cwd=include_cwd,
+                )
+            else:
+                _handle_non_interactive(message, model=model, provider=provider)
         else:
             _start_interactive(model=model, provider=provider)
 
@@ -245,6 +278,15 @@ def _handle_non_interactive(
     loop.on("text_delta", _on_text_delta)
     loop.on("tool_call", _on_tool_call)
 
+    # A best-of-K attempt subprocess sets RUNE_IN_BEST_OF. Such a run is a
+    # throwaway sample, not a real session: it must not leave persistent
+    # side-effects (episode learning, memory promotion) or it pollutes the
+    # self-improving store with K-1 discarded attempts. Memory reads (rule
+    # injection, classification) stay on so each sample runs under production
+    # conditions; only writes are suppressed. MCP stays on so attempts keep full
+    # tool capability.
+    _throwaway = bool(os.environ.get("RUNE_IN_BEST_OF"))
+
     async def _run() -> None:
         from rune.agent.agent_context import (
             PostProcessInput,
@@ -305,30 +347,32 @@ def _handle_non_interactive(
         if trace.reason != "completed":
             console.print(f"[dim]({trace.reason})[/dim]")
 
-        try:
-            _learned = await post_process_agent_result(PostProcessInput(
-                context=ctx,
-                success=(trace.reason == "completed"),
-                answer="".join(output_parts),
-                reason=trace.reason,
-                evidence_gate=trace.evidence_gate,
-                classification_hint=goal_type,
-            ))
-            # Show what was learned from this run.
-            from rune.agent.memory_bridge import format_learned_rules_note
-            _ln = format_learned_rules_note(_learned)
-            if _ln:
-                console.print(f"[dim]{_ln}[/dim]")
-        except Exception:
-            pass  # best-effort memory save
+        if not _throwaway:
+            try:
+                _learned = await post_process_agent_result(PostProcessInput(
+                    context=ctx,
+                    success=(trace.reason == "completed"),
+                    answer="".join(output_parts),
+                    reason=trace.reason,
+                    evidence_gate=trace.evidence_gate,
+                    classification_hint=goal_type,
+                    changed_files=loop.files_written,
+                ))
+                # Show what was learned from this run.
+                from rune.agent.memory_bridge import format_learned_rules_note
+                _ln = format_learned_rules_note(_learned)
+                if _ln:
+                    console.print(f"[dim]{_ln}[/dim]")
+            except Exception:
+                pass  # best-effort memory save
 
-        # A one-shot run is a whole session; flush its events into the daily
-        # tier on exit (else promotion never runs). No-op if no events.
-        try:
-            from rune.memory.manager import get_memory_manager
-            await get_memory_manager().promote_memories()
-        except Exception:
-            pass
+            # A one-shot run is a whole session; flush its events into the daily
+            # tier on exit (else promotion never runs). No-op if no events.
+            try:
+                from rune.memory.manager import get_memory_manager
+                await get_memory_manager().promote_memories()
+            except Exception:
+                pass
 
         # Cleanup MCP servers
         try:
@@ -504,6 +548,7 @@ def _simple_repl(model: str | None = None, provider: str | None = None) -> None:
                 answer=answer,
                 reason=trace.reason,
                 evidence_gate=trace.evidence_gate,
+                changed_files=loop.files_written,
             ))
 
     console.print("[dim]Type your message. /exit to quit, /help for commands.[/dim]\n")

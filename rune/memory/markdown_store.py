@@ -257,9 +257,16 @@ def save_learned_fact(
             key_lower = key.lower()
             replaced = False
 
+            # Update is unique by (category, key). Matching key alone would let a
+            # rule in one domain (e.g. rule:full) clobber a same-keyed rule in
+            # another (rule:code_modify), silently destroying learned knowledge.
             for i, line in enumerate(lines):
                 m = _LEARNED_RE.match(line.strip())
-                if m and m.group("key").strip().lower() == key_lower:
+                if (
+                    m
+                    and m.group("key").strip().lower() == key_lower
+                    and m.group("category").strip() == category
+                ):
                     lines[i] = new_line
                     replaced = True
                     break
