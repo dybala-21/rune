@@ -467,6 +467,11 @@ class NativeAgentLoop(EventEmitter):
         # Evidence Gate (benchmark output-correctness verification; opt-in)
         self._evidence_gate = None
 
+    @property
+    def files_written(self) -> list[str]:
+        """Files the agent actually wrote this run (from its file tools)."""
+        return sorted(self._files_written)
+
     async def _benchmark_completion_blocker(self) -> str | None:
         # 1. Recent unresolved tool failure (behavioral evidence).
         if _env_flag("RUNE_BENCH_CAPTURE_FAILED_TOOL_OUTPUT") and self._recent_failed_tool_nudge:
@@ -965,40 +970,49 @@ class NativeAgentLoop(EventEmitter):
         async def _on_tool_end(cap_name: str, result: CapabilityResult) -> None:
             self._last_activity = time.monotonic()  # (#30) activity on tool result
 
+            # A throwaway best-of-K sample (RUNE_IN_BEST_OF set in the attempt
+            # subprocess) must not persist tool-call telemetry: the proactive
+            # engine seeds its behavior predictor from tool_call_log, so K
+            # discarded attempts would pollute later sessions' predictions. Skip
+            # both the persistent log and the in-process predictor record.
+            _ephemeral = bool(os.environ.get("RUNE_IN_BEST_OF"))
+
             # Record tool call to persistent log (with params for command extraction)
-            try:
-                from rune.memory.store import get_memory_store
-                _store = get_memory_store()
-                _sid = self._session_id or "unknown"
-                _err = getattr(result, "error", "") or "" if not result.success else ""
-                _store.log_tool_call(
-                    _sid,
-                    cap_name,
-                    params=_last_tool_params or None,
-                    result_success=result.success,
-                    error_message=str(_err)[:500],
-                    duration_ms=getattr(result, "duration_ms", 0) or 0,
-                )
-            except Exception:
-                pass  # Tool logging must never break the agent loop
+            if not _ephemeral:
+                try:
+                    from rune.memory.store import get_memory_store
+                    _store = get_memory_store()
+                    _sid = self._session_id or "unknown"
+                    _err = getattr(result, "error", "") or "" if not result.success else ""
+                    _store.log_tool_call(
+                        _sid,
+                        cap_name,
+                        params=_last_tool_params or None,
+                        result_success=result.success,
+                        error_message=str(_err)[:500],
+                        duration_ms=getattr(result, "duration_ms", 0) or 0,
+                    )
+                except Exception:
+                    pass  # Tool logging must never break the agent loop
 
             # Record tool call for proactive behavior prediction
-            try:
-                from rune.proactive.prediction.engine import get_prediction_engine
-                pred_eng = get_prediction_engine()
-                if result.success:
-                    pred_eng.behavior_predictor.record_tool_call(_tool_key(cap_name, _last_tool_params))
-                # Also record success/failure for frustration detection
-                pred_eng._recent_actions.append({
-                    "type": "tool",
-                    "tool": cap_name,
-                    "success": result.success,
-                })
-                # Keep bounded
-                if len(pred_eng._recent_actions) > 50:
-                    pred_eng._recent_actions = pred_eng._recent_actions[-50:]
-            except Exception:
-                pass  # Prediction recording must never break the agent loop
+            if not _ephemeral:
+                try:
+                    from rune.proactive.prediction.engine import get_prediction_engine
+                    pred_eng = get_prediction_engine()
+                    if result.success:
+                        pred_eng.behavior_predictor.record_tool_call(_tool_key(cap_name, _last_tool_params))
+                    # Also record success/failure for frustration detection
+                    pred_eng._recent_actions.append({
+                        "type": "tool",
+                        "tool": cap_name,
+                        "success": result.success,
+                    })
+                    # Keep bounded
+                    if len(pred_eng._recent_actions) > 50:
+                        pred_eng._recent_actions = pred_eng._recent_actions[-50:]
+                except Exception:
+                    pass  # Prediction recording must never break the agent loop
 
             # Update evidence counters
             if cap_name == "file_read":

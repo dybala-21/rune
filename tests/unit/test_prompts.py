@@ -88,6 +88,23 @@ class TestBuildSystemPrompt:
         assert goal_text in prompt
         assert "Current Task" in prompt
 
+    def test_memory_context_reaches_prompt_in_all_shapes(self):
+        # Producers pass memory_context as an object (.formatted), the
+        # raw run-context dict, or a plain string — ALL must reach the model.
+        marker = "integer division must floor"
+        section = f"## Learned Rules\n- floor: {marker}"
+
+        class _Obj:
+            formatted = section
+
+        for ctx in (
+            _Obj(),
+            {"memory_context": section, "workspace_root": "/x"},
+            section,
+        ):
+            prompt = build_system_prompt(goal="x", memory_context=ctx)
+            assert marker in prompt, f"memory dropped for {type(ctx).__name__}"
+
     def test_code_category_includes_prompt_code(self):
         prompt = build_system_prompt(goal="fix bug", goal_category="code")
         assert "Code Intelligence" in prompt

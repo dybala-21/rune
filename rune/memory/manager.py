@@ -390,25 +390,26 @@ class MemoryManager:
             budget_used += len(text)
             return True
 
-        # 0. Learned rules (from Rule Learner) - domain-scoped
+        # 0. Learned rules (from Rule Learner) exact-domain + semantic.
+        # Domain (goal_type) matching alone is brittle: the LLM classifier drifts
+        # between valid enums for the same task (e.g. code_modify vs the 'full'
+        # fallback), so a rule learned under one enum silently misses. We pass the
+        # goal too so semantically-similar rules inject regardless of domain.
         try:
-            from rune.memory.rule_learner import get_rules_for_domain
+            from rune.memory.rule_learner import get_relevant_rules
             domain = getattr(classification, "goal_type", None) if classification else None
             if domain is None and goal:
-                # Most callers pass no classification; classify here so rules
-                # inject on every path. On failure, skip injection.
                 try:
                     from rune.agent.goal_classifier import classify_goal
                     domain = (await classify_goal(goal)).goal_type
                 except Exception:
                     domain = None
-            if domain:
-                rules = get_rules_for_domain(domain)
-                if rules:
-                    rule_lines = [f"- {r['key']}: {r['value']}" for r in rules]
-                    _add_section(
-                        "## Learned Rules\n" + "\n".join(rule_lines[:10]) + "\n"
-                    )
+            rules = await get_relevant_rules(goal, domain)
+            if rules:
+                rule_lines = [f"- {r['key']}: {r['value']}" for r in rules]
+                _add_section(
+                    "## Learned Rules\n" + "\n".join(rule_lines[:10]) + "\n"
+                )
         except Exception:
             pass  # Rule injection is best-effort
 

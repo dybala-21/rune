@@ -267,19 +267,38 @@ class TestUpdateRulesFromOutcome:
         assert meta["rule:code_modify:high"]["confidence"] <= 1.0
         assert meta["rule:code_modify:low"]["confidence"] >= 0.0
 
-    def test_wrong_domain_not_updated(self, meta_dir):
-        """Rules from different domain should not be touched."""
+    def test_cross_domain_rule_updated_when_relevant(self, meta_dir):
+        """Injection is cross-domain (semantic), so demotion MUST reach a
+        keyword-relevant rule stored under another domain — else a rule injected
+        cross-domain causes failures forever without being penalized."""
         _seed_meta(meta_dir, [{
             "domain": "research", "sig": "xyz",
             "human_key": "verify_source",
-            "confidence": 0.40,
+            "confidence": 0.50,
         }])
-
         count = update_rules_from_outcome(
-            "code_modify", task_success=True,
-            goal="verify source code",
+            "code_modify", task_success=False,
+            goal="verify source code",  # overlaps verify/source
+        )
+        assert count == 1
+        meta = _read_json(meta_dir / "fact-meta.json")
+        assert meta["rule:research:xyz"]["confidence"] == pytest.approx(0.45, abs=0.001)
+
+    def test_cross_domain_rule_not_updated_when_irrelevant(self, meta_dir):
+        """A cross-domain rule with NO keyword overlap is never blindly touched
+        (avoids over-demoting unrelated rules on every failure)."""
+        _seed_meta(meta_dir, [{
+            "domain": "browser", "sig": "q",
+            "human_key": "click_submit_button",
+            "confidence": 0.50,
+        }])
+        count = update_rules_from_outcome(
+            "code_modify", task_success=False,
+            goal="fix integer division in calc.py",
         )
         assert count == 0
+        meta = _read_json(meta_dir / "fact-meta.json")
+        assert meta["rule:browser:q"]["confidence"] == 0.50  # unchanged
 
     def test_empty_goal_updates_all_domain_rules(self, meta_dir):
         """When goal is empty, keyword check is skipped → all rules updated."""

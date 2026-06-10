@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from rune.agent.memory_bridge import (
     _select_crisp_signal,
     detect_languages,
@@ -11,8 +13,49 @@ from rune.agent.memory_bridge import (
     extract_intent_from_goal,
     format_relative_time,
     generate_skill_name,
+    save_agent_result_to_memory,
 )
 from rune.types import Domain
+
+
+class TestEpisodeFilesAreAuthoritative:
+    """The episode records the files the agent's tools actually wrote
+    (result['changed_files']) — never paths guessed from free text, so env/model
+    noise mentioned in output can't leak into memory."""
+
+    async def _save(self, result):
+        captured = {}
+
+        class _FakeMgr:
+            async def save_episode(self, ep):
+                captured["ep"] = ep
+
+        await save_agent_result_to_memory("create solution.py", result, _FakeMgr())
+        return captured.get("ep")
+
+    @pytest.mark.asyncio
+    async def test_uses_changed_files_only(self):
+        result = {
+            "output": "done; loaded /x/.venv/site-packages/llama_cpp/_internals.py "
+                      "and /y/models/m.gguf",
+            "success": True,
+            "reason": "completed",
+            "changed_files": ["solution.py", "src/calc.py"],
+        }
+        ep = await self._save(result)
+        assert ep is not None
+        import json
+        assert json.loads(ep.files_touched) == ["solution.py", "src/calc.py"]
+        # the noise paths from output are NOT recorded
+        assert ".venv" not in ep.files_touched and ".gguf" not in ep.files_touched
+
+    @pytest.mark.asyncio
+    async def test_empty_when_no_changed_files(self):
+        result = {"output": "ran /usr/bin/python /x/.venv/foo.py", "success": True,
+                  "reason": "completed"}
+        ep = await self._save(result)
+        assert ep is not None
+        assert ep.files_touched in ("", "[]")
 
 
 class TestSelectCrispSignal:

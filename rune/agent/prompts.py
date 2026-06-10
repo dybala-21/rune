@@ -687,9 +687,20 @@ def build_system_prompt(
         goal_type = getattr(classification, "goal_type", str(classification))
         parts.append(f"## Task Classification\n\nType: {goal_type}")
 
-    # Memory context
+    # Memory context. Producers pass this in three shapes and all must reach the
+    # model: an AgentMemoryContext (``.formatted``), the raw run-context dict
+    # (``{"memory_context": "<text>"}``, what the CLI/controller pass), or a
+    # plain string. Handling only ``.formatted`` would drop the dict/string ones.
     if memory_context is not None:
         formatted = getattr(memory_context, "formatted", None)
+        if formatted is None:
+            if isinstance(memory_context, str):
+                formatted = memory_context
+            elif isinstance(memory_context, dict):
+                formatted = (
+                    memory_context.get("memory_context")
+                    or memory_context.get("formatted")
+                )
         if formatted:
             parts.append(f"## Memory Context\n\n{formatted}")
 

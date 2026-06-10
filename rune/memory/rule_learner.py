@@ -405,12 +405,12 @@ def _find_meta_key(
     return None
 
 
-def get_rules_for_domain(domain: str) -> list[dict[str, Any]]:
-    """Get active rules for a specific domain.
+def _resolved_rule_candidates() -> list[dict[str, Any]]:
+    """All ``rule:*`` facts with resolved confidence >= threshold.
 
-    Returns list of {key, value, confidence} for rules matching the domain.
-    Max 10 rules.  Only rules with confidence >= ``_INJECTION_THRESHOLD``
-    are returned — new rules must prove themselves first.
+    Each candidate carries its source ``domain`` (the part after ``rule:``) so
+    callers can match exactly or across domains. Confidence prefers the
+    outcome-updated meta value over the static one in learned.md.
     """
     from rune.memory.markdown_store import parse_learned_md
 
@@ -419,36 +419,112 @@ def get_rules_for_domain(domain: str) -> list[dict[str, Any]]:
     except Exception:
         return []
 
-    category = f"rule:{domain}"
     meta = load_fact_meta()
-
-    rules: list[dict[str, Any]] = []
+    out: list[dict[str, Any]] = []
     for fact in facts:
-        if fact.get("category") != category:
+        category = fact.get("category", "")
+        if not category.startswith("rule:"):
             continue
+        fdomain = category.split(":", 1)[1]
         key = fact.get("key", "")
 
-        # Prefer meta confidence (updated by outcome feedback) over
-        # the static confidence stored in learned.md.
         meta_key = _find_meta_key(meta, category, key)
         if meta_key and meta[meta_key].get("eval_count", 0) > 0:
             confidence = meta[meta_key].get("confidence", 0.5)
         else:
             confidence = fact.get("confidence", 0.5)
-
         if confidence < _INJECTION_THRESHOLD:
             continue
+
         meta_entry = meta.get(meta_key, {}) if meta_key else {}
-        rules.append({
+        out.append({
             "key": key,
             "value": fact.get("value", ""),
             "confidence": confidence,
+            "domain": fdomain,
             "hit_count": meta_entry.get("hit_count", 0),
         })
+    return out
 
-    # Sort by confidence desc, limit to 10
+
+def get_rules_for_domain(domain: str) -> list[dict[str, Any]]:
+    """Get active rules for a specific domain (EXACT match).
+
+    Returns list of {key, value, confidence} for rules matching the domain.
+    Max 10 rules.  Only rules with confidence >= ``_INJECTION_THRESHOLD``
+    are returned — new rules must prove themselves first.
+    """
+    rules = [r for r in _resolved_rule_candidates() if r["domain"] == domain]
     rules.sort(key=lambda r: r["confidence"], reverse=True)
     return rules[:10]
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    """Cosine similarity of two equal-length vectors (0 if either is zero)."""
+    import math
+
+    dot = sum(x * y for x, y in zip(a, b, strict=False))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot / (na * nb)
+
+
+# Semantic-similarity threshold for cross-domain rule retrieval. Tunable: too
+# low injects unrelated rules, too high misses relevant ones.
+_RULE_SIM_THRESHOLD_ENV = "RUNE_RULE_SIM_THRESHOLD"
+_DEFAULT_RULE_SIM_THRESHOLD = 0.55
+
+
+async def get_relevant_rules(
+    goal: str,
+    domain: str | None = None,
+    *,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    """Rules to inject for ``goal``: exact-domain (precise) + semantically similar.
+
+    Exact ``goal_type`` matching alone is brittle — the LLM classifier assigns
+    different (all valid) enums to the same task across runs (e.g. code_modify vs
+    the 'full' fallback), so a rule learned under one enum silently fails to
+    inject when the same task later classifies to another. To be robust we ALSO
+    retrieve rules whose text is semantically close to the goal, regardless of
+    the domain they were stored under. Falls back to exact-domain only when the
+    embedding provider is unavailable.
+    """
+    from rune.utils.env import env_float
+
+    candidates = _resolved_rule_candidates()
+    if not candidates:
+        return []
+
+    chosen: dict[str, dict[str, Any]] = {}
+
+    # 1. Exact-domain matches — high precision, always included.
+    if domain:
+        for r in candidates:
+            if r["domain"] == domain:
+                chosen[r["key"]] = r
+
+    # 2. Semantic matches across ALL domains — robust to classifier drift.
+    if goal:
+        try:
+            from rune.memory.manager import get_memory_manager
+
+            threshold = env_float(_RULE_SIM_THRESHOLD_ENV, _DEFAULT_RULE_SIM_THRESHOLD)
+            texts = [goal] + [f"{r['key']}: {r['value']}" for r in candidates]
+            vecs = await get_memory_manager().embed_batch(texts)
+            gvec, rvecs = vecs[0], vecs[1:]
+            for r, rv in zip(candidates, rvecs, strict=False):
+                if _cosine(gvec, rv) >= threshold:
+                    chosen.setdefault(r["key"], r)
+        except Exception as exc:  # embeddings unavailable -> exact-domain only
+            log.debug("rule_semantic_retrieval_skipped", error=str(exc)[:120])
+
+    out = list(chosen.values())
+    out.sort(key=lambda r: r["confidence"], reverse=True)
+    return out[:limit]
 
 
 def update_rules_from_outcome(
@@ -472,17 +548,26 @@ def update_rules_from_outcome(
     for key, entry in meta.items():
         if not key.startswith(_RULE_CATEGORY_PREFIX):
             continue
-        if entry.get("category") != category:
-            continue
         # Demote rules from both learners on negative outcomes. This is what
         # lets a wrongly-learned one-shot rule fall back out of injection.
         if entry.get("source") not in ("rule_learner", "crisp_failure"):
             continue
 
-        # Relevance check: rule keywords must appear in task context
+        # Relevance check: rule keywords vs task context.
         human_key = entry.get("human_key", "")
         rule_words = {w for w in human_key.lower().split("_") if len(w) > 3}
-        if rule_words and context and not any(w in context for w in rule_words):
+        has_overlap = bool(rule_words) and any(w in context for w in rule_words)
+        in_domain = entry.get("category") == category
+
+        # Injection is cross-domain (semantic similarity, get_relevant_rules), so
+        # demotion must also be able to reach a rule stored under another domain —
+        # else a wrong rule injected cross-domain causes failures forever without
+        # ever being penalized. Update a rule when it is the task's own domain, or
+        # when it is positively keyword-relevant to this task. A cross-domain rule
+        # with no positive overlap is never touched (avoids over-demotion).
+        if not in_domain and not has_overlap:
+            continue
+        if in_domain and rule_words and context and not has_overlap:
             continue
 
         conf = entry.get("confidence", _INITIAL_CONFIDENCE)

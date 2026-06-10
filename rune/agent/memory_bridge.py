@@ -388,16 +388,6 @@ async def _search_facts(memory_manager: Any, category: str) -> list[Any]:
 
 # Save agent result to memory
 
-def _extract_files_from_text(text: str) -> list[str]:
-    """Extract file paths mentioned in text."""
-    paths: list[str] = []
-    for match in PATH_PATTERN.finditer(text):
-        path = match.group(1)
-        if len(path) > 4 and not path.startswith("http"):
-            paths.append(path)
-    return list(dict.fromkeys(paths))[:20]  # dedup, limit 20
-
-
 def format_applied_rules_note(mem_ctx: str) -> str | None:
     """One-line summary of the learned rules in a memory context, or None."""
     marker = "## Learned Rules"
@@ -495,10 +485,10 @@ async def save_agent_result_to_memory(
         # Extract intent
         intent = extract_intent_from_goal(goal, classification_hint)
 
-        # Extract file paths (deterministic, no LLM needed)
+        # Files the agent actually wrote, reported by its file tools — the
+        # authoritative list, so we never guess paths out of free text.
         import json as _json
-        combined_text = f"{goal}\n{result_text}"
-        files = _extract_files_from_text(combined_text)
+        files = list(result.get("changed_files") or []) if isinstance(result, dict) else []
 
         # Generate lessons from both success and failure
         if not success:

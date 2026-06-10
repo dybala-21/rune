@@ -112,6 +112,30 @@ async def test_evidence_gate_verifier_selects_only_pass(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_evidence_gate_verifier_records_failure_evidence(monkeypatch) -> None:
+    import rune.agent.evidence_gate as eg
+
+    async def fake_extract(instruction: str):
+        return "echo check"
+
+    async def fake_run(script: str, cwd: str):
+        # "bad" fails with mismatch evidence; "good" passes.
+        if cwd == "good":
+            return ("pass", "")
+        return ("fail", f"mismatch at {cwd}")
+
+    monkeypatch.setattr(eg, "extract_success_check", fake_extract)
+    monkeypatch.setattr(eg, "run_evidence_check", fake_run)
+
+    verify = await make_evidence_gate_verifier("task")
+    assert await verify("bad") is False
+    assert await verify("good") is True
+    # the failed candidate's evidence is captured (for best-of failure learning),
+    # the passing one leaves no evidence
+    assert verify.evidence_by_cwd == {"bad": "mismatch at bad"}
+
+
+@pytest.mark.asyncio
 async def test_evidence_gate_verifier_no_check_never_selects(monkeypatch) -> None:
     import rune.agent.evidence_gate as eg
 
