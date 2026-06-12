@@ -25,7 +25,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from rune.agent.rejection_sampler import (
-    make_evidence_gate_verifier,
+    make_verifier,
     sample_parallel,
 )
 from rune.utils.env import env_int
@@ -484,11 +484,14 @@ async def _best_of_async(
     agent can edit existing files; restore then writes back only the changed
     files (overwriting, with a backup), instead of the greenfield new-files copy.
     """
-    verify_cwd = await make_evidence_gate_verifier(message)
-    has_check = bool(getattr(verify_cwd, "has_check", True))
-
     dest = os.getcwd()
     seed_from = dest if seed_cwd else None
+
+    # Execution-first verifier: prefer running the repo's tests over the LLM-judge
+    # Evidence Gate (execution selects code better, esp. for weak models
+    # arXiv 2502.14382). Falls back to the Evidence Gate when no tests exist.
+    verify_cwd = await make_verifier(message, seed_cwd=seed_from)
+    has_check = bool(getattr(verify_cwd, "has_check", True))
 
     # Cap concurrent attempt subprocesses: each is a full agent run, so a large
     # K must not spawn K heavyweight processes at once. Mirrors the workflow

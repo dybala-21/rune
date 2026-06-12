@@ -173,3 +173,48 @@ async def make_evidence_gate_verifier(
     verify.has_check = bool(script)  # type: ignore[attr-defined]
     verify.evidence_by_cwd = evidence_by_cwd  # type: ignore[attr-defined]
     return verify
+
+
+async def make_verifier(
+    instruction: str, seed_cwd: str | None = None
+) -> Callable[[str], Awaitable[bool]]:
+    """Build a best-of-K ``verify(cwd)`` that PREFERS execution over LLM-judge.
+
+    For code, running the project's tests is a more reliable selector than an
+    LLM/Evidence-Gate judge, and the gap is largest for weak models (arXiv
+    2502.14382 / 2506.10056) — which is exactly the best-of-K regime. So each
+    candidate is verified by:
+
+    1. its repo test command, if one is detectable (``detect_test_command``) —
+       ``pass`` selects, ``fail`` rejects (keeping the output as evidence);
+    2. otherwise (or when tests are inconclusive/``skip``) the Evidence Gate.
+
+    Greenfield tasks with no tests fall back to the Evidence Gate exactly as
+    before, so this never regresses the no-tests case; it strictly adds an
+    execution path for tested repos (e.g. ``--include-cwd``).
+    """
+    from rune.agent.auto_verify import detect_test_command, run_verify
+
+    eg = await make_evidence_gate_verifier(instruction)
+    evidence_by_cwd: dict[str, str] = getattr(eg, "evidence_by_cwd", {})
+    # A check exists if the Evidence Gate built one OR the seeded tree has tests.
+    has_check = bool(getattr(eg, "has_check", False)) or (
+        bool(seed_cwd) and detect_test_command(seed_cwd) is not None
+    )
+
+    async def verify(cwd: str) -> bool:
+        cmd = detect_test_command(cwd)
+        if cmd:
+            state, evidence = await run_verify(cmd, cwd)
+            if state == "pass":
+                return True
+            if state == "fail":
+                if evidence:
+                    evidence_by_cwd[cwd] = evidence
+                return False
+            # "skip" (could not run): fall through to the Evidence Gate.
+        return await eg(cwd)
+
+    verify.has_check = has_check  # type: ignore[attr-defined]
+    verify.evidence_by_cwd = evidence_by_cwd  # type: ignore[attr-defined]
+    return verify

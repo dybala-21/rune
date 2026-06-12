@@ -6,6 +6,7 @@ import pytest
 
 from rune.agent.rejection_sampler import (
     make_evidence_gate_verifier,
+    make_verifier,
     sample_parallel,
     solve_with_rejection,
 )
@@ -145,3 +146,85 @@ async def test_evidence_gate_verifier_no_check_never_selects(monkeypatch) -> Non
     monkeypatch.setattr(eg, "extract_success_check", fake_extract)
     verify = await make_evidence_gate_verifier("task")
     assert await verify("anything") is False
+
+
+class TestMakeVerifier:
+    """Execution-first verifier: repo tests select; Evidence Gate is the fallback."""
+
+    @pytest.mark.asyncio
+    async def test_prefers_tests_pass(self, monkeypatch) -> None:
+        import rune.agent.rejection_sampler as rs
+
+        monkeypatch.setattr(rs, "make_evidence_gate_verifier", _no_eg)
+        import rune.agent.auto_verify as av
+        monkeypatch.setattr(av, "detect_test_command", lambda cwd: ["pytest"])
+
+        async def fake_run(cmd, cwd, timeout=60.0):
+            return ("pass", "") if cwd == "good" else ("fail", "1 failed")
+
+        monkeypatch.setattr(av, "run_verify", fake_run)
+        verify = await make_verifier("task")
+        assert await verify("good") is True
+        assert await verify("bad") is False
+        assert verify.evidence_by_cwd == {"bad": "1 failed"}  # test output kept
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_eg_when_no_tests(self, monkeypatch) -> None:
+        import rune.agent.auto_verify as av
+        import rune.agent.rejection_sampler as rs
+
+        monkeypatch.setattr(av, "detect_test_command", lambda cwd: None)
+
+        async def fake_eg(instruction):
+            async def v(cwd):
+                return cwd == "eg_good"
+            v.has_check = True
+            v.evidence_by_cwd = {}
+            return v
+
+        monkeypatch.setattr(rs, "make_evidence_gate_verifier", fake_eg)
+        verify = await make_verifier("task")
+        assert await verify("eg_good") is True
+        assert await verify("eg_bad") is False
+
+    @pytest.mark.asyncio
+    async def test_skip_falls_through_to_eg(self, monkeypatch) -> None:
+        import rune.agent.auto_verify as av
+        import rune.agent.rejection_sampler as rs
+
+        monkeypatch.setattr(av, "detect_test_command", lambda cwd: ["pytest"])
+
+        async def fake_run(cmd, cwd, timeout=60.0):
+            return ("skip", "")  # could not run tests
+
+        monkeypatch.setattr(av, "run_verify", fake_run)
+
+        async def fake_eg(instruction):
+            async def v(cwd):
+                return True  # EG accepts when tests are inconclusive
+            v.has_check = True
+            v.evidence_by_cwd = {}
+            return v
+
+        monkeypatch.setattr(rs, "make_evidence_gate_verifier", fake_eg)
+        verify = await make_verifier("task")
+        assert await verify("anywhere") is True
+
+    @pytest.mark.asyncio
+    async def test_has_check_true_when_seed_has_tests(self, monkeypatch) -> None:
+        import rune.agent.auto_verify as av
+        import rune.agent.rejection_sampler as rs
+
+        monkeypatch.setattr(rs, "make_evidence_gate_verifier", _no_eg)
+        monkeypatch.setattr(av, "detect_test_command", lambda cwd: ["pytest"])
+        verify = await make_verifier("task", seed_cwd="/repo")
+        assert verify.has_check is True  # tests in the seed = a check exists
+
+
+async def _no_eg(instruction):
+    """An Evidence Gate that has no check and never selects."""
+    async def v(cwd):
+        return False
+    v.has_check = False
+    v.evidence_by_cwd = {}
+    return v

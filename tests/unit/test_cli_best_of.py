@@ -296,14 +296,14 @@ async def test_best_of_seeded_writes_back_edits(monkeypatch, tmp_path):
             index=0, workdir=str(w), stdout="done", returncode=0, produced=["app.py"]
         )
 
-    async def fake_make_verifier(instruction):
+    async def fake_make_verifier(instruction, seed_cwd=None):
         async def verify(cwd):
             return True
 
         return verify
 
     monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
-    monkeypatch.setattr(best_of, "make_evidence_gate_verifier", fake_make_verifier)
+    monkeypatch.setattr(best_of, "make_verifier", fake_make_verifier)
     monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
     monkeypatch.chdir(dest)
 
@@ -383,7 +383,7 @@ async def test_best_of_selects_passing_and_restores(monkeypatch, tmp_path):
             produced=sorted(os.listdir(works[index])),
         )
 
-    async def fake_make_verifier(instruction):
+    async def fake_make_verifier(instruction, seed_cwd=None):
         async def verify(cwd):
             # passes only the attempt whose workdir has answer.txt
             return os.path.exists(os.path.join(cwd, "answer.txt"))
@@ -391,7 +391,7 @@ async def test_best_of_selects_passing_and_restores(monkeypatch, tmp_path):
         return verify
 
     monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
-    monkeypatch.setattr(best_of, "make_evidence_gate_verifier", fake_make_verifier)
+    monkeypatch.setattr(best_of, "make_verifier", fake_make_verifier)
     # don't delete the temp workdirs we assert on
     monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
 
@@ -433,14 +433,14 @@ async def test_best_of_none_pass_no_restore(monkeypatch, tmp_path):
             produced=sorted(os.listdir(works[index])),
         )
 
-    async def fake_make_verifier(instruction):
+    async def fake_make_verifier(instruction, seed_cwd=None):
         async def verify(cwd):
             return False  # nothing passes
 
         return verify
 
     monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
-    monkeypatch.setattr(best_of, "make_evidence_gate_verifier", fake_make_verifier)
+    monkeypatch.setattr(best_of, "make_verifier", fake_make_verifier)
     monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
 
     dest = tmp_path / "dest"
@@ -479,14 +479,14 @@ async def test_best_of_preserves_winner_on_collision(monkeypatch, tmp_path):
             index=0, workdir=str(w), stdout="o", returncode=0, produced=["solution.py"]
         )
 
-    async def fake_make_verifier(instruction):
+    async def fake_make_verifier(instruction, seed_cwd=None):
         async def verify(cwd):
             return True  # passes
 
         return verify
 
     monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
-    monkeypatch.setattr(best_of, "make_evidence_gate_verifier", fake_make_verifier)
+    monkeypatch.setattr(best_of, "make_verifier", fake_make_verifier)
     monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
 
     dest = tmp_path / "dest"
@@ -528,14 +528,14 @@ async def test_best_of_reports_no_artifact_breakdown(monkeypatch, tmp_path):
             produced=sorted(os.listdir(works[index])),
         )
 
-    async def fake_make_verifier(instruction):
+    async def fake_make_verifier(instruction, seed_cwd=None):
         async def verify(cwd):
             return False
 
         return verify
 
     monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
-    monkeypatch.setattr(best_of, "make_evidence_gate_verifier", fake_make_verifier)
+    monkeypatch.setattr(best_of, "make_verifier", fake_make_verifier)
     monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
     monkeypatch.chdir(tmp_path)
 
@@ -559,7 +559,7 @@ async def test_best_of_reports_no_check(monkeypatch, tmp_path):
             index=index, workdir=str(w0), stdout="o", returncode=0, produced=["out.txt"]
         )
 
-    async def fake_make_verifier(instruction):
+    async def fake_make_verifier(instruction, seed_cwd=None):
         async def verify(cwd):
             return False
 
@@ -567,7 +567,7 @@ async def test_best_of_reports_no_check(monkeypatch, tmp_path):
         return verify
 
     monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
-    monkeypatch.setattr(best_of, "make_evidence_gate_verifier", fake_make_verifier)
+    monkeypatch.setattr(best_of, "make_verifier", fake_make_verifier)
     monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
     monkeypatch.chdir(tmp_path)
 
@@ -686,7 +686,7 @@ async def test_best_of_learns_from_failed_attempts_on_solve(monkeypatch, tmp_pat
             produced=[],
         )
 
-    async def fake_make_verifier(instruction):
+    async def fake_make_verifier(instruction, seed_cwd=None):
         async def verify(cwd):
             return cwd == works[1]  # only #1 passes
         verify.evidence_by_cwd = {works[0]: "mismatch: -7/2=-3 exp -4"}
@@ -699,7 +699,7 @@ async def test_best_of_learns_from_failed_attempts_on_solve(monkeypatch, tmp_pat
         return "k"
 
     monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
-    monkeypatch.setattr(best_of, "make_evidence_gate_verifier", fake_make_verifier)
+    monkeypatch.setattr(best_of, "make_verifier", fake_make_verifier)
     monkeypatch.setattr(best_of, "_record_winner", AsyncMock(return_value=True))
     monkeypatch.setattr(best_of, "_learn_from_failures", fake_learn)
     monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
@@ -727,14 +727,14 @@ async def test_records_winner_on_solve(monkeypatch, tmp_path, _mock_record_winne
             index=0, workdir=str(w), stdout="WIN", returncode=0, produced=["answer.txt"]
         )
 
-    async def fake_make_verifier(instruction):
+    async def fake_make_verifier(instruction, seed_cwd=None):
         async def verify(cwd):
             return True
 
         return verify
 
     monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
-    monkeypatch.setattr(best_of, "make_evidence_gate_verifier", fake_make_verifier)
+    monkeypatch.setattr(best_of, "make_verifier", fake_make_verifier)
     monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
     dest = tmp_path / "dest"
     dest.mkdir()
@@ -758,14 +758,14 @@ async def test_no_record_on_none_pass(monkeypatch, tmp_path, _mock_record_winner
             index=0, workdir=str(w), stdout="x", returncode=0, produced=[]
         )
 
-    async def fake_make_verifier(instruction):
+    async def fake_make_verifier(instruction, seed_cwd=None):
         async def verify(cwd):
             return False  # nothing passes
 
         return verify
 
     monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
-    monkeypatch.setattr(best_of, "make_evidence_gate_verifier", fake_make_verifier)
+    monkeypatch.setattr(best_of, "make_verifier", fake_make_verifier)
     monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
     monkeypatch.chdir(tmp_path)
 
@@ -882,14 +882,14 @@ async def test_concurrency_capped(monkeypatch, tmp_path):
             index=index, workdir=str(w), stdout="o", returncode=0, produced=[]
         )
 
-    async def fake_make_verifier(instruction):
+    async def fake_make_verifier(instruction, seed_cwd=None):
         async def verify(cwd):
             return False
 
         return verify
 
     monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
-    monkeypatch.setattr(best_of, "make_evidence_gate_verifier", fake_make_verifier)
+    monkeypatch.setattr(best_of, "make_verifier", fake_make_verifier)
     monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
     monkeypatch.chdir(tmp_path)
 
