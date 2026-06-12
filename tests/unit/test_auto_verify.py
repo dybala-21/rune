@@ -4,7 +4,44 @@ from __future__ import annotations
 
 import pytest
 
-from rune.agent.auto_verify import detect_verify_command, run_verify
+from rune.agent.auto_verify import (
+    detect_test_command,
+    detect_verify_command,
+    run_verify,
+)
+
+
+class TestDetectTestCommand:
+    """Correctness test detection (distinct from the lint/typecheck detector)."""
+
+    def test_pytest_via_tests_dir(self, tmp_path):
+        (tmp_path / "tests").mkdir()
+        cmd = detect_test_command(str(tmp_path))
+        assert cmd is not None and "pytest" in cmd
+
+    def test_pytest_via_test_file(self, tmp_path):
+        (tmp_path / "test_thing.py").write_text("def test_x(): pass")
+        cmd = detect_test_command(str(tmp_path))
+        assert cmd is not None and "pytest" in cmd
+
+    def test_npm_test_script(self, tmp_path):
+        (tmp_path / "package.json").write_text('{"scripts": {"test": "jest"}}')
+        cmd = detect_test_command(str(tmp_path))
+        assert cmd is not None and "npm" in cmd
+
+    def test_npm_placeholder_test_ignored(self, tmp_path):
+        (tmp_path / "package.json").write_text(
+            '{"scripts": {"test": "echo \\"Error: no test specified\\" && exit 1"}}'
+        )
+        assert detect_test_command(str(tmp_path)) is None
+
+    def test_override_wins(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("RUNE_AUTO_VERIFY_CMD", "pytest -q tests/unit")
+        assert detect_test_command(str(tmp_path)) == ["pytest", "-q", "tests/unit"]
+
+    def test_none_when_no_tests(self, tmp_path):
+        (tmp_path / "solution.py").write_text("x = 1")  # source, no tests
+        assert detect_test_command(str(tmp_path)) is None
 
 
 def test_detect_python_project(tmp_path):

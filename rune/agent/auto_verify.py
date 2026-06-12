@@ -30,6 +30,49 @@ _DEFAULT_TIMEOUT_S = 60.0
 _EVIDENCE_TAIL_CHARS = 400
 
 
+def detect_test_command(cwd: str) -> list[str] | None:
+    """Pick a CORRECTNESS test command for *cwd*, or None.
+
+    Unlike :func:`detect_verify_command` (fast lint/typecheck — structure, not
+    correctness), this runs the project's tests, so it can serve as a best-of-K
+    *selection* verifier (execution beats LLM-judge for code; arXiv 2502.14382).
+
+    Precedence: an explicit ``RUNE_AUTO_VERIFY_CMD`` override (the project's own
+    test command) wins; otherwise structured marker detection — never NL. Returns
+    None when no test runner is evident, so the caller can fall back to the
+    Evidence Gate rather than mistake a lint pass for correctness.
+    """
+    override = os.environ.get("RUNE_AUTO_VERIFY_CMD", "").strip()
+    if override:
+        import shlex
+        return shlex.split(override)
+
+    # Python: a tests/ dir or top-level test_*.py / *_test.py -> pytest.
+    try:
+        entries = os.listdir(cwd)
+    except OSError:
+        return None
+    has_pytests = os.path.isdir(os.path.join(cwd, "tests")) or any(
+        (e.startswith("test_") or e.endswith("_test.py")) and e.endswith(".py")
+        for e in entries
+    )
+    if has_pytests:
+        return ["python", "-m", "pytest", "-q"]
+
+    # Node: a non-placeholder "test" script in package.json -> npm test.
+    pkg = os.path.join(cwd, "package.json")
+    if os.path.exists(pkg):
+        try:
+            import json
+            with open(pkg, encoding="utf-8") as fh:
+                test_script = (json.load(fh).get("scripts") or {}).get("test", "")
+            if test_script and "no test specified" not in test_script:
+                return ["npm", "test", "-s"]
+        except (OSError, ValueError):
+            pass
+    return None
+
+
 def detect_verify_command(cwd: str) -> list[str] | None:
     """Pick a verify command, or None if unknown.
 
