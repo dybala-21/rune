@@ -196,8 +196,9 @@ async def file_edit(params: FileEditParams) -> CapabilityResult:
         return CapabilityResult(
             success=False,
             error=(
-                f"File not found: {params.path}. "
-                f"Use the full path from project_map or file_list "
+                f"File not found: {params.path}. To create a new file, call "
+                f"file_write (not file_edit). To edit an existing file, check "
+                f"the path: use the full path from project_map or file_list "
                 f"(e.g., rune/agent/loop.py, not loop.py)."
             ),
         )
