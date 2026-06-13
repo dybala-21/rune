@@ -78,3 +78,50 @@ def test_iter_json_objects_skips_braces_in_strings():
 def test_empty_known_set_recovers_nothing():
     text = '{"name": "file_write", "arguments": {}}'
     assert _extract_text_tool_calls(text, set()) == []
+
+
+# Guided-decoding schema (constrained tool-call output for local models)
+
+def test_guided_flag_default_off(monkeypatch):
+    from rune.agent.litellm_adapter import _guided_tools_enabled
+    monkeypatch.delenv("RUNE_GUIDED_TOOLS", raising=False)
+    assert _guided_tools_enabled() is False
+    monkeypatch.setenv("RUNE_GUIDED_TOOLS", "1")
+    assert _guided_tools_enabled() is True
+    monkeypatch.setenv("RUNE_GUIDED_TOOLS", "off")
+    assert _guided_tools_enabled() is False
+
+
+def test_build_action_schema_enum_names_plus_final():
+    # Generic shape: tool name constrained to the real set via enum, arguments a
+    # free object. A per-tool anyOf over dozens of rich param schemas is rejected
+    # by ollama's grammar engine ("invalid JSON schema"), so it stays small to
+    # scale to the full tool set.
+    from rune.agent.litellm_adapter import _build_action_schema
+    schemas = [
+        {"function": {"name": "file_write", "parameters": {"type": "object"}}},
+        {"function": {"name": "bash_execute", "parameters": {"type": "object"}}},
+    ]
+    schema = _build_action_schema(schemas)
+    branches = schema["anyOf"]
+    assert len(branches) == 2  # one tool-call branch + one final branch
+    call = next(b for b in branches if "tool" in b["properties"])
+    assert call["properties"]["tool"]["enum"] == ["file_write", "bash_execute"]
+    assert call["properties"]["arguments"] == {"type": "object"}
+    assert any("final" in b["properties"] for b in branches)
+
+
+def test_arg_key_aliases_normalized():
+    # Weak models emit filename/cmd/code; RUNE tools use path/command/content.
+    from rune.agent.litellm_adapter import _extract_text_tool_calls
+    text = '{"tool": "file_write", "arguments": {"filename": "a.py", "content": "x=1"}}'
+    calls = _extract_text_tool_calls(text, {"file_write"})
+    import json
+    args = json.loads(calls[0]["function"]["arguments"])
+    assert args["path"] == "a.py" and "filename" not in args
+
+
+def test_arg_alias_not_applied_when_canonical_present():
+    from rune.agent.litellm_adapter import _normalize_arg_keys
+    out = _normalize_arg_keys({"path": "real.py", "filename": "ignore.py"})
+    assert out["path"] == "real.py"  # canonical wins; alias dropped

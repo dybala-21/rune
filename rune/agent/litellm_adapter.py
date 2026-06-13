@@ -193,6 +193,25 @@ def _iter_json_objects(text: str) -> list[str]:
     return out
 
 
+# Common argument-key aliases weak models emit for RUNE's tools. Every file tool
+# uses "path" and bash uses "command", so these renames are unambiguous. Applied
+# only to recovered text tool-calls (where args aren't schema-constrained).
+_ARG_ALIASES: dict[str, str] = {
+    "filename": "path", "file": "path", "filepath": "path", "file_path": "path",
+    "cmd": "command", "code": "content",
+}
+
+
+def _normalize_arg_keys(args: dict[str, Any]) -> dict[str, Any]:
+    """Rename common alias keys to RUNE's canonical tool params (e.g. filename
+    to path), only when the canonical key isn't already present."""
+    out = dict(args)
+    for alias, canonical in _ARG_ALIASES.items():
+        if alias in out and canonical not in out:
+            out[canonical] = out.pop(alias)
+    return out
+
+
 def _extract_text_tool_calls(
     text: str, known_names: set[str]
 ) -> list[dict[str, Any]]:
@@ -229,6 +248,8 @@ def _extract_text_tool_calls(
                 args = obj.get("parameters", obj.get("args", obj.get("input", {})))
         if not isinstance(name, str) or name not in known_names:
             continue
+        if isinstance(args, dict):
+            args = _normalize_arg_keys(args)
         if isinstance(args, str):
             args_str = args  # already a JSON string
         else:
@@ -242,6 +263,58 @@ def _extract_text_tool_calls(
             "function": {"name": name, "arguments": args_str},
         })
     return calls
+
+
+def _guided_tools_enabled() -> bool:
+    """Whether to schema-constrain tool calls for local models (default off).
+
+    Local models (ollama) often fail to emit native tool_calls and instead write
+    them as text, so the loop runs nothing. With guided decoding the output is
+    grammar-forced to a tool-call schema, so the model produces a valid action.
+    Opt-in via RUNE_GUIDED_TOOLS.
+    """
+    import os
+
+    return os.environ.get("RUNE_GUIDED_TOOLS", "").strip().lower() in (
+        "1", "true", "on", "yes",
+    )
+
+
+def _build_action_schema(tool_schemas: list[dict[str, Any]]) -> dict[str, Any]:
+    """A JSON schema the model's output must satisfy each turn: either a tool
+    call (``{tool, arguments}``) or a final answer (``{final}``).
+
+    The tool name is constrained to the real tool set (an enum), so the model
+    can't invent a tool; ``arguments`` is a free object. Per-tool argument
+    schemas are intentionally NOT inlined: an anyOf over dozens of rich tool
+    param schemas is rejected by ollama's grammar engine as "invalid JSON
+    schema", whereas a small enum plus generic args scales to the full tool set
+    and is accepted (argument-key correctness is left to the tools' own
+    validation). This guarantees a parseable call naming a real tool, which weak
+    local models otherwise fail to emit.
+    """
+    names = [
+        (s.get("function") or {}).get("name")
+        for s in tool_schemas
+    ]
+    names = [n for n in names if n]
+    return {
+        "anyOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "tool": {"type": "string", "enum": names},
+                    "arguments": {"type": "object"},
+                },
+                "required": ["tool", "arguments"],
+            },
+            {
+                "type": "object",
+                "properties": {"final": {"type": "string"}},
+                "required": ["final"],
+            },
+        ],
+    }
 
 
 def _build_tool_lookup(tools: list[Any]) -> dict[str, Any]:
@@ -474,6 +547,33 @@ class StreamResult:
         self._provider_extra = provider_extra or {}
         self._extra_headers = extra_headers or {}
         self._max_tool_rounds = max_tool_rounds
+        # Guided decoding: schema-constrain tool calls for local (ollama) models,
+        # detected via the ollama api_base. When on, the model must emit a tool
+        # call or a final answer as schema-valid JSON each turn.
+        self._guided = (
+            _guided_tools_enabled()
+            and bool(tool_schemas)
+            and "11434" in str(self._provider_extra)
+        )
+        # Guided-mode {final} guard: weak models bail with a final answer after a
+        # failed edit without ever writing anything. Block {final} until a
+        # write/exec tool has actually succeeded (capped, so genuine no-op finals
+        # still terminate).
+        self._action_ok = False
+        self._final_blocks = 0
+        if self._guided:
+            self._messages.append({
+                "role": "system",
+                "content": (
+                    "Respond ONLY as JSON matching the schema. To use a tool, "
+                    'emit {"tool": "<tool_name>", "arguments": {...}}. When the '
+                    'task is fully done, emit {"final": "<answer>"}. One object '
+                    "per turn. To CREATE a new file use file_write with "
+                    '{"path", "content"}; file_edit only modifies an existing '
+                    "file. Do not emit a final answer until the work is actually "
+                    "done (files written, tests run)."
+                ),
+            })
         self._collected_text = ""
         self._usage = StreamUsage()
         self._stream: Any = None
@@ -557,6 +657,24 @@ class StreamResult:
                 _acompletion_kwargs["extra_headers"] = dict(self._extra_headers)
             _acompletion_kwargs.update(self._provider_extra)
             _acompletion_kwargs.update(extra)
+
+            # Guided decoding for local models: replace the native tools param
+            # with a schema the output must satisfy (tool call or final answer),
+            # so a weak model that can't emit native tool_calls still produces a
+            # valid, parseable action. ollama-only (detected via its api_base);
+            # the content-JSON is parsed by the recovery path below.
+            if self._guided:
+                _acompletion_kwargs.pop("tools", None)
+                _acompletion_kwargs.pop("tool_choice", None)
+                _gschema = _build_action_schema(self._tool_schemas)
+                log.info("guided_decoding_active",
+                         tools=len(self._tool_schemas),
+                         branches=len(_gschema.get("anyOf", [])))
+                _acompletion_kwargs["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {"name": "rune_action", "schema": _gschema},
+                }
+
             self._stream = await litellm.acompletion(**_acompletion_kwargs)
 
             text_this_turn = ""
@@ -612,6 +730,33 @@ class StreamResult:
             # ollama models degrade to text tool-calls under the full tool set +
             # streaming; models that emit native tool_calls never reach here.
             if not tool_calls_by_index and text_this_turn.strip():
+                # Guided mode emits the final answer as {"final": "..."}; unwrap
+                # it to clean text so the loop finalizes with the answer, not raw
+                # JSON. A {"tool", "arguments"} object falls through to recovery.
+                if self._guided:
+                    import json as _json
+                    try:
+                        _obj = _json.loads(text_this_turn.strip())
+                    except (ValueError, TypeError):
+                        _obj = None
+                    if isinstance(_obj, dict) and isinstance(_obj.get("final"), str):
+                        if not self._action_ok and self._final_blocks < 2:
+                            # Bailing without doing the work; force another round.
+                            self._final_blocks += 1
+                            log.info("guided_final_blocked", n=self._final_blocks)
+                            self._messages.append(
+                                {"role": "assistant", "content": text_this_turn})
+                            self._messages.append({"role": "user", "content": (
+                                "You returned a final answer but have not "
+                                "successfully written any file or run any command. "
+                                "Do the actual work now: use file_write to create "
+                                "files and bash_execute to run the tests, then "
+                                "finalize."
+                            )})
+                            self._collected_text = ""
+                            continue  # re-prompt instead of finalizing
+                        text_this_turn = _obj["final"]
+
                 _known = {
                     s.get("function", {}).get("name") or s.get("name")
                     for s in (self._tool_schemas or [])
@@ -885,6 +1030,8 @@ class StreamResult:
                     self._messages.append({
                         "role": "tool", "tool_call_id": tc_id, "content": res,
                     })
+                    if is_write_exec and not _looks_like_tool_failure(res):
+                        self._action_ok = True  # a real action succeeded
                     nudge = self._policy.record_tool_call(fn)
                     if nudge:
                         deferred_nudges.append(nudge)
