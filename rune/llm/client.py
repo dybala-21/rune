@@ -146,6 +146,17 @@ class LLMClient:
         config = get_config()
         provider = self._effective_provider(provider)
 
+        # Local providers (ollama) usually have a single model installed, so the
+        # per-tier defaults (e.g. fast=llama3.2) are typically NOT present. When
+        # the user selected a model for the session, use it for every tier;
+        # otherwise aux calls (consolidation, classifier, gates) hit an
+        # uninstalled tier model and fail. Cloud providers keep per-tier models
+        # (all reachable via API), so the cheaper fast tier still applies there.
+        if provider == Provider.OLLAMA:
+            active = (getattr(config.llm, "active_model", None) or "").strip()
+            if active:
+                return active
+
         models_config = config.llm.models
         if provider == Provider.OPENAI:
             tier_models = models_config.openai

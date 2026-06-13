@@ -379,6 +379,17 @@ def _handle_non_interactive(
             except Exception:
                 pass  # best-effort memory save
 
+            # The episode's consolidation is fired as a background task that a
+            # one-shot CLI process exits before finishing, so nothing would be
+            # consolidated. Drain it here (bounded), the same catch-up the
+            # interactive controller runs. Gated by is_consolidation_enabled
+            # (RUNE_LEARNING=0 opts out); skipped for throwaway best-of attempts.
+            try:
+                from rune.memory.consolidation import consolidate_recent
+                await consolidate_recent(limit=2)
+            except Exception:
+                pass
+
             # A one-shot run is a whole session; flush its events into the daily
             # tier on exit (else promotion never runs). No-op if no events.
             try:

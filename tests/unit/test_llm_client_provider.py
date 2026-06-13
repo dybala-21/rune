@@ -33,6 +33,26 @@ def test_no_active_falls_back_to_default():
     assert client.resolve_model(ModelTier.FAST) == "gpt-5-mini"
 
 
+def test_ollama_uses_active_model_for_all_tiers(monkeypatch):
+    # A local user usually installs one model, so the per-tier ollama defaults
+    # (fast=llama3.2) are typically not present. With a selected model, every
+    # tier must resolve to it, or aux calls hit an uninstalled model and fail.
+    cfg = get_config()
+    monkeypatch.setattr(cfg.llm, "active_provider", "ollama")
+    monkeypatch.setattr(cfg.llm, "active_model", "qwen2.5-coder:7b")
+    client = LLMClient()
+    assert client.resolve_model(ModelTier.FAST, Provider.OLLAMA) == "qwen2.5-coder:7b"
+    assert client.resolve_model(ModelTier.BEST, Provider.OLLAMA) == "qwen2.5-coder:7b"
+
+
+def test_ollama_without_active_model_uses_configured_tier(monkeypatch):
+    cfg = get_config()
+    monkeypatch.setattr(cfg.llm, "active_model", None)
+    client = LLMClient()
+    # Cloud per-tier resolution is unaffected by the ollama special-case.
+    assert client.resolve_model(ModelTier.FAST, Provider.OLLAMA) == cfg.llm.models.ollama.fast
+
+
 def test_explicit_provider_overrides_active():
     cfg = get_config()
     cfg.llm.default_provider = "openai"
