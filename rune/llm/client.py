@@ -122,10 +122,29 @@ class LLMClient:
             details=details,
         )
 
+    def _effective_provider(self, provider: Provider | None) -> Provider:
+        """Provider to call when none is passed explicitly.
+
+        Uses the session choice (``active_provider``, set by ``-p`` / ``/model``)
+        before the static ``default_provider``. Without this, subsystems that
+        call with no explicit provider (classifier, gates, learning) route to
+        ``default_provider`` even when the user selected another provider.
+        """
+        if provider is not None:
+            return provider
+        config = get_config()
+        active = getattr(config.llm, "active_provider", None)
+        if active:
+            try:
+                return Provider(active)
+            except ValueError:
+                pass
+        return Provider(config.llm.default_provider)
+
     def resolve_model(self, tier: ModelTier, provider: Provider | None = None) -> str:
         """Resolve a model ID from tier and provider."""
         config = get_config()
-        provider = provider or Provider(config.llm.default_provider)
+        provider = self._effective_provider(provider)
 
         models_config = config.llm.models
         if provider == Provider.OPENAI:
@@ -157,9 +176,9 @@ class LLMClient:
 
         resolved_model = model or self.resolve_model(tier, provider)
 
-        # Prepend provider prefix for LiteLLM if needed
-        config = get_config()
-        effective_provider = provider or Provider(config.llm.default_provider)
+        # Prepend the LiteLLM provider prefix. Use the same effective provider as
+        # resolve_model so the prefix matches the chosen provider.
+        effective_provider = self._effective_provider(provider)
         _PREFIX_MAP = {
             Provider.ANTHROPIC: "anthropic/",
             Provider.GEMINI: "gemini/",

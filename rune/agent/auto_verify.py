@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import sys
 
 from rune.utils.logger import get_logger
 
@@ -57,7 +58,11 @@ def detect_test_command(cwd: str) -> list[str] | None:
         for e in entries
     )
     if has_pytests:
-        return ["python", "-m", "pytest", "-q"]
+        # Use the running interpreter, not a bare "python": many machines only
+        # have "python3", so "python" fails to spawn and run_verify returns
+        # "skip", falling back to the Evidence Gate. sys.executable is the venv
+        # interpreter, which has pytest.
+        return [sys.executable, "-m", "pytest", "-q"]
 
     # Node: a non-placeholder "test" script in package.json -> npm test.
     pkg = os.path.join(cwd, "package.json")

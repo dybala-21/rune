@@ -158,6 +158,92 @@ def tools_to_openai_schema(tools: list[Any]) -> list[dict[str, Any]]:
     return result
 
 
+def _iter_json_objects(text: str) -> list[str]:
+    """Yield top-level {...} JSON substrings via a balanced-brace scan.
+
+    Handles prose around the JSON and nested braces (unlike a regex), and skips
+    braces inside strings. Used to recover tool calls emitted as text.
+    """
+    out: list[str] = []
+    depth = 0
+    start = -1
+    in_str = False
+    esc = False
+    for i, ch in enumerate(text):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and start >= 0:
+                    out.append(text[start : i + 1])
+                    start = -1
+    return out
+
+
+def _extract_text_tool_calls(
+    text: str, known_names: set[str]
+) -> list[dict[str, Any]]:
+    """Recover tool calls a model emitted as text JSON instead of native tool_calls.
+
+    Small local models (qwen2.5-coder, gemma) routed through ollama sometimes emit
+    ``{"name": "file_write", "arguments": {...}}`` in the message content rather
+    than as native ``tool_calls``, so the loop would treat it as a plain text
+    answer and run nothing. Parse such JSON, require the name to be in the known
+    tool set (so real text answers aren't misread), and synthesize tool_call
+    entries for the normal execution path.
+    """
+    import json as _json
+
+    if not text or "{" not in text or not known_names:
+        return []
+    calls: list[dict[str, Any]] = []
+    for blob in _iter_json_objects(text):
+        try:
+            obj = _json.loads(blob)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        # Accept common shapes: {name,arguments} / {tool,args} / {function,parameters}
+        name = obj.get("name") or obj.get("tool") or obj.get("function")
+        if isinstance(name, dict):  # {"function": {"name": ..., "arguments": ...}}
+            inner = name
+            name = inner.get("name")
+            args = inner.get("arguments", inner.get("parameters", {}))
+        else:
+            args = obj.get("arguments")
+            if args is None:
+                args = obj.get("parameters", obj.get("args", obj.get("input", {})))
+        if not isinstance(name, str) or name not in known_names:
+            continue
+        if isinstance(args, str):
+            args_str = args  # already a JSON string
+        else:
+            try:
+                args_str = _json.dumps(args if isinstance(args, dict) else {})
+            except (ValueError, TypeError):
+                args_str = "{}"
+        calls.append({
+            "id": f"call_text_{len(calls)}",
+            "type": "function",
+            "function": {"name": name, "arguments": args_str},
+        })
+    return calls
+
+
 def _build_tool_lookup(tools: list[Any]) -> dict[str, Any]:
     """Build name-to-callable lookup from PydanticAI Tool objects or raw functions."""
     lookup: dict[str, Any] = {}
@@ -520,6 +606,24 @@ class StreamResult:
                 # Usage from final chunk
                 if hasattr(chunk, "usage") and chunk.usage:
                     self._update_usage(chunk.usage)
+
+            # Local-model fallback: if there were no native tool_calls but the
+            # text is a JSON tool call naming a known tool, recover it. Small
+            # ollama models degrade to text tool-calls under the full tool set +
+            # streaming; models that emit native tool_calls never reach here.
+            if not tool_calls_by_index and text_this_turn.strip():
+                _known = {
+                    s.get("function", {}).get("name") or s.get("name")
+                    for s in (self._tool_schemas or [])
+                }
+                _known.discard(None)
+                _recovered = _extract_text_tool_calls(text_this_turn, _known)
+                if _recovered:
+                    log.info("text_tool_call_recovered", count=len(_recovered),
+                             names=[c["function"]["name"] for c in _recovered])
+                    for _i, _c in enumerate(_recovered):
+                        tool_calls_by_index[_i] = _c
+                    text_this_turn = ""  # the text WAS the call, not an answer
 
             # Post-stream decision: yield text or discard
             # We check ALL continuation paths (tool_calls, force_tool,

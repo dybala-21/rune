@@ -146,6 +146,11 @@ async def _memory_handler(args: str) -> str | None:
     return f"__ACTION__:memory:{sub}"
 
 
+async def _escalate_handler(args: str) -> str | None:
+    # Empty task is valid: re-run the last message on the escalation model.
+    return f"__ACTION__:escalate:{args.strip()}"
+
+
 async def _goal_handler(args: str) -> str | None:
     goal = args.strip()
     if not goal:
@@ -197,6 +202,13 @@ COMMANDS: dict[str, Command] = {
         description="Re-run the last message",
         handler=_retry_handler,
         aliases=["/r"],
+    ),
+    "/escalate": Command(
+        name="/escalate",
+        description="Re-run a task once on the cloud escalation model",
+        handler=_escalate_handler,
+        aliases=["/esc"],
+        usage="/escalate [task]",
     ),
     "/undo": Command(
         name="/undo",

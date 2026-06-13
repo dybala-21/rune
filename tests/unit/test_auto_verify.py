@@ -24,6 +24,20 @@ class TestDetectTestCommand:
         cmd = detect_test_command(str(tmp_path))
         assert cmd is not None and "pytest" in cmd
 
+    def test_pytest_uses_running_interpreter_not_bare_python(self, tmp_path):
+        # Regression: a bare "python" fails to spawn on python3-only machines, so
+        # run_verify returns "skip" and the verifier falls back to the Evidence
+        # Gate. The command must use sys.executable (the interpreter RUNE runs
+        # under, which has pytest).
+        import os
+        import sys
+
+        (tmp_path / "test_thing.py").write_text("def test_x(): pass")
+        cmd = detect_test_command(str(tmp_path))
+        assert cmd[0] == sys.executable
+        assert cmd[0] != "python"
+        assert os.path.exists(cmd[0])  # actually spawnable
+
     def test_npm_test_script(self, tmp_path):
         (tmp_path / "package.json").write_text('{"scripts": {"test": "jest"}}')
         cmd = detect_test_command(str(tmp_path))

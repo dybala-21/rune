@@ -35,7 +35,8 @@ an AI assistant session, extract the following in JSON format:
   "commitments": ["things the user said they need to do, with deadlines if mentioned"],
   "lessons": ["reusable insights - what worked, what failed, how it was fixed"],
   "entities": ["people, projects, services, files mentioned"],
-  "decisions": ["key choices or conclusions made"]
+  "decisions": ["key choices or conclusions made"],
+  "conventions": ["durable project conventions or user preferences evident this session - how this project/user does things, applicable to future tasks"]
 }
 
 Rules:
@@ -43,6 +44,10 @@ Rules:
 - Commitments must be user obligations, not completed tasks.
 - Lessons must be actionable for future reference.
 - Entities are proper nouns: names, project names, file paths, service names.
+- Conventions are durable, cross-task rules: coding style (e.g. "use snake_case"),
+  required practices (e.g. "every function needs a docstring", "validate inputs and
+  raise ValueError"), tooling/library choices, or stated user preferences. Not
+  one-off task details. Phrase each as a standalone rule.
 - Return empty arrays if nothing fits a category.
 - Respond with ONLY the JSON object, no other text.
 """
@@ -67,15 +72,16 @@ def _parse_extraction(raw: str) -> dict[str, list[str]]:
             try:
                 data = json.loads(text[start:end])
             except (json.JSONDecodeError, ValueError):
-                return {"commitments": [], "lessons": [], "entities": [], "decisions": []}
+                return {"commitments": [], "lessons": [], "entities": [], "decisions": [], "conventions": []}
         else:
-            return {"commitments": [], "lessons": [], "entities": [], "decisions": []}
+            return {"commitments": [], "lessons": [], "entities": [], "decisions": [], "conventions": []}
 
     return {
         "commitments": data.get("commitments", [])[:10],
         "lessons": data.get("lessons", [])[:10],
         "entities": data.get("entities", [])[:20],
         "decisions": data.get("decisions", [])[:10],
+        "conventions": data.get("conventions", [])[:10],
     }
 
 
@@ -232,6 +238,13 @@ async def consolidate_episode(episode_id: str) -> dict[str, list[str]] | None:
             for lesson in result.get("lessons", []):
                 if isinstance(lesson, str) and len(lesson) > 5 and not is_suppressed(lesson[:40]):
                     save_learned_fact("lesson", lesson[:40], lesson, 0.7)
+
+            # Conventions go to the "project" category at durable confidence
+            # (>=0.7), so build_memory_context injects them ("## Durable
+            # Knowledge") and a later under-specified task can follow them.
+            for conv in result.get("conventions", []):
+                if isinstance(conv, str) and len(conv) > 5 and not is_suppressed(conv[:80]):
+                    save_learned_fact("project", conv[:80], conv, 0.8)
         except Exception as exc:
             log.debug("learned_md_write_failed", error=str(exc)[:100])
 
@@ -242,6 +255,7 @@ async def consolidate_episode(episode_id: str) -> dict[str, list[str]] | None:
             lessons=len(result["lessons"]),
             entities=len(result["entities"]),
             decisions=len(result["decisions"]),
+            conventions=len(result.get("conventions", [])),
         )
 
         return result

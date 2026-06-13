@@ -1110,6 +1110,9 @@ class RuneApp:
             await self._do_memory_operation(sub)
         elif action.startswith("goal_loop:"):
             await self._do_goal_loop(action.split(":", 1)[1])
+        elif action.startswith("escalate"):
+            task = action.split(":", 1)[1] if ":" in action else ""
+            await self._do_escalate(task)
         else:
             self.renderer.print_system_message(result)
 
@@ -1251,6 +1254,7 @@ class RuneApp:
             "/help": "General", "/exit": "General", "/clear": "General",
             "/model": "General", "/theme": "General", "/config": "General",
             "/retry": "Agent", "/undo": "Agent", "/memory": "Agent",
+            "/escalate": "Agent",
             "/style": "Output", "/copy": "Output",
             "/files": "Files & Git", "/diff": "Files & Git",
             "/save": "Session", "/load": "Session", "/sessions": "Session",
@@ -1294,42 +1298,53 @@ class RuneApp:
         self.console.print(keys)
         self.console.print()
 
-    def _apply_model(self, value: str) -> None:
-        """Apply a model selection string (provider:model or just model)."""
-        if ":" in value:
-            self._provider, self._model = value.split(":", 1)
-        else:
-            # Try to find the provider
-            for prov, model in _KNOWN_MODELS:
-                if model == value:
-                    self._provider = prov
-                    self._model = model
-                    break
-            else:
-                self._model = value
-        # Persist to config (in-memory)
+    def _set_session_model(self, provider: str, model: str) -> None:
+        """Point this session (footer, aux subsystems, agent loop) at a model.
+
+        In-memory only: updates the active selection and the live agent loop, not
+        the configured defaults or config.yaml, so a temporary switch (e.g.
+        /escalate) can be undone by calling this again.
+        """
+        self._provider = provider
+        self._model = model
+
         from rune.config import get_config
         cfg = get_config()
-        cfg.llm.default_provider = self._provider
-        cfg.llm.default_model = self._model
-        cfg.llm.active_provider = self._provider
-        cfg.llm.active_model = self._model
-
-        # Persist to config.yaml (disk)
-        self._save_active_model_to_yaml(self._provider, self._model)
+        cfg.llm.active_provider = provider
+        cfg.llm.active_model = model
 
         # Update agent config if controller is connected
         if self._agent_controller and hasattr(self._agent_controller, "_loop"):
             loop_obj = self._agent_controller._loop
             if hasattr(loop_obj, "_config"):
-                loop_obj._config.model = self._model
-                loop_obj._config.provider = self._provider
+                loop_obj._config.model = model
+                loop_obj._config.provider = provider
                 loop_obj._config._overridden = True
 
             # Rebuild failover profiles with new model
             from rune.agent.failover import build_profiles_from_config
             if hasattr(loop_obj, "_failover"):
                 loop_obj._failover._profiles = build_profiles_from_config()
+
+    def _apply_model(self, value: str) -> None:
+        """Apply a model selection string (provider:model or just model)."""
+        if ":" in value:
+            provider, model = value.split(":", 1)
+        else:
+            provider, model = self._provider, value
+            # Try to find the provider
+            for prov, known in _KNOWN_MODELS:
+                if known == value:
+                    provider = prov
+                    break
+        self._set_session_model(provider, model)
+
+        # Persist to config (in-memory defaults + config.yaml on disk)
+        from rune.config import get_config
+        cfg = get_config()
+        cfg.llm.default_provider = provider
+        cfg.llm.default_model = model
+        self._save_active_model_to_yaml(provider, model)
 
         self.console.print(f"[bold #D4A017]Model:[/bold #D4A017] {self._provider}:{self._model}")
 
@@ -1455,6 +1470,81 @@ class RuneApp:
         self.renderer.print_system_message(f"Retrying: {last_msg[:80]}...")
         if self._agent_controller is not None:
             await self._run_agent(last_msg)
+
+    async def _do_escalate(self, task: str) -> None:
+        """Run one task on the cloud escalation profile, then restore.
+
+        With a local default model, data leaves the machine only here, on an
+        explicit command announced beforehand, never via an automatic router. The
+        switch is in-memory and undone in ``finally``, so the session returns to
+        the local default even if the run fails or is cancelled.
+        """
+        from rune.config import get_config
+
+        cfg = get_config()
+        provider = cfg.llm.escalation_provider
+        if not provider:
+            self.console.print(
+                "[yellow]No escalation profile configured. In ~/.rune/config.yaml "
+                "set:\n  llm:\n    escalationProvider: anthropic   # or openai, "
+                "gemini, ...\n    escalationModel: <optional, defaults to that "
+                "provider's best tier>[/yellow]"
+            )
+            return
+
+        task = task.strip() or (
+            self._user_message_history[-1] if self._user_message_history else ""
+        )
+        if not task:
+            self.console.print(
+                "[yellow]Nothing to escalate — no previous message. "
+                "Usage: /escalate \\[task][/yellow]"
+            )
+            return
+
+        model = cfg.llm.escalation_model
+        if not model:
+            from rune.llm.client import get_llm_client
+            from rune.types import ModelTier, Provider
+            try:
+                model = get_llm_client().resolve_model(
+                    ModelTier.BEST, Provider(provider)
+                )
+            except ValueError:
+                self.console.print(
+                    f"[red]Unknown escalation provider: {provider}[/red]"
+                )
+                return
+
+        if provider == self._provider and model == self._model:
+            self.console.print(
+                f"[dim]Already on {provider}:{model} — escalation is a no-op; "
+                f"running normally.[/dim]"
+            )
+            await self._run_agent(task)
+            return
+
+        # Announce before any data leaves the machine.
+        self.console.print(
+            f"[bold #D4A017]Escalating to {provider}:{model}[/bold #D4A017]: "
+            f"this task will be sent to {provider}. One task only, "
+            f"then back to {self._provider}:{self._model}."
+        )
+
+        prev_provider, prev_model = self._provider, self._model
+        prev_active = (cfg.llm.active_provider, cfg.llm.active_model)
+        self._set_session_model(provider, model)
+        try:
+            await self._run_agent(task)
+        finally:
+            self._set_session_model(prev_provider, prev_model)
+            # _set_session_model set active_* to the restored selection; put back
+            # the exact pre-escalation values (possibly None = unset).
+            cfg.llm.active_provider, cfg.llm.active_model = prev_active
+            self.console.print(
+                f"[dim]Escalation finished — back on "
+                f"{prev_provider}:{prev_model}.[/dim]"
+            )
 
     def _show_file_changes(self) -> None:
         """Show file changes."""

@@ -24,8 +24,45 @@ from rune.utils.paths import rune_data
 
 log = get_logger(__name__)
 
-# Apply APSW best practices (WAL, foreign keys, etc.)
-apsw.bestpractice.apply(apsw.bestpractice.recommended)
+# Apply APSW best practices (WAL, busy timeout, foreign keys, etc.) except
+# library_logging, which forwards every SQLite log to the root logger at ERROR.
+# Statement-level failures already surface as Python exceptions (and the
+# idempotent migrations in _migrate catch expected "duplicate column" errors), so
+# that forwarder logged ERROR lines on a fresh install's first run for no-ops.
+apsw.bestpractice.apply(
+    tuple(
+        f
+        for f in apsw.bestpractice.recommended
+        if f is not apsw.bestpractice.library_logging
+    )
+)
+
+# Statement-level codes (SQLITE_ERROR etc.) duplicate the Python exception the
+# caller already handled; database-health messages have no exception to surface
+# them, so those stay at warning.
+_SQLITE_HEALTH_CODES = frozenset(
+    {
+        apsw.SQLITE_WARNING,
+        apsw.SQLITE_NOTICE,
+        apsw.SQLITE_CORRUPT,
+        apsw.SQLITE_CANTOPEN,
+        apsw.SQLITE_FULL,
+        apsw.SQLITE_IOERR,
+    }
+)
+
+
+def _sqlite_log_handler(errcode: int, message: str) -> None:
+    emit = log.warning if (errcode & 0xFF) in _SQLITE_HEALTH_CODES else log.debug
+    emit("sqlite_log", code=errcode, message=message)
+
+
+try:
+    apsw.config(apsw.SQLITE_CONFIG_LOG, _sqlite_log_handler)
+except apsw.MisuseError:
+    # SQLITE_CONFIG_LOG only works before SQLite initializes (before any
+    # connection); if something connected first, run without the handler.
+    log.debug("sqlite_log_handler_not_installed")
 
 __all__ = ["Episode", "Fact", "SafetyRule", "MemoryStore", "get_memory_store"]  # Fact/SafetyRule re-exported from types.py for compat
 

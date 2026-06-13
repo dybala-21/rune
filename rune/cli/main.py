@@ -113,6 +113,19 @@ def main(
     from rune.utils.logger import configure_logging
     configure_logging(level=log_level)
 
+    # Apply -p/-m to the whole session, not just the main agent: set the
+    # session-active provider/model so auxiliary subsystems (classifier, gates,
+    # learning) use the chosen provider instead of falling back to
+    # default_provider, and so the failover primary profile (what the agent loop
+    # runs) is the requested model rather than the default provider's best tier.
+    if provider or model:
+        from rune.config import get_config
+        llm_cfg = get_config().llm
+        if provider:
+            llm_cfg.active_provider = provider
+        if model:
+            llm_cfg.active_model = model
+
     if version:
         from rune import __codename__
         console.print(f"rune v{__version__} ({__codename__})")
@@ -886,14 +899,23 @@ def _print_banner() -> None:
 
 
 def _ensure_llm_key() -> bool:
-    """Check if at least one API key is available."""
+    """Check the session can reach an LLM: a local provider or an API key.
+
+    A fully-local session (ollama) needs no API key; requiring a cloud key here
+    would force local-only users to create one just to start.
+    """
     from rune.config import get_config
     config = get_config()
+    provider = config.llm.active_provider or config.llm.default_provider
+    if provider == "ollama":
+        return True
     return bool(
         config.openai_api_key
         or config.anthropic_api_key
+        or config.gemini_api_key
         or os.environ.get("OPENAI_API_KEY")
         or os.environ.get("ANTHROPIC_API_KEY")
+        or os.environ.get("GEMINI_API_KEY")
     )
 
 

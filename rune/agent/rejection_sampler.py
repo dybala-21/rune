@@ -202,10 +202,16 @@ async def make_verifier(
         bool(seed_cwd) and detect_test_command(seed_cwd) is not None
     )
 
+    # Which check decided each candidate's verdict (keyed by cwd), so callers
+    # can report what the winner passed (test command vs Evidence Gate).
+    method_by_cwd: dict[str, str] = {}
+
     async def verify(cwd: str) -> bool:
         cmd = detect_test_command(cwd)
         if cmd:
             state, evidence = await run_verify(cmd, cwd)
+            if state in ("pass", "fail"):
+                method_by_cwd[cwd] = f"`{' '.join(cmd)}`"
             if state == "pass":
                 return True
             if state == "fail":
@@ -213,8 +219,10 @@ async def make_verifier(
                     evidence_by_cwd[cwd] = evidence
                 return False
             # "skip" (could not run): fall through to the Evidence Gate.
+        method_by_cwd[cwd] = "Evidence Gate"
         return await eg(cwd)
 
     verify.has_check = has_check  # type: ignore[attr-defined]
     verify.evidence_by_cwd = evidence_by_cwd  # type: ignore[attr-defined]
+    verify.method_by_cwd = method_by_cwd  # type: ignore[attr-defined]
     return verify

@@ -533,6 +533,7 @@ def build_system_prompt(
     is_deep_research: bool = False,
     defer_browser: bool = False,
     advisor_native_enabled: bool = False,  # Phase A: Claude native advisor
+    skill_context: str | None = None,  # matched learned skill, if any
 ) -> str:
     """Build the full system prompt for an agent run.
 
@@ -703,6 +704,14 @@ def build_system_prompt(
                 )
         if formatted:
             parts.append(f"## Memory Context\n\n{formatted}")
+
+    # Learned skill: an approach distilled from a past verified run, matched to
+    # this goal. Advisory; the model adapts it.
+    if skill_context:
+        parts.append(
+            "## Learned Skill (from a past verified run; adapt as needed)\n\n"
+            f"{skill_context}"
+        )
 
     # Knowledge inventory
     if knowledge_inventory:

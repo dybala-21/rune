@@ -220,6 +220,41 @@ class TestMakeVerifier:
         verify = await make_verifier("task", seed_cwd="/repo")
         assert verify.has_check is True  # tests in the seed = a check exists
 
+    @pytest.mark.asyncio
+    async def test_records_which_method_decided(self, monkeypatch) -> None:
+        # The UX line "picked #i (passed `pytest -q`)" depends on the verifier
+        # recording WHAT decided each candidate: the test command when tests
+        # ran (pass or fail), the Evidence Gate when tests were unavailable.
+        import rune.agent.auto_verify as av
+        import rune.agent.rejection_sampler as rs
+
+        def fake_detect(cwd):
+            return ["pytest", "-q"] if cwd in ("good", "bad") else None
+
+        async def fake_run(cmd, cwd, timeout=60.0):
+            return ("pass", "") if cwd == "good" else ("fail", "1 failed")
+
+        monkeypatch.setattr(av, "detect_test_command", fake_detect)
+        monkeypatch.setattr(av, "run_verify", fake_run)
+
+        async def fake_eg(instruction):
+            async def v(cwd):
+                return True
+            v.has_check = True
+            v.evidence_by_cwd = {}
+            return v
+
+        monkeypatch.setattr(rs, "make_evidence_gate_verifier", fake_eg)
+        verify = await make_verifier("task")
+        assert await verify("good") is True
+        assert await verify("bad") is False
+        assert await verify("no_tests") is True
+        assert verify.method_by_cwd == {
+            "good": "`pytest -q`",
+            "bad": "`pytest -q`",
+            "no_tests": "Evidence Gate",
+        }
+
 
 async def _no_eg(instruction):
     """An Evidence Gate that has no check and never selects."""

@@ -30,6 +30,7 @@ from rune.agent.rejection_sampler import (
 )
 from rune.utils.env import env_int
 from rune.utils.logger import get_logger
+from rune.utils.paths import rune_data
 
 log = get_logger(__name__)
 
@@ -265,6 +266,27 @@ def _changed_vs_seed(root: str, seed: dict[str, tuple[float, int]]) -> list[str]
     return sorted(changed)
 
 
+def _backup_root() -> str:
+    """Undo-backup location, under the data dir rather than the user's repo.
+
+    Backing up inside ``dest`` left a ``.rune-bestof-backup-*`` dir in the working
+    tree after every run, which accumulated and risked accidental commits. Storing
+    it out-of-tree keeps the repo clean; old backups are pruned to bound growth.
+    """
+    root = rune_data() / "bestof-backups"
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        existing = sorted(
+            (p for p in root.iterdir() if p.is_dir()),
+            key=lambda p: p.stat().st_mtime,
+        )
+        for old in existing[:-10]:  # keep the 10 most recent
+            shutil.rmtree(old, ignore_errors=True)
+    except OSError:
+        pass
+    return str(root)
+
+
 def _restore_changed(
     workdir: str, dest: str, relpaths: list[str]
 ) -> tuple[list[str], str | None]:
@@ -272,7 +294,7 @@ def _restore_changed(
 
     Overwriting IS intended here (the agent edited a copy of the user's tree),
     but it's destructive, so every pre-existing target is first backed up into a
-    fresh ``.rune-bestof-backup-*`` dir for undo. Returns ``(restored, backup_dir)``.
+    fresh out-of-tree backup dir for undo. Returns ``(restored, backup_dir)``.
     """
     restored: list[str] = []
     backup_dir: str | None = None
@@ -283,7 +305,7 @@ def _restore_changed(
         dst = os.path.join(dest, rel)
         if os.path.exists(dst):
             if backup_dir is None:
-                backup_dir = tempfile.mkdtemp(prefix=".rune-bestof-backup-", dir=dest)
+                backup_dir = tempfile.mkdtemp(prefix="backup-", dir=_backup_root())
             bdst = os.path.join(backup_dir, rel)
             os.makedirs(os.path.dirname(bdst), exist_ok=True)
             shutil.copy2(dst, bdst)
@@ -496,7 +518,16 @@ async def _best_of_async(
     # Cap concurrent attempt subprocesses: each is a full agent run, so a large
     # K must not spawn K heavyweight processes at once. Mirrors the workflow
     # engine's min(cores-2, ...) policy.
-    cap = max(1, min(k, (os.cpu_count() or 4) - 2))
+    #
+    # A single local model server (Ollama/llama.cpp) serves one request at a
+    # time, so K parallel attempts contend for it and starve each other. Cloud
+    # APIs parallelize; a local server does not. RUNE_BESTOF_CONCURRENCY=1 forces
+    # serial attempts so each gets full model throughput.
+    _conc_override = env_int("RUNE_BESTOF_CONCURRENCY", 0)
+    if _conc_override > 0:
+        cap = max(1, min(k, _conc_override))
+    else:
+        cap = max(1, min(k, (os.cpu_count() or 4) - 2))
     sem = asyncio.Semaphore(cap)
 
     async def run_attempt(i: int) -> AttemptArtifact:
@@ -542,6 +573,7 @@ async def _best_of_async(
                 backup_dir = None
             # Learn from the verifier-confirmed winner (1 episode).
             await _record_winner(message, selected.stdout, selected.produced)
+            method_map = getattr(verify_cwd, "method_by_cwd", {}) or {}
             report(
                 selected.stdout,
                 solved=True,
@@ -554,6 +586,7 @@ async def _best_of_async(
                 backup_dir=backup_dir,
                 has_check=has_check,
                 no_artifact=0,
+                verify_method=method_map.get(selected.workdir),
             )
             return 0
 
@@ -641,20 +674,24 @@ def run_best_of(
         backup_dir: str | None = None,
         has_check: bool = True,
         no_artifact: int = 0,
+        verify_method: str | None = None,
     ) -> None:
         if stdout:
             print(stdout, end="" if stdout.endswith("\n") else "\n", flush=True)
         if solved:
             names = ", ".join(copied) if copied else "—"
+            # Report what the winner passed (the repo's test command when known,
+            # else a generic "verifier").
+            passed = f"passed {verify_method}" if verify_method else "passed verifier"
             console.print(
-                f"[dim]best-of-{k}: selected attempt #{selected_index} "
-                f"({pass_count}/{k} passed verifier); "
+                f"[dim]best-of-{k}: tried {k} · {pass_count} verified · "
+                f"picked #{selected_index} ({passed}); "
                 f"restored {len(copied)} item(s): {names}[/dim]"
             )
             if backup_dir:
                 console.print(
                     f"[dim]best-of: originals backed up to "
-                    f"{os.path.relpath(backup_dir)}/ before overwrite.[/dim]"
+                    f"{backup_dir}/ before overwrite.[/dim]"
                 )
             if skipped:
                 where = (

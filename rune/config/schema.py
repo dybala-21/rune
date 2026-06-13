@@ -55,6 +55,11 @@ class LLMConfig(BaseModel):
     default_model: str = Field(default="gpt-5.4", alias="defaultModel")
     active_provider: str | None = Field(default=None, alias="activeProvider")
     active_model: str | None = Field(default=None, alias="activeModel")
+    # Cloud-escalation profile for /escalate: data leaves the machine only when
+    # the user invokes it (never auto-routed). Model is optional; defaults to the
+    # provider's best tier.
+    escalation_provider: str | None = Field(default=None, alias="escalationProvider")
+    escalation_model: str | None = Field(default=None, alias="escalationModel")
     models: ProviderModels = Field(default_factory=ProviderModels)
     routing_mode: str = Field(default="cloud-first", alias="routingMode")
     request_timeout_ms: int = Field(default=600_000, alias="requestTimeoutMs")
@@ -212,11 +217,26 @@ class GoalLoopConfig(BaseModel):
 
 # Root Configuration
 
+class SkillsConfig(BaseModel):
+    """Skill learning/reuse.
+
+    ``auto_skill`` gates both halves: distilling a skill from a verified-
+    successful run, and injecting a matching learned skill into a later similar
+    task. Default off (opt-in). Distilling only from completed/verified runs is
+    what separates this from capturing whatever the run claimed worked.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    auto_skill: bool = Field(default=False, alias="autoSkill")
+
+
 class RuneConfig(BaseModel):
     """Root configuration schema for RUNE."""
 
     version: str = "1.0"
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    skills: SkillsConfig = Field(default_factory=SkillsConfig)
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     hooks: HooksConfig = Field(default_factory=HooksConfig)

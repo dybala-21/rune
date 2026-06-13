@@ -7,9 +7,55 @@ import pytest
 from rune.agent.failover import (
     FailoverManager,
     LLMProfile,
+    build_profiles_from_config,
     classify_error,
     determine_strategy,
 )
+
+
+class TestBuildProfilesFromConfig:
+    """The primary profile is what the agent loop runs, so it must use the
+    session selection even when only one half (provider or model) was
+    overridden. An all-or-nothing check would upgrade a partial override to the
+    default provider's best tier.
+    """
+
+    def _set_llm(self, monkeypatch, provider=None, model=None, default="openai"):
+        from rune.config import get_config
+
+        cfg = get_config()
+        monkeypatch.setattr(cfg.llm, "default_provider", default)
+        monkeypatch.setattr(cfg.llm, "active_provider", provider)
+        monkeypatch.setattr(cfg.llm, "active_model", model)
+        return cfg
+
+    def test_model_only_active_keeps_user_model(self, monkeypatch):
+        # `rune -m gpt-5-mini` (no -p) must NOT upgrade to openai's best tier.
+        self._set_llm(monkeypatch, provider=None, model="gpt-5-mini")
+        primary = build_profiles_from_config()[0]
+        assert (primary.provider, primary.model) == ("openai", "gpt-5-mini")
+
+    def test_provider_only_active_uses_that_providers_best(self, monkeypatch):
+        cfg = self._set_llm(monkeypatch, provider="anthropic", model=None)
+        primary = build_profiles_from_config()[0]
+        assert primary.provider == "anthropic"
+        assert primary.model == cfg.llm.models.anthropic.best
+
+    def test_both_active_win(self, monkeypatch):
+        self._set_llm(
+            monkeypatch, provider="anthropic", model="claude-haiku-4-5-20251001"
+        )
+        primary = build_profiles_from_config()[0]
+        assert (primary.provider, primary.model) == (
+            "anthropic",
+            "claude-haiku-4-5-20251001",
+        )
+
+    def test_no_active_falls_back_to_default_best(self, monkeypatch):
+        cfg = self._set_llm(monkeypatch)
+        primary = build_profiles_from_config()[0]
+        assert primary.provider == "openai"
+        assert primary.model == cfg.llm.models.openai.best
 
 
 class TestClassifyError:
