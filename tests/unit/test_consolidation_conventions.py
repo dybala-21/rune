@@ -10,7 +10,14 @@ from __future__ import annotations
 
 import pytest
 
-from rune.memory.consolidation import _parse_extraction
+from rune.memory.consolidation import _EXTRACTION_MAX_TOKENS, _parse_extraction
+
+
+def test_extraction_token_budget_has_reasoning_headroom():
+    # Reasoning fast-tier models (e.g. gpt-5-mini) spend tokens on reasoning
+    # before any content. At 512 they return empty and extraction yields nothing,
+    # silently disabling all consolidation. Keep enough headroom for both.
+    assert _EXTRACTION_MAX_TOKENS >= 2048
 
 
 def test_parse_extraction_includes_conventions():

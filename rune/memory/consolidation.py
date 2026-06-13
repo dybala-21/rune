@@ -22,7 +22,10 @@ log = get_logger(__name__)
 _CONSOLIDATION_ENABLED_KEY = "learning"  # rune config key
 _DEFAULT_ENABLED = True
 _MAX_EPISODES_PER_RUN = 5  # process at most N episodes per tick
-_EXTRACTION_MAX_TOKENS = 512
+# Headroom for reasoning fast-tier models (e.g. gpt-5-mini): at 512 they spend
+# the whole budget on reasoning and return empty content, so extraction yields
+# nothing. Non-reasoning models still use only what the JSON needs.
+_EXTRACTION_MAX_TOKENS = 4096
 
 
 # Extraction prompt
