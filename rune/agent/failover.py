@@ -89,15 +89,17 @@ def build_profiles_from_config() -> list[LLMProfile]:
         cfg = get_config()
         llm = cfg.llm
 
-        # active_provider/active_model (set by /model command) take priority
+        # active_provider/active_model (set by -p/-m and /model) take priority,
+        # each independently. An all-or-nothing check would let a -m-only launch
+        # fall back to the default provider's best tier, running a model other
+        # than the one requested.
         active_provider = getattr(llm, "active_provider", None)
         active_model = (getattr(llm, "active_model", None) or "").strip()
 
-        if active_provider and active_model:
-            provider = active_provider
+        provider = active_provider or llm.default_provider or "openai"
+        if active_model:
             model_name = active_model
         else:
-            provider = llm.default_provider or "openai"
             models = getattr(llm.models, provider, None)
             model_name = models.best if models else "gpt-5.2"
 

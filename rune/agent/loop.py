@@ -79,6 +79,25 @@ log = get_logger(__name__)
 
 T = TypeVar("T")
 
+
+def _auto_skill_enabled() -> bool:
+    """Whether skill-reuse is on (distil on verified completion, inject a
+    matching skill). Env ``RUNE_AUTO_SKILL`` overrides config ``skills.auto_skill``;
+    default off. See SkillsConfig."""
+    import os
+
+    env = os.environ.get("RUNE_AUTO_SKILL", "").strip().lower()
+    if env in ("1", "true", "on", "yes"):
+        return True
+    if env in ("0", "false", "off", "no"):
+        return False
+    try:
+        from rune.config import get_config
+
+        return bool(getattr(get_config().skills, "auto_skill", False))
+    except Exception:
+        return False
+
 # Turn-atomic grouping — shared implementation in message_utils
 from rune.agent.message_utils import (
     group_into_turns as _group_into_turns,
@@ -380,6 +399,11 @@ class NativeAgentLoop(EventEmitter):
         # Execution nudges (#27) - counters
         self._consecutive_reads_without_write: int = 0
         self._pending_verification_nudge: bool = False
+        # Skill-reuse (auto-skill, default off): tool trace for this run,
+        # captured only when the flag is on. Distilled into a skill on verified
+        # completion.
+        self._tool_trace: list[Any] = []
+        self._auto_skill: bool = False
         # Completion gate enhancements (#16) - tracked files + hard failures
         self._files_written: set[str] = set()
         self._files_read: set[str] = set()
@@ -446,6 +470,8 @@ class NativeAgentLoop(EventEmitter):
         self._pending_verification_nudge = False
         self._files_written.clear()
         self._files_read.clear()
+        self._tool_trace = []
+        self._auto_skill = _auto_skill_enabled()
         self._hard_failure_signatures.clear()
         self._hard_failures.clear()
         self._last_code_write_step = 0
@@ -767,6 +793,12 @@ class NativeAgentLoop(EventEmitter):
                     trace.evidence_gate = None
             await self.emit("completed", trace)
 
+            # On a verified-successful run, distil the tool trace into a skill
+            # (flag-gated). maybe_generate_skill's quality gate requires reason
+            # completed/verified, so a failed run produces nothing.
+            if self._auto_skill and self._tool_trace:
+                await self._maybe_distill_skill(goal, trace)
+
             return trace
 
         except asyncio.CancelledError:
@@ -817,6 +849,39 @@ class NativeAgentLoop(EventEmitter):
                 disabled.add("file_read")
 
         return disabled
+
+    async def _maybe_distill_skill(self, goal: str, trace: Any) -> None:
+        """Distil this run's tool trace into a skill (best-effort).
+
+        Gated upstream by ``self._auto_skill``. ``maybe_generate_skill`` applies
+        the quality gate (success + evidence), so only good runs register a
+        skill. Never raises into the run.
+        """
+        try:
+            from rune.agent.memory_bridge import maybe_generate_skill
+            skill = await maybe_generate_skill(
+                goal=goal, result=trace, intent=None, trace=self._tool_trace,
+            )
+            if skill:
+                log.info(
+                    "auto_skill_distilled",
+                    name=skill.get("name"),
+                    steps=len(skill.get("steps", [])),
+                    quality=skill.get("quality_score"),
+                )
+        except Exception as exc:
+            log.debug("auto_skill_distill_failed", error=str(exc)[:120])
+
+    def _build_skill_context(self, goal: str, goal_category: str) -> str | None:
+        """Retrieve a matching learned skill to inject (flag-gated, best-effort)."""
+        if not self._auto_skill or goal_category not in ("code", "full"):
+            return None
+        try:
+            from rune.skills.executor import build_skill_context_for_goal
+            ctx = build_skill_context_for_goal(goal)
+            return ctx.formatted_context if ctx else None
+        except Exception:
+            return None
 
     def _build_system_prompt(
         self,
@@ -886,6 +951,7 @@ class NativeAgentLoop(EventEmitter):
             is_deep_research=is_deep,
             has_mcp_services=bool(_mcp_servers),
             mcp_server_names=_mcp_servers,
+            skill_context=self._build_skill_context(goal, goal_category),
         )
 
     async def _execute_loop(
@@ -1085,6 +1151,21 @@ class NativeAgentLoop(EventEmitter):
                     self._recent_failed_tool_nudge = ""
 
             await self.emit("tool_result", _tool_result_event_payload(cap_name, result))
+
+            # Capture the tool step for skill distillation (flag-gated;
+            # ephemeral best-of attempts never persist).
+            if self._auto_skill and not _ephemeral:
+                try:
+                    from rune.agent.memory_bridge import ToolTraceEntry
+                    if len(self._tool_trace) < 100:  # bound memory
+                        self._tool_trace.append(ToolTraceEntry(
+                            tool_name=cap_name,
+                            params=dict(_last_tool_params or {}),
+                            result_summary=(getattr(result, "output", "") or "")[:200],
+                            success=bool(result.success),
+                        ))
+                except Exception:
+                    pass  # skill capture must never break the loop
 
         # Build PydanticAI agent and tool set
 

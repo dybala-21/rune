@@ -205,6 +205,13 @@ def test_restore_changed_overwrites_with_backup(tmp_path):
     assert open(os.path.join(backup_dir, "sub", "edit.py")).read() == "OLD VERSION"
     # nothing to back up for the brand-new file
     assert not os.path.exists(os.path.join(backup_dir, "fresh.py"))
+    # backup lives OUT of the user's repo (no cruft / no accidental commit)
+    assert os.path.realpath(backup_dir).startswith(
+        os.path.realpath(str(dest))
+    ) is False
+    assert not any(
+        n.startswith(".rune-bestof-backup") for n in os.listdir(dest)
+    )
 
 
 def test_seed_footprint_counts_and_ignores(tmp_path):
@@ -384,10 +391,14 @@ async def test_best_of_selects_passing_and_restores(monkeypatch, tmp_path):
         )
 
     async def fake_make_verifier(instruction, seed_cwd=None):
+        method_by_cwd: dict[str, str] = {}
+
         async def verify(cwd):
             # passes only the attempt whose workdir has answer.txt
+            method_by_cwd[cwd] = "`pytest -q`"
             return os.path.exists(os.path.join(cwd, "answer.txt"))
 
+        verify.method_by_cwd = method_by_cwd
         return verify
 
     monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
@@ -411,8 +422,43 @@ async def test_best_of_selects_passing_and_restores(monkeypatch, tmp_path):
     assert kw["solved"] is True
     assert kw["selected_index"] == 1
     assert kw["copied"] == ["answer.txt"]
+    # what the winner passed is surfaced for the UX line ("passed `pytest -q`")
+    assert kw["verify_method"] == "`pytest -q`"
     # artifact restored into the real cwd
     assert (dest / "answer.txt").read_text() == "correct"
+
+
+@pytest.mark.asyncio
+async def test_best_of_concurrency_override_serializes(monkeypatch, tmp_path):
+    """RUNE_BESTOF_CONCURRENCY=1 forces serial attempts: no two run at once even
+    with K>1 (a single local model server can't serve parallel attempts)."""
+    import asyncio
+
+    monkeypatch.setenv("RUNE_BESTOF_CONCURRENCY", "1")
+    in_flight = 0
+    max_in_flight = 0
+
+    async def fake_attempt(index, message, model, provider, seed_from=None):
+        nonlocal in_flight, max_in_flight
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        await asyncio.sleep(0.02)  # overlap window if concurrent
+        in_flight -= 1
+        return AttemptArtifact(index=index, workdir=str(tmp_path / f"w{index}"),
+                               stdout=f"o{index}", returncode=0, produced=[])
+
+    async def fake_make_verifier(instruction, seed_cwd=None):
+        async def verify(cwd):
+            return False
+        return verify
+
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
+    monkeypatch.setattr(best_of, "make_verifier", fake_make_verifier)
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    monkeypatch.chdir(tmp_path)
+
+    await _best_of_async("task", 4, None, None, report=lambda s, **kw: None)
+    assert max_in_flight == 1  # serialized despite K=4
 
 
 @pytest.mark.asyncio

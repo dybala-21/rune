@@ -239,3 +239,46 @@ class TestGetSequencePatterns:
         assert "count" in p
         assert "avg_transition_minutes" in p
         assert "updated_at" in p
+
+
+class TestSqliteLogRouting:
+    """SQLite's internal log should not emit ERROR for expected statement noise.
+
+    A fresh install's first run executes idempotent migrations whose expected
+    "duplicate column" failures are caught in Python, but APSW's default
+    library_logging forwarded them to the root logger at ERROR. Statement-level
+    codes route to debug (the caller already saw the exception); database-health
+    codes stay at warning.
+    """
+
+    def test_statement_error_routes_to_debug(self):
+        import apsw
+        from structlog.testing import capture_logs
+
+        from rune.memory.store import _sqlite_log_handler
+
+        with capture_logs() as logs:
+            _sqlite_log_handler(apsw.SQLITE_ERROR, "duplicate column name: importance")
+        assert logs[0]["log_level"] == "debug"
+
+    def test_health_codes_route_to_warning(self):
+        import apsw
+        from structlog.testing import capture_logs
+
+        from rune.memory.store import _sqlite_log_handler
+
+        with capture_logs() as logs:
+            _sqlite_log_handler(apsw.SQLITE_CORRUPT, "database disk image is malformed")
+            # extended codes carry the primary in the low byte
+            _sqlite_log_handler(apsw.SQLITE_IOERR | (1 << 8), "disk I/O error")
+        assert [r["log_level"] for r in logs] == ["warning", "warning"]
+
+    def test_fresh_db_open_and_migrate_works(self, tmp_dir):
+        # The bestpractice subset (WAL, FK, busy timeout) still applies and a
+        # brand-new DB migrates cleanly end-to-end.
+        s = MemoryStore(db_path=tmp_dir / "fresh.db")
+        try:
+            assert s.conn.pragma("journal_mode") == "wal"
+            assert s.conn.pragma("user_version") > 0  # migrations ran
+        finally:
+            s.close()
