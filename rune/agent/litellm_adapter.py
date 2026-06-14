@@ -51,6 +51,22 @@ def _looks_like_tool_failure(result: str) -> bool:
     return looks_like_failure_output(result)
 
 
+def _redirect_edit_to_write(fn: str, args: dict[str, Any]) -> str:
+    """Map a misused file_edit call onto file_write when the model supplied the
+    whole new file as `content` instead of a search/replace pair.
+
+    Weak local models conflate the two tools: they pass `content` to file_edit,
+    which fails schema validation, and then retry the identical call. When an
+    edit carries `content` but no `search`, the intent is a full-file write, so
+    rewrite the call. Edit-specific keys are dropped so file_write validates.
+    """
+    if fn == "file_edit" and args.get("content") and not args.get("search"):
+        args.pop("replace", None)
+        args.pop("all", None)
+        return "file_write"
+    return fn
+
+
 def _skipped_after_batch_failure_message(tool_name: str) -> str:
     return (
         "[BLOCKED] Skipped this tool because an earlier write/execute tool in the same "
@@ -571,7 +587,12 @@ class StreamResult:
                     "per turn. To CREATE a new file use file_write with "
                     '{"path", "content"}; file_edit only modifies an existing '
                     "file. Do not emit a final answer until the work is actually "
-                    "done (files written, tests run)."
+                    "done (files written, tests run). When the code involves a "
+                    "calculation or multi-step rule, first write the computation "
+                    "as explicit ordered steps in comments, defining each "
+                    "intermediate value (compute the base result, then apply each "
+                    "further adjustment to that result in sequence), then "
+                    "implement to follow those steps."
                 ),
             })
         self._collected_text = ""
@@ -1022,6 +1043,11 @@ class StreamResult:
                         args = json.loads(args_str) if args_str else {}
                     except (json.JSONDecodeError, TypeError):
                         args = {}
+                    if self._guided:
+                        _redirected = _redirect_edit_to_write(fn, args)
+                        if _redirected != fn:
+                            fn = _redirected
+                            log.info("guided_edit_to_write_redirect")
                     if self._policy.should_block_tool(fn):
                         res = f"ERROR: {fn} blocked — called too many times consecutively."
                         log.warning("policy_tool_blocked", tool=fn)

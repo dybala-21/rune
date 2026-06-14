@@ -1024,3 +1024,16 @@ def test_cli_best_of_zero_errors():
     with patch("rune.cli.main._ensure_llm_key", return_value=True):
         result = runner.invoke(app, ["--message", "hi", "--best-of", "0"])
     assert result.exit_code == 2
+
+
+def test_attempt_work_root_is_guardian_safe():
+    # macOS tempfile.mkdtemp() lands under /var/folders, which the Guardian
+    # blocks as protected, so attempts there produce no files. The attempt root
+    # must live under the data dir (in $HOME), not /var.
+    from rune.cli.best_of import _attempt_work_root
+    from rune.utils.paths import rune_data
+    root = _attempt_work_root()
+    assert not root.startswith("/var"), f"attempt root under protected /var: {root}"
+    assert str(rune_data()) in root
+    import os
+    assert os.path.isdir(root)

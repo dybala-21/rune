@@ -80,7 +80,7 @@ async def _run_attempt_subprocess(
     first so the agent can edit existing files; ``produced`` then becomes the set
     of files CHANGED vs the seed, not every top-level entry.
     """
-    workdir = tempfile.mkdtemp(prefix=f"rune_bestof_{index}_")
+    workdir = tempfile.mkdtemp(prefix=f"rune_bestof_{index}_", dir=_attempt_work_root())
 
     seed_manifest: dict[str, tuple[float, int]] | None = None
     if seed_from:
@@ -264,6 +264,20 @@ def _changed_vs_seed(root: str, seed: dict[str, tuple[float, int]]) -> list[str]
     if seed and len(changed) >= len(seed) and all(r in changed for r in seed):
         log.warning("bestof_seed_diff_suspicious", changed=len(changed), seeded=len(seed))
     return sorted(changed)
+
+
+def _attempt_work_root() -> str:
+    """Guardian-allowed parent for attempt workdirs.
+
+    The default temp dir is unusable: on macOS ``tempfile.mkdtemp()`` lands under
+    ``$TMPDIR`` (``/var/folders/...``), and the Guardian blocks the whole ``/var``
+    tree as protected, so every file_write in an attempt fails and best-of reports
+    "produced no files". Rooting attempt workdirs under the data dir (in $HOME)
+    keeps them writable on every platform.
+    """
+    root = rune_data() / "bestof-work"
+    root.mkdir(parents=True, exist_ok=True)
+    return str(root)
 
 
 def _backup_root() -> str:

@@ -126,5 +126,18 @@ async def run_verify(
 
     text = (out or b"").decode("utf-8", "replace")
     if proc.returncode == 0:
-        return "pass", ""
+        # Keep the summary line ("3 passed in 0.01s") so callers can report the
+        # test count: verification is only as strong as the suite.
+        lines = [ln for ln in text.strip().splitlines() if ln.strip()]
+        return "pass", (lines[-1].strip() if lines else "")
     return "fail", text[-_EVIDENCE_TAIL_CHARS:].strip()
+
+
+def passed_test_count(summary: str) -> int | None:
+    """Parse the passing-test count from a runner summary line.
+
+    "3 passed in 0.01s" -> 3, "1 passed, 2 warnings" -> 1, else None.
+    """
+    import re
+    m = re.search(r"(\d+)\s+passed", summary)
+    return int(m.group(1)) if m else None

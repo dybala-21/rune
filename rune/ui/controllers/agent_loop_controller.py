@@ -685,6 +685,15 @@ class AgentLoopController:
         )
         self._renderer.print_completion_summary(summary)
 
+        # On a verified-unfixable failure, point at /escalate (a stronger model),
+        # the explicit-consent path for errors a weak model cannot self-correct.
+        # Suggestion only; nothing leaves the machine here.
+        from rune.agent.escalation import escalation_hint
+        _hint = escalation_hint(reason)
+        if _hint:
+            with contextlib.suppress(Exception):
+                self._renderer.print_system_message(_hint)
+
         # Ring terminal bell (TS RUNE behavior)
         self._app._ring_bell()
 

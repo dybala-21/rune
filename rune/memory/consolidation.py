@@ -58,6 +58,18 @@ Rules:
 
 # Consolidation result
 
+def _is_mechanical_lesson(lessons: str) -> bool:
+    """True if `lessons` is RUNE's auto-generated telemetry, not a real lesson.
+
+    The agent records a terse status string at save time ("Success: domain=...;
+    action=...; files=..." on success, "Task failed: ..." on failure). It is
+    internal bookkeeping with no extractable content; feeding it to the small
+    extractor model derails convention/decision extraction.
+    """
+    head = lessons.lstrip()[:24].lower()
+    return head.startswith("success: domain=") or head.startswith("task failed:")
+
+
 def _parse_extraction(raw: str) -> dict[str, list[str]]:
     """Parse LLM extraction output into structured dict."""
     # Strip markdown fences if present
@@ -174,9 +186,15 @@ async def consolidate_episode(episode_id: str) -> dict[str, list[str]] | None:
         if episode.entities and episode.entities.strip():
             return None
 
-        # Build extraction input
+        # Build extraction input. The episode's `lessons` field often holds
+        # RUNE's own mechanical telemetry ("Success: domain=...; action=...;
+        # files=...", "Task failed: ..."), written at save time. That string
+        # carries no source signal and, fed to a small extractor model, anchors
+        # its attention and suppresses convention/decision extraction. It is
+        # already persisted as a heuristic lesson, so skip it here and pass only
+        # natural lessons.
         input_text = f"Task: {episode.task_summary}\nResult: {episode.result}"
-        if episode.lessons:
+        if episode.lessons and not _is_mechanical_lesson(episode.lessons):
             input_text += f"\nLessons: {episode.lessons}"
 
         # Call fast model
@@ -207,8 +225,56 @@ async def consolidate_episode(episode_id: str) -> dict[str, list[str]] | None:
 
         result = _parse_extraction(response_text)
 
-        # Save back to episode
         import json as _json
+
+        # Persist the extracted facts FIRST, then mark the episode consolidated
+        # (the `entities` field) LAST. consolidate_recent treats a non-empty
+        # `entities` as already consolidated, so marking it before the facts are
+        # written would lose them if the process exits mid-way: the episode would
+        # look done but carry no facts. Writing facts first means the mark implies
+        # the facts are saved; a cancelled run leaves entities empty so the next
+        # drain reprocesses it (dedup-safe).
+
+        # Save commitments to dedicated table
+        if result["commitments"] and hasattr(store, "save_commitment"):
+            for c in result["commitments"]:
+                if isinstance(c, str) and len(c) > 5:
+                    store.save_commitment(episode_id, c)
+
+        # Success-gate the durable facts. A failed run's `result` text is the
+        # model's own self-assessment, often false (e.g. "the tests passed" on a
+        # run whose tests failed), so extracting decisions/conventions/lessons
+        # from it injects false high-confidence knowledge that
+        # build_memory_context later surfaces to mislead similar tasks. Only a
+        # successful episode (utility > 0) writes durable facts; a failure still
+        # records its episode for the anti-example path but asserts no knowledge.
+        _utility = getattr(episode, "utility", 0) or 0
+        _succeeded = _utility > 0
+
+        # Save decisions, lessons, conventions to learned.md
+        try:
+            from rune.memory.markdown_store import save_learned_fact
+            from rune.memory.state import is_suppressed
+
+            if _succeeded:
+                for d in result.get("decisions", []):
+                    if isinstance(d, str) and len(d) > 5 and not is_suppressed(d[:80]):
+                        save_learned_fact("decision", d[:80], d, 0.8)
+
+                for lesson in result.get("lessons", []):
+                    if isinstance(lesson, str) and len(lesson) > 5 and not is_suppressed(lesson[:40]):
+                        save_learned_fact("lesson", lesson[:40], lesson, 0.7)
+
+                # Conventions go to the "project" category at durable confidence
+                # (>=0.7), so build_memory_context injects them ("## Durable
+                # Knowledge") and a later under-specified task can follow them.
+                for conv in result.get("conventions", []):
+                    if isinstance(conv, str) and len(conv) > 5 and not is_suppressed(conv[:80]):
+                        save_learned_fact("project", conv[:80], conv, 0.8)
+        except Exception as exc:
+            log.debug("learned_md_write_failed", error=str(exc)[:100])
+
+        # Mark consolidated LAST (after facts are durably written).
         store.conn.execute(
             """UPDATE episodes SET
                 entities = ?,
@@ -222,34 +288,6 @@ async def consolidate_episode(episode_id: str) -> dict[str, list[str]] | None:
                 episode_id,
             ),
         )
-
-        # Save commitments to dedicated table
-        if result["commitments"] and hasattr(store, "save_commitment"):
-            for c in result["commitments"]:
-                if isinstance(c, str) and len(c) > 5:
-                    store.save_commitment(episode_id, c)
-
-        # Save decisions and lessons to learned.md
-        try:
-            from rune.memory.markdown_store import save_learned_fact
-            from rune.memory.state import is_suppressed
-
-            for d in result.get("decisions", []):
-                if isinstance(d, str) and len(d) > 5 and not is_suppressed(d[:80]):
-                    save_learned_fact("decision", d[:80], d, 0.8)
-
-            for lesson in result.get("lessons", []):
-                if isinstance(lesson, str) and len(lesson) > 5 and not is_suppressed(lesson[:40]):
-                    save_learned_fact("lesson", lesson[:40], lesson, 0.7)
-
-            # Conventions go to the "project" category at durable confidence
-            # (>=0.7), so build_memory_context injects them ("## Durable
-            # Knowledge") and a later under-specified task can follow them.
-            for conv in result.get("conventions", []):
-                if isinstance(conv, str) and len(conv) > 5 and not is_suppressed(conv[:80]):
-                    save_learned_fact("project", conv[:80], conv, 0.8)
-        except Exception as exc:
-            log.debug("learned_md_write_failed", error=str(exc)[:100])
 
         log.debug(
             "episode_consolidated",

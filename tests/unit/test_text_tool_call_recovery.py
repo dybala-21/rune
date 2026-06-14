@@ -125,3 +125,27 @@ def test_arg_alias_not_applied_when_canonical_present():
     from rune.agent.litellm_adapter import _normalize_arg_keys
     out = _normalize_arg_keys({"path": "real.py", "filename": "ignore.py"})
     assert out["path"] == "real.py"  # canonical wins; alias dropped
+
+
+def test_edit_with_content_redirects_to_write():
+    # Weak models pass the whole new file as `content` to file_edit, which fails
+    # schema validation. Treat that as a full-file write.
+    from rune.agent.litellm_adapter import _redirect_edit_to_write
+    args = {"path": "a.py", "content": "x = 1\n", "replace": "", "all": False}
+    fn = _redirect_edit_to_write("file_edit", args)
+    assert fn == "file_write"
+    assert "replace" not in args and "all" not in args  # edit-only keys dropped
+    assert args["content"] == "x = 1\n"
+
+
+def test_real_edit_with_search_is_not_redirected():
+    # A genuine search/replace edit must stay file_edit.
+    from rune.agent.litellm_adapter import _redirect_edit_to_write
+    args = {"path": "a.py", "search": "x = 1", "replace": "x = 2"}
+    assert _redirect_edit_to_write("file_edit", args) == "file_edit"
+
+
+def test_non_edit_tool_untouched():
+    from rune.agent.litellm_adapter import _redirect_edit_to_write
+    args = {"path": "a.py", "content": "x = 1"}
+    assert _redirect_edit_to_write("file_write", args) == "file_write"
