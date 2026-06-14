@@ -213,6 +213,14 @@ async def make_verifier(
             if state in ("pass", "fail"):
                 method_by_cwd[cwd] = f"`{' '.join(cmd)}`"
             if state == "pass":
+                # Report the test count: passing the provided tests is not proof
+                # of correctness, so the count lets the user gauge the check.
+                from rune.agent.auto_verify import passed_test_count
+                n = passed_test_count(evidence)
+                if n is not None:
+                    method_by_cwd[cwd] = (
+                        f"`{' '.join(cmd)}`, {n} test{'s' if n != 1 else ''}"
+                    )
                 return True
             if state == "fail":
                 if evidence:

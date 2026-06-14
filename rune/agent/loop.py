@@ -532,18 +532,26 @@ class NativeAgentLoop(EventEmitter):
             return "skip", None
 
     async def _auto_verify(self) -> tuple[str, str]:
-        """Run the project's fast verifier (lint/typecheck) after edits.
+        """Run the project's check after edits, preferring correctness over lint.
 
-        Returns ``("pass"|"fail"|"skip", evidence)``; ``"skip"`` when no
-        verify command is detected. Never raises.
+        Prefer the correctness test command (the repo's pytest/npm test) over the
+        fast lint/typecheck, since a logic error passes lint but fails the tests.
+        Falls back to the lint verifier when no test runner is evident. Returns
+        ``("pass"|"fail"|"skip", evidence)``; ``"skip"`` when neither is detected.
+        Never raises.
         """
         import os as _os
 
-        from rune.agent.auto_verify import detect_verify_command, run_verify
-        cmd = detect_verify_command(_os.getcwd())
+        from rune.agent.auto_verify import (
+            detect_test_command,
+            detect_verify_command,
+            run_verify,
+        )
+        cwd = _os.getcwd()
+        cmd = detect_test_command(cwd) or detect_verify_command(cwd)
         if not cmd:
             return "skip", ""
-        return await run_verify(cmd, _os.getcwd())
+        return await run_verify(cmd, cwd)
 
     async def _auto_verify_gate(
         self, messages: list[Any], blocked_count: int

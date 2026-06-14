@@ -359,6 +359,10 @@ def _handle_non_interactive(
             print()
         if trace.reason != "completed":
             console.print(f"[dim]({trace.reason})[/dim]")
+            from rune.agent.escalation import escalation_hint
+            _hint = escalation_hint(trace.reason)
+            if _hint:
+                console.print(f"[yellow]{_hint}[/yellow]")
 
         if not _throwaway:
             try:
