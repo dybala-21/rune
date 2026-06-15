@@ -1226,6 +1226,14 @@ class RuneApp:
                 else None
             ),
             cancelled=lambda: getattr(self, "_goal_cancelled", False),
+            # Gap #4: one stronger-model attempt when stuck. Injected only when
+            # the user opted in AND an escalation profile is configured, so its
+            # presence is the consent to send that attempt to the cloud.
+            escalate_fn=(
+                runtime.escalate_run_fn
+                if cfg.escalate_on_stuck and get_config().llm.escalation_provider
+                else None
+            ),
             workspace=workspace,
         )
 
@@ -1242,6 +1250,11 @@ class RuneApp:
             f"/goal finished: {verdict} after {len(res.iterations)} iteration(s). "
             f"State in {workspace}/(SPEC|fix_plan|progress).md"
         )
+        if not res.success:
+            from rune.agent.escalation import goal_escalation_hint
+            _hint = goal_escalation_hint(res.stop_cause)
+            if _hint:
+                self.renderer.print_system_message(_hint)
         if res.final_answer:
             self.renderer.print_assistant_response(res.final_answer)
             self._last_response_text = res.final_answer

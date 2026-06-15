@@ -991,3 +991,75 @@ async def test_c1_no_steer_on_normal_progress(tmp_path: Path) -> None:
     await loop.run(spec(validation_commands=["cargo build"]))
 
     assert "[BUDGET DISCIPLINE]" not in runner.calls[1][1]
+
+
+# ---------------------------------------------------------------------------
+# Gap #4: escalation on stuck
+# ---------------------------------------------------------------------------
+
+
+async def test_escalate_on_stuck_recovers(tmp_path: Path) -> None:
+    # Local loop is stuck (max_iterations of progress); the injected escalate_fn
+    # returns a verified attempt, so the run flips to verified.
+    local = ScriptedRunner([progress()])
+    esc = ScriptedRunner([verified()])
+    loop = GoalLoop(
+        GoalLoopConfig(max_iterations=2, stagnation_window=0),
+        run_fn=local,
+        escalate_fn=esc,
+        workspace=tmp_path,
+    )
+    res = await loop.run(spec())
+    assert res.stop_cause == "verified" and res.success is True
+    assert len(esc.calls) == 1  # one-shot escalation
+
+
+async def test_escalate_not_called_when_verified(tmp_path: Path) -> None:
+    local = ScriptedRunner([verified()])
+    esc = ScriptedRunner([verified()])
+    loop = GoalLoop(run_fn=local, escalate_fn=esc, workspace=tmp_path)
+    res = await loop.run(spec())
+    assert res.stop_cause == "verified"
+    assert esc.calls == []  # never escalate a run that already passed
+
+
+async def test_escalate_failure_keeps_stuck(tmp_path: Path) -> None:
+    local = ScriptedRunner([progress()])
+    esc = ScriptedRunner([progress()])  # escalation also fails to verify
+    loop = GoalLoop(
+        GoalLoopConfig(max_iterations=2, stagnation_window=0),
+        run_fn=local,
+        escalate_fn=esc,
+        workspace=tmp_path,
+    )
+    res = await loop.run(spec())
+    assert res.stop_cause == "max_iterations" and res.success is False
+    assert len(esc.calls) == 1  # tried once, did not loop
+
+
+async def test_no_escalate_fn_is_unchanged(tmp_path: Path) -> None:
+    # Default (no escalate_fn injected) preserves the prior give-up behavior.
+    local = ScriptedRunner([progress()])
+    loop = GoalLoop(
+        GoalLoopConfig(max_iterations=2, stagnation_window=0),
+        run_fn=local,
+        workspace=tmp_path,
+    )
+    res = await loop.run(spec())
+    assert res.stop_cause == "max_iterations" and res.success is False
+
+
+async def test_escalate_not_called_on_cancel(tmp_path: Path) -> None:
+    # Cancellation is not a capability failure, so it must not escalate.
+    local = ScriptedRunner([progress()])
+    esc = ScriptedRunner([verified()])
+    loop = GoalLoop(
+        GoalLoopConfig(max_iterations=5, stagnation_window=0),
+        run_fn=local,
+        escalate_fn=esc,
+        cancelled=lambda: True,
+        workspace=tmp_path,
+    )
+    res = await loop.run(spec())
+    assert res.stop_cause == "cancelled"
+    assert esc.calls == []

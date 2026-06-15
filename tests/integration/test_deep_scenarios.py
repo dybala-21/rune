@@ -1105,7 +1105,7 @@ class TestProactiveFullCycle:
 
         async def mock_agent(goal: str) -> dict[str, Any]:
             execution_log.append(goal)
-            return {"success": True}
+            return {"success": True, "verified": True}
 
         bridge = ProactiveAgentBridge(
             engine=engine,
@@ -1140,7 +1140,7 @@ class TestProactiveFullCycle:
             attempt_count += 1
             if attempt_count < 3:
                 raise RuntimeError("Temporary error")
-            return {"success": True}
+            return {"success": True, "verified": True}
 
         bridge = ProactiveAgentBridge(
             engine=engine,
@@ -1169,7 +1169,7 @@ class TestProactiveFullCycle:
         async def counting_agent(goal: str) -> dict[str, Any]:
             nonlocal call_count
             call_count += 1
-            return {"success": True}
+            return {"success": True, "verified": True}
 
         bridge = ProactiveAgentBridge(
             engine=engine,

@@ -31,6 +31,10 @@ StopCause = Literal[
     "verified", "max_iterations", "budget", "stagnation", "cancelled", "error"
 ]
 
+# Stuck outcomes: the model tried and could not pass validation. These warrant a
+# stronger-model escalation; "cancelled" (user) and "error" (crash) do not.
+_STUCK_STOP_CAUSES = frozenset({"stagnation", "max_iterations", "budget"})
+
 # Inner-loop reasons that mean "ran out of room without self-reporting
 # completed" - a weak model often burns its whole iteration budget here, so
 # the next prompt is steered to do the minimum and validate.
@@ -160,10 +164,15 @@ class GoalLoop:
         review_fn: ReviewFn | None = None,
         critique_fn: CritiqueFn | None = None,
         artifact_fn: Callable[[], Awaitable[str]] | None = None,
+        escalate_fn: RunFn | None = None,
         workspace: Path | str | None = None,
     ) -> None:
         self._cfg = config or GoalLoopConfig()
         self._run = run_fn
+        # One final attempt on a stronger model when the local loop is stuck.
+        # Injected (not None) only when the caller has opted in AND configured an
+        # escalation path, so its mere presence is the consent to escalate.
+        self._escalate = escalate_fn
         self._validate = validate_fn
         self._persist = persist_fn
         self._cancelled = cancelled or (lambda: False)
@@ -603,6 +612,20 @@ class GoalLoop:
             ):
                 effective_max += 1
 
+        # Gap #4: climb the escalation ladder before giving up. When the local
+        # loop is stuck (tried and could not pass validation) and an escalation
+        # path was injected, run ONE attempt on the stronger model and re-judge.
+        if (
+            stop_cause in _STUCK_STOP_CAUSES
+            and self._escalate is not None
+        ):
+            self._append_progress("ESCALATE one attempt on a stronger model (stuck)")
+            accepted, last_answer = await self._escalated_attempt(
+                spec, hist, last_answer, len(hist) + 1
+            )
+            if accepted:
+                stop_cause = "verified"
+
         success = stop_cause == "verified"
         # Persist episodic memory once, at the terminal outcome only.
         if self._persist is not None:
@@ -619,6 +642,46 @@ class GoalLoop:
             iterations=hist,
             final_answer=last_answer,
         )
+
+    async def _escalated_attempt(
+        self,
+        spec: GoalSpec,
+        hist: list[GoalIteration],
+        last_answer: str,
+        n: int,
+    ) -> tuple[bool, str]:
+        """Run one fresh attempt on the stronger model and judge it with the same
+        validation/acceptance path as a normal iteration. Returns
+        ``(accepted, last_answer)``. Never raises; a failed escalation just leaves
+        the original stuck outcome in place."""
+        if self._escalate is None:
+            return False, last_answer
+        try:
+            coro = self._escalate(self._build_prompt(spec, n), n)
+            trace = (
+                await asyncio.wait_for(coro, timeout=self._cfg.iteration_timeout_s)
+                if self._cfg.iteration_timeout_s > 0
+                else await coro
+            )
+        except Exception as exc:
+            log.warning("goal_loop_escalate_error", error=str(exc)[:200])
+            return False, last_answer
+
+        ans = self._answer_of(trace) or last_answer
+        it = GoalIteration(
+            n=n,
+            reason=trace.reason or "",
+            evidence=float(getattr(trace, "evidence_score", 0.0) or 0.0),
+            tokens=int(getattr(trace, "total_tokens_used", 0) or 0),
+            verdict=self._verdict(trace),
+        )
+        if it.verdict == "verified":
+            accepted, _ = await self._try_accept(spec, it, ans, hist)
+            if accepted:
+                self._record(hist, it)
+                return True, ans
+        self._record(hist, it)
+        return False, ans
 
     async def _run_validation(self, spec: GoalSpec) -> tuple[bool, str]:
         """The loop runs the SPEC validation commands itself. With no commands

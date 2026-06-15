@@ -37,7 +37,19 @@ def _make_suggestion(**overrides) -> Suggestion:
 
 
 async def _success_factory(goal: str) -> dict:
+    # A verified successful execution: claims success AND carries an objective
+    # verification signal, so the bridge may count it as SUCCESS.
+    return {"success": True, "verified": True}
+
+
+async def _unverified_factory(goal: str) -> dict:
+    # Claims success but with no verification signal: must NOT count as success.
     return {"success": True}
+
+
+async def _no_flag_factory(goal: str) -> dict:
+    # Missing success flag: must NOT default to success (the old trust hole).
+    return {"output": "did some stuff"}
 
 
 async def _failure_factory(goal: str) -> dict:
@@ -93,6 +105,22 @@ class TestProactiveAgentBridge:
         assert record.attempt == 1
         assert record.error is None
         assert len(bridge.history) == 1
+
+    @pytest.mark.asyncio
+    async def test_self_reported_success_without_verification_is_unverified(self):
+        # The fabricated-success guard: an agent claiming done with no objective
+        # signal is recorded UNVERIFIED, not SUCCESS, so it never feeds
+        # success-learning or autonomy promotion.
+        bridge = ProactiveAgentBridge(_make_engine(), _unverified_factory)
+        record = await bridge.execute_suggestion(_make_suggestion())
+        assert record.status == ExecutionStatus.UNVERIFIED
+
+    @pytest.mark.asyncio
+    async def test_missing_success_flag_is_not_a_win(self):
+        # The old hole defaulted a missing flag to True; now it is a failure.
+        bridge = ProactiveAgentBridge(_make_engine(), _no_flag_factory)
+        record = await bridge.execute_suggestion(_make_suggestion())
+        assert record.status != ExecutionStatus.SUCCESS
 
     @pytest.mark.asyncio
     async def test_execute_suggestion_failure_retries(self):
@@ -294,3 +322,26 @@ class TestPollOnce:
         await bridge._poll_once()
         skipped = bridge.get_history(status=ExecutionStatus.SKIPPED)
         assert len(skipped) >= 1
+
+
+async def _verifying_factory(goal: str, *, verification=None) -> dict:
+    # Models the Stage-2 daemon factory: verified iff the suggestion carried
+    # verification commands (a scoped check actually ran and passed).
+    return {"success": True, "verified": bool(verification)}
+
+
+class TestVerifiedProactivity:
+    @pytest.mark.asyncio
+    async def test_verification_commands_yield_verified_success(self):
+        bridge = ProactiveAgentBridge(_make_engine(), _verifying_factory)
+        s = _make_suggestion()
+        s.verification = ["pytest -q test_thing.py"]
+        record = await bridge.execute_suggestion(s)
+        assert record.status == ExecutionStatus.SUCCESS
+
+    @pytest.mark.asyncio
+    async def test_no_verification_commands_stay_unverified(self):
+        bridge = ProactiveAgentBridge(_make_engine(), _verifying_factory)
+        s = _make_suggestion()  # no verification -> factory returns verified False
+        record = await bridge.execute_suggestion(s)
+        assert record.status == ExecutionStatus.UNVERIFIED

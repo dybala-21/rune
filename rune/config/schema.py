@@ -213,6 +213,10 @@ class GoalLoopConfig(BaseModel):
     adversarial_review: bool = True  # run the allow/block gate before accepting
     ssc_interval: int = 0  # self-critique every N iterations (0 = off, opt-in)
     inner_token_budget: int = 1_000_000  # per-iteration NativeAgentLoop budget
+    # When stuck (stagnation/max_iterations/budget), run one final attempt on the
+    # escalation profile before giving up. Opt-in: that attempt goes to the cloud
+    # escalation model, so default off to preserve local-only operation.
+    escalate_on_stuck: bool = False
 
 
 # Root Configuration

@@ -17,6 +17,7 @@ memory stack.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import time
 from collections.abc import Awaitable, Callable
@@ -311,6 +312,54 @@ class GoalRuntime:
             or self._last_answer
         )
         return trace
+
+    async def escalate_run_fn(self, prompt: str, iteration: int) -> Any:
+        """Like :meth:`run_fn` but for the one final stuck-escalation attempt:
+        point this runtime's loop at the configured escalation profile, run, then
+        restore. Switch is in-memory and undone in ``finally`` so the loop returns
+        to the local default even on failure. Falls back to a normal run when no
+        escalation profile is configured."""
+        from rune.config import get_config
+
+        llm = get_config().llm
+        provider = llm.escalation_provider
+        if not provider:
+            return await self.run_fn(prompt, iteration)
+        model = llm.escalation_model
+        if not model:
+            from rune.llm.client import get_llm_client
+            from rune.types import ModelTier, Provider
+            try:
+                model = get_llm_client().resolve_model(ModelTier.BEST, Provider(provider))
+            except ValueError:
+                return await self.run_fn(prompt, iteration)
+
+        prev_active = (llm.active_provider, llm.active_model)
+        loop_cfg = getattr(self._loop, "_config", None)
+        prev_loop = (
+            getattr(loop_cfg, "provider", None),
+            getattr(loop_cfg, "model", None),
+            getattr(loop_cfg, "_overridden", None),
+        ) if loop_cfg is not None else None
+
+        log.info("goal_escalate_attempt", provider=provider, model=model)
+        llm.active_provider, llm.active_model = provider, model
+        if loop_cfg is not None:
+            loop_cfg.provider, loop_cfg.model, loop_cfg._overridden = provider, model, True
+            with contextlib.suppress(Exception):
+                from rune.agent.failover import build_profiles_from_config
+                if hasattr(self._loop, "_failover"):
+                    self._loop._failover._profiles = build_profiles_from_config()
+        try:
+            return await self.run_fn(prompt, iteration)
+        finally:
+            llm.active_provider, llm.active_model = prev_active
+            if loop_cfg is not None and prev_loop is not None:
+                loop_cfg.provider, loop_cfg.model, loop_cfg._overridden = prev_loop
+                with contextlib.suppress(Exception):
+                    from rune.agent.failover import build_profiles_from_config
+                    if hasattr(self._loop, "_failover"):
+                        self._loop._failover._profiles = build_profiles_from_config()
 
     def answer_of(self, _trace: Any) -> str:
         return self._last_answer
