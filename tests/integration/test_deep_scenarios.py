@@ -1114,6 +1114,7 @@ class TestProactiveFullCycle:
                 min_confidence=0.4,
                 max_retries=0,
                 max_executions_per_hour=10,
+                auto_execute=True,
             ),
         )
 
@@ -1148,6 +1149,7 @@ class TestProactiveFullCycle:
             config=BridgeConfig(
                 max_retries=2,
                 backoff_base_seconds=0.01,  # fast for test
+                auto_execute=True,
             ),
         )
 
@@ -1177,6 +1179,7 @@ class TestProactiveFullCycle:
             config=BridgeConfig(
                 max_executions_per_hour=2,
                 max_retries=0,
+                auto_execute=True,
             ),
         )
 

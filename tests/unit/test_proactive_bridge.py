@@ -96,7 +96,8 @@ class TestProactiveAgentBridge:
     @pytest.mark.asyncio
     async def test_execute_suggestion_success(self):
         engine = _make_engine()
-        bridge = ProactiveAgentBridge(engine, _success_factory)
+        bridge = ProactiveAgentBridge(engine, _success_factory,
+                                      BridgeConfig(auto_execute=True))
 
         suggestion = _make_suggestion()
         record = await bridge.execute_suggestion(suggestion)
@@ -111,7 +112,7 @@ class TestProactiveAgentBridge:
         # The fabricated-success guard: an agent claiming done with no objective
         # signal is recorded UNVERIFIED, not SUCCESS, so it never feeds
         # success-learning or autonomy promotion.
-        bridge = ProactiveAgentBridge(_make_engine(), _unverified_factory)
+        bridge = ProactiveAgentBridge(_make_engine(), _unverified_factory, BridgeConfig(auto_execute=True))
         record = await bridge.execute_suggestion(_make_suggestion())
         assert record.status == ExecutionStatus.UNVERIFIED
 
@@ -125,7 +126,7 @@ class TestProactiveAgentBridge:
     @pytest.mark.asyncio
     async def test_execute_suggestion_failure_retries(self):
         engine = _make_engine()
-        config = BridgeConfig(max_retries=2, backoff_base_seconds=0.01)
+        config = BridgeConfig(max_retries=2, backoff_base_seconds=0.01, auto_execute=True)
         bridge = ProactiveAgentBridge(engine, _failure_factory, config)
 
         suggestion = _make_suggestion()
@@ -139,7 +140,7 @@ class TestProactiveAgentBridge:
     @pytest.mark.asyncio
     async def test_execute_suggestion_exception_retries(self):
         engine = _make_engine()
-        config = BridgeConfig(max_retries=1, backoff_base_seconds=0.01)
+        config = BridgeConfig(max_retries=1, backoff_base_seconds=0.01, auto_execute=True)
         bridge = ProactiveAgentBridge(engine, _exception_factory, config)
 
         suggestion = _make_suggestion()
@@ -153,7 +154,7 @@ class TestProactiveAgentBridge:
     @pytest.mark.asyncio
     async def test_rate_limiting(self):
         engine = _make_engine()
-        config = BridgeConfig(max_executions_per_hour=2)
+        config = BridgeConfig(max_executions_per_hour=2, auto_execute=True)
         bridge = ProactiveAgentBridge(engine, _success_factory, config)
 
         # Execute 2 suggestions successfully
@@ -290,7 +291,7 @@ class TestPollOnce:
     @pytest.mark.asyncio
     async def test_poll_executes_high_confidence_suggestions(self):
         engine = _make_engine()
-        config = BridgeConfig(min_confidence=0.3)
+        config = BridgeConfig(min_confidence=0.3, auto_execute=True)
         bridge = ProactiveAgentBridge(
             engine,
             _success_factory,
@@ -333,7 +334,7 @@ async def _verifying_factory(goal: str, *, verification=None) -> dict:
 class TestVerifiedProactivity:
     @pytest.mark.asyncio
     async def test_verification_commands_yield_verified_success(self):
-        bridge = ProactiveAgentBridge(_make_engine(), _verifying_factory)
+        bridge = ProactiveAgentBridge(_make_engine(), _verifying_factory, BridgeConfig(auto_execute=True))
         s = _make_suggestion()
         s.verification = ["pytest -q test_thing.py"]
         record = await bridge.execute_suggestion(s)
@@ -341,7 +342,37 @@ class TestVerifiedProactivity:
 
     @pytest.mark.asyncio
     async def test_no_verification_commands_stay_unverified(self):
-        bridge = ProactiveAgentBridge(_make_engine(), _verifying_factory)
+        bridge = ProactiveAgentBridge(_make_engine(), _verifying_factory, BridgeConfig(auto_execute=True))
         s = _make_suggestion()  # no verification -> factory returns verified False
         record = await bridge.execute_suggestion(s)
         assert record.status == ExecutionStatus.UNVERIFIED
+
+
+class TestDefaultDoesNotAutoExecute:
+    """Stage A: with auto_execute off (default), suggestions are delivered for
+    the user to act on, never run unsolicited."""
+
+    @pytest.mark.asyncio
+    async def test_default_delivers_not_executes(self):
+        ran = []
+        async def factory(goal, *, verification=None):
+            ran.append(goal)
+            return {"success": True, "verified": True}
+        bridge = ProactiveAgentBridge(_make_engine(), factory)  # auto_execute defaults False
+        record = await bridge.execute_suggestion(_make_suggestion())
+        assert record.status == ExecutionStatus.DELIVERED
+        assert ran == []  # the agent never ran
+
+    @pytest.mark.asyncio
+    async def test_force_executes_even_when_off(self):
+        # An explicit accept (Stage B) bypasses the gate.
+        bridge = ProactiveAgentBridge(_make_engine(), _success_factory)
+        record = await bridge.execute_suggestion(_make_suggestion(), force=True)
+        assert record.status == ExecutionStatus.SUCCESS
+
+    @pytest.mark.asyncio
+    async def test_opt_in_executes(self):
+        bridge = ProactiveAgentBridge(_make_engine(), _success_factory,
+                                      BridgeConfig(auto_execute=True))
+        record = await bridge.execute_suggestion(_make_suggestion())
+        assert record.status == ExecutionStatus.SUCCESS
