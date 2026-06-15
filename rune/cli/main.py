@@ -800,6 +800,102 @@ def web(
         _force_exit()
 
 
+# Overnight: unattended verified goal run
+
+async def _run_overnight(
+    goal: str, validate: str | None, max_iter: int,
+    provider: str | None, model: str | None, escalate: bool,
+) -> None:
+    import subprocess
+
+    from rune.agent.auto_verify import detect_test_command
+    from rune.agent.goal_loop import GoalLoop, GoalLoopConfig, GoalSpec
+    from rune.agent.goal_runtime import GoalRuntime
+    from rune.agent.goal_validate import make_validate_fn
+    from rune.agent.loop import NativeAgentLoop
+    from rune.agent.overnight_report import format_overnight_report
+    from rune.config import get_config
+
+    llm = get_config().llm
+    if provider:
+        llm.active_provider = provider
+    if model:
+        llm.active_model = model
+
+    # Validation: explicit flag, else auto-detect the project's tests.
+    cwd = os.getcwd()
+    commands = [validate] if validate else (
+        [" ".join(_d)] if (_d := detect_test_command(cwd)) else []
+    )
+    if not commands:
+        console.print(
+            "[yellow]No validation command. Pass --validate \"pytest -q\" so the "
+            "result can be objectively verified; running unverified.[/yellow]"
+        )
+
+    has_esc = bool(escalate and llm.escalation_provider)
+    runtime = GoalRuntime(loop=NativeAgentLoop(), channel="cli", conversation_id="overnight")
+    gl = GoalLoop(
+        GoalLoopConfig(max_iterations=max_iter, adversarial_review=False),
+        run_fn=runtime.run_fn,
+        validate_fn=make_validate_fn(cwd=cwd),
+        persist_fn=runtime.persist_fn,
+        answer_of=runtime.answer_of,
+        escalate_fn=runtime.escalate_run_fn if has_esc else None,
+    )
+    console.print(f"[dim]overnight: working on \"{goal[:70]}\" (max {max_iter} iters"
+                  + (", auto-escalate on)" if has_esc else ")") + "[/dim]")
+    res = await gl.run(GoalSpec(goal=goal, validation_commands=commands))
+
+    try:
+        out = subprocess.run(["git", "status", "--porcelain"], cwd=cwd,
+                             capture_output=True, text=True, timeout=10).stdout
+        changed = [
+            f for ln in out.splitlines() if ln.strip()
+            and (f := ln[3:].strip())
+            and "__pycache__" not in f and not f.endswith(".pyc")
+        ]
+    except Exception:
+        changed = []
+
+    hint = None
+    if not res.success:
+        from rune.agent.escalation import goal_escalation_hint
+        hint = goal_escalation_hint(res.stop_cause)
+    report = format_overnight_report(
+        goal=goal, success=res.success, stop_cause=res.stop_cause,
+        iterations=len(res.iterations), validation=commands,
+        changed_files=changed, escalation_hint=hint,
+    )
+    console.print(report)
+    raise typer.Exit(0 if res.success else 1)
+
+
+@app.command()
+def overnight(
+    goal: Annotated[str, typer.Argument(help="Goal to work on unattended")],
+    validate: Annotated[
+        str | None,
+        typer.Option("--validate", help="Command that confirms the work, e.g. 'pytest -q'"),
+    ] = None,
+    max_iter: Annotated[int, typer.Option("--max-iter", help="Max fresh attempts")] = 10,
+    provider: Annotated[str | None, typer.Option("--provider", "-p")] = None,
+    model: Annotated[str | None, typer.Option("--model", "-m")] = None,
+    escalate: Annotated[
+        bool,
+        typer.Option("--escalate/--no-escalate",
+                     help="Auto-escalate to the configured stronger model when stuck"),
+    ] = True,
+) -> None:
+    """Run a goal unattended: iterate locally with fresh context, verify against
+    your tests, escalate to a stronger model when stuck, and print a morning
+    report. Only verified work is reported as done; otherwise it says what it
+    could not do and why."""
+    setup_event_loop()
+    import asyncio
+    asyncio.run(_run_overnight(goal, validate, max_iter, provider, model, escalate))
+
+
 # DB subcommands
 
 @db_app.command("status")

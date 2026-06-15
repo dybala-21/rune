@@ -731,19 +731,49 @@ class RuneDaemon:
                 timeout_ms=180_000,
             )
 
-            async def _proactive_agent_factory(goal: str) -> dict[str, Any]:
-                """Agent factory for proactive bridge that creates a NativeAgentLoop
-                per suggestion and runs it to completion."""
+            async def _proactive_agent_factory(
+                goal: str, *, verification: list[str] | None = None
+            ) -> dict[str, Any]:
+                """Agent factory for the proactive bridge.
+
+                With verification commands, run the action through the verified
+                goal loop (scoped validation + completion gate + escalation) and
+                report ``verified`` from its objective verdict, so a proactive
+                code action counts as success only when its own check passes.
+                Without them, run a single attempt and leave ``verified`` unset,
+                so the bridge records it as unverified rather than a claimed win.
+                """
                 from rune.types import AgentConfig
+                timeout_s = bridge_config.timeout_ms / 1000
+
+                if verification:
+                    from rune.agent.goal_loop import GoalLoop, GoalLoopConfig, GoalSpec
+                    from rune.agent.goal_runtime import GoalRuntime
+                    from rune.agent.goal_validate import make_validate_fn
+                    runtime = GoalRuntime(
+                        loop=NativeAgentLoop(), channel="proactive",
+                    )
+                    gl = GoalLoop(
+                        GoalLoopConfig(max_iterations=3, adversarial_review=False),
+                        run_fn=runtime.run_fn,
+                        validate_fn=make_validate_fn(timeout_s=timeout_s),
+                        persist_fn=runtime.persist_fn,
+                        answer_of=runtime.answer_of,
+                    )
+                    res = await gl.run(GoalSpec(goal=goal, validation_commands=list(verification)))
+                    return {
+                        "success": res.success,
+                        "verified": res.success,  # objective: goal-loop validation verdict
+                        "output": res.final_answer,
+                        "error": None if res.success else res.stop_cause,
+                    }
+
                 cfg = AgentConfig(
                     max_iterations=bridge_config.max_steps,
-                    timeout_seconds=bridge_config.timeout_ms / 1000,
+                    timeout_seconds=timeout_s,
                 )
                 loop = NativeAgentLoop(config=cfg)
-                result = await asyncio.wait_for(
-                    loop.run(goal),
-                    timeout=bridge_config.timeout_ms / 1000,
-                )
+                result = await asyncio.wait_for(loop.run(goal), timeout=timeout_s)
                 return {
                     "success": getattr(result, "success", True),
                     "output": getattr(result, "answer", str(result)),

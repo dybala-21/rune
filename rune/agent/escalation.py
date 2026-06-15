@@ -1,24 +1,36 @@
 """Escalation hinting for verified-unfixable failures.
 
-When a run ends in ``max_gate_blocked`` the agent verified its output against the
-project's tests, the tests failed, and repeated self-fix attempts did not
-converge. A weak local model often cannot self-correct such an error, so the next
-step is a stronger model. We only suggest it: data leaves the machine on an
-explicit ``/escalate``, never automatically.
+Two terminal outcomes mean the local model could not finish and a stronger model
+is the next step:
+
+- ``max_gate_blocked``: the agent verified its output against the project's tests,
+  the tests failed, and repeated self-fix attempts did not converge.
+- ``advisor_abort``: the in-loop advisor (a stronger reviewer) inspected the run
+  and recommended stopping.
+
+We only suggest the next step; data leaves the machine on an explicit
+``/escalate``, never automatically. The message adapts to the advisor's state so
+the two rungs of the ladder (in-loop advisor, then full /escalate handoff) stay
+coherent.
 """
 
 from __future__ import annotations
 
-_VERIFIED_FAILURE_REASON = "max_gate_blocked"
+_HINT_REASONS = ("max_gate_blocked", "advisor_abort")
+
+# /goal outer-loop terminal causes where the model tried and could not pass
+# validation. "cancelled" (user stopped) and "error" (crash) are not capability
+# failures, and "verified" is success, so none of those suggest escalation.
+_GOAL_STUCK_CAUSES = ("stagnation", "max_iterations", "budget")
 
 
 def escalation_hint(reason: str) -> str | None:
     """Return a one-line escalation suggestion, or None.
 
-    Shown only when the run hit the verified-failure cap AND an escalation
-    profile is configured — never hint at something the user cannot act on.
+    Shown only on a terminal local failure AND when an escalation profile is
+    configured, so the suggestion is always actionable.
     """
-    if reason != _VERIFIED_FAILURE_REASON:
+    if reason not in _HINT_REASONS:
         return None
     from rune.config import get_config
 
@@ -27,8 +39,49 @@ def escalation_hint(reason: str) -> str | None:
     if not provider:
         return None
     target = cfg.escalation_model or f"{provider}'s best model"
-    return (
-        "Verified the solution still fails the project's tests after repeated "
-        "self-fix attempts — a systematic error a weak model will not fix by "
-        f"retrying. Run /escalate to retry once on {target}."
+
+    if reason == "advisor_abort":
+        return (
+            "The advisor reviewed this run and recommended stopping. Run "
+            f"/escalate to hand the whole task to {target}."
+        )
+
+    # max_gate_blocked: the solution still fails the project's tests.
+    base = (
+        "The solution still fails the project's tests after repeated self-fix "
+        f"attempts. Run /escalate to retry once on {target}"
     )
+    return _with_advisor_suffix(base)
+
+
+def goal_escalation_hint(stop_cause: str) -> str | None:
+    """Escalation suggestion for a /goal outer-loop run that ended stuck.
+
+    The autonomous loop iterated fresh attempts and could not pass validation.
+    Same contract as ``escalation_hint``: shown only on a stuck cause AND when an
+    escalation profile is configured, so the suggestion is always actionable.
+    """
+    if stop_cause not in _GOAL_STUCK_CAUSES:
+        return None
+    from rune.config import get_config
+
+    cfg = get_config().llm
+    provider = cfg.escalation_provider
+    if not provider:
+        return None
+    target = cfg.escalation_model or f"{provider}'s best model"
+    base = (
+        "The goal loop could not pass validation after repeated fresh attempts. "
+        f"Run /escalate to retry on {target}"
+    )
+    return _with_advisor_suffix(base)
+
+
+def _with_advisor_suffix(base: str) -> str:
+    """Append the in-loop advisor hint only when the advisor is off (else it is
+    already the earlier rung of the same ladder)."""
+    from rune.agent.advisor.runtime_toggle import is_advisor_enabled
+
+    if is_advisor_enabled():
+        return base + "."
+    return base + ", or turn on the in-loop advisor with /advisor."

@@ -27,6 +27,10 @@ class ExecutionStatus(StrEnum):
     SUCCESS = "success"
     FAILURE = "failure"
     SKIPPED = "skipped"
+    # Ran and the agent claimed done, but no objective check could confirm it.
+    # Not a success: kept out of success-learning and autonomy promotion so a
+    # proactive action is never trusted on its self-report alone.
+    UNVERIFIED = "unverified"
 
 
 @dataclass(slots=True)
@@ -55,9 +59,11 @@ class BridgeConfig:
     timeout_ms: int = 180_000
 
 
-# Type alias for agent factory: takes a goal string and returns a coroutine
-# that resolves to a result dict.
-AgentFactory = Callable[[str], Coroutine[Any, Any, dict[str, Any]]]
+# Type alias for agent factory: takes a goal string (and optional verification
+# commands that confirm the work) and returns a coroutine resolving to a result
+# dict. The factory should set ``verified`` in the result when those commands
+# passed, so the bridge can tell a confirmed success from a self-reported one.
+AgentFactory = Callable[..., Coroutine[Any, Any, dict[str, Any]]]
 
 
 # ProactiveAgentBridge
@@ -219,6 +225,42 @@ class ProactiveAgentBridge:
 
     # Execution with retry
 
+    async def _call_factory(self, goal: str, verification: list[str]) -> object:
+        """Call the agent factory, passing verification commands when it accepts
+        them; fall back to goal-only for factories with the older signature."""
+        try:
+            coro = self._agent_factory(goal, verification=verification)
+        except TypeError:
+            coro = self._agent_factory(goal)
+        return await coro
+
+    def _outcome_from_result(self, result: object) -> ExecutionStatus:
+        """Classify a proactive execution from the agent result, conservatively.
+
+        Trusting ``result['success']`` (and defaulting it to True) is the
+        fabricated-success hole: a missing/ambiguous flag was being recorded as a
+        win. So:
+
+        - explicit ``success: True`` AND a verification signal we can trust
+          (``verified``/``tests_passed``) -> SUCCESS
+        - explicit ``success: True`` with no objective signal -> UNVERIFIED
+          (it ran and claims done, but nothing confirmed it; kept out of
+          success-learning and autonomy promotion)
+        - anything else (no claim, or explicit failure) -> FAILURE
+
+        Scoped verification (running the action's own tests via the goal loop) is
+        the next stage; this stage stops self-report alone from counting as a
+        verified success.
+        """
+        if not isinstance(result, dict) or not bool(result.get("success", False)):
+            return ExecutionStatus.FAILURE
+        verified = result.get("verified")
+        if verified is None:
+            verified = result.get("tests_passed")
+        if verified is True:
+            return ExecutionStatus.SUCCESS
+        return ExecutionStatus.UNVERIFIED
+
     async def execute_suggestion(self, suggestion: Suggestion) -> ExecutionRecord:
         """Execute a suggestion by creating an agent session.
 
@@ -231,12 +273,15 @@ class ProactiveAgentBridge:
             start = datetime.now(UTC)
             try:
                 goal = f"{suggestion.title}: {suggestion.description}"
-                result = await self._agent_factory(goal)
+                # Pass the suggestion's own verification commands so the factory
+                # can run a scoped verified loop; factories that don't accept the
+                # kwarg still work (self-reported result -> UNVERIFIED).
+                result = await self._call_factory(goal, suggestion.verification)
 
                 duration = (datetime.now(UTC) - start).total_seconds() * 1000
-                success = result.get("success", True) if isinstance(result, dict) else True
+                outcome = self._outcome_from_result(result)
 
-                if success:
+                if outcome == ExecutionStatus.SUCCESS:
                     record = self._record(
                         suggestion,
                         ExecutionStatus.SUCCESS,
@@ -263,6 +308,17 @@ class ProactiveAgentBridge:
                         result_summary=str(result.get("output", ""))[:200] if isinstance(result, dict) else "",
                     )
                     return record
+                elif outcome == ExecutionStatus.UNVERIFIED:
+                    # Ran but could not be confirmed. Surface for review; do NOT
+                    # feed success-learning or autonomy promotion, and do not
+                    # retry (it executed; there is just nothing to verify against).
+                    log.info("proactive_unverified", suggestion=suggestion.title)
+                    return self._record(
+                        suggestion,
+                        ExecutionStatus.UNVERIFIED,
+                        attempt=attempt,
+                        duration_ms=duration,
+                    )
                 else:
                     error_msg = (
                         result.get("error", "Agent returned failure")

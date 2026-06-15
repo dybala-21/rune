@@ -27,6 +27,11 @@ class Suggestion:
     status: SuggestionStatus = "pending"
     created_at: datetime = field(default_factory=datetime.now)
     expires_at: datetime | None = None
+    # Commands that objectively confirm this suggestion's work (e.g. the tests
+    # for the change). When set, the bridge runs the action through a verified
+    # loop and only a passing check counts as success; empty means there is
+    # nothing to verify, so the action stays unverified rather than self-reported.
+    verification: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
