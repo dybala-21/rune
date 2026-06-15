@@ -27,6 +27,9 @@ class ExecutionStatus(StrEnum):
     SUCCESS = "success"
     FAILURE = "failure"
     SKIPPED = "skipped"
+    # Surfaced to the user instead of auto-executed (auto_execute off). The
+    # default proactive outcome: RUNE alerts/suggests, the user decides.
+    DELIVERED = "delivered"
     # Ran and the agent claimed done, but no objective check could confirm it.
     # Not a success: kept out of success-learning and autonomy promotion so a
     # proactive action is never trusted on its self-report alone.
@@ -57,6 +60,12 @@ class BridgeConfig:
     backoff_base_seconds: float = 2.0
     max_steps: int = 50
     timeout_ms: int = 180_000
+    # Off by default: proactive suggestions are DELIVERED for the user to act on,
+    # not auto-executed. Acting on its own (even when verified) is the most
+    # intrusive mode and is unwanted by default; opt in to let the bridge run
+    # suggestions itself. The HCI evidence is that semi-automation (suggest)
+    # beats full automation (act) on control, ownership, and trust.
+    auto_execute: bool = False
 
 
 # Type alias for agent factory: takes a goal string (and optional verification
@@ -261,11 +270,23 @@ class ProactiveAgentBridge:
             return ExecutionStatus.SUCCESS
         return ExecutionStatus.UNVERIFIED
 
-    async def execute_suggestion(self, suggestion: Suggestion) -> ExecutionRecord:
+    async def execute_suggestion(
+        self, suggestion: Suggestion, *, force: bool = False
+    ) -> ExecutionRecord:
         """Execute a suggestion by creating an agent session.
 
-        Retries up to ``max_retries`` times with exponential backoff on failure.
+        Gated by ``auto_execute``: unless the user opted into autonomous action
+        (or ``force=True`` from an explicit accept), the suggestion is DELIVERED
+        for the user to act on, not run. Acting unsolicited is the most intrusive
+        mode, so the default is to surface, not execute. Retries up to
+        ``max_retries`` times with exponential backoff on failure once executing.
         """
+        if not (self._config.auto_execute or force):
+            log.info("proactive_delivered", suggestion=suggestion.title)
+            return self._record(
+                suggestion, ExecutionStatus.DELIVERED, attempt=0,
+            )
+
         max_attempts = 1 + self._config.max_retries
         last_record: ExecutionRecord | None = None
 
@@ -301,8 +322,8 @@ class ProactiveAgentBridge:
                             "steps_taken": attempt,
                             "duration_ms": duration,
                         })
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        log.debug("reflexion_record_success_failed", error=str(exc)[:100])
                     self._record_to_autonomous_executor(
                         suggestion, success=True, duration_ms=duration,
                         result_summary=str(result.get("output", ""))[:200] if isinstance(result, dict) else "",
@@ -377,8 +398,8 @@ class ProactiveAgentBridge:
                 "steps_taken": max_attempts,
                 "duration_ms": last_record.duration_ms if last_record else 0.0,
             })
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("reflexion_record_failure_failed", error=str(exc)[:100])
         self._record_to_autonomous_executor(
             suggestion,
             success=False,

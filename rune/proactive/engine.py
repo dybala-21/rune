@@ -528,8 +528,8 @@ class ProactiveEngine:
                 from rune.memory.manager import get_memory_manager
                 mgr = get_memory_manager()
                 store = getattr(mgr, "store", None)
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("open_commitments_store_unavailable", error=str(exc)[:100])
 
             if store is not None and hasattr(store, "get_open_commitments"):
                 open_commits = store.get_open_commitments(limit=2)
@@ -564,8 +564,8 @@ class ProactiveEngine:
             learned_threshold = get_reflexion_learner().get_score_threshold()
             if learned_threshold is not None and learned_threshold > min_confidence:
                 min_confidence = learned_threshold
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("reflexion_threshold_unavailable", error=str(exc)[:100])
 
         filtered: list[Suggestion] = []
         for s in candidates:

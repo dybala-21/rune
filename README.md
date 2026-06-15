@@ -40,9 +40,13 @@
 
 ## Why RUNE
 
-Most coding agents make the same mistake twice in two days. They start every session from a blank slate — no memory of what worked, no memory of what failed, no learned conventions.
+Most coding agents tell you a task is done when it isn't. Adoption is near-universal, trust is not: surveys in 2026 put trust under 30%, the top complaint is output that is almost-but-not-quite right, and a large share of AI changes still need debugging in production. The hard part is no longer generating code, it is trusting it.
 
-**RUNE remembers.** Every task is recorded as an episode, scored +1 or -1. Similar future tasks pull past episodes into context. Repeated failures auto-generate prevention rules. The agent measurably improves at tasks it has done before.
+**RUNE is built for trust, not just output:**
+
+- **It verifies before it claims done.** Every code result is gated on a real check you provide (your tests, your lint). Passes, it reports done with the diff. Fails, it says so, instead of reporting a success it cannot back up.
+- **You stay in control.** It surfaces proactive work for you to act on rather than running it behind your back; autonomous execution is opt-in.
+- **It improves at what it has done.** Every task is recorded and scored; similar future tasks pull past episodes into context and repeated failures auto-generate prevention rules, with successes gated so a failed run never poisons that memory.
 
 ```
 First time: "Fix lint in src/auth.py"
@@ -85,6 +89,20 @@ rune --message "explain the auth flow"  # one-shot
 rune web                                # web UI
 rune voice                              # voice mode (STT/TTS)
 ```
+
+### Try it: only verified work counts
+
+```bash
+rune --message "fix the failing auth test" --validate "pytest -q tests/auth"
+```
+
+RUNE gates the result on the check you give it. If your tests pass it reports
+done, with the diff to review; if they fail it says so, instead of reporting a
+success it cannot back up. You stay in control: proactive suggestions are
+surfaced for you to act on, not executed, and autonomous execution is opt-in.
+Verification is only as strong as the command you give. There is also an opt-in
+unattended mode (`rune overnight "<goal>" --validate "..."`) for handing off a
+well-specified, test-backed task.
 
 ## How It Works
 
