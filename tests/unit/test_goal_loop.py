@@ -1063,3 +1063,55 @@ async def test_escalate_not_called_on_cancel(tmp_path: Path) -> None:
     res = await loop.run(spec())
     assert res.stop_cause == "cancelled"
     assert esc.calls == []
+
+
+async def test_escalate_progress_verdict_still_validated(tmp_path: Path) -> None:
+    # The escalation attempt produced passing work but hit a token wind_down, so
+    # its inner verdict is "progress" not "completed". C2 decoupling must judge
+    # it by the SPEC validation (which passes), not the inner self-report, so a
+    # real escalation win is not discarded as a false negative.
+    local = ScriptedRunner([progress()])
+    esc = ScriptedRunner([progress()])
+    loop = GoalLoop(
+        GoalLoopConfig(max_iterations=2, stagnation_window=0),
+        run_fn=local,
+        escalate_fn=esc,
+        # local validation fails twice (stuck), escalation's artifact passes
+        validate_fn=_flip_validator(2),
+        workspace=tmp_path,
+    )
+    res = await loop.run(spec(validation_commands=["pytest -q"]))
+    assert res.success is True and res.stop_cause == "verified"
+    assert len(esc.calls) == 1
+
+
+def test_escalation_prompt_is_clean(tmp_path: Path) -> None:
+    # The stronger-model attempt must receive the raw goal + validation target
+    # only, not the weak-model failure feedback or @plan/@progress ceremony that
+    # measurably derails a strong model into gate-block/tool-round thrashing.
+    loop = GoalLoop(run_fn=ScriptedRunner([progress()]), workspace=tmp_path)
+    loop._last_feedback = "previous attempt failed badly"
+    p = loop._escalation_prompt(spec(validation_commands=["pytest -q tests/x"]))
+    assert "PREVIOUS ATTEMPT FAILED" not in p
+    assert "Work ONE unfinished item" not in p
+    assert "@" not in p
+    assert "pytest -q tests/x" in p
+
+
+async def test_escalate_progress_verdict_validation_fails_stays_stuck(
+    tmp_path: Path,
+) -> None:
+    # The decoupled escalation judgement must still fail-closed: a progress-verdict
+    # escalation whose artifact does NOT pass validation stays stuck (no false pass).
+    local = ScriptedRunner([progress()])
+    esc = ScriptedRunner([progress()])
+    loop = GoalLoop(
+        GoalLoopConfig(max_iterations=2, stagnation_window=0),
+        run_fn=local,
+        escalate_fn=esc,
+        validate_fn=validator(False, "1 failed"),
+        workspace=tmp_path,
+    )
+    res = await loop.run(spec(validation_commands=["pytest -q"]))
+    assert res.success is False and res.stop_cause == "max_iterations"
+    assert len(esc.calls) == 1
