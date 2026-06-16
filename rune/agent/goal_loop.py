@@ -448,7 +448,19 @@ class GoalLoop:
             f"Do not start unrelated work."
         )
 
-    # -- main --------------------------------------------------------------
+    def _escalation_prompt(self, spec: GoalSpec) -> str:
+        """Clean, minimal prompt for the stronger-model escalation attempt.
+
+        The weak-model outer-loop scaffolding (failed-attempt feedback, the
+        @plan/@progress/@spec file ceremony, iteration framing) actively derails a
+        strong model: measured, the same model solves the bare task in one step but
+        thrashes (repeated gate blocks, tool-round blowup, wind_down cutoff) when
+        handed the accumulated failure context. So escalate with the raw goal plus
+        the validation target only.
+        """
+        cmds = ", ".join(spec.validation_commands)
+        target = f" Make these pass, then stop: {cmds}." if cmds else ""
+        return f"{spec.goal}\n\nImplement the solution directly.{target}"
 
     async def run(self, spec: GoalSpec) -> GoalLoopResult:
         if (
@@ -657,7 +669,7 @@ class GoalLoop:
         if self._escalate is None:
             return False, last_answer
         try:
-            coro = self._escalate(self._build_prompt(spec, n), n)
+            coro = self._escalate(self._escalation_prompt(spec), n)
             trace = (
                 await asyncio.wait_for(coro, timeout=self._cfg.iteration_timeout_s)
                 if self._cfg.iteration_timeout_s > 0
@@ -675,7 +687,12 @@ class GoalLoop:
             tokens=int(getattr(trace, "total_tokens_used", 0) or 0),
             verdict=self._verdict(trace),
         )
-        if it.verdict == "verified":
+        has_objective = bool(spec.validation_commands) or (
+            self._cfg.adversarial_review and self._review is not None
+        )
+        if it.verdict == "verified" or (
+            has_objective and it.verdict not in ("error", "cancelled")
+        ):
             accepted, _ = await self._try_accept(spec, it, ans, hist)
             if accepted:
                 self._record(hist, it)
