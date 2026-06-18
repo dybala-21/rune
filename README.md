@@ -4,8 +4,8 @@
 
 <h1 align="center">RUNE-BOT</h1>
 
-<p align="center"><strong>A local-first AI agent that learns from experience.</strong></p>
-<p align="center">Every task makes it smarter. Your data stays on your machine.</p>
+<p align="center"><strong>The coding agent that refuses to fake "done."</strong></p>
+<p align="center">It runs your tests and claims done only when they pass. On your own local model, for free.</p>
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> ·
@@ -17,26 +17,28 @@
 <p align="center">
   <img alt="Python 3.13+" src="https://img.shields.io/badge/python-3.13%2B-blue?logo=python&logoColor=white" />
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green" />
-  <img alt="Tests" src="https://img.shields.io/badge/tests-2147%20passing-brightgreen" />
-  <img alt="LOC" src="https://img.shields.io/badge/Python-86K%20LOC-blue" />
+  <img alt="Tests" src="https://img.shields.io/badge/tests-2601%20passing-brightgreen" />
+  <img alt="LOC" src="https://img.shields.io/badge/Python-94K%20LOC-blue" />
 </p>
 
 ---
 
-<!-- TODO: replace with asciinema/terminal GIF showing learning effect across two sessions -->
-
 ```
 ─── rune ──────────────────────────────────────────
-  Terminal Agent · claude-sonnet · 318 episodes learned
+  Terminal Agent · qwen2.5-coder:7b (local) · best-of-3
 
-❯ Fix the authentication bug in api/auth.py
+❯ fix the failing auth test     --validate "pytest -q tests/auth"
 
-  ┃  ◇ file_read api/auth.py  ✓
-  ┃  ◆ file_edit api/auth.py  ✓
-  ┃  ▸ bash ruff check .  ✓
+  ┃  attempt 1   claimed done   ✗ pytest: 1 failed    discarded
+  ┃  attempt 2   claimed done   ✓ pytest: passed      kept
+  ┃  attempt 3   claimed done   ✗ pytest: 1 failed    discarded
 
-✓ done — steps 1 — tools 3 — tokens 12k
+✓ shipped attempt #2, the only one that passed your test
 ```
+
+> Two attempts said "done" on code that fails your test. RUNE ran the test,
+> threw them out, and shipped the one that actually passed. Most agents would
+> have handed you attempt #1.
 
 ## Why RUNE
 
@@ -93,16 +95,22 @@ rune voice                              # voice mode (STT/TTS)
 ### Try it: only verified work counts
 
 ```bash
-rune --message "fix the failing auth test" --validate "pytest -q tests/auth"
+rune --best-of 3 --message "fix the failing auth test" --validate "pytest -q tests/auth"
 ```
 
-RUNE gates the result on the check you give it. If your tests pass it reports
-done, with the diff to review; if they fail it says so, instead of reporting a
-success it cannot back up. You stay in control: proactive suggestions are
-surfaced for you to act on, not executed, and autonomous execution is opt-in.
-Verification is only as strong as the command you give. There is also an opt-in
-unattended mode (`rune overnight "<goal>" --validate "..."`) for handing off a
-well-specified, test-backed task.
+RUNE runs three independent attempts and keeps the first that passes your check:
+
+```
+best-of-3: tried 3 · 1 verified · picked #2 (passed pytest -q tests/auth)
+```
+
+If none pass, it says so instead of shipping a success it cannot back up. A plain
+`rune --message "..." --validate "..."` is the single-attempt version: pass and it
+reports done with the diff; fail and it tells you, with what it tried.
+Verification is only as strong as the command you give. You stay in control:
+proactive suggestions are surfaced for you to act on, not executed, and autonomous
+execution is opt-in. There is also an opt-in unattended mode
+(`rune overnight "<goal>" --validate "..."`) for handing off a test-backed task.
 
 ## How It Works
 

@@ -296,6 +296,17 @@ def _guided_tools_enabled() -> bool:
     )
 
 
+def _guided_for_model(model: str, has_tools: bool, provider_extra: object) -> bool:
+    """Whether guided decoding applies: enabled, has tools, an ollama endpoint,
+    and not a '-cloud' model (cloud models use native tool calls)."""
+    return (
+        _guided_tools_enabled()
+        and has_tools
+        and "11434" in str(provider_extra)
+        and "-cloud" not in str(model).lower()
+    )
+
+
 def _build_action_schema(tool_schemas: list[dict[str, Any]]) -> dict[str, Any]:
     """A JSON schema the model's output must satisfy each turn: either a tool
     call (``{tool, arguments}``) or a final answer (``{final}``).
@@ -566,10 +577,8 @@ class StreamResult:
         # Guided decoding: schema-constrain tool calls for local (ollama) models,
         # detected via the ollama api_base. When on, the model must emit a tool
         # call or a final answer as schema-valid JSON each turn.
-        self._guided = (
-            _guided_tools_enabled()
-            and bool(tool_schemas)
-            and "11434" in str(self._provider_extra)
+        self._guided = _guided_for_model(
+            self._model, bool(tool_schemas), self._provider_extra
         )
         # Guided-mode {final} guard: weak models bail with a final answer after a
         # failed edit without ever writing anything. Block {final} until a

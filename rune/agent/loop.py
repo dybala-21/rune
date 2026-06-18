@@ -51,6 +51,7 @@ from rune.agent.goal_classifier import ClassificationResult, classify_goal
 from rune.agent.intent_engine import resolve_intent_contract
 from rune.agent.litellm_adapter import LiteLLMAgent, UsageLimits
 from rune.agent.prompts import build_system_prompt
+from rune.agent.requirement_gate import RequirementGate, requirement_gate_enabled
 from rune.agent.tool_adapter import STALL_LIMITS, ToolAdapterOptions, build_tool_set
 from rune.config.defaults import (
     ACTIVE_TOOLS_REDUCTION_STEP,
@@ -213,7 +214,8 @@ def _compute_tool_rounds(
     tier = resolve_tier(provider, model_name)
 
     is_complex = getattr(classification, "is_complex_coding", False)
-    base = 15 if is_complex else 8
+    # Per-turn tool-round budget. Token budget and max_iterations bound runaway.
+    base = 24 if is_complex else 12
 
     # Modest tier bonus. Larger bonuses burn tokens on weak models
     # that keep retrying the same failing tool.
@@ -406,6 +408,9 @@ class NativeAgentLoop(EventEmitter):
         self._auto_skill: bool = False
         # Completion gate enhancements (#16) - tracked files + hard failures
         self._files_written: set[str] = set()
+        # Requirement-Adherence Gate (opt-in via RUNE_REQUIREMENT_GATE); None when off.
+        self._requirement_gate_obj: RequirementGate | None = None
+        self._last_answer_text: str = ""  # latest final-answer text, for the gate's artifact
         self._files_read: set[str] = set()
         self._hard_failure_signatures: set[str] = set()
         self._hard_failures: list[str] = []
@@ -581,6 +586,39 @@ class NativeAgentLoop(EventEmitter):
             return False, messages, blocked_count
         return True, messages, blocked_count
 
+    def _gather_artifact(self) -> str:
+        """Bounded snapshot of the files written plus the final answer text, for
+        the requirement gate to check against the user's requirements."""
+        parts: list[str] = []
+        for fp in self.files_written[:20]:
+            try:
+                with open(fp, encoding="utf-8", errors="replace") as fh:
+                    parts.append(f"=== file: {fp} ===\n{fh.read()[:2000]}")
+            except OSError:
+                continue
+        if self._last_answer_text.strip():
+            parts.append(f"=== final answer ===\n{self._last_answer_text[:2000]}")
+        return "\n\n".join(parts)
+
+    async def _requirement_gate(
+        self, messages: list[Any], blocked_count: int
+    ) -> tuple[bool, list[Any], int]:
+        """Requirement-adherence gate (opt-in, default off). Same contract as
+        :meth:`_auto_verify_gate`: checks the produced output against the user's
+        requirements and injects the unmet list on a miss; pass / skip / disabled
+        return ``ok=True``."""
+        if self._requirement_gate_obj is None:
+            return True, messages, blocked_count
+        artifact = self._gather_artifact()
+        state, msg = await self._requirement_gate_obj.verdict(artifact)
+        if state == "fail" and msg:
+            log.info("requirement_gate_block", step=self._step)
+            messages = self._inject_system_message(messages, msg)
+            blocked_count += 1
+            self._gate_blocked_count = blocked_count
+            return False, messages, blocked_count
+        return True, messages, blocked_count
+
     async def run(
         self,
         goal: str,
@@ -612,6 +650,9 @@ class NativeAgentLoop(EventEmitter):
         self._cancel_event.clear()
         self._reset_run_state()
         max_iterations = max_steps or self._config.max_iterations
+        self._requirement_gate_obj = (
+            RequirementGate(goal) if requirement_gate_enabled() else None
+        )
 
         # Checkpoint restoration
         if resume_session_id:
@@ -1759,6 +1800,7 @@ class NativeAgentLoop(EventEmitter):
                     output_text = collected_text
 
                 if output_text:
+                    self._last_answer_text = output_text
                     self._stall.mark_activity("agent_step")
                 else:
                     self._stall.mark_no_progress()
@@ -1880,6 +1922,17 @@ class NativeAgentLoop(EventEmitter):
                                     trace.final_step = self._step
                                     break
                                 continue
+                            # Requirement gate (opt-in, default off).
+                            _rqok, messages, _gate_blocked_count = \
+                                await self._requirement_gate(messages, _gate_blocked_count)
+                            if not _rqok:
+                                if _gate_blocked_count >= 5:
+                                    log.warning("max_gate_blocked", step=self._step,
+                                                count=_gate_blocked_count)
+                                    trace.reason = "max_gate_blocked"
+                                    trace.final_step = self._step
+                                    break
+                                continue
                             log.info("final_answer_detected", step=self._step,
                                      text_len=len(output_text), evidence=total_evidence)
                             trace.reason = "completed"
@@ -1907,6 +1960,17 @@ class NativeAgentLoop(EventEmitter):
                         log.info("benchmark_failed_tool_text_only_block", step=self._step)
                         messages = self._inject_system_message(messages, blocker)
                     else:
+                        # Requirement gate (opt-in, default off).
+                        _rqok, messages, _gate_blocked_count = \
+                            await self._requirement_gate(messages, _gate_blocked_count)
+                        if not _rqok:
+                            if _gate_blocked_count >= 5:
+                                log.warning("max_gate_blocked", step=self._step,
+                                            count=_gate_blocked_count)
+                                trace.reason = "max_gate_blocked"
+                                trace.final_step = self._step
+                                break
+                            continue
                         log.info("text_only_complete", step=self._step, text_len=len(output_text))
                         trace.reason = "completed"
                         trace.final_step = self._step
@@ -2005,6 +2069,17 @@ class NativeAgentLoop(EventEmitter):
                                 trace.final_step = self._step
                                 break
                         else:
+                            # Requirement gate (opt-in, default off).
+                            _rqok, messages, _gate_blocked_count = \
+                                await self._requirement_gate(messages, _gate_blocked_count)
+                            if not _rqok:
+                                if _gate_blocked_count >= 5:
+                                    log.warning("max_gate_blocked", step=self._step,
+                                                count=_gate_blocked_count)
+                                    trace.reason = "max_gate_blocked"
+                                    trace.final_step = self._step
+                                    break
+                                continue
                             trace.reason = "completed"
                             trace.final_step = self._step
                             trace.evidence_score = 1.0
