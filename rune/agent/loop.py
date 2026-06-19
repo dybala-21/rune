@@ -50,6 +50,11 @@ from rune.agent.failover import FailoverManager, classify_error
 from rune.agent.goal_classifier import ClassificationResult, classify_goal
 from rune.agent.intent_engine import resolve_intent_contract
 from rune.agent.litellm_adapter import LiteLLMAgent, UsageLimits
+from rune.agent.output_integrity import (
+    build_nudge,
+    fabricated_citations,
+    output_integrity_enabled,
+)
 from rune.agent.prompts import build_system_prompt
 from rune.agent.requirement_gate import RequirementGate, requirement_gate_enabled
 from rune.agent.tool_adapter import STALL_LIMITS, ToolAdapterOptions, build_tool_set
@@ -435,6 +440,10 @@ class NativeAgentLoop(EventEmitter):
         self._ask_user_callback: Any = None  # AskUserCallback
         # Last classification result (for domain change detection across turns)
         self._last_goal_type: str = ""
+        # Whether this run's task is verified by execution (tests/commands). When
+        # true, execution verification owns correctness and the LLM requirement
+        # gate is skipped (redundant, and risks false-blocking on a snapshot).
+        self._requires_execution: bool = False
         # Rehydration subsystem (initialized per run in _execute_loop)
         self._rehydration_recorder: Any = None
         self._rehydration_trigger: Any = None
@@ -588,16 +597,37 @@ class NativeAgentLoop(EventEmitter):
 
     def _gather_artifact(self) -> str:
         """Bounded snapshot of the files written plus the final answer text, for
-        the requirement gate to check against the user's requirements."""
+        the requirement gate to check against the user's requirements. The
+        per-source cap is generous: judging subject adherence on a report needs
+        enough context to see what the document is dominantly about. A 2000-char
+        cut can leave only an intro that name-drops the requested subject while
+        the body is about something else, which reads as satisfied. The
+        requirement gate re-caps the total (``_MAX_ARTIFACT_CHARS``)."""
         parts: list[str] = []
         for fp in self.files_written[:20]:
             try:
                 with open(fp, encoding="utf-8", errors="replace") as fh:
-                    parts.append(f"=== file: {fp} ===\n{fh.read()[:2000]}")
+                    parts.append(f"=== file: {fp} ===\n{fh.read()[:8000]}")
             except OSError:
                 continue
         if self._last_answer_text.strip():
-            parts.append(f"=== final answer ===\n{self._last_answer_text[:2000]}")
+            parts.append(f"=== final answer ===\n{self._last_answer_text[:8000]}")
+        return "\n\n".join(parts)
+
+    def _gather_citation_text(self) -> str:
+        """Full text of written files plus the final answer, untruncated. Citations
+        in a report sit at the end (a ## Sources section), so the requirement
+        gate's 2000-char snapshot would drop them. The deterministic URL scan is
+        cheap, so the integrity gate reads full content."""
+        parts: list[str] = []
+        for fp in self.files_written[:20]:
+            try:
+                with open(fp, encoding="utf-8", errors="replace") as fh:
+                    parts.append(fh.read())
+            except OSError:
+                continue
+        if self._last_answer_text.strip():
+            parts.append(self._last_answer_text)
         return "\n\n".join(parts)
 
     async def _requirement_gate(
@@ -618,6 +648,41 @@ class NativeAgentLoop(EventEmitter):
             self._gate_blocked_count = blocked_count
             return False, messages, blocked_count
         return True, messages, blocked_count
+
+    def _output_integrity_gate(
+        self, messages: list[Any], blocked_count: int
+    ) -> tuple[bool, list[Any], int]:
+        """Deterministic citation-integrity check (opt-in, model-free). Flags URLs
+        cited in the output that were never retrieved. Skips when disabled or when
+        retrieval cannot be determined."""
+        if not output_integrity_enabled():
+            return True, messages, blocked_count
+        bad = fabricated_citations(self._gather_citation_text(), messages)
+        if bad:
+            log.info("output_integrity_block", step=self._step, n=len(bad))
+            messages = self._inject_system_message(messages, build_nudge(bad))
+            blocked_count += 1
+            self._gate_blocked_count = blocked_count
+            return False, messages, blocked_count
+        return True, messages, blocked_count
+
+    async def _finalize_gates(
+        self, messages: list[Any], blocked_count: int
+    ) -> tuple[bool, list[Any], int]:
+        """Pre-finalize checks: deterministic output-integrity (model-agnostic),
+        then the requirement gate. Both opt-in; no-op when disabled.
+
+        The requirement gate (LLM-judged) is skipped for execution-verified tasks:
+        running the code/tests is the authoritative check there, so an LLM
+        adherence judgment is redundant and risks false-blocking. Output-integrity
+        is deterministic and harmless, so it always runs when enabled."""
+        ok, messages, blocked_count = self._output_integrity_gate(messages, blocked_count)
+        if not ok:
+            return False, messages, blocked_count
+        if self._requires_execution:
+            log.info("requirement_gate_skip_execution_task")
+            return True, messages, blocked_count
+        return await self._requirement_gate(messages, blocked_count)
 
     async def run(
         self,
@@ -753,6 +818,9 @@ class NativeAgentLoop(EventEmitter):
                      is_domain_change=classification.is_domain_change)
             await self.emit("goal_classified", classification)
             self._last_goal_type = classification.goal_type
+            self._requires_execution = bool(
+                getattr(classification, "requires_execution", False)
+            )
 
             # Token budget scaling by intent (#24)
             intent_key = classification.goal_type
@@ -1924,7 +1992,7 @@ class NativeAgentLoop(EventEmitter):
                                 continue
                             # Requirement gate (opt-in, default off).
                             _rqok, messages, _gate_blocked_count = \
-                                await self._requirement_gate(messages, _gate_blocked_count)
+                                await self._finalize_gates(messages, _gate_blocked_count)
                             if not _rqok:
                                 if _gate_blocked_count >= 5:
                                     log.warning("max_gate_blocked", step=self._step,
@@ -1962,7 +2030,7 @@ class NativeAgentLoop(EventEmitter):
                     else:
                         # Requirement gate (opt-in, default off).
                         _rqok, messages, _gate_blocked_count = \
-                            await self._requirement_gate(messages, _gate_blocked_count)
+                            await self._finalize_gates(messages, _gate_blocked_count)
                         if not _rqok:
                             if _gate_blocked_count >= 5:
                                 log.warning("max_gate_blocked", step=self._step,
@@ -2071,7 +2139,7 @@ class NativeAgentLoop(EventEmitter):
                         else:
                             # Requirement gate (opt-in, default off).
                             _rqok, messages, _gate_blocked_count = \
-                                await self._requirement_gate(messages, _gate_blocked_count)
+                                await self._finalize_gates(messages, _gate_blocked_count)
                             if not _rqok:
                                 if _gate_blocked_count >= 5:
                                     log.warning("max_gate_blocked", step=self._step,

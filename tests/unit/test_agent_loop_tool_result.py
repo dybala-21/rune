@@ -137,6 +137,43 @@ async def test_blocker_returns_fail_message_from_gate(monkeypatch: MonkeyPatch) 
     assert await loop._benchmark_completion_blocker() is None
 
 
+class _FakeReqGate:
+    def __init__(self, state: str, message: str | None = None):
+        self._state = state
+        self._message = message
+
+    async def verdict(self, artifact: str):
+        return self._state, self._message
+
+
+@pytest.mark.asyncio
+async def test_finalize_skips_requirement_gate_for_execution_task(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # Execution-verified tasks: tests/commands are authoritative, so the LLM
+    # requirement gate is skipped even if it would have failed.
+    monkeypatch.delenv("RUNE_OUTPUT_INTEGRITY", raising=False)
+    loop = NativeAgentLoop()
+    loop._requirement_gate_obj = _FakeReqGate("fail", "should not block")
+    loop._requires_execution = True
+    ok, _msgs, n = await loop._finalize_gates([], 0)
+    assert ok is True and n == 0
+
+
+@pytest.mark.asyncio
+async def test_finalize_runs_requirement_gate_for_non_execution_task(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # Non-executable output (report/analysis): the requirement gate runs and can
+    # block, since there is no execution check to fall back on.
+    monkeypatch.delenv("RUNE_OUTPUT_INTEGRITY", raising=False)
+    loop = NativeAgentLoop()
+    loop._requirement_gate_obj = _FakeReqGate("fail", "[Requirement Gate] unmet: X")
+    loop._requires_execution = False
+    ok, _msgs, n = await loop._finalize_gates([], 0)
+    assert ok is False and n == 1
+
+
 def test_failed_tool_nudge_clears_after_successful_bash() -> None:
     assert _should_clear_failed_tool_nudge(
         "bash_execute",

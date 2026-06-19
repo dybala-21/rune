@@ -58,6 +58,48 @@ def _patch_llm_client(monkeypatch: pytest.MonkeyPatch, verdict: dict[str, Any]) 
     )
 
 
+class TestRequiresExecutionParsing:
+    """LLM-emitted requires_execution survives into ClassificationResult and
+    defaults False (safe) when absent or unparseable."""
+
+    async def test_requires_execution_true(self, monkeypatch: pytest.MonkeyPatch):
+        _patch_llm_client(monkeypatch, {
+            "goal_type": "code_modify",
+            "confidence": 0.9,
+            "reason": "fix bug and pass tests",
+            "requires_execution": True,
+        })
+        from rune.agent.goal_classifier import classify_goal
+        result = await classify_goal("fix the failing test and make pytest pass")
+        assert result.requires_execution is True
+
+    async def test_requires_execution_false_for_report(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        _patch_llm_client(monkeypatch, {
+            "goal_type": "full",
+            "confidence": 0.9,
+            "reason": "research report",
+            "requires_execution": False,
+        })
+        from rune.agent.goal_classifier import classify_goal
+        result = await classify_goal("research X and write report.md")
+        assert result.requires_execution is False
+
+    async def test_requires_execution_defaults_false_when_absent(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ):
+        # Missing key -> False, so the requirement gate still runs (safe).
+        _patch_llm_client(monkeypatch, {
+            "goal_type": "full",
+            "confidence": 0.9,
+            "reason": "no flag emitted",
+        })
+        from rune.agent.goal_classifier import classify_goal
+        result = await classify_goal("do something")
+        assert result.requires_execution is False
+
+
 class TestIntentCategoryParsing:
     """LLM-emitted intent_categories survive into ClassificationResult."""
 
