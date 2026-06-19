@@ -13,9 +13,10 @@ def _patch_completion(monkeypatch, replies):
     """Return successive canned LLM replies; None simulates a call failure."""
     calls = {"n": 0}
 
-    async def fake(system, user, max_tokens):
+    async def fake(system, user, max_tokens, judge=None):
         i = calls["n"]
         calls["n"] += 1
+        calls.setdefault("judges", []).append(judge)
         return replies[i] if i < len(replies) else replies[-1]
 
     monkeypatch.setattr(rg, "_completion", fake)
@@ -89,24 +90,66 @@ async def test_gate_extracts_once_and_caches(monkeypatch):
     assert calls["n"] == 3
 
 
-async def test_gate_skips_when_no_checklist(monkeypatch):
-    # Extraction yields empty list -> gate never blocks, never calls the checker.
+async def test_gate_passes_when_no_checklist(monkeypatch):
+    # Empty checklist -> nothing to block on; never calls the checker.
     monkeypatch.setattr(rg, "checker_capable", lambda: True)
     calls = _patch_completion(monkeypatch, ["[]"])
     gate = rg.RequirementGate("trivial")
     state, msg = await gate.verdict("anything")
-    assert state == "skip" and msg is None
+    assert state == "pass" and msg is None
     assert calls["n"] == 1  # only the extraction call
 
 
-async def test_gate_skips_when_checker_weak(monkeypatch):
-    # A weak checker must make the whole gate skip (it false-blocks correct work).
+async def test_gate_skips_when_weak_and_no_escalation(monkeypatch):
+    # Weak active checker AND no escalation judge configured -> skip (no judge).
     monkeypatch.setattr(rg, "checker_capable", lambda: False)
+    monkeypatch.setattr(rg, "escalation_judge", lambda: None)
     calls = _patch_completion(monkeypatch, ['["r1"]', '{"unmet": ["r1"]}'])
     gate = rg.RequirementGate("a task")
     state, msg = await gate.verdict("output")
     assert state == "skip" and msg is None
-    assert calls["n"] == 0  # never even extracts with a weak checker
+    assert calls["n"] == 0  # never extracts: no capable judge to reach
+
+
+async def test_gate_routes_to_escalation_when_checker_weak(monkeypatch):
+    # Weak active checker but an escalation judge is configured -> route to it.
+    judge = ("anthropic", "claude-sonnet-4-5")
+    monkeypatch.setattr(rg, "checker_capable", lambda: False)
+    monkeypatch.setattr(rg, "escalation_judge", lambda: judge)
+    calls = _patch_completion(monkeypatch, ['["r1"]', '{"unmet": ["r1"]}'])
+    gate = rg.RequirementGate("a task")
+    state, msg = await gate.verdict("output")
+    assert state == "fail" and "r1" in msg
+    # extract + check both ran on the escalation judge, not the active provider.
+    assert calls["judges"] == [judge, judge]
+
+
+async def test_gate_escalates_when_active_check_call_fails(monkeypatch):
+    # Active checker is capable but its check CALL fails (None) -> do not silently
+    # pass; re-judge on the escalation judge (reusing the cached checklist).
+    judge = ("anthropic", "claude-sonnet-4-5")
+    monkeypatch.setattr(rg, "checker_capable", lambda: True)
+    monkeypatch.setattr(rg, "escalation_judge", lambda: judge)
+    # extract ok (active), check fails (None), then check on escalation -> fail.
+    calls = _patch_completion(monkeypatch, ['["r1"]', None, '{"unmet": ["r1"]}'])
+    gate = rg.RequirementGate("a task")
+    state, msg = await gate.verdict("output")
+    assert state == "fail" and "r1" in msg
+    # extraction ran once on active; the escalation re-check did NOT re-extract.
+    assert calls["judges"] == [None, None, judge]
+
+
+async def test_gate_skips_when_both_judges_fail(monkeypatch):
+    # Active check call fails and the escalation judge also fails -> skip, never
+    # a false block from an infra outage.
+    judge = ("anthropic", "claude-sonnet-4-5")
+    monkeypatch.setattr(rg, "checker_capable", lambda: True)
+    monkeypatch.setattr(rg, "escalation_judge", lambda: judge)
+    calls = _patch_completion(monkeypatch, ['["r1"]', None, None])
+    gate = rg.RequirementGate("a task")
+    state, msg = await gate.verdict("output")
+    assert state == "skip" and msg is None
+    assert calls["judges"] == [None, None, judge]
 
 
 def test_checker_capable_local_ollama_weak(monkeypatch):

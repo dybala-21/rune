@@ -38,12 +38,11 @@ apsw.bestpractice.apply(
 )
 
 # Statement-level codes (SQLITE_ERROR etc.) duplicate the Python exception the
-# caller already handled; database-health messages have no exception to surface
-# them, so those stay at warning.
+# caller already handled. NOTICE/WARNING are informational (e.g. WAL recovery on
+# open) and go to debug. Only real database-health problems, which have no
+# exception to surface them, warn.
 _SQLITE_HEALTH_CODES = frozenset(
     {
-        apsw.SQLITE_WARNING,
-        apsw.SQLITE_NOTICE,
         apsw.SQLITE_CORRUPT,
         apsw.SQLITE_CANTOPEN,
         apsw.SQLITE_FULL,

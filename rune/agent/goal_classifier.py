@@ -78,6 +78,15 @@ If the goal combines both (e.g. "email the report"), set both. If neither clearl
 
 _INTENT_JSON_FIELD = '"intent_categories": [<zero or more of: "email", "document">]'
 
+_REQUIRES_EXECUTION_FLAG = """\
+requires_execution: true ONLY when verifying this output's correctness requires \
+RUNNING code, tests, or commands (e.g. fix a bug and make tests pass, build or \
+run a program, execute a script and check its result). false for prose, \
+analysis, research, reports, plans, or documents whose correctness is judged by \
+reading them. When in doubt, choose false."""
+
+_REQUIRES_EXECUTION_JSON_FIELD = '"requires_execution": true/false'
+
 _TIER2_SYSTEM_PROMPT = f"""\
 You are a goal classifier. Given a user's request, classify it into exactly one category and detect any applicable intent flags.
 
@@ -89,7 +98,9 @@ Categories:
 Rules:
 {_CLASSIFICATION_RULES}
 
-Respond with ONLY a JSON object: {{"goal_type": "<category>", "confidence": <0.0-1.0>, "reason": "<brief reason>", {_INTENT_JSON_FIELD}}}
+{_REQUIRES_EXECUTION_FLAG}
+
+Respond with ONLY a JSON object: {{"goal_type": "<category>", "confidence": <0.0-1.0>, "reason": "<brief reason>", {_REQUIRES_EXECUTION_JSON_FIELD}, {_INTENT_JSON_FIELD}}}
 """
 
 _TIER2_SYSTEM_PROMPT_WITH_PREVIOUS = f"""\
@@ -103,12 +114,14 @@ Categories:
 Rules:
 {_CLASSIFICATION_RULES}
 
+{_REQUIRES_EXECUTION_FLAG}
+
 is_related_to_previous rules:
 - true: the current request references, continues, or builds on the previous one
 - false: the current request is about a completely different topic or task
 - When in doubt, choose false
 
-Respond with ONLY a JSON object: {{"goal_type": "<category>", "confidence": <0.0-1.0>, "reason": "<brief reason>", "is_related_to_previous": true/false, {_INTENT_JSON_FIELD}}}
+Respond with ONLY a JSON object: {{"goal_type": "<category>", "confidence": <0.0-1.0>, "reason": "<brief reason>", {_REQUIRES_EXECUTION_JSON_FIELD}, "is_related_to_previous": true/false, {_INTENT_JSON_FIELD}}}
 """
 
 
@@ -203,6 +216,11 @@ async def classify_tier2(
         # tasks get the larger tool-round and advisor budgets.
         is_complex_coding = goal_type in ("code_modify", "full")
 
+        # Whether the output's correctness is established by running code/tests.
+        # Defaults False on a missing/unparseable value (safe direction: the
+        # requirement gate then still runs rather than being silently skipped).
+        requires_execution = bool(data.get("requires_execution", False))
+
         # Validate intent_categories: keep only known values, ignore typos / hallucinated tags.
         raw_intents = data.get("intent_categories") or []
         if not isinstance(raw_intents, list):
@@ -220,6 +238,7 @@ async def classify_tier2(
             reason=reason,
             is_domain_change=is_domain_change,
             is_complex_coding=is_complex_coding,
+            requires_execution=requires_execution,
             intent_categories=intent_categories,
         )
 
