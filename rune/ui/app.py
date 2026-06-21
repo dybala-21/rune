@@ -417,7 +417,11 @@ class RuneApp:
                             context={"workspace_root": ctx.workspace_root},
                         )
 
-                        answer = "".join(collected).strip()
+                        from rune.agent.agent_context import resolve_assistant_answer
+                        answer = resolve_assistant_answer(
+                            getattr(agent_loop, "_last_answer_text", ""),
+                            "".join(collected),
+                        ).strip()
                         adapter = registry.get(channel_name)
                         if adapter and answer:
                             from rune.channels.types import OutgoingMessage

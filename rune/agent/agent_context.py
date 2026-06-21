@@ -300,6 +300,20 @@ async def prepare_agent_context(
     )
 
 
+def resolve_assistant_answer(loop_answer: str, *fallbacks: str) -> str:
+    """Pick the assistant answer to persist for multi-turn history.
+
+    Prefer the loop's final answer, which is authoritative, over UI text that is
+    a render side effect and can be empty depending on the streaming path. A
+    missing assistant turn makes the next turn treat answered questions as
+    pending and re-run them.
+    """
+    for candidate in (loop_answer, *fallbacks):
+        if candidate and candidate.strip():
+            return candidate
+    return ""
+
+
 async def post_process_agent_result(inp: PostProcessInput) -> list[str]:
     """Post-process agent result: save assistant turn + episodic memory.
 

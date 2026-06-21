@@ -154,6 +154,7 @@ async def _execute_agent(tracker: RunTracker, run_id: str, req: AgentRunRequest)
             PrepareContextOptions,
             post_process_agent_result,
             prepare_agent_context,
+            resolve_assistant_answer,
         )
         from rune.agent.loop import NativeAgentLoop
 
@@ -234,7 +235,13 @@ async def _execute_agent(tracker: RunTracker, run_id: str, req: AgentRunRequest)
             context=context_dict if context_dict else None,
             message_history=agent_ctx.messages if agent_ctx.messages else None,
         )
-        answer = "".join(collected) if collected else (trace.reason or "completed")
+        # Prefer the loop's final answer over collected stream text so the
+        # assistant turn is recorded reliably; a missing turn makes the next
+        # request re-run already-answered tasks. Keep the reason fallback so the
+        # API response is never empty.
+        answer = resolve_assistant_answer(
+            getattr(loop, "_last_answer_text", ""), "".join(collected),
+        ) or (trace.reason or "completed")
 
         # Record assistant turn
         if conv_manager and session_id and answer:
