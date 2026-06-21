@@ -814,6 +814,56 @@ class StreamResult:
                     tool_count=len(tool_calls_by_index),
                 )
 
+            # Tool-call truncation recovery: the turn hit the output limit
+            # mid-arguments (a large tool argument such as a file_write body, or
+            # reasoning tokens consuming the budget). The partial arguments do not
+            # parse, so the call would run with empty args and fail, then the
+            # model retries and truncates again, looping to the tool-round cap.
+            # Raise BOTH caps (response_tokens_limit re-clamps max_tokens, so
+            # bumping only max_tokens has no effect) and re-prompt to retry the
+            # call, instead of executing the broken one.
+            if (
+                _finish_reason == "length"
+                and tool_calls_by_index
+                and _output_recovery_count < _MAX_OUTPUT_RECOVERY
+            ):
+                _truncated_tool = False
+                for _tc in tool_calls_by_index.values():
+                    _args = _tc["function"].get("arguments") or ""
+                    try:
+                        if _args:
+                            json.loads(_args)
+                    except (ValueError, TypeError):
+                        _truncated_tool = True
+                        break
+                if _truncated_tool:
+                    _output_recovery_count += 1
+                    _bumped = _clamp_max_tokens(
+                        self._model,
+                        min(max(self._max_tokens, self._response_tokens_limit) * 2,
+                            64_000),
+                    )
+                    self._max_tokens = _bumped
+                    self._response_tokens_limit = max(
+                        self._response_tokens_limit, _bumped
+                    )
+                    log.info(
+                        "tool_call_truncation_escalate",
+                        new_max=_bumped,
+                        attempt=_output_recovery_count,
+                    )
+                    self._messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your previous tool call was cut off by the output "
+                            "limit before its arguments finished, so it could not "
+                            "run. The limit has been raised. Call the tool again, "
+                            "in full."
+                        ),
+                    })
+                    self._collected_text = ""
+                    continue
+
             # No tool calls - check continuation paths before yielding
             if not tool_calls_by_index:
                 # force_tool_on_empty: only retry when the model produced

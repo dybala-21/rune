@@ -122,6 +122,13 @@ def escalation_judge() -> tuple[object, str | None] | None:
         log.warning("requirement_gate_escalation_resolve_failed", error=str(exc)[:100])
         return None
     model = (getattr(get_config().llm, "escalation_model", None) or "").strip() or None
+    active = (getattr(get_config().llm, "active_provider", None)
+              or getattr(get_config().llm, "default_provider", "") or "").lower()
+    if name == active:
+        # Not a fully independent judge: the verifier is the same provider as the
+        # generator, so the blind-spot benefit is reduced (still a fresh-context
+        # call). Configure a different escalationProvider for true independence.
+        log.info("escalation_judge_same_provider", provider=name)
     return provider, model
 
 

@@ -10,6 +10,7 @@ from rune.agent.orchestrator import (
     OrchestratorConfig,
     SubTask,
     SubTaskResult,
+    WorkerResult,
 )
 
 
@@ -136,3 +137,55 @@ class TestOrchestratorExecution:
         result = await orch.execute("do something useful")
         assert result.success is True
         assert len(result.results) == 1
+
+
+def _factory_returning(worker_result):
+    async def factory(role_id):
+        async def runner(goal, context=None):
+            return worker_result
+        return runner
+    return factory
+
+
+class TestOrchestratorQualityGateEvidence:
+    """The quality gate reads the worker's iterations/actions threaded via
+    WorkerResult, not default zeros that fail every real worker."""
+
+    @pytest.mark.asyncio
+    async def test_worker_with_action_evidence_passes(self, monkeypatch):
+        # No LLM judge available -> structural-only check.
+        import rune.llm.client as llm_client_mod
+        monkeypatch.setattr(
+            llm_client_mod, "get_llm_client",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no client")),
+        )
+        wr = WorkerResult(answer="A substantial answer " * 10, iterations=5, actions=2)
+        orch = Orchestrator(
+            config=OrchestratorConfig(
+                max_workers=1, risk_gate_enabled=False, max_retries=0),
+            agent_loop_factory=_factory_returning(wr),
+        )
+        plan = OrchestrationPlan(tasks=[SubTask(id="t1", description="Do real work")])
+        result = await orch.execute("goal", plan=plan)
+        assert result.success is True
+        assert result.results[0].success is True
+        assert result.results[0].output.startswith("A substantial answer")
+
+    @pytest.mark.asyncio
+    async def test_worker_without_any_evidence_still_fails(self, monkeypatch):
+        # No iterations and no actions means no evidence, so the gate rejects.
+        import rune.llm.client as llm_client_mod
+        monkeypatch.setattr(
+            llm_client_mod, "get_llm_client",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no client")),
+        )
+        wr = WorkerResult(answer="x" * 200, iterations=0, actions=0)
+        orch = Orchestrator(
+            config=OrchestratorConfig(
+                max_workers=1, risk_gate_enabled=False, max_retries=0),
+            agent_loop_factory=_factory_returning(wr),
+        )
+        plan = OrchestrationPlan(tasks=[SubTask(id="t1", description="Hollow")])
+        result = await orch.execute("goal", plan=plan)
+        assert result.results[0].success is False
+        assert "action evidence" in (result.results[0].error or "")

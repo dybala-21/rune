@@ -36,6 +36,22 @@ class DelegateOrchestrateParams(BaseModel):
 
 # Implementations
 
+def _build_base_agent_config() -> Any:
+    """AgentConfig for workers, using the session-active provider/model and
+    falling back to the configured defaults."""
+    from rune.types import AgentConfig
+
+    try:
+        from rune.config import get_config
+        llm = get_config().llm
+        provider = llm.active_provider or llm.default_provider
+        model = llm.active_model or llm.default_model
+        return AgentConfig(model=model, provider=provider)
+    except Exception as exc:
+        log.debug("delegate_base_config_fallback", error=str(exc)[:100])
+        return AgentConfig()
+
+
 async def delegate_task(params: DelegateTaskParams) -> CapabilityResult:
     """Create and run a sub-agent with the specified role."""
     log.info("delegate_task", goal=params.goal[:100], role=params.role)
@@ -80,9 +96,11 @@ async def delegate_task(params: DelegateTaskParams) -> CapabilityResult:
         except ImportError:
             log.debug("delegate_no_agent_loop", reason="agent loop not available")
 
-        # Fallback 2: Try the orchestrator for single-task execution
+        # Fallback 2: run through the orchestrator. Wire a real factory so this
+        # path executes instead of returning stub output.
         try:
             from rune.agent.orchestrator import Orchestrator, OrchestratorConfig
+            from rune.agent.worker_factory import make_worker_factory
 
             guardian: Any = None
             try:
@@ -91,8 +109,14 @@ async def delegate_task(params: DelegateTaskParams) -> CapabilityResult:
             except Exception:
                 pass
 
+            factory = make_worker_factory(_build_base_agent_config(), 500_000, 1)
             orchestrator = Orchestrator(
-                config=OrchestratorConfig(max_workers=1),
+                config=OrchestratorConfig(
+                    max_workers=1,
+                    execution_mode="sequential",
+                    risk_gate_enabled=False,
+                ),
+                agent_loop_factory=factory,
                 guardian=guardian,
             )
             orch_result = await orchestrator.execute(params.goal)
@@ -154,7 +178,28 @@ async def delegate_orchestrate(params: DelegateOrchestrateParams) -> CapabilityR
             OrchestratorConfig,
         )
 
-        config = OrchestratorConfig(max_workers=params.max_workers)
+        # Wire real workers. With no factory the orchestrator runs the stub
+        # path and returns "[stub] Executed: ..." as success, so it has to be
+        # given one. make_worker_factory runs each subtask in a real loop with
+        # a per-worker budget slice.
+        from rune.agent.worker_factory import make_worker_factory
+
+        base_config = _build_base_agent_config()
+        total_budget = 500_000
+        factory = make_worker_factory(
+            base_config, total_budget, params.max_workers
+        )
+
+        config = OrchestratorConfig(
+            max_workers=params.max_workers,
+            # Parallel workers share one working directory and overwrite each
+            # other. Sequential lets each read what the previous one wrote.
+            execution_mode="sequential",
+            # The plan-risk gate flags ordinary multi-file plans as critical and
+            # blocks them, so leave it off here. Each worker still runs under the
+            # Guardian, which gates risky actions per call.
+            risk_gate_enabled=False,
+        )
 
         # Try to get a guardian for risk gating
         guardian: Any = None
@@ -166,6 +211,7 @@ async def delegate_orchestrate(params: DelegateOrchestrateParams) -> CapabilityR
 
         orchestrator = Orchestrator(
             config=config,
+            agent_loop_factory=factory,
             guardian=guardian,
         )
 

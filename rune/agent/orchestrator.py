@@ -48,10 +48,25 @@ __all__ = [
     "OrchestrationPlan",
     "OrchestrationResult",
     "OrchestratorConfig",
+    "WorkerResult",
     "ExecutionMode",
     "Orchestrator",
     "TaskFailureType",
 ]
+
+
+@dataclass(slots=True)
+class WorkerResult:
+    """Worker output plus execution evidence for the quality gate.
+
+    Runners return this or a plain string. When they return this, the
+    orchestrator passes iterations and actions to the gate so the executor
+    evidence check sees what the worker did rather than zero.
+    """
+
+    answer: str = ""
+    iterations: int = 0
+    actions: int = 0
 
 
 @dataclass(slots=True)
@@ -89,12 +104,11 @@ class OrchestratorConfig:
 
 TaskFailureType = Literal["transient", "correctable", "systemic", "critical", "unknown"]
 
-# Type alias for the factory that creates per-role agent loops.
-# The factory receives the role id and returns an async callable that
-# accepts (goal, context) and returns a string output.
+# Factory that creates per-role agent loops. Takes a role id and returns an
+# async callable (goal, context) that returns a string or a WorkerResult.
 AgentLoopFactory = Callable[
     [AgentRoleId],
-    Coroutine[Any, Any, Callable[..., Coroutine[Any, Any, str]]],
+    Coroutine[Any, Any, Callable[..., Coroutine[Any, Any, "str | WorkerResult"]]],
 ]
 
 
@@ -217,7 +231,14 @@ class Orchestrator(EventEmitter):
                     f"Return JSON with tasks list. Goal: {goal}",
                     {},
                 )
-                parsed = self._try_parse_plan_json(raw_plan)
+                # Runner may return a WorkerResult or a string; the JSON
+                # parser needs the text.
+                raw_text = (
+                    raw_plan.answer
+                    if isinstance(raw_plan, WorkerResult)
+                    else str(raw_plan)
+                )
+                parsed = self._try_parse_plan_json(raw_text)
                 if parsed is not None:
                     return parsed
             except Exception as exc:
@@ -571,6 +592,18 @@ class Orchestrator(EventEmitter):
 
             duration_ms = (time.monotonic() - t0) * 1000
 
+            # Runner returns a WorkerResult (real workers) or a string (stub
+            # path). Pull out the iteration and action counts so the quality
+            # gate's executor evidence check sees real work instead of zero.
+            if isinstance(output, WorkerResult):
+                answer_text = output.answer
+                worker_iterations = output.iterations
+                worker_history = [{"type": "action"}] * max(output.actions, 0)
+            else:
+                answer_text = str(output)
+                worker_iterations = 0
+                worker_history = []
+
             # Quality gate: catch hollow success before accepting.
             # Skip for stub outputs (no agent_loop_factory) to avoid
             # false positives on short synthetic responses.
@@ -587,7 +620,13 @@ class Orchestrator(EventEmitter):
                     log.debug("orchestrator_quality_judge_unavailable", error=str(exc))
                 qc = await check_task_quality(
                     QATaskInfo(id=task.id, role=role_id, goal=goal),
-                    QAResult(success=True, answer=str(output), duration_ms=duration_ms),
+                    QAResult(
+                        success=True,
+                        answer=answer_text,
+                        iterations=worker_iterations,
+                        duration_ms=duration_ms,
+                        history=worker_history,
+                    ),
                     threshold=self._config.quality_threshold,
                     llm_client=judge_client,
                 )
@@ -606,7 +645,7 @@ class Orchestrator(EventEmitter):
                     duration_ms=duration_ms,
                 )
 
-            await self.emit("subtask_complete", task.id, output)
+            await self.emit("subtask_complete", task.id, answer_text)
             log.info(
                 "orchestrator_subtask_done",
                 task_id=task.id,
@@ -616,7 +655,7 @@ class Orchestrator(EventEmitter):
             return SubTaskResult(
                 task_id=task.id,
                 success=True,
-                output=str(output),
+                output=answer_text,
                 duration_ms=duration_ms,
             )
 
@@ -817,7 +856,13 @@ class Orchestrator(EventEmitter):
                 f"Return JSON with tasks list.",
                 {},
             )
-            parsed = self._try_parse_plan_json(raw_plan)
+            # Runner may return a WorkerResult or a string.
+            raw_text = (
+                raw_plan.answer
+                if isinstance(raw_plan, WorkerResult)
+                else str(raw_plan)
+            )
+            parsed = self._try_parse_plan_json(raw_text)
             if parsed is not None:
                 log.info("orchestrator_replan_success", tasks=len(parsed.tasks))
                 return parsed

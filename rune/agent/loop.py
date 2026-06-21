@@ -395,6 +395,7 @@ class NativeAgentLoop(EventEmitter):
         self._cancel_event = asyncio.Event()
         # Wind-down 5-stage state machine (#14)
         self._wind_down_phase: WindDownPhase = "none"
+        self._wind_down_write_forced: bool = False
         # Step watchdog (#29)
         self._step_start_time: float = 0.0
         self._STEP_WARN_MS: int = 45_000
@@ -444,10 +445,13 @@ class NativeAgentLoop(EventEmitter):
         # true, execution verification owns correctness and the LLM requirement
         # gate is skipped (redundant, and risks false-blocking on a snapshot).
         self._requires_execution: bool = False
+        # Whether this run produces substantive non-executable output that gets
+        # the depth scaffold and depth critic.
         # Rehydration subsystem (initialized per run in _execute_loop)
         self._rehydration_recorder: Any = None
         self._rehydration_trigger: Any = None
         self._gate_blocked_count: int = 0
+        self._output_integrity_fired: int = 0
         self._evidence_gate: Any = None
 
     @property
@@ -478,6 +482,7 @@ class NativeAgentLoop(EventEmitter):
         self._stall = StallState()
         self._token_budget = TokenBudget()
         self._wind_down_phase = "none"
+        self._wind_down_write_forced = False
         self._step_start_time = 0.0
         self._last_activity = 0.0
         self._consecutive_reads_without_write = 0
@@ -504,6 +509,7 @@ class NativeAgentLoop(EventEmitter):
         self._rehydration_recorder = None
         self._rehydration_trigger = None
         self._gate_blocked_count = 0
+        self._output_integrity_fired = 0
         # Evidence Gate (benchmark output-correctness verification; opt-in)
         self._evidence_gate = None
 
@@ -657,8 +663,16 @@ class NativeAgentLoop(EventEmitter):
         retrieval cannot be determined."""
         if not output_integrity_enabled():
             return True, messages, blocked_count
+        # Bounded: after a couple of blocks the model is not fixing the citation
+        # (it may be a true hallucination it cannot ground, or a borderline case).
+        # Pass through with a warning rather than consuming the whole gate-block
+        # budget and failing the run while a usable artifact already exists.
+        if self._output_integrity_fired >= 2:
+            log.warning("output_integrity_budget_spent", step=self._step)
+            return True, messages, blocked_count
         bad = fabricated_citations(self._gather_citation_text(), messages)
         if bad:
+            self._output_integrity_fired += 1
             log.info("output_integrity_block", step=self._step, n=len(bad))
             messages = self._inject_system_message(messages, build_nudge(bad))
             blocked_count += 1
@@ -666,16 +680,48 @@ class NativeAgentLoop(EventEmitter):
             return False, messages, blocked_count
         return True, messages, blocked_count
 
+    def _maybe_force_wind_down_write(self, messages: list[Any]) -> list[Any]:
+        """In the budget wind-down 'final' phase, inject a one-shot directive to
+        write the best-effort artifact now. The final phase only trims tools;
+        without this a task can keep reading/thinking until the budget hard-stops
+        and produce nothing. No-op if not in the final phase or already injected."""
+        if self._wind_down_phase != "final" or self._wind_down_write_forced:
+            return messages
+        self._wind_down_write_forced = True
+        log.info("wind_down_force_write", step=self._step)
+        return self._inject_system_message(
+            messages,
+            "The token budget is almost spent. Stop researching and write your "
+            "best answer NOW with what you already have: if the task expects a "
+            "file, call file_write with the complete content this turn; otherwise "
+            "give the final answer. Do not promise to continue; produce the "
+            "artifact now.",
+        )
+
+    def _max_gate_reason(self) -> str:
+        """Reason to record when the gate-block budget is exhausted. For a
+        non-executable task the blocking gates are the soft quality gates
+        (requirement / depth / integrity) and a usable artifact already exists, so
+        report a warning rather than a hard failure. Executable tasks keep
+        failing: do not ship code whose tests/verification never passed."""
+        return (
+            "max_gate_blocked"
+            if self._requires_execution
+            else "completed_gate_warnings"
+        )
+
     async def _finalize_gates(
         self, messages: list[Any], blocked_count: int
     ) -> tuple[bool, list[Any], int]:
         """Pre-finalize checks: deterministic output-integrity (model-agnostic),
-        then the requirement gate. Both opt-in; no-op when disabled.
+        the requirement gate, then the depth critic. All opt-in; no-op when
+        disabled.
 
-        The requirement gate (LLM-judged) is skipped for execution-verified tasks:
-        running the code/tests is the authoritative check there, so an LLM
-        adherence judgment is redundant and risks false-blocking. Output-integrity
-        is deterministic and harmless, so it always runs when enabled."""
+        The requirement gate and depth critic (LLM-judged) are skipped for
+        execution-verified tasks: running the code/tests is the authoritative
+        check there, so an LLM judgment is redundant and risks false-blocking.
+        Output-integrity is deterministic and harmless, so it always runs when
+        enabled."""
         ok, messages, blocked_count = self._output_integrity_gate(messages, blocked_count)
         if not ok:
             return False, messages, blocked_count
@@ -1583,6 +1629,7 @@ class NativeAgentLoop(EventEmitter):
                         max_tool_rounds=_tool_rounds,
                     )
                     log.info("tools_reduced_final_phase", tools=len(tools))
+                messages = self._maybe_force_wind_down_write(messages)
 
             # Active tools reduction after the configured step
             if self._step >= ACTIVE_TOOLS_REDUCTION_STEP:
@@ -1986,7 +2033,7 @@ class NativeAgentLoop(EventEmitter):
                                 if _gate_blocked_count >= 5:
                                     log.warning("max_gate_blocked", step=self._step,
                                                 count=_gate_blocked_count)
-                                    trace.reason = "max_gate_blocked"
+                                    trace.reason = self._max_gate_reason()
                                     trace.final_step = self._step
                                     break
                                 continue
@@ -1997,7 +2044,7 @@ class NativeAgentLoop(EventEmitter):
                                 if _gate_blocked_count >= 5:
                                     log.warning("max_gate_blocked", step=self._step,
                                                 count=_gate_blocked_count)
-                                    trace.reason = "max_gate_blocked"
+                                    trace.reason = self._max_gate_reason()
                                     trace.final_step = self._step
                                     break
                                 continue
@@ -2035,7 +2082,7 @@ class NativeAgentLoop(EventEmitter):
                             if _gate_blocked_count >= 5:
                                 log.warning("max_gate_blocked", step=self._step,
                                             count=_gate_blocked_count)
-                                trace.reason = "max_gate_blocked"
+                                trace.reason = self._max_gate_reason()
                                 trace.final_step = self._step
                                 break
                             continue
@@ -2117,7 +2164,7 @@ class NativeAgentLoop(EventEmitter):
                             if _gate_blocked_count >= 5:
                                 log.warning("max_gate_blocked", step=self._step,
                                             count=_gate_blocked_count)
-                                trace.reason = "max_gate_blocked"
+                                trace.reason = self._max_gate_reason()
                                 trace.final_step = self._step
                                 break
                             continue
@@ -2133,7 +2180,7 @@ class NativeAgentLoop(EventEmitter):
                             if _gate_blocked_count >= 5:
                                 log.warning("max_gate_blocked", step=self._step,
                                             count=_gate_blocked_count)
-                                trace.reason = "max_gate_blocked"
+                                trace.reason = self._max_gate_reason()
                                 trace.final_step = self._step
                                 break
                         else:
@@ -2144,7 +2191,7 @@ class NativeAgentLoop(EventEmitter):
                                 if _gate_blocked_count >= 5:
                                     log.warning("max_gate_blocked", step=self._step,
                                                 count=_gate_blocked_count)
-                                    trace.reason = "max_gate_blocked"
+                                    trace.reason = self._max_gate_reason()
                                     trace.final_step = self._step
                                     break
                                 continue
@@ -2168,7 +2215,7 @@ class NativeAgentLoop(EventEmitter):
                         if _gate_blocked_count >= 5:
                             log.warning("max_gate_blocked", step=self._step,
                                         count=_gate_blocked_count)
-                            trace.reason = "max_gate_blocked"
+                            trace.reason = self._max_gate_reason()
                             trace.final_step = self._step
                             break
                         continue
@@ -2245,7 +2292,7 @@ class NativeAgentLoop(EventEmitter):
                         _avok, _, _ = await self._auto_verify_gate(
                             messages, _gate_blocked_count)
                         if not _avok:
-                            trace.reason = "max_gate_blocked"
+                            trace.reason = self._max_gate_reason()
                             trace.final_step = self._step
                             break
                         _ev_state2, _ = await self._evidence_verdict()
@@ -2257,7 +2304,7 @@ class NativeAgentLoop(EventEmitter):
                             break
                         log.warning("max_gate_blocked", step=self._step,
                                     count=_gate_blocked_count)
-                        trace.reason = "max_gate_blocked"
+                        trace.reason = self._max_gate_reason()
                         trace.final_step = self._step
                         break
 
@@ -2289,7 +2336,7 @@ class NativeAgentLoop(EventEmitter):
                                 if _gate_blocked_count >= 5:
                                     log.warning("max_gate_blocked", step=self._step,
                                                 count=_gate_blocked_count)
-                                    trace.reason = "max_gate_blocked"
+                                    trace.reason = self._max_gate_reason()
                                     trace.final_step = self._step
                                     break
                                 continue
