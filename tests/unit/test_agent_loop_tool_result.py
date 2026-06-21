@@ -174,6 +174,59 @@ async def test_finalize_runs_requirement_gate_for_non_execution_task(
     assert ok is False and n == 1
 
 
+def test_wind_down_phase_final_at_90pct_then_forces_write() -> None:
+    # The full N1 chain: budget at >=90% -> phase "final" -> force-write injects.
+    loop = NativeAgentLoop()
+    loop._token_budget.total = 20_000
+    loop._token_budget.used = 18_400  # 92%
+    loop._update_wind_down_phase()
+    assert loop._wind_down_phase == "final"
+    msgs = loop._maybe_force_wind_down_write([])
+    assert loop._wind_down_write_forced is True
+    assert "write your best answer NOW" in str(msgs[-1])
+
+
+def test_wind_down_force_write_injects_once() -> None:
+    loop = NativeAgentLoop()
+    loop._wind_down_phase = "final"
+    loop._wind_down_write_forced = False
+    msgs = loop._maybe_force_wind_down_write([])
+    assert loop._wind_down_write_forced is True
+    assert len(msgs) == 1  # directive injected
+    assert "write your best answer NOW" in str(msgs[-1])
+    # Second call is a no-op (already forced).
+    msgs2 = loop._maybe_force_wind_down_write(msgs)
+    assert len(msgs2) == 1
+
+
+def test_wind_down_force_write_noop_when_not_final() -> None:
+    loop = NativeAgentLoop()
+    loop._wind_down_phase = "none"
+    loop._wind_down_write_forced = False
+    msgs = loop._maybe_force_wind_down_write([])
+    assert msgs == []
+    assert loop._wind_down_write_forced is False
+
+
+def test_max_gate_reason_graceful_for_non_execution_task() -> None:
+    loop = NativeAgentLoop()
+    loop._requires_execution = False
+    assert loop._max_gate_reason() == "completed_gate_warnings"
+    loop._requires_execution = True
+    assert loop._max_gate_reason() == "max_gate_blocked"
+
+
+def test_output_integrity_gate_bounded(monkeypatch: MonkeyPatch) -> None:
+    # After the per-run firing budget, the integrity gate passes through instead
+    # of consuming the whole gate-block budget.
+    monkeypatch.setenv("RUNE_OUTPUT_INTEGRITY", "1")
+    loop = NativeAgentLoop()
+    loop._output_integrity_fired = 2
+    ok, _msgs, n = loop._output_integrity_gate([], 0)
+    assert ok is True and n == 0
+
+
+
 def test_failed_tool_nudge_clears_after_successful_bash() -> None:
     assert _should_clear_failed_tool_nudge(
         "bash_execute",

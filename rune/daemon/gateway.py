@@ -839,6 +839,7 @@ class ChannelGateway:
                 PrepareContextOptions,
                 post_process_agent_result,
                 prepare_agent_context,
+                resolve_assistant_answer,
             )
             from rune.agent.loop import NativeAgentLoop
 
@@ -870,14 +871,46 @@ class ChannelGateway:
                         count=len(attachment_paths),
                     )
 
-            # 3. Prepare agent context with identity
+            # 3. Resolve the multi-turn conversation for this sender so channel
+            # follow-ups ("그거 정리해줘") have context. Keyed by channel:sender.
+            conv_manager = None
+            try:
+                from pathlib import Path
+
+                from rune.conversation.manager import ConversationManager
+                from rune.conversation.store import ConversationStore
+                from rune.conversation.types import Conversation
+
+                conv_store = ConversationStore(
+                    Path.home() / ".rune" / "conversations.db")
+                conv_manager = ConversationManager(conv_store)
+                existing = await conv_store.load(conv_id)
+                if existing is not None:
+                    conv_manager._active[conv_id] = existing
+                else:
+                    conv_manager._active[conv_id] = Conversation(
+                        id=conv_id, user_id=message.sender_id or "channel")
+            except Exception as exc:
+                log.debug("gateway_conv_manager_init_failed", error=str(exc)[:100])
+                conv_manager = None
+
+            # Record the user turn before history is loaded. prepare_agent_context
+            # drops this latest user turn from the loaded history (the goal is
+            # passed to the loop separately).
+            if conv_manager is not None:
+                with contextlib.suppress(Exception):
+                    conv_manager.add_turn(conv_id, "user", text)
+
+            # 4. Prepare agent context with identity + conversation history
             context_opts = PrepareContextOptions(
                 goal=text,
                 channel=message.metadata.get("channel_name", "remote"),
                 sender_id=message.sender_id,
+                conversation_id=conv_id,
             )
-            agent_ctx = await prepare_agent_context(context_opts)
-            conv_id = getattr(agent_ctx, "conversation_id", conv_id)
+            agent_ctx = await prepare_agent_context(
+                context_opts, conversation_manager=conv_manager)
+            conv_id = getattr(agent_ctx, "conversation_id", conv_id) or conv_id
 
             # 4. Build memory context (best-effort)
             memory_context = ""
@@ -957,7 +990,11 @@ class ChannelGateway:
             if attachment_paths:
                 context_dict["attachment_paths"] = attachment_paths
 
-            trace = await loop.run(text, context=context_dict if context_dict else None)
+            trace = await loop.run(
+                text,
+                context=context_dict if context_dict else None,
+                message_history=agent_ctx.messages if agent_ctx.messages else None,
+            )
 
             # Prefer last step's text to avoid repeating intermediate
             # commentary ("검색하겠습니다") in the final message.
@@ -976,6 +1013,21 @@ class ChannelGateway:
                     )
 
             duration_ms = int((time.monotonic() - start_time) * 1000)
+
+            # Persist the assistant turn so the next message has context. Use the
+            # loop's final answer, not the channel response (which may carry a
+            # learned-rules note), so history stays clean.
+            if conv_manager is not None:
+                with contextlib.suppress(Exception):
+                    assistant_answer = resolve_assistant_answer(
+                        getattr(loop, "_last_answer_text", ""), response)
+                    if assistant_answer:
+                        conv_manager.add_turn(
+                            conv_id, "assistant", assistant_answer,
+                            goal_type=getattr(loop, "_last_goal_type", ""),
+                        )
+                        await conv_manager._store.save(
+                            conv_manager._active[conv_id])
 
             # 6. Post-process (memory persistence)
             try:

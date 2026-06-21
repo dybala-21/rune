@@ -1005,8 +1005,14 @@ class AgentLoopController:
                     if error:
                         self._renderer.print_system_message(f"Completed with issues: {error}")
 
-            # Record assistant turn for multi-turn context
-            answer = self._app._last_response_text or ""
+            # Record assistant turn for multi-turn context, preferring the
+            # loop's final answer over the UI text (a render side effect that
+            # can be empty and would drop the turn from history).
+            from rune.agent.agent_context import resolve_assistant_answer
+            answer = resolve_assistant_answer(
+                getattr(self._loop, "_last_answer_text", ""),
+                self._app._last_response_text or "",
+            )
             if self._conv_manager and self._conversation_id and answer:
                 with contextlib.suppress(Exception):
                     self._conv_manager.add_turn(

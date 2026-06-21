@@ -12,6 +12,7 @@ from rune.agent.agent_context import (
     PrepareContextOptions,
     _sanitize_goal_input,
     post_process_agent_result,
+    resolve_assistant_answer,
 )
 
 # ---------------------------------------------------------------------------
@@ -124,6 +125,72 @@ class TestPostProcessAgentResult:
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+
+class TestResolveAssistantAnswer:
+    """Regression guard for the multi-turn bug where a missing assistant turn
+    made the next turn re-run already-answered questions."""
+
+    def test_prefers_loop_answer_over_empty_ui_text(self):
+        # The bug: UI text empty -> assistant turn dropped. The loop answer is
+        # authoritative and must win.
+        assert resolve_assistant_answer("loop final answer", "") == "loop final answer"
+
+    def test_falls_back_to_ui_text_when_loop_empty(self):
+        assert resolve_assistant_answer("", "ui text") == "ui text"
+
+    def test_blank_loop_answer_is_skipped(self):
+        assert resolve_assistant_answer("   ", "ui text") == "ui text"
+
+    def test_returns_empty_when_all_blank(self):
+        assert resolve_assistant_answer("", "", "  ") == ""
+
+    def test_loop_answer_wins_even_when_ui_also_present(self):
+        assert resolve_assistant_answer("loop", "ui") == "loop"
+
+
+class TestChannelMultiTurnRoundTrip:
+    """Channels (gateway) persist turns per sender across messages, so a
+    follow-up sees prior turns. Mirrors the gateway's per-message handling."""
+
+    @pytest.mark.asyncio
+    async def test_history_accumulates_across_messages(self, tmp_path):
+        from rune.agent.agent_context import (
+            PrepareContextOptions,
+            prepare_agent_context,
+        )
+        from rune.conversation.manager import ConversationManager
+        from rune.conversation.store import ConversationStore
+        from rune.conversation.types import Conversation
+
+        db = tmp_path / "conv.db"
+        conv_id = "slack:U1"
+
+        async def one_message(user_text: str, assistant_text: str) -> list:
+            store = ConversationStore(db)
+            mgr = ConversationManager(store)
+            existing = await store.load(conv_id)
+            mgr._active[conv_id] = existing or Conversation(id=conv_id, user_id="ch")
+            mgr.add_turn(conv_id, "user", user_text)
+            ctx = await prepare_agent_context(
+                PrepareContextOptions(
+                    goal=user_text, channel="slack", conversation_id=conv_id),
+                conversation_manager=mgr,
+            )
+            mgr.add_turn(conv_id, "assistant", assistant_text)
+            await store.save(mgr._active[conv_id])
+            return ctx.messages
+
+        h1 = await one_message("first question", "first answer")
+        assert h1 == []  # nothing before the first message
+
+        h2 = await one_message("second question", "second answer")
+        roles_2 = [m["role"] for m in h2]
+        assert roles_2 == ["user", "assistant"]  # the first turn, current dropped
+        assert h2[1]["content"] == "first answer"
+
+        h3 = await one_message("follow up", "third answer")
+        assert [m["role"] for m in h3] == ["user", "assistant", "user", "assistant"]
+
 
 class TestConstants:
     def test_max_attempts_is_positive(self):

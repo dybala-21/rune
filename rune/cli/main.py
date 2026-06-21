@@ -555,7 +555,13 @@ def _simple_repl(model: str | None = None, provider: str | None = None) -> None:
             message_history=ctx.messages if ctx.messages else None,
         )
 
-        answer = "".join(collected_text)
+        # Prefer the loop's final answer; fall back to streamed text. The
+        # streamed text can be empty depending on the render path, and a missing
+        # assistant turn makes the next turn re-run already-answered tasks.
+        from rune.agent.agent_context import resolve_assistant_answer
+        answer = resolve_assistant_answer(
+            getattr(loop, "_last_answer_text", ""), "".join(collected_text),
+        )
 
         # Record assistant turn in conversation manager
         if conv_manager and conversation_id and answer:

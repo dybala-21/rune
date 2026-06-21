@@ -9,6 +9,24 @@ import pytest
 from rune.proactive.engine import ProactiveEngine
 
 
+@pytest.fixture(autouse=True)
+def _isolate_proactive_state():
+    """Reset the proactive/prediction singletons and the memory store before each
+    test, so evaluate() candidates do not leak across tests (this file's tests
+    otherwise depend on execution order)."""
+    import rune.memory.manager as mgr_mod
+    import rune.memory.store as store_mod
+    import rune.proactive.engine as eng_mod
+    import rune.proactive.prediction.engine as pe_mod
+    eng_mod._engine = None
+    pe_mod._engine = None
+    store_mod._store = store_mod.MemoryStore(db_path=":memory:")
+    # The open-commitments source reads get_memory_manager().store, a separate
+    # cached reference; reset the manager too or a prior test's commitments leak.
+    mgr_mod._manager = None
+    yield
+
+
 class TestEventEmitterOn:
     def test_registers_listener(self):
         engine = ProactiveEngine()
