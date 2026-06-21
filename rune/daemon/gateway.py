@@ -172,6 +172,11 @@ class ChannelGateway:
         self._pending_approvals: dict[str, _PendingApproval] = {}
         self._listeners: dict[str, list[Callable[..., Any]]] = {}
         self._delivery_manager = ChannelDeliveryManager()
+        # One conversation manager for the gateway's lifetime. Built per message
+        # before, which leaked a sqlite connection each time (the store holds an
+        # open connection with no close) and gave concurrent same-conversation
+        # messages separate in-memory copies that overwrote each other on save.
+        self._conv_manager: Any = None
 
     # Event emitter (lightweight, ported from TS EventEmitter pattern)
 
@@ -872,27 +877,17 @@ class ChannelGateway:
                     )
 
             # 3. Resolve the multi-turn conversation for this sender so channel
-            # follow-ups ("그거 정리해줘") have context. Keyed by channel:sender.
-            conv_manager = None
-            try:
-                from pathlib import Path
-
-                from rune.conversation.manager import ConversationManager
-                from rune.conversation.store import ConversationStore
-                from rune.conversation.types import Conversation
-
-                conv_store = ConversationStore(
-                    Path.home() / ".rune" / "conversations.db")
-                conv_manager = ConversationManager(conv_store)
-                existing = await conv_store.load(conv_id)
-                if existing is not None:
-                    conv_manager._active[conv_id] = existing
-                else:
-                    conv_manager._active[conv_id] = Conversation(
-                        id=conv_id, user_id=message.sender_id or "channel")
-            except Exception as exc:
-                log.debug("gateway_conv_manager_init_failed", error=str(exc)[:100])
-                conv_manager = None
+            conv_manager = await self._get_conv_manager()
+            if conv_manager is not None:
+                try:
+                    from rune.conversation.types import Conversation
+                    if conv_id not in conv_manager._active:
+                        existing = await conv_manager._store.load(conv_id)
+                        conv_manager._active[conv_id] = existing or Conversation(
+                            id=conv_id, user_id=message.sender_id or "channel")
+                except Exception as exc:
+                    log.debug("gateway_conv_load_failed", error=str(exc)[:100])
+                    conv_manager = None
 
             # Record the user turn before history is loaded. prepare_agent_context
             # drops this latest user turn from the loaded history (the goal is
@@ -1064,6 +1059,27 @@ class ChannelGateway:
             _log_event(conv_id, "agent_error", {"error": str(exc)[:200]}, run_id=run_id)
             # Sanitize error - don't expose stack traces to end users
             return "An error occurred while processing your request. Please try again."
+
+    async def _get_conv_manager(self) -> Any:
+        """Lazily build one conversation manager for the gateway's lifetime.
+
+        Returns None if the store cannot be opened, in which case the agent
+        still runs but without multi-turn channel memory.
+        """
+        if self._conv_manager is not None:
+            return self._conv_manager
+        try:
+            from pathlib import Path
+
+            from rune.conversation.manager import ConversationManager
+            from rune.conversation.store import ConversationStore
+
+            store = ConversationStore(Path.home() / ".rune" / "conversations.db")
+            self._conv_manager = ConversationManager(store)
+        except Exception as exc:
+            log.debug("gateway_conv_manager_init_failed", error=str(exc)[:100])
+            self._conv_manager = None
+        return self._conv_manager
 
     async def _handle_proactive_feedback(self, text: str) -> str:
         """Handle approve:/deny: prefix messages for proactive suggestions."""
