@@ -172,8 +172,9 @@ Every suggestion must reference specific code (file path, function name, or patt
 PROMPT_WEB_BASE = """
 ## Web Research Strategy
 
-- **Escalation path**: web_search → web_fetch → browser_navigate (try in this order)
-- If web_search fails, immediately fall back to browser_navigate. Do not answer from memory.
+- **Answer directly when you already know it**: stable general knowledge (word meanings, definitions, concepts, translations, established facts) needs no search. Search only for volatile or specific information you are unsure of: current events, prices, weather, latest versions, or specific people/sites.
+- **Escalation path** (when a search is actually needed): web_search → web_fetch → browser_navigate (try in this order)
+- If web_search fails, fall back to browser_navigate rather than fabricating web content.
 - **If web_fetch returns empty/minimal content, treat the site as dynamically rendered** → immediately switch to browser_navigate + browser_observe/browser_extract. Do not report limitations to the user — browse directly.
 - When a specific site is mentioned, use web_search's `site` parameter. If results are insufficient, use browser_navigate.
 - **NEVER hallucinate web content**. If all web tools fail, honestly report the failure."""
@@ -453,7 +454,9 @@ Respond in the SAME language the user used. Korean input → Korean output.
 ## Guidelines
 - Be concise and direct. Lead with the answer.
 - For simple questions, respond in 1-3 sentences.
-- Use tools only when needed (memory_search for recall, web_search for facts).
+- Answer from your own knowledge for stable facts you are confident about: word meanings, definitions, concepts, translations, general knowledge. Do not search for these.
+- Use web_search only for volatile or specific information you are not sure of: current events, prices, weather, scores, latest versions, or specific people/sites.
+- Use memory_search for recall of past sessions.
 - For greetings or casual chat, respond naturally without tools.
 - If the user references previous work, call memory_search first.
 - If memory_search returns nothing, tell the user no records were found in their language. Do NOT guess or fabricate past activities.
