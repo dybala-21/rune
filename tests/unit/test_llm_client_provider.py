@@ -53,6 +53,24 @@ def test_ollama_without_active_model_uses_configured_tier(monkeypatch):
     assert client.resolve_model(ModelTier.FAST, Provider.OLLAMA) == cfg.llm.models.ollama.fast
 
 
+def test_gemini_resolves_its_own_tier_models():
+    # Regression: gemini had no branch in resolve_model and fell through to the
+    # ollama tier (llama3.2), which then got the vertex_ai/ prefix and failed
+    # every aux call (classifier, gates). It must resolve the gemini tier models.
+    cfg = get_config()
+    client = LLMClient()
+    assert client.resolve_model(ModelTier.FAST, Provider.GEMINI) == cfg.llm.models.gemini.fast
+    assert client.resolve_model(ModelTier.BEST, Provider.GEMINI) == cfg.llm.models.gemini.best
+    assert client.resolve_model(ModelTier.FAST, Provider.GEMINI) != cfg.llm.models.ollama.fast
+
+
+def test_azure_resolves_its_own_tier_models():
+    cfg = get_config()
+    client = LLMClient()
+    assert client.resolve_model(ModelTier.FAST, Provider.AZURE) == cfg.llm.models.azure.fast
+    assert client.resolve_model(ModelTier.BEST, Provider.AZURE) == cfg.llm.models.azure.best
+
+
 def test_explicit_provider_overrides_active():
     cfg = get_config()
     cfg.llm.default_provider = "openai"

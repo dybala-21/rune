@@ -158,12 +158,7 @@ class LLMClient:
                 return active
 
         models_config = config.llm.models
-        if provider == Provider.OPENAI:
-            tier_models = models_config.openai
-        elif provider == Provider.ANTHROPIC:
-            tier_models = models_config.anthropic
-        else:
-            tier_models = models_config.ollama
+        tier_models = getattr(models_config, provider.value, models_config.ollama)
 
         return getattr(tier_models, tier, tier_models.best)
 
