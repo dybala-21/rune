@@ -910,7 +910,7 @@ def db_status_cmd() -> None:
     from rune.memory.store import get_memory_store
     store = get_memory_store()
     episodes = len(store.get_recent_episodes(limit=999_999))
-    facts = len(store.search_facts("", limit=999_999))
+    facts = store.count_facts()
     console.print("[green]Database OK[/green]")
     console.print(f"  Episodes: {episodes}")
     console.print(f"  Facts: {facts}")

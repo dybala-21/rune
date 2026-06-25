@@ -115,6 +115,7 @@ def _register_all_capabilities(registry: CapabilityRegistry) -> None:
     from rune.capabilities.credential import register_credential_capabilities
     from rune.capabilities.cron import register_cron_capabilities
     from rune.capabilities.delegate import register_delegate_capabilities
+    from rune.capabilities.document import register_document_capability
     from rune.capabilities.file import register_file_capabilities
     from rune.capabilities.memory_capability import register_memory_capabilities
     from rune.capabilities.project import register_project_capabilities
@@ -126,6 +127,7 @@ def _register_all_capabilities(registry: CapabilityRegistry) -> None:
     from rune.capabilities.web import register_web_capabilities
 
     register_file_capabilities(registry)
+    register_document_capability(registry)
     register_bash_capabilities(registry)
     register_think_capabilities(registry)
     register_web_capabilities(registry)
