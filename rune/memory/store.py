@@ -1916,6 +1916,11 @@ class MemoryStore:
             for r in rows
         ]
 
+    def count_facts(self) -> int:
+        """Total number of stored facts."""
+        row = self.conn.execute("SELECT COUNT(*) FROM facts").fetchone()
+        return int(row[0]) if row else 0
+
     def get_fact_by_key(self, key: str) -> Fact | None:
         row = self.conn.execute(
             "SELECT * FROM facts WHERE key = ?", (key,),
