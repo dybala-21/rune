@@ -135,11 +135,17 @@ def build_skill_context(
 def build_skill_context_for_goal(
     goal: str,
     registry: SkillRegistry | None = None,
+    *,
+    gated: bool = False,
 ) -> SkillExecutionContext | None:
     """Find the best-matching skill for a goal and return its context.
 
     Uses the skill registry's keyword/fuzzy search to rank skills,
     then returns the context for the highest-scoring match.
+
+    When ``gated`` is set (Gated Skill Learning on), only ACTIVE skills —
+    those measured to raise the verified rate — are eligible; candidates and
+    skills under evaluation are filtered out (T1-1).
     """
     from rune.skills.registry import get_skill_registry
 
@@ -150,6 +156,10 @@ def build_skill_context_for_goal(
     except Exception:
         log.warning("skill_search_failed", goal=goal[:50])
         return None
+
+    if gated:
+        from rune.skills.lifecycle import is_injectable
+        matches = [m for m in matches if is_injectable(m.skill, gated=True)]
 
     if not matches:
         log.debug("no_matching_skills", goal=goal[:50])

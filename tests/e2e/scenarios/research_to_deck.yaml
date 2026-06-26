@@ -1,0 +1,67 @@
+name: "research-to-deck"
+description: "Connected long workflow: web research -> notes -> Word report -> review -> deepen with more search -> revise -> PowerPoint deck -> verify. Exercises web + document_create + document_read + iterative refinement together."
+
+turns:
+  - id: research
+    goal: "Search the web for recent trends in the global electric vehicle (EV) market. Write your findings as notes with at least 3 distinct points to {workspace}/ev_research.md"
+    verify:
+      - type: file_exists
+        path: "ev_research.md"
+
+  - id: summarize
+    goal: "Read {workspace}/ev_research.md and give me the three most important takeaways."
+    verify:
+      - type: answer_contains_any
+        expect_any: ["EV", "electric", "vehicle", "전기차"]
+
+  - id: report
+    goal: "Create a structured Word report at {workspace}/ev_report.docx with these section headings: Overview, Market Trends, Key Players, Outlook. Fill each section from your research notes."
+    verify:
+      - type: file_exists
+        path: "ev_report.docx"
+
+  - id: review
+    goal: "Read {workspace}/ev_report.docx back and tell me which section is the thinnest and would benefit from more concrete data."
+    verify:
+      - type: answer_contains_any
+        expect_any: ["Overview", "Market Trends", "Key Players", "Outlook", "section"]
+
+  - id: deepen
+    goal: "Search for a concrete figure on EV market size or annual growth rate. Add a new 'Market Size' section with that figure to {workspace}/ev_report.docx and re-save it, keeping the existing sections."
+    verify:
+      - type: file_exists
+        path: "ev_report.docx"
+
+  - id: verify_report
+    goal: "Read {workspace}/ev_report.docx and list every section heading it now contains."
+    verify:
+      - type: answer_contains
+        expect: "Market Size"
+      - type: answer_contains
+        expect: "Outlook"
+
+  - id: deck
+    goal: "Create a presentation at {workspace}/ev_deck.pptx that summarizes the report: a title slide, one slide per major section, and a closing 'Next Steps' slide."
+    verify:
+      - type: file_exists
+        path: "ev_deck.pptx"
+
+  - id: verify_deck
+    goal: "Read {workspace}/ev_deck.pptx and tell me how many slides it has and what their titles are."
+    verify:
+      - type: answer_contains_any
+        expect_any: ["Market", "Outlook", "Overview", "Next Steps"]
+
+  - id: recall
+    goal: "What topic have we been researching and building the deck about?"
+    verify:
+      - type: answer_contains_any
+        expect_any: ["EV", "electric", "vehicle", "전기차"]
+
+  - id: deliverables
+    goal: "List the files you produced in this session."
+    verify:
+      - type: answer_contains
+        expect: "ev_report.docx"
+      - type: answer_contains
+        expect: "ev_deck.pptx"

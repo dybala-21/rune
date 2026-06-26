@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
 from rune.memory.store import Episode
+from rune.skills.lifecycle import SkillState
 from rune.skills.registry import get_skill_registry
 from rune.skills.types import Skill
 from rune.types import Domain, Intent
@@ -1179,6 +1180,13 @@ async def maybe_generate_skill(
             scope="user",
             author="auto",
             metadata={
+                # Gated Skill Learning (T1-1): a freshly distilled skill is a
+                # CANDIDATE, not yet proven to help. With gating off (default)
+                # injection is unchanged, so this tag is behaviour-neutral; with
+                # gating on, a CANDIDATE is withheld until the evaluator promotes
+                # it to ACTIVE.
+                "state": SkillState.CANDIDATE,
+                "source": "auto_distill",
                 "quality_score": quality,
                 "pattern": template["pattern"],
                 "fingerprint": template["fingerprint"],

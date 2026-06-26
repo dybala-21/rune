@@ -412,6 +412,13 @@ class NativeAgentLoop(EventEmitter):
         # completion.
         self._tool_trace: list[Any] = []
         self._auto_skill: bool = False
+        # Gated Skill Learning (T1-1): name+match-score of the skill injected
+        # into this run (if any), so its outcome can be logged at run end.
+        self._injected_skill: tuple[str, float] | None = None
+        # Replay-corpus capture (T1-1): pre-task git ref recorded at
+        # run start when capture_replay is on, snapshotted at run end if a skill
+        # is distilled. None when capture is off / cwd isn't a git repo.
+        self._replay_capture: dict[str, str] | None = None
         # Completion gate enhancements (#16) - tracked files + hard failures
         self._files_written: set[str] = set()
         # Requirement-Adherence Gate (opt-in via RUNE_REQUIREMENT_GATE); None when off.
@@ -738,6 +745,7 @@ class NativeAgentLoop(EventEmitter):
         max_steps: int | None = None,
         resume_session_id: str | None = None,
         message_history: list[dict[str, str]] | None = None,
+        extra_system_context: str | None = None,
     ) -> CompletionTrace:
         """Execute the agent loop for a given goal.
 
@@ -760,6 +768,22 @@ class NativeAgentLoop(EventEmitter):
         self._running = True
         self._cancel_event.clear()
         self._reset_run_state()
+        self._replay_capture = None
+        # T1-1: record the pre-task git ref now (before the agent
+        # mutates the tree) so a distilled skill can later be A/B'd by replay.
+        # Gated by skills.capture_replay; best-effort, never blocks the run.
+        if self._auto_skill:
+            try:
+                from rune.config import get_config
+                if getattr(get_config().skills, "capture_replay", False):
+                    from rune.skills.capture import capture_head_ref
+                    _cwd = os.getcwd()
+                    _ref = capture_head_ref(_cwd)
+                    if _ref:
+                        self._replay_capture = {"goal": goal, "cwd": _cwd,
+                                                "head": _ref}
+            except Exception as exc:
+                log.debug("replay_capture_start_failed", error=str(exc)[:120])
         max_iterations = max_steps or self._config.max_iterations
         self._requirement_gate_obj = (
             RequirementGate(goal) if requirement_gate_enabled() else None
@@ -910,6 +934,11 @@ class NativeAgentLoop(EventEmitter):
 
             # Step 3: Build system prompt + provider supplement
             system_prompt = self._build_system_prompt(goal, classification, context)
+            # Caller-supplied supplement (used by paired skill replay to inject a
+            # specific skill into the "with" arm deterministically). Neutral when
+            # unset.
+            if extra_system_context:
+                system_prompt = f"{system_prompt}\n\n{extra_system_context}"
             try:
                 from rune.agent.provider_capabilities import get_prompt_supplement
                 _model_id = getattr(self._config, "model", "") or ""
@@ -960,7 +989,14 @@ class NativeAgentLoop(EventEmitter):
             # (flag-gated). maybe_generate_skill's quality gate requires reason
             # completed/verified, so a failed run produces nothing.
             if self._auto_skill and self._tool_trace:
-                await self._maybe_distill_skill(goal, trace)
+                _distilled = await self._maybe_distill_skill(goal, trace)
+                # T1-1: capture this run as a replayable corpus task
+                # for the freshly distilled skill (gated; closes the loop).
+                self._maybe_capture_replay(_distilled)
+
+            # T1-1: record whether an injected skill coincided with a verified
+            # run (observational baseline). Logging only — never affects the run.
+            self._log_skill_outcome(trace)
 
             return trace
 
@@ -1013,7 +1049,7 @@ class NativeAgentLoop(EventEmitter):
 
         return disabled
 
-    async def _maybe_distill_skill(self, goal: str, trace: Any) -> None:
+    async def _maybe_distill_skill(self, goal: str, trace: Any) -> str | None:
         """Distil this run's tool trace into a skill (best-effort).
 
         Gated upstream by ``self._auto_skill``. ``maybe_generate_skill`` applies
@@ -1032,8 +1068,58 @@ class NativeAgentLoop(EventEmitter):
                     steps=len(skill.get("steps", [])),
                     quality=skill.get("quality_score"),
                 )
+                return skill.get("name")
         except Exception as exc:
             log.debug("auto_skill_distill_failed", error=str(exc)[:120])
+        return None
+
+    def _maybe_capture_replay(self, skill_name: str | None) -> None:
+        """Snapshot the pre-task workspace for a distilled skill (T1-1 1b).
+
+        Closes the gated-learning loop: a skill distilled this run becomes a
+        replayable corpus task (pre-task git ref + project check) so it can be
+        A/B'd offline before being trusted. Best-effort; gated upstream by
+        capture_replay (self._replay_capture is None when off).
+        """
+        if not skill_name or self._replay_capture is None:
+            return
+        try:
+            from rune.memory.store import get_memory_store
+            from rune.skills.capture import capture_replay_snapshot
+            cap = self._replay_capture
+            capture_replay_snapshot(
+                cap["goal"], skill_name,
+                store=get_memory_store(), cwd=cap["cwd"], head_ref=cap["head"],
+            )
+        except Exception as exc:
+            log.debug("replay_capture_end_failed", error=str(exc)[:120])
+
+    def _log_skill_outcome(self, trace: Any) -> None:
+        """Record an injected skill's run outcome (T1-1, observational).
+
+        Pure measurement: writes one ``arm="with"`` row tying the injected skill
+        to whether the run verified, building the base success rate the
+        evaluator compares a control arm against. Best-effort; never raises into
+        the run.
+        """
+        if self._injected_skill is None:
+            return
+        name, score = self._injected_skill
+        verified = getattr(trace, "reason", "") in ("completed", "verified")
+        try:
+            from rune.memory.store import get_memory_store
+            get_memory_store().log_skill_eval(
+                name,
+                verified=verified,
+                session_id=self._session_id or "",
+                arm="with",
+                match_score=score,
+                duration_ms=getattr(trace, "duration_ms", 0) or 0,
+                tokens=self._token_budget.used,
+            )
+            log.info("skill_outcome_logged", skill=name, verified=verified)
+        except Exception as exc:
+            log.debug("skill_outcome_log_failed", error=str(exc)[:120])
 
     def _build_skill_context(self, goal: str, goal_category: str) -> str | None:
         """Retrieve a matching learned skill to inject (flag-gated, best-effort)."""
@@ -1041,8 +1127,19 @@ class NativeAgentLoop(EventEmitter):
             return None
         try:
             from rune.skills.executor import build_skill_context_for_goal
-            ctx = build_skill_context_for_goal(goal)
-            return ctx.formatted_context if ctx else None
+            gated = False
+            try:
+                from rune.config import get_config
+                gated = bool(getattr(get_config().skills, "gated_learning", False))
+            except Exception:
+                gated = False
+            ctx = build_skill_context_for_goal(goal, gated=gated)
+            if ctx is None:
+                return None
+            # T1-1: remember which skill was injected so its outcome can be
+            # logged when the run finishes (observational arm).
+            self._injected_skill = (ctx.active_skill_name, 0.0)
+            return ctx.formatted_context
         except Exception:
             return None
 

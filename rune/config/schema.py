@@ -234,6 +234,21 @@ class SkillsConfig(BaseModel):
 
     auto_skill: bool = Field(default=False, alias="autoSkill")
 
+    # Gated Skill Learning (T1-1). When on, a distilled skill stays a
+    # CANDIDATE and is only injected once measured to raise the verified rate;
+    # regressions auto-deprecate. Default off → behaviour identical to plain
+    # auto_skill.
+    gated_learning: bool = Field(default=False, alias="gatedLearning")
+    # Promotion thresholds (Bayesian decision rule, §4.4).
+    eval_delta_min: float = Field(default=0.05, alias="evalDeltaMin")
+    eval_prob_threshold: float = Field(default=0.95, alias="evalProbThreshold")
+    eval_min_samples_paired: int = Field(default=12, alias="evalMinSamplesPaired")
+    eval_min_samples_online: int = Field(default=40, alias="evalMinSamplesOnline")
+    # Capture reproducible tasks (workspace snapshot + check) for offline paired
+    # replay. Default off — snapshotting has storage cost.
+    capture_replay: bool = Field(default=False, alias="captureReplay")
+    eval_max_pairs: int = Field(default=20, alias="evalMaxPairs")
+
 
 class RuneConfig(BaseModel):
     """Root configuration schema for RUNE."""
