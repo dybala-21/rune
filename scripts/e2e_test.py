@@ -471,14 +471,12 @@ class E2EHarness:
                     )
 
                 elif vtype == "file_exists":
-                    path = check.get("path", "")
-                    full = os.path.join(self.tmpdir, "workspace", path)
-                    exists = os.path.exists(full)
-                    results.append(
-                        VerifyResult(
-                            type=vtype, passed=exists, detail=path
-                        )
-                    )
+                    raw = check.get("path", "")
+                    full = (raw.replace("{workspace}", self.workspace)
+                            if "{workspace}" in raw
+                            else os.path.join(self.workspace, raw))
+                    results.append(VerifyResult(
+                        type=vtype, passed=os.path.exists(full), detail=full))
 
                 elif vtype == "answer_contains":
                     expect = check.get("expect", "")
@@ -491,6 +489,12 @@ class E2EHarness:
                             actual=self._last_answer[:100],
                         )
                     )
+
+                elif vtype == "answer_contains_any":
+                    opts = check.get("expect_any", [])
+                    results.append(VerifyResult(type=vtype,
+                        passed=any(o in self._last_answer for o in opts),
+                        expected=f"ANY {opts}", actual=self._last_answer[:100]))
 
                 elif vtype == "answer_not_contains":
                     expect = check.get("expect", "")

@@ -301,6 +301,37 @@ CREATE TABLE IF NOT EXISTS advisor_events (
     post_call_evidence INTEGER DEFAULT 0
 );
 
+-- Gated Skill Learning (T1-1): record of skill injection outcomes.
+-- Observational rows log (skill present? -> run verified?) per run; paired
+-- replay adds the control arm to compute a causal success-lift.
+CREATE TABLE IF NOT EXISTS skill_evals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    skill_name TEXT NOT NULL,
+    session_id TEXT NOT NULL DEFAULT '',
+    eval_mode TEXT NOT NULL DEFAULT 'observational',
+    arm TEXT NOT NULL DEFAULT 'with',  -- with | without
+    pair_id TEXT DEFAULT '',           -- links the two arms of a paired replay
+    task_intent TEXT DEFAULT '',
+    verified INTEGER NOT NULL DEFAULT 0,
+    match_score REAL DEFAULT 0.0,
+    duration_ms INTEGER DEFAULT 0,
+    tokens INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Replay corpus (T1-1): reproducible tasks used to A/B a skill
+-- offline. Each row is (goal, a materialisable workspace ref, a deterministic
+-- check) so the paired replay runner can re-run it with and without the skill.
+CREATE TABLE IF NOT EXISTS replay_corpus (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    skill_name TEXT NOT NULL DEFAULT '',
+    goal TEXT NOT NULL,
+    workspace_ref TEXT NOT NULL DEFAULT '',
+    check_cmd TEXT NOT NULL DEFAULT '',
+    task_intent TEXT DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_episodes_timestamp ON episodes(timestamp);
 CREATE INDEX IF NOT EXISTS idx_episodes_conversation ON episodes(conversation_id);
@@ -313,12 +344,14 @@ CREATE INDEX IF NOT EXISTS idx_proactive_conv_records_user ON proactive_conversa
 CREATE INDEX IF NOT EXISTS idx_advisor_events_session ON advisor_events(session_id);
 CREATE INDEX IF NOT EXISTS idx_advisor_events_trigger ON advisor_events(trigger);
 CREATE INDEX IF NOT EXISTS idx_advisor_events_created ON advisor_events(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_skill_evals_name ON skill_evals(skill_name, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_replay_corpus_skill ON replay_corpus(skill_name);
 """
 
 
 # MemoryStore
 
-_CURRENT_SCHEMA_VERSION = 10
+_CURRENT_SCHEMA_VERSION = 11
 
 
 class MemoryStore:
@@ -495,6 +528,41 @@ class MemoryStore:
                     conn.execute(stmt)
                 except apsw.SQLError:
                     pass  # Column already exists
+
+        if current_version < 11:
+            # Gated Skill Learning (T1-1): skill injection outcome log.
+            # Table itself is created idempotently by _SCHEMA_SQL; this block
+            # exists so the version bump is explicit and auditable.
+            try:
+                conn.execute(
+                    """CREATE TABLE IF NOT EXISTS skill_evals (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        skill_name TEXT NOT NULL,
+                        session_id TEXT NOT NULL DEFAULT '',
+                        eval_mode TEXT NOT NULL DEFAULT 'observational',
+                        arm TEXT NOT NULL DEFAULT 'with',
+                        pair_id TEXT DEFAULT '',
+                        task_intent TEXT DEFAULT '',
+                        verified INTEGER NOT NULL DEFAULT 0,
+                        match_score REAL DEFAULT 0.0,
+                        duration_ms INTEGER DEFAULT 0,
+                        tokens INTEGER DEFAULT 0,
+                        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                    )"""
+                )
+                conn.execute(
+                    """CREATE TABLE IF NOT EXISTS replay_corpus (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        skill_name TEXT NOT NULL DEFAULT '',
+                        goal TEXT NOT NULL,
+                        workspace_ref TEXT NOT NULL DEFAULT '',
+                        check_cmd TEXT NOT NULL DEFAULT '',
+                        task_intent TEXT DEFAULT '',
+                        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                    )"""
+                )
+            except apsw.SQLError:
+                pass  # Table already exists
 
         conn.execute(f"PRAGMA user_version = {_CURRENT_SCHEMA_VERSION}")
         log.info(
@@ -1414,6 +1482,139 @@ class MemoryStore:
                 (cutoff,),
             )
         return cnt
+
+    # Gated Skill Learning (T1-1)
+
+    def log_skill_eval(
+        self,
+        skill_name: str,
+        *,
+        verified: bool,
+        session_id: str = "",
+        eval_mode: str = "observational",
+        arm: str = "with",
+        pair_id: str = "",
+        task_intent: str = "",
+        match_score: float = 0.0,
+        duration_ms: float = 0.0,
+        tokens: int = 0,
+    ) -> None:
+        """Record one skill-injection outcome.
+
+        Observational rows log that a skill was present in a run and whether the
+        run verified. Paired replay writes two rows per task sharing a
+        ``pair_id`` — ``arm="with"`` and ``arm="without"`` — so a causal
+        success-lift can be computed.
+        """
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            """INSERT INTO skill_evals
+               (skill_name, session_id, eval_mode, arm, pair_id, task_intent,
+                verified, match_score, duration_ms, tokens, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                skill_name, session_id, eval_mode, arm, pair_id,
+                task_intent[:200],
+                int(verified), match_score, duration_ms, int(tokens), now,
+            ),
+        )
+
+    def get_skill_paired_counts(self, skill_name: str) -> dict[str, int]:
+        """Return McNemar discordant counts over paired replay rows.
+
+        Pairs share a ``pair_id`` and have one ``with`` and one ``without`` row.
+        Returns ``{"b", "c", "n"}`` where ``b`` = with✓/without✗ (skill helped),
+        ``c`` = with✗/without✓ (skill hurt), ``n`` = complete pairs.
+        """
+        rows = self.conn.execute(
+            """SELECT pair_id,
+                      MAX(CASE WHEN arm='with' THEN verified END),
+                      MAX(CASE WHEN arm='without' THEN verified END)
+               FROM skill_evals
+               WHERE skill_name = ? AND pair_id != '' AND eval_mode LIKE 'offline%'
+               GROUP BY pair_id
+               HAVING COUNT(DISTINCT arm) = 2""",
+            (skill_name,),
+        )
+        b = c = n = 0
+        for _pid, with_v, without_v in rows:
+            n += 1
+            if with_v and not without_v:
+                b += 1
+            elif not with_v and without_v:
+                c += 1
+        return {"b": b, "c": c, "n": n}
+
+    def get_skill_eval_summary(self, skill_name: str) -> dict[str, Any]:
+        """Return per-arm trial/success counts for a skill.
+
+        Returns ``{"with_n", "with_s", "without_n", "without_s"}``. The naive
+        observed lift is ``with_s/with_n - without_s/without_n``; rigorous
+        posterior-based promotion is computed by the evaluator (Phase 1).
+        """
+        rows = self.conn.execute(
+            """SELECT arm, COUNT(*), SUM(verified)
+               FROM skill_evals WHERE skill_name = ? GROUP BY arm""",
+            (skill_name,),
+        )
+        out = {"with_n": 0, "with_s": 0, "without_n": 0, "without_s": 0}
+        for arm, n, s in rows:
+            if arm == "with":
+                out["with_n"], out["with_s"] = int(n), int(s or 0)
+            elif arm == "without":
+                out["without_n"], out["without_s"] = int(n), int(s or 0)
+        return out
+
+    def prune_skill_evals(self, max_age_days: int = 30) -> int:
+        cutoff = datetime.fromtimestamp(
+            time.time() - max_age_days * 86400, tz=UTC,
+        ).isoformat()
+        (cnt,) = self.conn.execute(
+            "SELECT COUNT(*) FROM skill_evals WHERE created_at < ?",
+            (cutoff,),
+        ).fetchone()
+        if cnt > 0:
+            self.conn.execute(
+                "DELETE FROM skill_evals WHERE created_at < ?",
+                (cutoff,),
+            )
+        return cnt
+
+    def add_replay_task(
+        self,
+        *,
+        skill_name: str,
+        goal: str,
+        workspace_ref: str = "",
+        check_cmd: str = "",
+        task_intent: str = "",
+    ) -> None:
+        """Record a reproducible task for offline paired replay."""
+        now = datetime.now(UTC).isoformat()
+        self.conn.execute(
+            """INSERT INTO replay_corpus
+               (skill_name, goal, workspace_ref, check_cmd, task_intent, created_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (skill_name, goal, workspace_ref, check_cmd, task_intent[:200], now),
+        )
+
+    def get_replay_tasks_for_skill(
+        self, skill_name: str, limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return replay-corpus tasks tagged for *skill_name*."""
+        rows = self.conn.execute(
+            """SELECT id, skill_name, goal, workspace_ref, check_cmd, task_intent
+               FROM replay_corpus WHERE skill_name = ?
+               ORDER BY created_at DESC LIMIT ?""",
+            (skill_name, limit),
+        )
+        return [
+            {
+                "id": r[0], "skill_name": r[1], "goal": r[2],
+                "workspace_ref": r[3], "check_cmd": r[4], "task_intent": r[5],
+            }
+            for r in rows
+        ]
 
     # Advisor events (Tier 2)
 
