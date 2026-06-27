@@ -1116,6 +1116,68 @@ async def refine_skill_steps(
         return steps
 
 
+_STRATEGIC_BODY_MAX_TOKENS = 700
+
+
+def _build_strategic_skill_prompt(
+    goal: str, steps: list[dict[str, Any]], pattern: str
+) -> str:
+    """Prompt to distil a tool trace into a REUSABLE, generalised procedure.
+
+    The pattern-extracted body is a verbatim transcript of one run (concrete
+    filenames + code), which an LLM agent gains nothing from — it already knows
+    how to call tools. This asks for the strategy (why each step, decision
+    points), generalised away from the specific values, so a future SIMILAR
+    task can actually follow it.
+    """
+    tool_seq = " -> ".join(s.get("tool", "?") for s in steps)
+    return (
+        "Distil a REUSABLE procedure from one successful agent run so a future "
+        "agent facing a SIMILAR (not identical) task can follow it.\n\n"
+        f"Original goal: {goal}\n"
+        f"Tool sequence used: {tool_seq}\n\n"
+        "Write a short skill in markdown with EXACTLY these sections:\n"
+        "## When to use\n"
+        "one line naming the CLASS of task (generalise — do NOT name the specific "
+        "file or value from this run)\n"
+        "## Procedure\n"
+        "numbered steps; for each give the tool AND the reason/decision (e.g. "
+        "'read the target file first to locate the change site'); refer to inputs "
+        "generically like <target_file>, never the concrete value from this run\n"
+        "## Verify\n"
+        "how to confirm success (e.g. run the tests)\n\n"
+        "Generalise away ALL concrete values, filenames and code from the run. "
+        "No preamble. Under 150 words."
+    )
+
+
+async def _synthesize_strategic_body(
+    goal: str,
+    steps: list[dict[str, Any]],
+    pattern: str,
+    refiner: LLMRefiner | None,
+) -> str | None:
+    """Return a generalised strategy body, or None to fall back to the template.
+
+    Default-off: only runs when a refiner is wired (auto-skill path). Keeps the
+    executable ``steps`` template in metadata for the replay evaluator; this only
+    replaces the human/LLM-readable BODY that gets injected into the prompt.
+    """
+    if refiner is None or not steps:
+        return None
+    try:
+        prompt = _build_strategic_skill_prompt(goal, steps, pattern)
+        raw = await refiner.refine(prompt, max_tokens=_STRATEGIC_BODY_MAX_TOKENS)
+        text = (raw or "").strip()
+        # Guard: must look like the asked-for procedure, not an echo/empty reply.
+        if len(text) >= 40 and "## Procedure" in text:
+            return text
+        log.debug("strategic_skill_body_rejected", length=len(text))
+    except Exception as exc:
+        log.warning("strategic_skill_body_failed", error=str(exc)[:120])
+    return None
+
+
 async def maybe_generate_skill(
     goal: str,
     result: Any,
@@ -1163,15 +1225,24 @@ async def maybe_generate_skill(
         )
         template["steps"] = refined_steps
 
-        # Build a Skill body that encodes the steps as structured YAML-like
-        # markdown so it can be rendered by the skill runner.
-        body_lines: list[str] = [f"# Auto-generated skill: {skill_name}", ""]
-        for idx, step in enumerate(template["steps"], 1):
-            body_lines.append(f"## Step {idx}: {step['tool']}")
-            for pkey, pval in step["params_template"].items():
-                body_lines.append(f"- {pkey}: {pval}")
-            body_lines.append("")
-        body = "\n".join(body_lines)
+        # Preferred body: an LLM-distilled REUSABLE procedure (strategy + why),
+        # generalised away from this run's concrete values — what an agent can
+        # actually transfer to a similar task. Falls back to the structured
+        # step transcript below when no refiner is wired or synthesis fails.
+        strategic_body = await _synthesize_strategic_body(
+            goal, template["steps"], template["pattern"], refiner,
+        )
+        if strategic_body:
+            body = f"# Skill: {template['description']}\n\n{strategic_body}"
+        else:
+            # Fallback: encode the steps as structured markdown.
+            body_lines: list[str] = [f"# Auto-generated skill: {skill_name}", ""]
+            for idx, step in enumerate(template["steps"], 1):
+                body_lines.append(f"## Step {idx}: {step['tool']}")
+                for pkey, pval in step["params_template"].items():
+                    body_lines.append(f"- {pkey}: {pval}")
+                body_lines.append("")
+            body = "\n".join(body_lines)
 
         skill = Skill(
             name=skill_name,
@@ -1208,12 +1279,21 @@ async def maybe_generate_skill(
                 pattern=template["pattern"],
                 steps=len(template["steps"]),
             )
-            # Gated learning persists the CANDIDATE to disk so the daemon (a
-            # separate process) can pick it up for evaluation. Without gating,
-            # skills stay in-memory/session-scoped as before (behaviour-neutral).
+            # Persist the distilled skill to disk so a FUTURE session can reuse
+            # it. The point of distillation is cross-session reuse, but a skill
+            # registered only in-memory dies with this one-shot process — which
+            # is precisely why auto-skill showed no cross-session lift. The
+            # registry loads SKILL.md files on startup, so persisting here closes
+            # the loop (a later run matches + injects it). We persist whenever
+            # skill learning is on in EITHER mode: gated_learning (the daemon
+            # evaluates the candidate) or plain auto_skill (candidates inject
+            # directly). Default-off config means tests/normal runs write nothing.
             try:
                 from rune.config import get_config
-                if getattr(get_config().skills, "gated_learning", False):
+                skills_cfg = get_config().skills
+                if getattr(skills_cfg, "gated_learning", False) or getattr(
+                    skills_cfg, "auto_skill", False
+                ):
                     from rune.skills.persistence import write_skill_to_disk
                     write_skill_to_disk(skill)
             except Exception as exc:

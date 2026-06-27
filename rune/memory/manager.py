@@ -111,6 +111,86 @@ def _rank_durable_facts(
     return out
 
 
+# Max failed episodes injected as anti-examples. Bounded so a loop/retry on the
+# same failing goal can't accumulate a wall of ⚠️ entries (negative-reinforcement
+# spiral) — the original code injected EVERY negative-utility episode in scope.
+_MAX_ANTI_EXAMPLES = 2
+
+
+def _episode_key(ep: Any) -> str:
+    """Stable identity for supersession matching (intent if present, else summary)."""
+    return (getattr(ep, "intent", "") or getattr(ep, "task_summary", "") or "").strip().lower()[:80]
+
+
+def _actionable_lesson(ep: Any) -> str:
+    """Return a clean, actionable lesson for an episode, or "" if it has none.
+
+    A bare failure ("this goal failed", no reason) is noise — injecting it only
+    discourages. RUNE's own save-time telemetry ("Task failed: ...", "Success:
+    domain=...") is likewise not actionable. Only a real lesson makes a failed
+    episode worth surfacing as an anti-example.
+    """
+    raw = (getattr(ep, "lessons", "") or "").strip()
+    if not raw:
+        return ""
+
+    def _mechanical(s: str) -> bool:
+        head = s.lstrip()[:16].lower()
+        return head.startswith("task failed:") or head.startswith("success: domain=")
+
+    try:
+        from rune.utils.fast_serde import json_decode
+        decoded = json_decode(raw)
+        if isinstance(decoded, list):
+            parts = [str(x).strip() for x in decoded if str(x).strip() and not _mechanical(str(x))]
+            return "; ".join(parts)[:200]
+    except Exception:
+        pass
+    return "" if _mechanical(raw) else raw[:200]
+
+
+def _select_experience_lines(scored: list[dict[str, Any]]) -> list[str]:
+    """Build the "## Past Experience" lines, using failures as a SIGNAL not POISON.
+
+    Three guards turn the old "inject every negative-utility summary" behavior
+    (a documented poisoning spiral) into genuine anti-example learning that
+    still beats simply hiding failures (which throws the signal away):
+      1. Supersession — a failure whose task was ALSO succeeded (same key, in the
+         relevant set) is dropped; you have a working approach now, so the old
+         failure is stale poison, not a lesson.
+      2. Actionability — a failure with no real lesson is dropped (bare "it
+         failed" only discourages); survivors carry their lesson inline.
+      3. Cap — at most ``_MAX_ANTI_EXAMPLES``, most-recent first, so a retry loop
+         can't pile up a wall of warnings.
+    """
+    successes = [e for e in scored if getattr(e["episode"], "utility", 0) > 0]
+    failures = [e for e in scored if getattr(e["episode"], "utility", 0) < 0]
+    succeeded_keys = {_episode_key(e["episode"]) for e in successes}
+
+    anti: list[tuple[Any, str]] = []
+    for e in failures:
+        ep = e["episode"]
+        if _episode_key(ep) in succeeded_keys:  # later/also succeeded → not a lesson
+            continue
+        lesson = _actionable_lesson(ep)
+        if not lesson:  # bare failure = noise
+            continue
+        anti.append((ep, lesson))
+    # most recent / important first, then cap
+    anti.sort(key=lambda t: (getattr(t[0], "timestamp", "") or "", getattr(t[0], "importance", 0.0)), reverse=True)
+    anti = anti[:_MAX_ANTI_EXAMPLES]
+
+    lines: list[str] = []
+    for e in successes:
+        ep = e["episode"]
+        lines.append(f"- ✅ {ep.task_summary or '(no summary)'} (utility: +{ep.utility})")
+    for ep, lesson in anti:
+        lines.append(
+            f"- ⚠️ {ep.task_summary or '(no summary)'} — previously failed; avoid repeating: {lesson}"
+        )
+    return lines
+
+
 class MemoryManager:
     """Orchestrates memory subsystems: store, vectors, working memory."""
 
@@ -524,17 +604,10 @@ class MemoryManager:
                 pass
 
         if scored:
-            # Keep score_episodes relevance order; utility is for labeling only
-            lines: list[str] = []
-            for entry in scored:
-                ep: Episode = entry["episode"]
-                summary = ep.task_summary or "(no summary)"
-                u = getattr(ep, "utility", 0)
-                if u > 0:
-                    lines.append(f"- ✅ {summary} (utility: +{u})")
-                elif u < 0:
-                    lines.append(f"- ⚠️ {summary} (utility: {u})")
-                # utility=0 episodes are neutral, skip them
+            # Failures are kept as ANTI-EXAMPLES, but guarded against the
+            # poisoning spiral (superseded-by-success dropped, bare failures
+            # dropped, capped). See _select_experience_lines.
+            lines = _select_experience_lines(scored)
             if lines:
                 _add_section("## Past Experience (auto-learned)\n" + "\n".join(lines) + "\n")
 

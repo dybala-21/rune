@@ -104,6 +104,35 @@ def _auto_skill_enabled() -> bool:
     except Exception:
         return False
 
+
+class _FastSkillRefiner:
+    """LLMRefiner that distils a skill body via the FAST tier.
+
+    Only used on the auto-skill path (default-off). The skill body is guidance,
+    not correctness-bearing, so the cheapest tier is appropriate. Failures fall
+    back to the deterministic step transcript inside maybe_generate_skill.
+    """
+
+    async def refine(self, prompt: str, max_tokens: int = 600) -> str:
+        from rune.llm.client import get_llm_client
+        from rune.types import ModelTier
+
+        resp = await get_llm_client().completion(
+            messages=[{"role": "user", "content": prompt}],
+            tier=ModelTier.FAST,
+            max_tokens=max_tokens,
+        )
+        if isinstance(resp, dict):
+            choices = resp.get("choices") or []
+            if choices:
+                return choices[0].get("message", {}).get("content", "") or ""
+            return ""
+        try:
+            return resp.choices[0].message.content or ""
+        except (AttributeError, IndexError):
+            return ""
+
+
 # Turn-atomic grouping — shared implementation in message_utils
 from rune.agent.message_utils import (
     group_into_turns as _group_into_turns,
@@ -1060,6 +1089,7 @@ class NativeAgentLoop(EventEmitter):
             from rune.agent.memory_bridge import maybe_generate_skill
             skill = await maybe_generate_skill(
                 goal=goal, result=trace, intent=None, trace=self._tool_trace,
+                refiner=_FastSkillRefiner(),
             )
             if skill:
                 log.info(

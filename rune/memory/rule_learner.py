@@ -14,7 +14,7 @@ import hashlib
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from rune.memory.markdown_store import save_learned_fact
+from rune.memory.markdown_store import remove_learned_fact, save_learned_fact
 from rune.memory.state import (
     load_fact_meta,
     load_suppressed,
@@ -200,20 +200,80 @@ async def generate_rule_from_failure(
         return None
 
 
+def _rule_keys(meta: dict[str, Any]) -> list[str]:
+    return [k for k in meta if k.startswith(_RULE_CATEGORY_PREFIX)]
+
+
+def _rule_strength(entry: dict[str, Any]) -> tuple[int, float, str]:
+    """Sort key for how worth-keeping a rule is (higher == keep).
+
+    Engagement first (``eval_count`` — outcomes that actually exercised the
+    rule; ``hit_count`` is never bumped for rules so it's a dead signal), then
+    confidence, then age (older kept as tie-break recency proxy via created_at).
+    """
+    return (
+        entry.get("eval_count", 0) or 0,
+        entry.get("confidence", 0.0) or 0.0,
+        entry.get("created_at", "") or "",
+    )
+
+
+def _evict_weakest_rule(meta: dict[str, Any], incoming_confidence: float) -> str | None:
+    """Free one cap slot by deleting the single weakest UNPROVEN rule.
+
+    The soft cap previously hard-froze all learning once reached: nothing ever
+    decrements the rule count (GC only lowered confidence, never deleted), so a
+    saturated set of never-engaged rules blocked every future failure-rule for
+    good. This converts that freeze into a self-maintaining bounded set.
+
+    Deterministic and conservative — unlike an LLM compaction pass it cannot
+    hallucinate or drop a proven rule: a rule is evictable ONLY if it has never
+    been exercised by an outcome (``eval_count == 0``) AND its confidence is no
+    higher than the incoming rule's. Any rule that earned engagement or higher
+    confidence is protected. Returns the evicted rule_key, or None when every
+    rule is proven/stronger (the cap then legitimately holds). Mutates ``meta``
+    in place; the caller persists it.
+    """
+    keys = _rule_keys(meta)
+    if not keys:
+        return None
+    weakest = min(keys, key=lambda k: _rule_strength(meta[k]))
+    e = meta[weakest]
+    if (e.get("eval_count", 0) or 0) == 0 and (e.get("confidence", 0.0) or 0.0) <= incoming_confidence:
+        human_key = e.get("human_key") or weakest.split(":", 2)[-1]
+        try:
+            remove_learned_fact(human_key)
+        except Exception:  # learned.md line may already be gone
+            pass
+        del meta[weakest]
+        # Persist the removal NOW: update_fact_meta() (called when the new rule
+        # is saved) reloads fact-meta.json from disk, so an un-persisted eviction
+        # would silently resurrect.
+        save_fact_meta(meta)
+        log.info(
+            "rule_evicted",
+            key=weakest,
+            confidence=e.get("confidence"),
+            reason="cap_make_room",
+        )
+        return weakest
+    return None
+
+
+def _ensure_rule_capacity(meta: dict[str, Any], incoming_confidence: float) -> bool:
+    """True if there is room for one more rule, evicting a dead rule if needed."""
+    if sum(1 for k in meta if k.startswith(_RULE_CATEGORY_PREFIX)) < _SOFT_CAP:
+        return True
+    return _evict_weakest_rule(meta, incoming_confidence) is not None
+
+
 async def learn_from_failures(store: Any, domain: str = "code_modify") -> list[str]:
     """Main entry point: find repeated failures and generate rules.
 
     Called after a task completes with utility=-1.
     Returns list of newly created rule keys.
     """
-    # Check soft cap
     meta = load_fact_meta()
-    existing_rules = sum(
-        1 for k in meta if k.startswith(_RULE_CATEGORY_PREFIX)
-    )
-    if existing_rules >= _SOFT_CAP:
-        log.debug("rule_learner_cap_reached", count=existing_rules)
-        return []
 
     # Check suppressed rules
     suppressed = load_suppressed()
@@ -233,6 +293,12 @@ async def learn_from_failures(store: Any, domain: str = "code_modify") -> list[s
             continue
         if rule_key in suppressed:
             continue
+
+        # Make room at the soft cap (evict a dead rule) BEFORE spending an LLM
+        # call; if every rule is proven, the cap holds and we stop.
+        if not _ensure_rule_capacity(meta, _INITIAL_CONFIDENCE):
+            log.debug("rule_learner_cap_reached", count=len(_rule_keys(meta)))
+            break
 
         # Generate rule via LLM
         rule_text = await generate_rule_from_failure(
@@ -261,7 +327,7 @@ async def learn_from_failures(store: Any, domain: str = "code_modify") -> list[s
         )
 
         # Save metadata
-        update_fact_meta(rule_key, {
+        rule_meta = {
             "confidence": _INITIAL_CONFIDENCE,
             "hit_count": 0,
             "eval_count": 0,
@@ -271,7 +337,11 @@ async def learn_from_failures(store: Any, domain: str = "code_modify") -> list[s
             "failure_count": pattern["count"],
             "human_key": key_part,
             "category": f"rule:{domain}",
-        })
+        }
+        update_fact_meta(rule_key, rule_meta)
+        # Mirror into the local snapshot so cap counting / eviction stay correct
+        # across multiple patterns in this same call.
+        meta[rule_key] = rule_meta
 
         new_rules.append(key_part)
         log.info(
@@ -340,14 +410,17 @@ async def learn_from_crisp_failure(
         return None
 
     meta = load_fact_meta()
-    existing_rules = sum(1 for k in meta if k.startswith(_RULE_CATEGORY_PREFIX))
-    if existing_rules >= _SOFT_CAP:
-        log.debug("crisp_rule_cap_reached", count=existing_rules)
-        return None
 
     sig = _error_signature(tool_name, error_message)
     rule_key = f"{_RULE_CATEGORY_PREFIX}{domain}:{sig}"
     if rule_key in meta or rule_key in load_suppressed():
+        return None
+
+    # A crisp rule is usable immediately (starts at the injection threshold), so
+    # it deserves a slot even at the cap: evict a dead rule to make room. If
+    # every existing rule is proven/stronger, the cap holds.
+    if not _ensure_rule_capacity(meta, _CRISP_INITIAL_CONFIDENCE):
+        log.debug("crisp_rule_cap_reached", count=len(_rule_keys(meta)))
         return None
 
     rule_text = await generate_rule_from_failure(
@@ -593,20 +666,27 @@ def update_rules_from_outcome(
 
 
 def decay_unused_rules() -> int:
-    """Decay confidence of rules with hit_count=0 and older than 30 days.
+    """Decay confidence of never-engaged rules older than 30 days, and DELETE
+    any that decay below the GC threshold.
 
-    Returns number of rules decayed.
+    Returns number of rules decayed or collected. Previously a rule that fell
+    below ``_GC_THRESHOLD`` was only logged ("rule_gc") and left in place at low
+    confidence — so it never re-entered injection yet still occupied a soft-cap
+    slot forever. Now it is removed from both fact-meta and learned.md, so the
+    rule set genuinely frees capacity over time (the on-demand counterpart is
+    ``_evict_weakest_rule`` at the cap).
     """
     meta = load_fact_meta()
     now = datetime.now(UTC)
     decayed = 0
+    changed = False
 
     for key, entry in list(meta.items()):
         if not key.startswith(_RULE_CATEGORY_PREFIX):
             continue
         if entry.get("source") not in ("rule_learner", "crisp_failure"):
             continue
-        if entry.get("hit_count", 0) > 0:
+        if entry.get("eval_count", 0) > 0:
             continue
 
         created = entry.get("created_at", "")
@@ -622,13 +702,21 @@ def decay_unused_rules() -> int:
         if age_days >= 30:
             old_conf = entry.get("confidence", _INITIAL_CONFIDENCE)
             new_conf = old_conf * _DECAY_FACTOR
-            entry["confidence"] = new_conf
             decayed += 1
+            changed = True
 
             if new_conf < _GC_THRESHOLD:
-                log.info("rule_gc", key=key, confidence=new_conf)
+                human_key = entry.get("human_key") or key.split(":", 2)[-1]
+                try:
+                    remove_learned_fact(human_key)
+                except Exception:
+                    pass
+                del meta[key]
+                log.info("rule_gc", key=key, confidence=new_conf, action="deleted")
+            else:
+                entry["confidence"] = new_conf
 
-    if decayed:
+    if changed:
         save_fact_meta(meta)
 
     return decayed
