@@ -194,9 +194,9 @@ def _tool_result_event_payload(cap_name: str, result: CapabilityResult) -> dict[
             )
         if result.error:
             payload["error_tail"] = _tail_text(result.error, min(tail_bytes, 2_000))
-            payload["error_tail_truncated"] = (
-                len(result.error.encode("utf-8", errors="replace")) > min(tail_bytes, 2_000)
-            )
+            payload["error_tail_truncated"] = len(
+                result.error.encode("utf-8", errors="replace")
+            ) > min(tail_bytes, 2_000)
     return payload
 
 
@@ -210,8 +210,7 @@ def _failed_tool_nudge(cap_name: str, result: CapabilityResult) -> str:
         parts.append("no output captured")
     return (
         "[SYSTEM] Most recent failed tool result for "
-        f"{cap_name}. Use this concrete failure before retrying or finalizing:\n"
-        + "\n".join(parts)
+        f"{cap_name}. Use this concrete failure before retrying or finalizing:\n" + "\n".join(parts)
     )
 
 
@@ -273,6 +272,7 @@ _PHASE_WINDOWS: dict[str, tuple[int, int]] = {
 
 # Vision Cache (#28)
 
+
 class VisionCache:
     """Cache image summaries to avoid re-processing identical images."""
 
@@ -297,12 +297,14 @@ WindDownPhase = Literal["none", "wrapping", "stopping", "final", "hard_stop"]
 
 # Stall State (ported from TS StallState) - unified, single source (#15)
 
+
 @dataclass(slots=True)
 class StallState:
     """Unified stall tracker - combines loop-level + tool-level tracking.
 
     This is the single source of truth; tool_adapter.py imports from here.
     """
+
     # Loop-level (consecutive/cumulative progress)
     consecutive_no_progress: int = 0
     cumulative_no_progress: int = 0
@@ -340,9 +342,7 @@ class StallState:
 
     def record_error(self, signature: str) -> None:
         """Track a unique error signature."""
-        self.error_signature_counts[signature] = (
-            self.error_signature_counts.get(signature, 0) + 1
-        )
+        self.error_signature_counts[signature] = self.error_signature_counts.get(signature, 0) + 1
 
     @property
     def is_stalled(self) -> bool:
@@ -360,6 +360,7 @@ class StallState:
 
 
 # Token Budget Manager
+
 
 @dataclass(slots=True)
 class TokenBudget:
@@ -402,6 +403,7 @@ class TokenBudget:
 
 
 # Agent Loop
+
 
 class NativeAgentLoop(EventEmitter):
     """Core agent execution loop using PydanticAI.
@@ -498,9 +500,7 @@ class NativeAgentLoop(EventEmitter):
     def tokens_used(self) -> int:
         return self._token_budget.used
 
-    def set_approval_callback(
-        self, cb: Callable[[str, str], Awaitable[bool]] | None
-    ) -> None:
+    def set_approval_callback(self, cb: Callable[[str, str], Awaitable[bool]] | None) -> None:
         """Set the approval callback: (capability, reason) -> approved."""
         self._approval_callback = cb
 
@@ -556,8 +556,7 @@ class NativeAgentLoop(EventEmitter):
             return (
                 "[Completion Gate] A recent tool failed and no later successful "
                 "command cleared it. Fix or explicitly verify the failure before "
-                "finalizing.\n"
-                + self._recent_failed_tool_nudge
+                "finalizing.\n" + self._recent_failed_tool_nudge
             )
         # 2. Evidence Gate: re-verify the produced artifact against the task's
         #    own success criteria before allowing finalization (opt-in).
@@ -599,6 +598,7 @@ class NativeAgentLoop(EventEmitter):
             detect_verify_command,
             run_verify,
         )
+
         cwd = _os.getcwd()
         cmd = detect_test_command(cwd) or detect_verify_command(cwd)
         if not cmd:
@@ -736,11 +736,7 @@ class NativeAgentLoop(EventEmitter):
         (requirement / depth / integrity) and a usable artifact already exists, so
         report a warning rather than a hard failure. Executable tasks keep
         failing: do not ship code whose tests/verification never passed."""
-        return (
-            "max_gate_blocked"
-            if self._requires_execution
-            else "completed_gate_warnings"
-        )
+        return "max_gate_blocked" if self._requires_execution else "completed_gate_warnings"
 
     async def _finalize_gates(
         self, messages: list[Any], blocked_count: int
@@ -800,19 +796,18 @@ class NativeAgentLoop(EventEmitter):
         if self._auto_skill:
             try:
                 from rune.config import get_config
+
                 if getattr(get_config().skills, "capture_replay", False):
                     from rune.skills.capture import capture_head_ref
+
                     _cwd = os.getcwd()
                     _ref = capture_head_ref(_cwd)
                     if _ref:
-                        self._replay_capture = {"goal": goal, "cwd": _cwd,
-                                                "head": _ref}
+                        self._replay_capture = {"goal": goal, "cwd": _cwd, "head": _ref}
             except Exception as exc:
                 log.debug("replay_capture_start_failed", error=str(exc)[:120])
         max_iterations = max_steps or self._config.max_iterations
-        self._requirement_gate_obj = (
-            RequirementGate(goal) if requirement_gate_enabled() else None
-        )
+        self._requirement_gate_obj = RequirementGate(goal) if requirement_gate_enabled() else None
 
         # Checkpoint restoration
         if resume_session_id:
@@ -867,8 +862,10 @@ class NativeAgentLoop(EventEmitter):
             # success criteria before finalizing (benchmark-only, opt-in). Built
             # once here so the LLM check extraction is cached for the run.
             from rune.agent.evidence_gate import EvidenceGate, evidence_gate_enabled
+
             if evidence_gate_enabled():
                 import os as _os
+
                 self._evidence_gate = EvidenceGate(goal, _os.getcwd())
 
             # Mark as continuation only when history exists AND domain hasn't changed
@@ -908,14 +905,16 @@ class NativeAgentLoop(EventEmitter):
                         intent_categories=frozenset({"email", "document"}),
                     )
 
-            log.info("goal_classified", type=classification.goal_type,
-                     confidence=classification.confidence, tier=classification.tier,
-                     is_domain_change=classification.is_domain_change)
+            log.info(
+                "goal_classified",
+                type=classification.goal_type,
+                confidence=classification.confidence,
+                tier=classification.tier,
+                is_domain_change=classification.is_domain_change,
+            )
             await self.emit("goal_classified", classification)
             self._last_goal_type = classification.goal_type
-            self._requires_execution = bool(
-                getattr(classification, "requires_execution", False)
-            )
+            self._requires_execution = bool(getattr(classification, "requires_execution", False))
 
             # Token budget scaling by intent (#24)
             intent_key = classification.goal_type
@@ -930,17 +929,13 @@ class NativeAgentLoop(EventEmitter):
                 "full": "deep_research",
             }
             budget_intent = _goal_to_budget.get(intent_key, "research")
-            self._token_budget.total = _BUDGET_BY_INTENT.get(
-                budget_intent, 500_000
-            )
+            self._token_budget.total = _BUDGET_BY_INTENT.get(budget_intent, 500_000)
             # Optional explicit override (used by /goal for heavy tasks).
             _budget_override = getattr(self._config, "token_budget_override", None)
             if _budget_override:
                 self._token_budget.total = int(_budget_override)
             # Output token scaling by intent (#H5)
-            self._max_output_tokens = _MAX_OUTPUT_TOKENS_BY_INTENT.get(
-                budget_intent, 8_192
-            )
+            self._max_output_tokens = _MAX_OUTPUT_TOKENS_BY_INTENT.get(budget_intent, 8_192)
             log.info(
                 "token_budget_set",
                 intent=budget_intent,
@@ -966,6 +961,7 @@ class NativeAgentLoop(EventEmitter):
                 system_prompt = f"{system_prompt}\n\n{extra_system_context}"
             try:
                 from rune.agent.provider_capabilities import get_prompt_supplement
+
                 _model_id = getattr(self._config, "model", "") or ""
                 supplement = get_prompt_supplement(_model_id)
                 if supplement:
@@ -1054,6 +1050,7 @@ class NativeAgentLoop(EventEmitter):
             case _:
                 # Full toolset for code_modify, execution, browser, full
                 from rune.capabilities.registry import get_capability_registry
+
                 return get_capability_registry().list_names()
 
     def _get_disabled_tools(self) -> set[str]:
@@ -1083,8 +1080,12 @@ class NativeAgentLoop(EventEmitter):
         """
         try:
             from rune.agent.memory_bridge import maybe_generate_skill
+
             skill = await maybe_generate_skill(
-                goal=goal, result=trace, intent=None, trace=self._tool_trace,
+                goal=goal,
+                result=trace,
+                intent=None,
+                trace=self._tool_trace,
                 refiner=_FastSkillRefiner(),
             )
             if skill:
@@ -1112,10 +1113,14 @@ class NativeAgentLoop(EventEmitter):
         try:
             from rune.memory.store import get_memory_store
             from rune.skills.capture import capture_replay_snapshot
+
             cap = self._replay_capture
             capture_replay_snapshot(
-                cap["goal"], skill_name,
-                store=get_memory_store(), cwd=cap["cwd"], head_ref=cap["head"],
+                cap["goal"],
+                skill_name,
+                store=get_memory_store(),
+                cwd=cap["cwd"],
+                head_ref=cap["head"],
             )
         except Exception as exc:
             log.debug("replay_capture_end_failed", error=str(exc)[:120])
@@ -1134,6 +1139,7 @@ class NativeAgentLoop(EventEmitter):
         verified = getattr(trace, "reason", "") in ("completed", "verified")
         try:
             from rune.memory.store import get_memory_store
+
             get_memory_store().log_skill_eval(
                 name,
                 verified=verified,
@@ -1153,9 +1159,11 @@ class NativeAgentLoop(EventEmitter):
             return None
         try:
             from rune.skills.executor import build_skill_context_for_goal
+
             gated = False
             try:
                 from rune.config import get_config
+
                 gated = bool(getattr(get_config().skills, "gated_learning", False))
             except Exception:
                 gated = False
@@ -1178,6 +1186,7 @@ class NativeAgentLoop(EventEmitter):
         """Build the system prompt for the agent using the canonical prompt builder."""
         # Map GoalType → goal_category for prompt assembly
         from rune.config.defaults import TOKEN_OPTIMIZATION_ENABLED
+
         if TOKEN_OPTIMIZATION_ENABLED:
             _CATEGORY_MAP: dict[str, str] = {
                 "code_modify": "code",
@@ -1210,12 +1219,14 @@ class NativeAgentLoop(EventEmitter):
         if goal_category in ("code", "full"):
             try:
                 from rune.intelligence.repo_map import build_repo_map_sync
+
                 repo_map_text = build_repo_map_sync(os.getcwd(), max_tokens=2048)
             except Exception:
                 pass
 
         # Detect connected MCP servers for prompt guide
         from rune.capabilities.registry import get_capability_registry
+
         _reg = get_capability_registry()
         _mcp_caps = [c for c in _reg.list_all() if c.name.startswith("mcp.")]
         _mcp_servers: dict[str, int] = {}
@@ -1333,6 +1344,7 @@ class NativeAgentLoop(EventEmitter):
             if not _ephemeral:
                 try:
                     from rune.memory.store import get_memory_store
+
                     _store = get_memory_store()
                     _sid = self._session_id or "unknown"
                     _err = getattr(result, "error", "") or "" if not result.success else ""
@@ -1351,15 +1363,20 @@ class NativeAgentLoop(EventEmitter):
             if not _ephemeral:
                 try:
                     from rune.proactive.prediction.engine import get_prediction_engine
+
                     pred_eng = get_prediction_engine()
                     if result.success:
-                        pred_eng.behavior_predictor.record_tool_call(_tool_key(cap_name, _last_tool_params))
+                        pred_eng.behavior_predictor.record_tool_call(
+                            _tool_key(cap_name, _last_tool_params)
+                        )
                     # Also record success/failure for frustration detection
-                    pred_eng._recent_actions.append({
-                        "type": "tool",
-                        "tool": cap_name,
-                        "success": result.success,
-                    })
+                    pred_eng._recent_actions.append(
+                        {
+                            "type": "tool",
+                            "tool": cap_name,
+                            "success": result.success,
+                        }
+                    )
                     # Keep bounded
                     if len(pred_eng._recent_actions) > 50:
                         pred_eng._recent_actions = pred_eng._recent_actions[-50:]
@@ -1384,11 +1401,9 @@ class NativeAgentLoop(EventEmitter):
                 # params are available - no duplicate tracking needed here.
                 # R19: track code-file writes for freshness gate
                 if result.success and cap_name != "file_delete":
-                    fp = (
-                        _last_tool_params.get("file_path")
-                        or _last_tool_params.get("path", "")
-                    )
+                    fp = _last_tool_params.get("file_path") or _last_tool_params.get("path", "")
                     from rune.intelligence.ast_analyzer import is_code_extension
+
                     _dot = fp.rfind(".")
                     if fp and _dot >= 0 and is_code_extension(fp[_dot:]):
                         self._tool_call_seq += 1
@@ -1403,6 +1418,7 @@ class NativeAgentLoop(EventEmitter):
                     # R06: count formal verification commands separately
                     cmd = _last_tool_params.get("command", "")
                     from rune.agent.bash_parsing import is_verification_command
+
                     if cmd and is_verification_command(cmd):
                         evidence.verifications += 1
             elif cap_name == "web_search":
@@ -1430,9 +1446,8 @@ class NativeAgentLoop(EventEmitter):
             if _env_flag("RUNE_BENCH_CAPTURE_FAILED_TOOL_OUTPUT"):
                 if not result.success:
                     self._recent_failed_tool_nudge = _failed_tool_nudge(cap_name, result)
-                elif (
-                    self._recent_failed_tool_nudge
-                    and _should_clear_failed_tool_nudge(cap_name, result)
+                elif self._recent_failed_tool_nudge and _should_clear_failed_tool_nudge(
+                    cap_name, result
                 ):
                     self._recent_failed_tool_nudge = ""
 
@@ -1443,13 +1458,16 @@ class NativeAgentLoop(EventEmitter):
             if self._auto_skill and not _ephemeral:
                 try:
                     from rune.agent.memory_bridge import ToolTraceEntry
+
                     if len(self._tool_trace) < 100:  # bound memory
-                        self._tool_trace.append(ToolTraceEntry(
-                            tool_name=cap_name,
-                            params=dict(_last_tool_params or {}),
-                            result_summary=(getattr(result, "output", "") or "")[:200],
-                            success=bool(result.success),
-                        ))
+                        self._tool_trace.append(
+                            ToolTraceEntry(
+                                tool_name=cap_name,
+                                params=dict(_last_tool_params or {}),
+                                result_summary=(getattr(result, "output", "") or "")[:200],
+                                success=bool(result.success),
+                            )
+                        )
                 except Exception:
                     pass  # skill capture must never break the loop
 
@@ -1458,7 +1476,11 @@ class NativeAgentLoop(EventEmitter):
         # Resolve model from failover profile (reads active_provider/active_model from config)
         profile = failover.current_profile
         if profile.provider not in ("none", ""):
-            model = f"{profile.provider}/{profile.model}" if profile.provider != "openai" else profile.model
+            model = (
+                f"{profile.provider}/{profile.model}"
+                if profile.provider != "openai"
+                else profile.model
+            )
         else:
             model = self._config.model
 
@@ -1476,6 +1498,7 @@ class NativeAgentLoop(EventEmitter):
         # Wire ask_user callback if set
         if self._ask_user_callback is not None:
             from rune.capabilities.ask_user import reset_ask_user_count, set_ask_user_callback
+
             set_ask_user_callback(self._ask_user_callback)
             reset_ask_user_count()
 
@@ -1483,6 +1506,7 @@ class NativeAgentLoop(EventEmitter):
         # This prevents non-vision models from wasting tokens on
         # screenshots they cannot interpret.
         from rune.llm.model_capabilities import get_capabilities
+
         _model_name = model.split("/")[-1] if "/" in model else model
         _caps = get_capabilities(_model_name)
         if not _caps.supports_vision:
@@ -1496,6 +1520,7 @@ class NativeAgentLoop(EventEmitter):
             build_native_tool_wrapper,
             resolve_native_config,
         )
+
         _native_cfg = resolve_native_config(
             executor_model=model,
             advisor_model_full=advisor_service.model_full,
@@ -1506,6 +1531,7 @@ class NativeAgentLoop(EventEmitter):
             if _native_wrapper is not None:
                 tool_functions["advisor"] = _native_wrapper
             from rune.agent.prompts import PROMPT_ADVISOR_TIMING
+
             system_prompt = system_prompt + "\n\n" + PROMPT_ADVISOR_TIMING
             log.info(
                 "advisor_native_path_enabled",
@@ -1516,7 +1542,9 @@ class NativeAgentLoop(EventEmitter):
 
         # Scale tool rounds by complexity and executor capability.
         _tool_rounds = _compute_tool_rounds(
-            classification, model, advisor_service.enabled,
+            classification,
+            model,
+            advisor_service.enabled,
         )
         agent = LiteLLMAgent(
             model=model,
@@ -1560,12 +1588,10 @@ class NativeAgentLoop(EventEmitter):
         # advisor tool must be in the first LiteLLMAgent construction.)
 
         import os as _os_for_freshness
-        verify_freshness_enabled = (
-            _os_for_freshness.environ.get("RUNE_VERIFY_FRESHNESS", "")
-            .strip()
-            .lower()
-            in ("1", "true", "yes", "on")
-        )
+
+        verify_freshness_enabled = _os_for_freshness.environ.get(
+            "RUNE_VERIFY_FRESHNESS", ""
+        ).strip().lower() in ("1", "true", "yes", "on")
 
         # main loop
         _prev_evidence_total = 0
@@ -1607,8 +1633,7 @@ class NativeAgentLoop(EventEmitter):
                         data = f.read(20_000)
                     contents[path] = data
                 except Exception as exc:
-                    log.debug("architect_file_read_failed",
-                              path=path, error=str(exc)[:100])
+                    log.debug("architect_file_read_failed", path=path, error=str(exc)[:100])
             return contents
 
         def _make_advisor_request(trigger: str, gate_result=None):
@@ -1618,9 +1643,7 @@ class NativeAgentLoop(EventEmitter):
                 classification=classification,
                 activity_phase=self._activity_phase,
                 step=self._step,
-                token_budget_frac=(
-                    self._token_budget.used / max(1, self._token_budget.total)
-                ),
+                token_budget_frac=(self._token_budget.used / max(1, self._token_budget.total)),
                 evidence=evidence,
                 gate_result=gate_result,
                 stall_consecutive=self._stall.consecutive_no_progress,
@@ -1648,22 +1671,27 @@ class NativeAgentLoop(EventEmitter):
 
             # BCT: check compliance for a pending advisor plan
             if _pending_advice is not None:
-                _ev_total = (evidence.reads + evidence.writes
-                             + evidence.executions + evidence.web_fetches)
+                _ev_total = (
+                    evidence.reads + evidence.writes + evidence.executions + evidence.web_fetches
+                )
                 _verdict = check_compliance(
-                    _pending_advice, self._step,
-                    _ev_total, len(self._hard_failures),
+                    _pending_advice,
+                    self._step,
+                    _ev_total,
+                    len(self._hard_failures),
                     _step_tool_calls,
                 )
                 if _verdict is not None:
                     if _verdict.followed:
                         self._stall.consecutive_no_progress = 0
                         _no_new_evidence_steps = 0
-                        log.info("advisor_compliance_followed",
-                                 reason=_verdict.reason, step=self._step)
+                        log.info(
+                            "advisor_compliance_followed", reason=_verdict.reason, step=self._step
+                        )
                     else:
-                        log.info("advisor_compliance_ignored",
-                                 reason=_verdict.reason, step=self._step)
+                        log.info(
+                            "advisor_compliance_ignored", reason=_verdict.reason, step=self._step
+                        )
                     # Merge verdict back into call_history so persistence
                     # writes it to advisor_events (Plan B measurement).
                     idx = _pending_advice.call_history_index
@@ -1671,7 +1699,9 @@ class NativeAgentLoop(EventEmitter):
                     if 0 <= idx < len(history):
                         history[idx]["compliance_verdict"] = _verdict.reason
                         history[idx]["expected_tool"] = _pending_advice.expected_tool or ""
-                        history[idx]["observed_tools"] = ",".join(_pending_advice.observed_tools[:20])
+                        history[idx]["observed_tools"] = ",".join(
+                            _pending_advice.observed_tools[:20]
+                        )
                         history[idx]["step_at_call"] = _pending_advice.injected_at_step
                         history[idx]["pre_call_evidence"] = _pending_advice.baseline_evidence
                         history[idx]["post_call_evidence"] = _ev_total
@@ -1696,11 +1726,17 @@ class NativeAgentLoop(EventEmitter):
                     break
                 if _adv_dec and _adv_dec.plan_steps and _adv_dec.trigger == "stuck":
                     # Deferred reset: set pending_advice, counters reset on verdict
-                    _ev_total = (evidence.reads + evidence.writes
-                                 + evidence.executions + evidence.web_fetches)
+                    _ev_total = (
+                        evidence.reads
+                        + evidence.writes
+                        + evidence.executions
+                        + evidence.web_fetches
+                    )
                     _pending_advice = build_pending(
-                        _adv_dec, self._step,
-                        _ev_total, len(self._hard_failures),
+                        _adv_dec,
+                        self._step,
+                        _ev_total,
+                        len(self._hard_failures),
                         call_history_index=len(advisor_service.budget.call_history) - 1,
                         advice_mode=advisor_service.mode,
                     )
@@ -1711,8 +1747,11 @@ class NativeAgentLoop(EventEmitter):
                 # tool call.  Other stall conditions (bash_stalled,
                 # file_read_exhausted, intent_repeat) are not deferred.
                 prior_evidence = (
-                    evidence.reads + evidence.writes + evidence.executions
-                    + evidence.web_searches + evidence.web_fetches
+                    evidence.reads
+                    + evidence.writes
+                    + evidence.executions
+                    + evidence.web_searches
+                    + evidence.web_fetches
                 )
                 if prior_evidence > 0 and self._stall.consecutive_no_progress < 5:
                     log.debug(
@@ -1739,8 +1778,14 @@ class NativeAgentLoop(EventEmitter):
 
             # Disable non-essential tools in "final" phase (#14)
             if self._wind_down_phase == "final":
-                essential = {"think", "file_read", "file_write", "file_edit",
-                             "bash_execute", "ask_user"}
+                essential = {
+                    "think",
+                    "file_read",
+                    "file_write",
+                    "file_edit",
+                    "bash_execute",
+                    "ask_user",
+                }
                 if set(tools) != essential and not set(tools).issubset(essential):
                     tools = [t for t in tools if t in essential]
                     adapter_opts.allowed_tools = tools
@@ -1791,9 +1836,7 @@ class NativeAgentLoop(EventEmitter):
             elapsed_ms = (time.monotonic() - self._step_start_time) * 1000
             if elapsed_ms > self._STEP_ABORT_MS:
                 log.error("step_abort", step=self._step, elapsed_ms=elapsed_ms)
-                raise TimeoutError(
-                    f"Step {self._step} exceeded {self._STEP_ABORT_MS}ms timeout"
-                )
+                raise TimeoutError(f"Step {self._step} exceeded {self._STEP_ABORT_MS}ms timeout")
             elif elapsed_ms > self._STEP_WARN_MS:
                 log.warning("step_slow", step=self._step, elapsed_ms=elapsed_ms)
 
@@ -1803,9 +1846,7 @@ class NativeAgentLoop(EventEmitter):
 
             # -- run PydanticAI agent --
             try:
-                remaining_tokens = max(
-                    0, self._token_budget.total - self._token_budget.used
-                )
+                remaining_tokens = max(0, self._token_budget.total - self._token_budget.used)
                 usage_limits = UsageLimits(
                     request_tokens_limit=remaining_tokens,
                     response_tokens_limit=min(
@@ -1823,7 +1864,8 @@ class NativeAgentLoop(EventEmitter):
                     # Inject persistent fail streak into this step (#P4)
                     if self._persistent_fail_streak:
                         stream.inject_failure_state(
-                            self._persistent_fail_streak, set(),
+                            self._persistent_fail_streak,
+                            set(),
                         )
                     collected_text = ""
 
@@ -1846,8 +1888,16 @@ class NativeAgentLoop(EventEmitter):
                 # -- update token budget from usage stats --
                 try:
                     usage = result.usage()
-                    request_tokens = getattr(usage, "input_tokens", 0) or getattr(usage, "request_tokens", 0) or 0
-                    response_tokens = getattr(usage, "output_tokens", 0) or getattr(usage, "response_tokens", 0) or 0
+                    request_tokens = (
+                        getattr(usage, "input_tokens", 0)
+                        or getattr(usage, "request_tokens", 0)
+                        or 0
+                    )
+                    response_tokens = (
+                        getattr(usage, "output_tokens", 0)
+                        or getattr(usage, "response_tokens", 0)
+                        or 0
+                    )
                     cached_input_tokens = getattr(usage, "cached_input_tokens", 0) or 0
                     cache_write_tokens = getattr(usage, "cache_write_tokens", 0) or 0
                     reasoning_tokens = getattr(usage, "reasoning_tokens", 0) or 0
@@ -1855,8 +1905,11 @@ class NativeAgentLoop(EventEmitter):
                     self._token_budget.used += step_tokens
                     trace.total_tokens_used = self._token_budget.used
                     await self.emit(
-                        "step_tokens", self._step, step_tokens,
-                        self._token_budget.used, self._token_budget.total,
+                        "step_tokens",
+                        self._step,
+                        step_tokens,
+                        self._token_budget.used,
+                        self._token_budget.total,
                     )
                     await self.emit(
                         "model_usage",
@@ -1937,10 +1990,15 @@ class NativeAgentLoop(EventEmitter):
                     if messages and len(messages) > keep_count + 2:
                         # Record originals before compaction (rehydration)
                         if self._rehydration_recorder is not None:
-                            to_compact = messages[:-keep_count] if keep_count < len(messages) else []
+                            to_compact = (
+                                messages[:-keep_count] if keep_count < len(messages) else []
+                            )
                             if to_compact:
                                 try:
-                                    raw = [m if isinstance(m, dict) else m.model_dump() for m in to_compact]
+                                    raw = [
+                                        m if isinstance(m, dict) else m.model_dump()
+                                        for m in to_compact
+                                    ]
                                     await self._rehydration_recorder.record(
                                         raw,
                                         step_range=(max(0, self._step - len(raw)), self._step),
@@ -1951,8 +2009,13 @@ class NativeAgentLoop(EventEmitter):
                                     log.debug("rehydration_record_p2_failed", error=str(exc)[:100])
                         # Use turn-atomic compaction to keep assistant+tool pairs together
                         messages = self._compact_messages_atomic(messages, keep_last=keep_count)
-                        log.info("rollover_compacted", step=self._step, phase=2, msg_count=len(messages),
-                                 dynamic_cap=dynamic_cap)
+                        log.info(
+                            "rollover_compacted",
+                            step=self._step,
+                            phase=2,
+                            msg_count=len(messages),
+                            dynamic_cap=dynamic_cap,
+                        )
 
                     # Inject rollover resume directive with incomplete requirements from completion gate
                     incomplete_reqs: list[str] = []
@@ -1985,17 +2048,16 @@ class NativeAgentLoop(EventEmitter):
                     messages = self._inject_system_message(messages, resume_msg)
 
                     # Cognitive cache partial clear on rollover (#2c)
-                    if cache and hasattr(cache, 'clear_older_than'):
+                    if cache and hasattr(cache, "clear_older_than"):
                         cache.clear_older_than(keep_count)
-                    elif cache and hasattr(cache, 'access_order') and hasattr(cache, 'entries'):
+                    elif cache and hasattr(cache, "access_order") and hasattr(cache, "entries"):
                         # Manual partial clear: remove entries not accessed recently
                         if len(cache.access_order) > keep_count:
                             stale_keys = cache.access_order[:-keep_count]
                             for key in stale_keys:
                                 cache.entries.pop(key, None)
                             cache.access_order = cache.access_order[-keep_count:]
-                            log.debug("cognitive_cache_partial_clear",
-                                      removed=len(stale_keys))
+                            log.debug("cognitive_cache_partial_clear", removed=len(stale_keys))
 
                     self._rollover_phase_done.add(2)
 
@@ -2007,7 +2069,10 @@ class NativeAgentLoop(EventEmitter):
                             to_compact = messages[:-3] if len(messages) > 3 else []
                             if to_compact:
                                 try:
-                                    raw = [m if isinstance(m, dict) else m.model_dump() for m in to_compact]
+                                    raw = [
+                                        m if isinstance(m, dict) else m.model_dump()
+                                        for m in to_compact
+                                    ]
                                     await self._rehydration_recorder.record(
                                         raw,
                                         step_range=(max(0, self._step - len(raw)), self._step),
@@ -2023,7 +2088,9 @@ class NativeAgentLoop(EventEmitter):
                         for t in kept:
                             messages.extend(t.messages)
                         messages = _validate_tool_pairs(messages)
-                        log.warning("emergency_rollover", step=self._step, phase=3, msg_count=len(messages))
+                        log.warning(
+                            "emergency_rollover", step=self._step, phase=3, msg_count=len(messages)
+                        )
                     self._rollover_phase_done.add(3)
 
                 # Wind-down state machine is handled by _prepare_step (#14)
@@ -2072,8 +2139,11 @@ class NativeAgentLoop(EventEmitter):
 
                 # Pre-compute evidence total for reuse below
                 total_evidence = (
-                    evidence.reads + evidence.writes + evidence.executions
-                    + evidence.web_searches + evidence.web_fetches
+                    evidence.reads
+                    + evidence.writes
+                    + evidence.executions
+                    + evidence.web_searches
+                    + evidence.web_fetches
                     + evidence.browser_reads
                 )
 
@@ -2082,8 +2152,11 @@ class NativeAgentLoop(EventEmitter):
                 # browser_reads are excluded because observe/find loops
                 # inflate the counter without producing useful output.
                 actionable_evidence = (
-                    evidence.reads + evidence.writes + evidence.executions
-                    + evidence.web_searches + evidence.web_fetches
+                    evidence.reads
+                    + evidence.writes
+                    + evidence.executions
+                    + evidence.web_searches
+                    + evidence.web_fetches
                 )
                 new_evidence = actionable_evidence - _prev_evidence_total
                 _prev_evidence_total = actionable_evidence
@@ -2096,8 +2169,7 @@ class NativeAgentLoop(EventEmitter):
                     # formulate its answer.  Allow extra patience.
                     threshold = 5 if actionable_evidence > 0 else 3
                     if _no_new_evidence_steps >= threshold:
-                        log.warning("no_progress_break", step=self._step,
-                                    evidence=total_evidence)
+                        log.warning("no_progress_break", step=self._step, evidence=total_evidence)
                         trace.reason = "no_progress"
                         trace.final_step = self._step
                         break
@@ -2110,7 +2182,9 @@ class NativeAgentLoop(EventEmitter):
                 # For code_modify/execution tasks, require writes or executions
                 # (not just reads) before considering the task done.
                 needs_action = classification.goal_type in (
-                    "code_modify", "execution", "full",
+                    "code_modify",
+                    "execution",
+                    "full",
                 )
                 action_evidence = evidence.writes + evidence.executions
                 # When action evidence exists (tools ran successfully),
@@ -2150,29 +2224,41 @@ class NativeAgentLoop(EventEmitter):
                             messages = self._inject_system_message(messages, blocker)
                         else:
                             # Post-edit auto-verify before fast-path completion.
-                            _avok, messages, _gate_blocked_count = \
-                                await self._auto_verify_gate(messages, _gate_blocked_count)
+                            _avok, messages, _gate_blocked_count = await self._auto_verify_gate(
+                                messages, _gate_blocked_count
+                            )
                             if not _avok:
                                 if _gate_blocked_count >= 5:
-                                    log.warning("max_gate_blocked", step=self._step,
-                                                count=_gate_blocked_count)
+                                    log.warning(
+                                        "max_gate_blocked",
+                                        step=self._step,
+                                        count=_gate_blocked_count,
+                                    )
                                     trace.reason = self._max_gate_reason()
                                     trace.final_step = self._step
                                     break
                                 continue
                             # Requirement gate (opt-in, default off).
-                            _rqok, messages, _gate_blocked_count = \
-                                await self._finalize_gates(messages, _gate_blocked_count)
+                            _rqok, messages, _gate_blocked_count = await self._finalize_gates(
+                                messages, _gate_blocked_count
+                            )
                             if not _rqok:
                                 if _gate_blocked_count >= 5:
-                                    log.warning("max_gate_blocked", step=self._step,
-                                                count=_gate_blocked_count)
+                                    log.warning(
+                                        "max_gate_blocked",
+                                        step=self._step,
+                                        count=_gate_blocked_count,
+                                    )
                                     trace.reason = self._max_gate_reason()
                                     trace.final_step = self._step
                                     break
                                 continue
-                            log.info("final_answer_detected", step=self._step,
-                                     text_len=len(output_text), evidence=total_evidence)
+                            log.info(
+                                "final_answer_detected",
+                                step=self._step,
+                                text_len=len(output_text),
+                                evidence=total_evidence,
+                            )
                             trace.reason = "completed"
                             trace.final_step = self._step
                             break
@@ -2185,7 +2271,9 @@ class NativeAgentLoop(EventEmitter):
                 effective_output_exp = intent_contract.output_expectation
                 requires_grounding = intent_contract.grounding_requirement == "required"
                 requires_code_verification = intent_contract.requires_code_verification
-                requires_code_write = getattr(intent_contract, "requires_code_write_artifact", False)
+                requires_code_write = getattr(
+                    intent_contract, "requires_code_write_artifact", False
+                )
 
                 # If IntentContract says no tools needed and LLM answered
                 # without tools, it's a text-only response - mark as complete.
@@ -2199,12 +2287,14 @@ class NativeAgentLoop(EventEmitter):
                         messages = self._inject_system_message(messages, blocker)
                     else:
                         # Requirement gate (opt-in, default off).
-                        _rqok, messages, _gate_blocked_count = \
-                            await self._finalize_gates(messages, _gate_blocked_count)
+                        _rqok, messages, _gate_blocked_count = await self._finalize_gates(
+                            messages, _gate_blocked_count
+                        )
                         if not _rqok:
                             if _gate_blocked_count >= 5:
-                                log.warning("max_gate_blocked", step=self._step,
-                                            count=_gate_blocked_count)
+                                log.warning(
+                                    "max_gate_blocked", step=self._step, count=_gate_blocked_count
+                                )
                                 trace.reason = self._max_gate_reason()
                                 trace.final_step = self._step
                                 break
@@ -2214,7 +2304,11 @@ class NativeAgentLoop(EventEmitter):
                         trace.final_step = self._step
                         break
 
-                if total_evidence == 0 and output_text and intent_contract.tool_requirement == "none":
+                if (
+                    total_evidence == 0
+                    and output_text
+                    and intent_contract.tool_requirement == "none"
+                ):
                     effective_tool_req = "none"
                     effective_output_exp = "text"
                     requires_grounding = False
@@ -2224,7 +2318,11 @@ class NativeAgentLoop(EventEmitter):
                 # re-generation loops.
                 step_had_tool_calls = any(
                     isinstance(m, dict) and m.get("role") == "assistant" and m.get("tool_calls")
-                    for m in (result.all_messages()[-3:] if len(result.all_messages()) > 3 else result.all_messages())
+                    for m in (
+                        result.all_messages()[-3:]
+                        if len(result.all_messages()) > 3
+                        else result.all_messages()
+                    )
                 )
                 if output_text and not step_had_tool_calls and total_evidence > 0:
                     effective_tool_req = "none"
@@ -2236,8 +2334,9 @@ class NativeAgentLoop(EventEmitter):
                 min_web_fetches = 0
                 if classification.goal_type in ("research",):
                     # Complex research needs deeper analysis; simple lookups need less
-                    if getattr(classification, "is_multi_task", False) or \
-                       getattr(classification, "is_complex_coding", False):
+                    if getattr(classification, "is_multi_task", False) or getattr(
+                        classification, "is_complex_coding", False
+                    ):
                         analysis_min_reads = 3
                     else:
                         analysis_min_reads = 1
@@ -2281,12 +2380,14 @@ class NativeAgentLoop(EventEmitter):
                         messages = self._inject_system_message(messages, blocker)
                     else:
                         # Post-edit auto-verify, then Evidence Gate, before final.
-                        _avok, messages, _gate_blocked_count = \
-                            await self._auto_verify_gate(messages, _gate_blocked_count)
+                        _avok, messages, _gate_blocked_count = await self._auto_verify_gate(
+                            messages, _gate_blocked_count
+                        )
                         if not _avok:
                             if _gate_blocked_count >= 5:
-                                log.warning("max_gate_blocked", step=self._step,
-                                            count=_gate_blocked_count)
+                                log.warning(
+                                    "max_gate_blocked", step=self._step, count=_gate_blocked_count
+                                )
                                 trace.reason = self._max_gate_reason()
                                 trace.final_step = self._step
                                 break
@@ -2301,19 +2402,24 @@ class NativeAgentLoop(EventEmitter):
                             _gate_blocked_count += 1
                             self._gate_blocked_count = _gate_blocked_count
                             if _gate_blocked_count >= 5:
-                                log.warning("max_gate_blocked", step=self._step,
-                                            count=_gate_blocked_count)
+                                log.warning(
+                                    "max_gate_blocked", step=self._step, count=_gate_blocked_count
+                                )
                                 trace.reason = self._max_gate_reason()
                                 trace.final_step = self._step
                                 break
                         else:
                             # Requirement gate (opt-in, default off).
-                            _rqok, messages, _gate_blocked_count = \
-                                await self._finalize_gates(messages, _gate_blocked_count)
+                            _rqok, messages, _gate_blocked_count = await self._finalize_gates(
+                                messages, _gate_blocked_count
+                            )
                             if not _rqok:
                                 if _gate_blocked_count >= 5:
-                                    log.warning("max_gate_blocked", step=self._step,
-                                                count=_gate_blocked_count)
+                                    log.warning(
+                                        "max_gate_blocked",
+                                        step=self._step,
+                                        count=_gate_blocked_count,
+                                    )
                                     trace.reason = self._max_gate_reason()
                                     trace.final_step = self._step
                                     break
@@ -2332,12 +2438,14 @@ class NativeAgentLoop(EventEmitter):
                     # completion even though some behavioral requirement is unmet
                     # (e.g. "not enough reads"). A failing check instead injects
                     # first-mismatch evidence and keeps the loop going.
-                    _avok, messages, _gate_blocked_count = \
-                        await self._auto_verify_gate(messages, _gate_blocked_count)
+                    _avok, messages, _gate_blocked_count = await self._auto_verify_gate(
+                        messages, _gate_blocked_count
+                    )
                     if not _avok:
                         if _gate_blocked_count >= 5:
-                            log.warning("max_gate_blocked", step=self._step,
-                                        count=_gate_blocked_count)
+                            log.warning(
+                                "max_gate_blocked", step=self._step, count=_gate_blocked_count
+                            )
                             trace.reason = self._max_gate_reason()
                             trace.final_step = self._step
                             break
@@ -2381,7 +2489,8 @@ class NativeAgentLoop(EventEmitter):
                             advisor_service,
                             policy_input=_make_policy_input(),
                             build_request=lambda trg, _gr=gate_result: _make_advisor_request(
-                                trg, gate_result=_gr,
+                                trg,
+                                gate_result=_gr,
                             ),
                             messages=messages,
                             inject=self._inject_system_message,
@@ -2396,11 +2505,17 @@ class NativeAgentLoop(EventEmitter):
                         if _adv_dec and _adv_dec.plan_steps:
                             # Deferred: full reset only after compliance verdict
                             _gate_blocked_count = max(0, _gate_blocked_count - 1)
-                            _ev_total = (evidence.reads + evidence.writes
-                                         + evidence.executions + evidence.web_fetches)
+                            _ev_total = (
+                                evidence.reads
+                                + evidence.writes
+                                + evidence.executions
+                                + evidence.web_fetches
+                            )
                             _pending_advice = build_pending(
-                                _adv_dec, self._step,
-                                _ev_total, len(self._hard_failures),
+                                _adv_dec,
+                                self._step,
+                                _ev_total,
+                                len(self._hard_failures),
                                 call_history_index=len(advisor_service.budget.call_history) - 1,
                                 advice_mode=advisor_service.mode,
                             )
@@ -2412,8 +2527,7 @@ class NativeAgentLoop(EventEmitter):
                         # would re-run the Evidence Gate.
                         # Auto-verify last: a fail at the block cap means broken
                         # code, so give up rather than retry.
-                        _avok, _, _ = await self._auto_verify_gate(
-                            messages, _gate_blocked_count)
+                        _avok, _, _ = await self._auto_verify_gate(messages, _gate_blocked_count)
                         if not _avok:
                             trace.reason = self._max_gate_reason()
                             trace.final_step = self._step
@@ -2425,8 +2539,7 @@ class NativeAgentLoop(EventEmitter):
                             trace.final_step = self._step
                             trace.evidence_score = 1.0
                             break
-                        log.warning("max_gate_blocked", step=self._step,
-                                    count=_gate_blocked_count)
+                        log.warning("max_gate_blocked", step=self._step, count=_gate_blocked_count)
                         trace.reason = self._max_gate_reason()
                         trace.final_step = self._step
                         break
@@ -2435,7 +2548,11 @@ class NativeAgentLoop(EventEmitter):
                 # prevent indefinite loops when only minor requirements remain.
                 # Exception: if code write was required but nothing was written,
                 # do NOT accept partial — force the agent to keep working.
-                if gate_result.outcome == "partial" and output_text and len(output_text.strip()) > 50:
+                if (
+                    gate_result.outcome == "partial"
+                    and output_text
+                    and len(output_text.strip()) > 50
+                ):
                     if requires_code_write and gate_input.structured_write_count == 0:
                         log.debug(
                             "partial_rejected_no_write",
@@ -2453,12 +2570,16 @@ class NativeAgentLoop(EventEmitter):
                             log.info("benchmark_failed_tool_partial_block", step=self._step)
                             messages = self._inject_system_message(messages, blocker)
                         else:
-                            _avok, messages, _gate_blocked_count = \
-                                await self._auto_verify_gate(messages, _gate_blocked_count)
+                            _avok, messages, _gate_blocked_count = await self._auto_verify_gate(
+                                messages, _gate_blocked_count
+                            )
                             if not _avok:
                                 if _gate_blocked_count >= 5:
-                                    log.warning("max_gate_blocked", step=self._step,
-                                                count=_gate_blocked_count)
+                                    log.warning(
+                                        "max_gate_blocked",
+                                        step=self._step,
+                                        count=_gate_blocked_count,
+                                    )
                                     trace.reason = self._max_gate_reason()
                                     trace.final_step = self._step
                                     break
@@ -2505,7 +2626,10 @@ class NativeAgentLoop(EventEmitter):
                             to_compact = messages[:-10] if len(messages) > 10 else []
                             if to_compact:
                                 try:
-                                    raw = [m if isinstance(m, dict) else m.model_dump() for m in to_compact]
+                                    raw = [
+                                        m if isinstance(m, dict) else m.model_dump()
+                                        for m in to_compact
+                                    ]
                                     await self._rehydration_recorder.record(
                                         raw,
                                         step_range=(max(0, self._step - len(raw)), self._step),
@@ -2513,7 +2637,9 @@ class NativeAgentLoop(EventEmitter):
                                         compaction_event="context_overflow",
                                     )
                                 except Exception as exc_r:
-                                    log.debug("rehydration_record_overflow_failed", error=str(exc_r)[:100])
+                                    log.debug(
+                                        "rehydration_record_overflow_failed", error=str(exc_r)[:100]
+                                    )
 
                         summary = f"(Summary of prior conversation compacted at step {self._step})"
                         turns = _group_into_turns(messages)
@@ -2557,14 +2683,12 @@ class NativeAgentLoop(EventEmitter):
             )
         try:
             import os as _os_persist
+
             _persist_env = _os_persist.environ.get("RUNE_ADVISOR_PERSIST", "").strip().lower()
             _persist_enabled = _persist_env not in ("0", "false", "no", "off")
-            if (
-                _persist_enabled
-                and advisor_service.budget.calls_used > 0
-                and self._session_id
-            ):
+            if _persist_enabled and advisor_service.budget.calls_used > 0 and self._session_id:
                 from rune.memory.store import get_memory_store
+
                 _store = get_memory_store()
                 for entry in advisor_service.budget.call_history:
                     _store.log_advisor_event(
@@ -2653,7 +2777,7 @@ class NativeAgentLoop(EventEmitter):
             return False
 
         # Check if any subsequent message references those paths
-        for later_msg in messages[idx + 1:]:
+        for later_msg in messages[idx + 1 :]:
             later_text = str(later_msg)
             for p in paths:
                 if p in later_text:
@@ -2713,8 +2837,7 @@ class NativeAgentLoop(EventEmitter):
 
         # Context pollution prevention (#1c): remove empty messages
         # Preserve tool messages even if empty — removing them breaks assistant+tool pairs
-        result = [m for m in result if not self._is_empty_message(m)
-                  or _msg_role(m) == "tool"]
+        result = [m for m in result if not self._is_empty_message(m) or _msg_role(m) == "tool"]
 
         return result
 
@@ -2722,18 +2845,18 @@ class NativeAgentLoop(EventEmitter):
     def _is_empty_message(msg: Any) -> bool:
         """Check if a message became empty after summarization/truncation."""
         try:
-            if hasattr(msg, 'parts'):
+            if hasattr(msg, "parts"):
                 if not msg.parts:
                     return True
                 # Check if all parts are empty
                 for part in msg.parts:
-                    if hasattr(part, 'content') and part.content:
+                    if hasattr(part, "content") and part.content:
                         return False
-                    if hasattr(part, 'text') and part.text:
+                    if hasattr(part, "text") and part.text:
                         return False
-                    if hasattr(part, 'tool_name'):
+                    if hasattr(part, "tool_name"):
                         return False  # tool call parts are not empty
-                    if hasattr(part, 'image') and part.image:
+                    if hasattr(part, "image") and part.image:
                         return False
                 return True
             if isinstance(msg, dict):
@@ -2764,17 +2887,17 @@ class NativeAgentLoop(EventEmitter):
         - Generic -> first 100 chars
         """
         try:
-            if hasattr(msg, 'parts'):
+            if hasattr(msg, "parts"):
                 # PydanticAI message with parts
                 text = ""
                 tool_name = ""
                 tool_args: dict[str, Any] = {}
                 for part in msg.parts:
-                    if hasattr(part, 'tool_name'):
+                    if hasattr(part, "tool_name"):
                         tool_name = part.tool_name
-                    if hasattr(part, 'args') and isinstance(part.args, dict):
+                    if hasattr(part, "args") and isinstance(part.args, dict):
                         tool_args = part.args
-                    if hasattr(part, 'content') and isinstance(part.content, str):
+                    if hasattr(part, "content") and isinstance(part.content, str):
                         text = part.content
                         break
 
@@ -2785,7 +2908,7 @@ class NativeAgentLoop(EventEmitter):
                 summary = ""
                 if tool_name == "file_read":
                     path = tool_args.get("file_path") or tool_args.get("path", "")
-                    lines = text.count('\n') + 1 if text else 0
+                    lines = text.count("\n") + 1 if text else 0
                     summary = f"[Summary] Read {path or 'file'} ({lines} lines)"
                 elif tool_name == "file_write":
                     path = tool_args.get("file_path") or tool_args.get("path", "")
@@ -2798,7 +2921,7 @@ class NativeAgentLoop(EventEmitter):
                     summary = f"[Summary] Deleted {path or 'file'}"
                 elif tool_name == "file_search":
                     query = tool_args.get("pattern") or tool_args.get("query", "")
-                    matches = text.count('\n') + 1 if text else 0
+                    matches = text.count("\n") + 1 if text else 0
                     summary = f"[Summary] Searched for '{query}' -- {matches} matches"
                 elif tool_name == "bash_execute":
                     cmd = tool_args.get("command", "")
@@ -2806,13 +2929,14 @@ class NativeAgentLoop(EventEmitter):
                     # Try to extract exit code from text if not in args
                     if not exit_code and text:
                         import re as _re
-                        m = _re.search(r'exit[_ ]code[:\s]+(\d+)', text.lower())
+
+                        m = _re.search(r"exit[_ ]code[:\s]+(\d+)", text.lower())
                         if m:
                             exit_code = int(m.group(1))
                     summary = f"[Summary] Ran `{cmd[:80]}` -> {exit_code}"
                 elif tool_name == "web_search":
                     query = tool_args.get("query", "")
-                    results = text.count('\n') + 1 if text else 0
+                    results = text.count("\n") + 1 if text else 0
                     summary = f"[Summary] Searched: '{query}' -- {results} results"
                 elif tool_name == "web_fetch":
                     url = tool_args.get("url", "")
@@ -2834,9 +2958,10 @@ class NativeAgentLoop(EventEmitter):
                     summary = f"[Summary] {(text or '')[:100]}..."
 
                 from copy import deepcopy
+
                 summarized = deepcopy(msg)
                 for part in summarized.parts:
-                    if hasattr(part, 'content') and isinstance(part.content, str):
+                    if hasattr(part, "content") and isinstance(part.content, str):
                         part.content = summary
                         break
                 return summarized
@@ -2853,27 +2978,28 @@ class NativeAgentLoop(EventEmitter):
         Assistant text content is also truncated if >500 chars.
         """
         try:
-            if hasattr(msg, 'parts'):
+            if hasattr(msg, "parts"):
                 from copy import deepcopy
+
                 truncated = deepcopy(msg)
                 for part in truncated.parts:
-                    if hasattr(part, 'content') and isinstance(part.content, str):
+                    if hasattr(part, "content") and isinstance(part.content, str):
                         content = part.content
                         # Tool result content uses the larger limit
-                        effective_limit = limit if hasattr(part, 'tool_name') else text_limit
+                        effective_limit = limit if hasattr(part, "tool_name") else text_limit
                         if len(content) > effective_limit:
-                            head = content[:effective_limit // 2]
-                            tail = content[-(effective_limit // 2):]
+                            head = content[: effective_limit // 2]
+                            tail = content[-(effective_limit // 2) :]
                             part.content = (
                                 f"{head}\n\n... [{len(content) - effective_limit} "
                                 f"chars truncated] ...\n\n{tail}"
                             )
                     # Also truncate plain text parts (#1b)
-                    elif hasattr(part, 'text') and isinstance(getattr(part, 'text', None), str):
+                    elif hasattr(part, "text") and isinstance(getattr(part, "text", None), str):
                         text_val = part.text
                         if len(text_val) > text_limit:
-                            head = text_val[:text_limit // 2]
-                            tail = text_val[-(text_limit // 2):]
+                            head = text_val[: text_limit // 2]
+                            tail = text_val[-(text_limit // 2) :]
                             part.text = (
                                 f"{head}\n\n... [{len(text_val) - text_limit} "
                                 f"chars truncated] ...\n\n{tail}"
@@ -2888,8 +3014,8 @@ class NativeAgentLoop(EventEmitter):
                     content = content[:300] + "\n... (truncated) ...\n" + content[-200:]
                     return {**msg, "content": content}
                 if len(content) > text_limit:
-                    head = content[:text_limit // 2]
-                    tail = content[-(text_limit // 2):]
+                    head = content[: text_limit // 2]
+                    tail = content[-(text_limit // 2) :]
                     return {
                         **msg,
                         "content": (
@@ -2903,8 +3029,15 @@ class NativeAgentLoop(EventEmitter):
 
     def _reduce_active_tools(self, tools: list[str]) -> list[str]:
         """After step 6, reduce to recently used + base tools."""
-        base_tools = {"think", "file_read", "file_write", "file_edit",
-                      "bash_execute", "ask_user", "memory_search"}
+        base_tools = {
+            "think",
+            "file_read",
+            "file_write",
+            "file_edit",
+            "bash_execute",
+            "ask_user",
+            "memory_search",
+        }
         # Keep base tools + any recently used
         return [t for t in tools if t in base_tools or t == self._stall.last_tool_call]
 
@@ -3060,9 +3193,7 @@ class NativeAgentLoop(EventEmitter):
         # Pin the first message (original goal/user request)
         pinned_first = head_turns[0] if head_turns else None
         pinned_tokens = (
-            sum(self._estimate_tokens(m) for m in pinned_first.messages)
-            if pinned_first
-            else 0
+            sum(self._estimate_tokens(m) for m in pinned_first.messages) if pinned_first else 0
         )
         budget_for_head = cap - tail_tokens - 50  # 50 = summary placeholder
         budget_after_pin = budget_for_head - pinned_tokens
@@ -3071,9 +3202,7 @@ class NativeAgentLoop(EventEmitter):
 
         # Compute token estimates for each turn
         for turn in rest_turns:
-            turn.token_estimate = sum(
-                self._estimate_tokens(m) for m in turn.messages
-            )
+            turn.token_estimate = sum(self._estimate_tokens(m) for m in turn.messages)
 
         # Fill from newest turns backward
         head_tokens = 0
@@ -3089,9 +3218,7 @@ class NativeAgentLoop(EventEmitter):
         for turn in rest_turns[keep_from_turn_idx:]:
             kept_msgs.extend(turn.messages)
 
-        dropped_count = sum(
-            len(t.messages) for t in rest_turns[:keep_from_turn_idx]
-        )
+        dropped_count = sum(len(t.messages) for t in rest_turns[:keep_from_turn_idx])
 
         if dropped_count == 0:
             return messages
@@ -3283,8 +3410,7 @@ class NativeAgentLoop(EventEmitter):
             )
         if self._stall.consecutive_no_progress >= 2:
             parts.append(
-                "[STALL] No progress detected for multiple steps. "
-                "Reconsider your strategy."
+                "[STALL] No progress detected for multiple steps. Reconsider your strategy."
             )
         if self._stall.cycle_detected:
             parts.append(
@@ -3335,10 +3461,7 @@ class NativeAgentLoop(EventEmitter):
             self._pending_verification_nudge = False
 
         # Research depth nudge
-        if (
-            self._stall.web_search_count >= 3
-            and self._stall.web_fetch_count == 0
-        ):
+        if self._stall.web_search_count >= 3 and self._stall.web_fetch_count == 0:
             nudges.append(
                 "[NUDGE] You have searched the web multiple times without "
                 "fetching any pages. Consider fetching results for deeper research."
@@ -3366,9 +3489,7 @@ class NativeAgentLoop(EventEmitter):
                 workspace_root=workspace_root,
             )
             if violations:
-                details = ", ".join(
-                    f"{v.source}: {v.requested}" for v in violations
-                )
+                details = ", ".join(f"{v.source}: {v.requested}" for v in violations)
                 return (
                     f"[WORKSPACE GUARD] Command may access paths outside workspace "
                     f"({workspace_root}): {details}. "
@@ -3381,21 +3502,21 @@ class NativeAgentLoop(EventEmitter):
             workspace_root = os.path.realpath(workspace_root)
             violation_parts: list[str] = []
 
-            for match in re.findall(r'\bcd\s+([^\s;&|]+)', command):
+            for match in re.findall(r"\bcd\s+([^\s;&|]+)", command):
                 target = os.path.expanduser(match)
                 if os.path.isabs(target):
                     real = os.path.realpath(target)
                     if not real.startswith(workspace_root):
                         violation_parts.append(f"cd to {target}")
 
-            for match in re.findall(r'>{1,2}\s*([^\s;&|]+)', command):
+            for match in re.findall(r">{1,2}\s*([^\s;&|]+)", command):
                 target = os.path.expanduser(match)
                 if os.path.isabs(target):
                     real = os.path.realpath(target)
                     if not real.startswith(workspace_root):
                         violation_parts.append(f"redirect to {target}")
 
-            for match in re.findall(r'-C\s+([^\s;&|]+)', command):
+            for match in re.findall(r"-C\s+([^\s;&|]+)", command):
                 target = os.path.expanduser(match)
                 if os.path.isabs(target):
                     real = os.path.realpath(target)
@@ -3413,9 +3534,7 @@ class NativeAgentLoop(EventEmitter):
 
     # Step watchdog / retry (#29)
 
-    async def _with_retry(
-        self, fn: Callable[[], Awaitable[T]], max_retries: int = 3
-    ) -> T:
+    async def _with_retry(self, fn: Callable[[], Awaitable[T]], max_retries: int = 3) -> T:
         """Execute a callable returning an awaitable, with exponential backoff on rate limits.
 
         Unlike the previous version that accepted a coroutine (which can only
@@ -3427,7 +3546,7 @@ class NativeAgentLoop(EventEmitter):
                 return await fn()
             except Exception as e:
                 if "rate_limit" in str(e).lower() and attempt < max_retries:
-                    delay = min(1.0 * (2 ** attempt), 8.0)
+                    delay = min(1.0 * (2**attempt), 8.0)
                     log.warning(
                         "rate_limit_retry",
                         attempt=attempt + 1,
@@ -3556,7 +3675,7 @@ class NativeAgentLoop(EventEmitter):
                     continue
 
                 # Try to extract JSON from the line (may be wrapped in markdown)
-                json_match = re.search(r'\{.*\}', line)
+                json_match = re.search(r"\{.*\}", line)
                 if not json_match:
                     continue
 
@@ -3584,11 +3703,14 @@ class NativeAgentLoop(EventEmitter):
 
                 try:
                     result = await registry.execute(tool_name, params)
-                    await self.emit("tool_result", {
-                        "name": tool_name,
-                        "success": result.success,
-                        "output": str(result.output)[:200] if result.output else "",
-                    })
+                    await self.emit(
+                        "tool_result",
+                        {
+                            "name": tool_name,
+                            "success": result.success,
+                            "output": str(result.output)[:200] if result.output else "",
+                        },
+                    )
                 except Exception as exc:
                     log.warning("fallback_tool_error", tool=tool_name, error=str(exc))
 
@@ -3622,6 +3744,7 @@ class NativeAgentLoop(EventEmitter):
 
 
 # Factory: create_agent_loop (#Task2)
+
 
 def create_agent_loop(
     role: str = "executor",

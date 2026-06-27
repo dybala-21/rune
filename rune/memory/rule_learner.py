@@ -62,15 +62,17 @@ _NON_CRISP_ERROR_MARKERS = (
 # Loop-end reasons that are not crisp: resource, exploration, or control
 # outcomes that do not identify a reproducible mistake. A rule learned from
 # "ran out of steps" would not generalize.
-_NON_CRISP_LOOP_REASONS = frozenset({
-    "stalled",
-    "no_progress",
-    "token_budget_exhausted",
-    "max_iterations",
-    "cancelled",
-    "advisor_abort",
-    "no_pydantic_ai",
-})
+_NON_CRISP_LOOP_REASONS = frozenset(
+    {
+        "stalled",
+        "no_progress",
+        "token_budget_exhausted",
+        "max_iterations",
+        "cancelled",
+        "advisor_abort",
+        "no_pydantic_ai",
+    }
+)
 
 
 def _error_signature(tool_name: str, error_message: str) -> str:
@@ -81,6 +83,7 @@ def _error_signature(tool_name: str, error_message: str) -> str:
     """
     # Normalize: strip paths, filenames, numbers for stable matching
     import re
+
     normalized = re.sub(r"/[\w/.\-]+", "<path>", error_message[:200])
     normalized = re.sub(r"[\w\-]+\.\w{1,4}", "<file>", normalized)  # filename.ext
     normalized = re.sub(r"\b\d+\b", "<n>", normalized)
@@ -126,12 +129,14 @@ def find_repeated_failures(
                 "calls": [],
             }
         sig_groups[sig]["count"] += 1
-        sig_groups[sig]["calls"].append({
-            "tool_name": tool_name,
-            "error": error_msg[:200],
-            "params": params_json,
-            "created_at": created_at,
-        })
+        sig_groups[sig]["calls"].append(
+            {
+                "tool_name": tool_name,
+                "error": error_msg[:200],
+                "params": params_json,
+                "created_at": created_at,
+            }
+        )
 
     # Filter to patterns with min_occurrences
     return [g for g in sig_groups.values() if g["count"] >= min_occurrences]
@@ -228,7 +233,9 @@ def _evict_weakest_rule(meta: dict[str, Any], incoming_confidence: float) -> str
         return None
     weakest = min(keys, key=lambda k: _rule_strength(meta[k]))
     e = meta[weakest]
-    if (e.get("eval_count", 0) or 0) == 0 and (e.get("confidence", 0.0) or 0.0) <= incoming_confidence:
+    if (e.get("eval_count", 0) or 0) == 0 and (
+        e.get("confidence", 0.0) or 0.0
+    ) <= incoming_confidence:
         human_key = e.get("human_key") or weakest.split(":", 2)[-1]
         try:
             remove_learned_fact(human_key)
@@ -288,7 +295,9 @@ async def learn_from_failures(store: Any, domain: str = "code_modify") -> list[s
 
         # Generate rule via LLM
         rule_text = await generate_rule_from_failure(
-            pattern["tool_name"], pattern["error_sample"], domain,
+            pattern["tool_name"],
+            pattern["error_sample"],
+            domain,
             occurrences=pattern["count"],
         )
         if rule_text is None:
@@ -427,23 +436,28 @@ async def learn_from_crisp_failure(
         value=value_part,
         confidence=_CRISP_INITIAL_CONFIDENCE,
     )
-    update_fact_meta(rule_key, {
-        "confidence": _CRISP_INITIAL_CONFIDENCE,
-        "hit_count": 0,
-        "eval_count": 0,
-        "source": "crisp_failure",
-        "created_at": datetime.now(UTC).isoformat(),
-        "failure_signature": sig,
-        "failure_count": 1,
-        "human_key": key_part,
-        "category": f"rule:{domain}",
-    })
+    update_fact_meta(
+        rule_key,
+        {
+            "confidence": _CRISP_INITIAL_CONFIDENCE,
+            "hit_count": 0,
+            "eval_count": 0,
+            "source": "crisp_failure",
+            "created_at": datetime.now(UTC).isoformat(),
+            "failure_signature": sig,
+            "failure_count": 1,
+            "human_key": key_part,
+            "category": f"rule:{domain}",
+        },
+    )
     log.info("crisp_rule_learned", domain=domain, key=key_part, value=value_part[:80])
     return key_part
 
 
 def _find_meta_key(
-    meta: dict[str, Any], category: str, human_key: str,
+    meta: dict[str, Any],
+    category: str,
+    human_key: str,
 ) -> str | None:
     """Find a meta entry by category + human_key.
 
@@ -454,10 +468,7 @@ def _find_meta_key(
     if direct in meta:
         return direct
     for k, v in meta.items():
-        if (
-            v.get("human_key") == human_key
-            and v.get("category") == category
-        ):
+        if v.get("human_key") == human_key and v.get("category") == category:
             return k
     return None
 
@@ -494,13 +505,15 @@ def _resolved_rule_candidates() -> list[dict[str, Any]]:
             continue
 
         meta_entry = meta.get(meta_key, {}) if meta_key else {}
-        out.append({
-            "key": key,
-            "value": fact.get("value", ""),
-            "confidence": confidence,
-            "domain": fdomain,
-            "hit_count": meta_entry.get("hit_count", 0),
-        })
+        out.append(
+            {
+                "key": key,
+                "value": fact.get("value", ""),
+                "confidence": confidence,
+                "domain": fdomain,
+                "hit_count": meta_entry.get("hit_count", 0),
+            }
+        )
     return out
 
 

@@ -56,12 +56,14 @@ class LLMRefiner(Protocol):
         """Send *prompt* to an LLM and return the refined text."""
         ...
 
+
 # Data classes
 
 
 @dataclass(slots=True)
 class AgentMemoryContext:
     """Memory context assembled for the agent system prompt."""
+
     relevant_history: list[str] = field(default_factory=list)
     preferences: dict[str, str] = field(default_factory=dict)
     recent_commands: list[str] = field(default_factory=list)
@@ -72,6 +74,7 @@ class AgentMemoryContext:
 @dataclass(slots=True)
 class ExecutionBlueprint:
     """Extracted artifacts from agent execution history."""
+
     files_created: list[str] = field(default_factory=list)
     files_modified: list[str] = field(default_factory=list)
     files_deleted: list[str] = field(default_factory=list)
@@ -82,6 +85,7 @@ class ExecutionBlueprint:
 
 
 # Time formatting (Korean relative time)
+
 
 def format_relative_time(timestamp: str | float | datetime) -> str:
     """Format a timestamp as Korean relative time.
@@ -125,6 +129,7 @@ def format_relative_time(timestamp: str | float | datetime) -> str:
 
 # Intent extraction
 
+
 def extract_intent_from_goal(
     goal: str,
     hint: str | None = None,
@@ -138,11 +143,17 @@ def extract_intent_from_goal(
 
     # Domain detection
     domain = Domain.GENERAL
-    if any(k in goal_lower for k in ("file", "read", "write", "edit", "create", "delete", "folder", "directory")):
+    if any(
+        k in goal_lower
+        for k in ("file", "read", "write", "edit", "create", "delete", "folder", "directory")
+    ):
         domain = Domain.FILE
     elif any(k in goal_lower for k in ("browse", "click", "navigate", "page", "website", "url")):
         domain = Domain.BROWSER
-    elif any(k in goal_lower for k in ("run", "execute", "command", "bash", "shell", "terminal", "test", "build")):
+    elif any(
+        k in goal_lower
+        for k in ("run", "execute", "command", "bash", "shell", "terminal", "test", "build")
+    ):
         domain = Domain.PROCESS
     elif any(k in goal_lower for k in ("search", "web", "google", "fetch", "download", "http")):
         domain = Domain.NETWORK
@@ -206,6 +217,7 @@ def extract_intent_from_goal(
 
 # Build agent memory context (8 layers)
 
+
 async def build_agent_memory_context(
     goal: str,
     memory_manager: Any,
@@ -256,6 +268,7 @@ async def build_agent_memory_context(
                 import os
 
                 from rune.memory.project_memory import read_project_memory_head
+
                 md_content = read_project_memory_head(
                     os.getcwd(),
                     {"max_lines": PROJECT_MEMORY_MAX_LINES, "max_chars": PROJECT_MEMORY_MAX_CHARS},
@@ -372,15 +385,21 @@ async def _search_facts(memory_manager: Any, category: str) -> list[Any]:
             for line in lines:
                 if ":" in line:
                     key, _, value = line.partition(":")
-                    results.append(Fact(category=section.lower(), key=key.strip(), value=value.strip()))
+                    results.append(
+                        Fact(category=section.lower(), key=key.strip(), value=value.strip())
+                    )
 
         # From learned.md
         for fact in parse_learned_md():
             if not category or fact["category"] == category:
-                results.append(Fact(
-                    category=fact["category"], key=fact["key"],
-                    value=fact["value"], confidence=fact["confidence"],
-                ))
+                results.append(
+                    Fact(
+                        category=fact["category"],
+                        key=fact["key"],
+                        value=fact["value"],
+                        confidence=fact["confidence"],
+                    )
+                )
 
         return results
     except Exception:
@@ -388,6 +407,7 @@ async def _search_facts(memory_manager: Any, category: str) -> list[Any]:
 
 
 # Save agent result to memory
+
 
 def format_applied_rules_note(mem_ctx: str) -> str | None:
     """One-line summary of the learned rules in a memory context, or None."""
@@ -489,6 +509,7 @@ async def save_agent_result_to_memory(
         # Files the agent actually wrote, reported by its file tools — the
         # authoritative list, so we never guess paths out of free text.
         import json as _json
+
         files = list(result.get("changed_files") or []) if isinstance(result, dict) else []
 
         # Generate lessons from both success and failure
@@ -564,12 +585,14 @@ async def save_agent_result_to_memory(
         if not domain:
             try:
                 from rune.agent.goal_classifier import classify_goal
+
                 domain = (await classify_goal(goal)).goal_type
             except Exception:
                 domain = None
         domain = domain or "code_modify"
         try:
             from rune.memory.rule_learner import update_rules_from_outcome
+
             update_rules_from_outcome(domain, success, goal=goal, error_message=result_text[:300])
         except Exception:
             pass  # Rule feedback must never block episode saving
@@ -580,9 +603,8 @@ async def save_agent_result_to_memory(
             try:
                 from rune.memory.rule_learner import learn_from_failures
                 from rune.memory.store import get_memory_store
-                learned_keys.extend(
-                    await learn_from_failures(get_memory_store(), domain) or []
-                )
+
+                learned_keys.extend(await learn_from_failures(get_memory_store(), domain) or [])
             except Exception:
                 pass  # Rule learning must never block episode saving
 
@@ -592,9 +614,7 @@ async def save_agent_result_to_memory(
             try:
                 from rune.memory.rule_learner import learn_from_crisp_failure
 
-                crisp_signal = _select_crisp_signal(
-                    success, failure_reason, evidence_gate
-                )
+                crisp_signal = _select_crisp_signal(success, failure_reason, evidence_gate)
                 if crisp_signal:
                     _crisp_key = await learn_from_crisp_failure(
                         tool_name=domain,
@@ -630,6 +650,7 @@ async def save_agent_result_to_memory(
             import asyncio
 
             from rune.memory.consolidation import consolidate_episode
+
             asyncio.create_task(consolidate_episode(episode.id))
         except Exception:
             pass  # Consolidation failure must never block episode saving
@@ -648,6 +669,7 @@ async def save_agent_result_to_memory(
 
 
 # Artifact extraction from execution history
+
 
 def extract_artifacts_from_history(
     history: list[dict[str, Any]],
@@ -690,10 +712,7 @@ def extract_artifacts_from_history(
                     blueprint.tools_used[tool] = blueprint.tools_used.get(tool, "used")
 
         if not success:
-            error = (
-                result.get("error", "")
-                if isinstance(result, dict) else str(result)
-            )
+            error = result.get("error", "") if isinstance(result, dict) else str(result)
             if error:
                 blueprint.errors_encountered.append(f"[{tool}] {error[:150]}")
 
@@ -769,7 +788,10 @@ _LANGUAGE_EXTENSIONS: dict[str, str] = {
 
 _LANGUAGE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bpython[3]?\b|\bpip\b|\bpytest\b|\bdjango\b|\bflask\b", re.I), "Python"),
-    (re.compile(r"\bnode\b|\bnpm\b|\byarn\b|\bpnpm\b|\breact\b|\bnext\.js\b", re.I), "JavaScript/TypeScript"),
+    (
+        re.compile(r"\bnode\b|\bnpm\b|\byarn\b|\bpnpm\b|\breact\b|\bnext\.js\b", re.I),
+        "JavaScript/TypeScript",
+    ),
     (re.compile(r"\bcargo\b|\brustc\b|\brust\b", re.I), "Rust"),
     (re.compile(r"\bgo\s+(build|run|test|get)\b", re.I), "Go"),
     (re.compile(r"\bjava\b|\bmaven\b|\bgradle\b|\bspring\b", re.I), "Java"),
@@ -778,7 +800,9 @@ _LANGUAGE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 _TOOL_PATTERNS: dict[str, re.Pattern[str]] = {
-    "git": re.compile(r"\bgit\s+(add|commit|push|pull|clone|branch|checkout|merge|rebase|stash)\b", re.I),
+    "git": re.compile(
+        r"\bgit\s+(add|commit|push|pull|clone|branch|checkout|merge|rebase|stash)\b", re.I
+    ),
     "docker": re.compile(r"\bdocker\s+(build|run|compose|push|pull|stop|rm)\b", re.I),
     "npm": re.compile(r"\bnpm\s+(install|run|test|build|publish)\b", re.I),
     "pip": re.compile(r"\bpip[3]?\s+(install|uninstall|freeze)\b", re.I),
@@ -802,6 +826,7 @@ def detect_languages(text: str) -> list[str]:
 def detect_languages_from_files(file_paths: list[str]) -> list[str]:
     """Detect programming languages from file extensions."""
     import os
+
     found: list[str] = []
     for path in file_paths:
         _, ext = os.path.splitext(path.lower())
@@ -825,6 +850,7 @@ def detect_tools(text: str) -> dict[str, str]:
 
 
 # Auto-skill quality scoring
+
 
 def compute_auto_skill_quality_score(result: Any) -> float:
     """Compute a quality score (0.0-1.0) for an agent result.
@@ -887,6 +913,7 @@ def compute_auto_skill_quality_score(result: Any) -> float:
 
 # Auto-skill generation (pattern-based, no LLM required)
 
+
 @dataclass(slots=True)
 class ToolTraceEntry:
     """A single tool invocation within an execution trace."""
@@ -943,8 +970,15 @@ def _detect_pattern_name(steps: list[dict[str, Any]]) -> str:
         return f"single_{unique[0]}"
 
     # Read-then-write patterns
-    read_tools = {"file_read", "code_analyze", "code_find_def", "code_find_refs",
-                  "file_search", "file_list", "project_map"}
+    read_tools = {
+        "file_read",
+        "code_analyze",
+        "code_find_def",
+        "code_find_refs",
+        "file_search",
+        "file_list",
+        "project_map",
+    }
     write_tools = {"file_write", "file_edit", "bash_execute"}
     has_read = any(t in read_tools for t in unique)
     has_write = any(t in write_tools for t in unique)
@@ -981,18 +1015,18 @@ def extract_skill_template(
     # Build step templates
     raw_steps: list[dict[str, Any]] = []
     for entry in successful:
-        raw_steps.append({
-            "tool": entry.tool_name,
-            "params_template": _build_param_template(entry.params),
-        })
+        raw_steps.append(
+            {
+                "tool": entry.tool_name,
+                "params_template": _build_param_template(entry.params),
+            }
+        )
 
     steps = _deduplicate_steps(raw_steps)
     pattern = _detect_pattern_name(steps)
 
     # Derive a description from the goal and pattern
-    description = (
-        f"Auto-extracted '{pattern}' skill: {goal[:160]}"
-    )
+    description = f"Auto-extracted '{pattern}' skill: {goal[:160]}"
 
     # Build a deterministic fingerprint so we can detect duplicates
     fp_input = json.dumps(
@@ -1020,9 +1054,7 @@ def _build_refinement_prompt(
     """Build a prompt asking the LLM to clean up auto-extracted skill steps."""
     step_lines: list[str] = []
     for idx, step in enumerate(steps, 1):
-        params_str = ", ".join(
-            f"{k}={v}" for k, v in step.get("params_template", {}).items()
-        )
+        params_str = ", ".join(f"{k}={v}" for k, v in step.get("params_template", {}).items())
         step_lines.append(f"  {idx}. tool={step['tool']}  params={params_str}")
 
     return (
@@ -1076,10 +1108,7 @@ def _parse_refined_steps(
         parsed.append({"tool": tool_name, "params_template": params_template})
 
     # Validate: must have reasonable number of steps
-    if (
-        len(parsed) < _REFINEMENT_MIN_STEPS
-        or len(parsed) > _REFINEMENT_MAX_STEPS
-    ):
+    if len(parsed) < _REFINEMENT_MIN_STEPS or len(parsed) > _REFINEMENT_MAX_STEPS:
         log.debug(
             "refined_steps_invalid_count",
             parsed=len(parsed),
@@ -1119,9 +1148,7 @@ async def refine_skill_steps(
 _STRATEGIC_BODY_MAX_TOKENS = 700
 
 
-def _build_strategic_skill_prompt(
-    goal: str, steps: list[dict[str, Any]], pattern: str
-) -> str:
+def _build_strategic_skill_prompt(goal: str, steps: list[dict[str, Any]], pattern: str) -> str:
     """Prompt to distil a tool trace into a reusable, generalised procedure.
 
     The pattern-extracted body is a verbatim transcript of one run; an agent
@@ -1225,7 +1252,10 @@ async def maybe_generate_skill(
         # Prefer an LLM-distilled reusable procedure; fall back to the step
         # transcript when no refiner is wired or synthesis fails.
         strategic_body = await _synthesize_strategic_body(
-            goal, template["steps"], template["pattern"], refiner,
+            goal,
+            template["steps"],
+            template["pattern"],
+            refiner,
         )
         if strategic_body:
             body = f"# Skill: {template['description']}\n\n{strategic_body}"
@@ -1279,11 +1309,13 @@ async def maybe_generate_skill(
             # Default-off config means normal runs write nothing.
             try:
                 from rune.config import get_config
+
                 skills_cfg = get_config().skills
                 if getattr(skills_cfg, "gated_learning", False) or getattr(
                     skills_cfg, "auto_skill", False
                 ):
                     from rune.skills.persistence import write_skill_to_disk
+
                     write_skill_to_disk(skill)
             except Exception as exc:
                 log.debug("candidate_persist_skipped", error=str(exc)[:120])
@@ -1318,13 +1350,62 @@ def generate_skill_name(goal: str) -> str | None:
     """
     # Remove common stop words and articles
     stop_words = {
-        "a", "an", "the", "is", "are", "was", "were", "be", "been",
-        "do", "does", "did", "will", "would", "could", "should",
-        "can", "may", "might", "shall", "to", "of", "in", "on",
-        "at", "by", "for", "with", "from", "and", "or", "but",
-        "not", "no", "this", "that", "it", "its", "my", "your",
-        "his", "her", "our", "me", "i", "you", "he", "she", "we",
-        "please", "just", "also", "very", "really", "now", "then",
+        "a",
+        "an",
+        "the",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "can",
+        "may",
+        "might",
+        "shall",
+        "to",
+        "of",
+        "in",
+        "on",
+        "at",
+        "by",
+        "for",
+        "with",
+        "from",
+        "and",
+        "or",
+        "but",
+        "not",
+        "no",
+        "this",
+        "that",
+        "it",
+        "its",
+        "my",
+        "your",
+        "his",
+        "her",
+        "our",
+        "me",
+        "i",
+        "you",
+        "he",
+        "she",
+        "we",
+        "please",
+        "just",
+        "also",
+        "very",
+        "really",
+        "now",
+        "then",
     }
 
     # Clean and split
@@ -1346,6 +1427,7 @@ def generate_skill_name(goal: str) -> str | None:
 
 
 # Record command to memory
+
 
 async def record_command_to_memory(
     command: str,

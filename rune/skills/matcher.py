@@ -91,7 +91,9 @@ def _compute_similarity(query: str, skill: Skill) -> float:
 
     # Fuzzy matching against description
     desc_ratio = SequenceMatcher(
-        None, query_lower, skill.description.lower()[:200],
+        None,
+        query_lower,
+        skill.description.lower()[:200],
     ).ratio()
 
     # Weighted combination

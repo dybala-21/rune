@@ -136,7 +136,9 @@ class TestSkillRegistry:
 class TestParseSkillFile:
     def test_parse_valid_skill_file(self):
         with tempfile.NamedTemporaryFile(suffix=".md", mode="w", delete=False) as f:
-            f.write("---\nname: my-skill\ndescription: A useful skill\nscope: user\n---\n\nBody content here.\n")
+            f.write(
+                "---\nname: my-skill\ndescription: A useful skill\nscope: user\n---\n\nBody content here.\n"
+            )
             f.flush()
             skill = _parse_skill_file(Path(f.name))
 
@@ -163,9 +165,7 @@ class TestParseSkillFile:
     def test_load_skills_from_directory(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             skill_path = Path(tmpdir) / "SKILL.md"
-            skill_path.write_text(
-                "---\nname: dir-skill\ndescription: From dir\n---\n\nBody\n"
-            )
+            skill_path.write_text("---\nname: dir-skill\ndescription: From dir\n---\n\nBody\n")
             reg = SkillRegistry()
             count = reg.load_skills(tmpdir)
             assert count == 1
@@ -186,6 +186,7 @@ class TestParseSkillFile:
 # ---------------------------------------------------------------------------
 # Skill Context Building
 # ---------------------------------------------------------------------------
+
 
 class TestBuildSkillContext:
     def _make_skill(self, **overrides):
@@ -270,16 +271,20 @@ class TestBuildSkillContext:
 class TestBuildSkillContextForGoal:
     def test_returns_context_for_matching_skill(self):
         reg = SkillRegistry()
-        reg.register(Skill(
-            name="test-runner",
-            description="Run unit tests for the project",
-            body="Run pytest",
-        ))
-        reg.register(Skill(
-            name="deploy",
-            description="Deploy application",
-            body="Deploy steps",
-        ))
+        reg.register(
+            Skill(
+                name="test-runner",
+                description="Run unit tests for the project",
+                body="Run pytest",
+            )
+        )
+        reg.register(
+            Skill(
+                name="deploy",
+                description="Deploy application",
+                body="Deploy steps",
+            )
+        )
         ctx = build_skill_context_for_goal("run unit tests", registry=reg)
         assert ctx is not None
         assert ctx.active_skill_name == "test-runner"
@@ -379,33 +384,46 @@ class TestSemanticMatching:
         monkeypatch.setattr(matcher, "get_embedding_provider", lambda: _Prov(), raising=False)
         # ensure the lazy import inside _semantic_scores resolves to our stub
         import rune.llm.local_embedding as le
+
         monkeypatch.setattr(le, "get_embedding_provider", lambda: _Prov())
 
     def test_semantic_rescues_reworded_goal(self, monkeypatch):
-        from rune.skills.matcher import match_skills, _skill_embed_text
-        skill = Skill(name="create_module_with_tests",
-                      description="Create a Python module with functions and pytest tests")
+        from rune.skills.matcher import _skill_embed_text, match_skills
+
+        skill = Skill(
+            name="create_module_with_tests",
+            description="Create a Python module with functions and pytest tests",
+        )
         query = "write an arithmetic helper with a sum function and unit tests"
         # query embedding aligned with the skill embedding (cosine 1.0)
-        self._patch_embeddings(monkeypatch, {
-            query: [1.0, 0.0],
-            _skill_embed_text(skill): [1.0, 0.0],
-        })
+        self._patch_embeddings(
+            monkeypatch,
+            {
+                query: [1.0, 0.0],
+                _skill_embed_text(skill): [1.0, 0.0],
+            },
+        )
         matches = match_skills(query, [skill])
         assert matches and matches[0].skill.name == "create_module_with_tests"
         assert matches[0].score >= 0.55
         assert "Semantic" in matches[0].reason
 
     def test_unrelated_goal_below_threshold_not_boosted(self, monkeypatch):
-        from rune.skills.matcher import match_skills, _skill_embed_text
-        skill = Skill(name="create_module_with_tests",
-                      description="Create a Python module with functions and pytest tests")
+        from rune.skills.matcher import _skill_embed_text, match_skills
+
+        skill = Skill(
+            name="create_module_with_tests",
+            description="Create a Python module with functions and pytest tests",
+        )
         query = "deploy a kubernetes cluster on aws"
         # orthogonal embeddings → cosine 0 → no semantic boost
-        self._patch_embeddings(monkeypatch, {
-            query: [0.0, 1.0],
-            _skill_embed_text(skill): [1.0, 0.0],
-        })
+        self._patch_embeddings(
+            monkeypatch,
+            {
+                query: [0.0, 1.0],
+                _skill_embed_text(skill): [1.0, 0.0],
+            },
+        )
         matches = match_skills(query, [skill])
         # may still appear via tiny lexical fuzz, but never as a semantic match
         assert all("Semantic" not in m.reason for m in matches)
@@ -413,10 +431,13 @@ class TestSemanticMatching:
 
     def test_embeddings_unavailable_falls_back_to_lexical(self, monkeypatch):
         import rune.llm.local_embedding as le
+
         def _boom():
             raise RuntimeError("no model")
+
         monkeypatch.setattr(le, "get_embedding_provider", _boom)
         from rune.skills.matcher import match_skills
+
         skills = [Skill(name="test-runner", description="Run unit tests for the project")]
         matches = match_skills("run tests", skills)  # must not raise
         assert matches and matches[0].skill.name == "test-runner"

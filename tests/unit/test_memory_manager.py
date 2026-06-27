@@ -184,13 +184,30 @@ class TestEpisodeAntiExampleSelection:
     @staticmethod
     def _ep(summary, utility, lessons="", intent="", ts="2020-01-01", importance=0.5):
         from rune.memory.types import Episode
-        return {"episode": Episode(task_summary=summary, utility=utility, lessons=lessons,
-                                   intent=intent, timestamp=ts, importance=importance), "score": 0.6}
+
+        return {
+            "episode": Episode(
+                task_summary=summary,
+                utility=utility,
+                lessons=lessons,
+                intent=intent,
+                timestamp=ts,
+                importance=importance,
+            ),
+            "score": 0.6,
+        }
 
     def test_success_superseding_failure_drops_it(self):
         from rune.memory.manager import _select_experience_lines
+
         scored = [
-            self._ep("add discount logic", -1, lessons="off-by-one in rate", intent="code:add:discount", ts="2020-01-01"),
+            self._ep(
+                "add discount logic",
+                -1,
+                lessons="off-by-one in rate",
+                intent="code:add:discount",
+                ts="2020-01-01",
+            ),
             self._ep("add discount logic", +1, intent="code:add:discount", ts="2020-02-01"),
         ]
         lines = _select_experience_lines(scored)
@@ -199,28 +216,40 @@ class TestEpisodeAntiExampleSelection:
 
     def test_bare_failure_without_lesson_dropped(self):
         from rune.memory.manager import _select_experience_lines
+
         lines = _select_experience_lines([self._ep("write parser", -1, lessons="")])
         assert lines == []  # noise, not injected
 
     def test_mechanical_lesson_is_not_actionable(self):
         from rune.memory.manager import _select_experience_lines
-        lines = _select_experience_lines([self._ep("x", -1, lessons="Task failed: timeout occurred")])
+
+        lines = _select_experience_lines(
+            [self._ep("x", -1, lessons="Task failed: timeout occurred")]
+        )
         assert lines == []
 
     def test_lesson_bearing_failure_injected_with_guidance(self):
         from rune.memory.manager import _select_experience_lines
-        lines = _select_experience_lines([self._ep("parse csv", -1, lessons="quote commas inside fields")])
+
+        lines = _select_experience_lines(
+            [self._ep("parse csv", -1, lessons="quote commas inside fields")]
+        )
         assert len(lines) == 1 and "⚠️" in lines[0] and "avoid repeating" in lines[0]
         assert "quote commas" in lines[0]
 
     def test_anti_examples_capped(self):
-        from rune.memory.manager import _select_experience_lines, _MAX_ANTI_EXAMPLES
-        scored = [self._ep(f"task {i}", -1, lessons=f"lesson {i}", intent=f"i{i}", ts=f"2020-01-0{i}") for i in range(1, 6)]
+        from rune.memory.manager import _MAX_ANTI_EXAMPLES, _select_experience_lines
+
+        scored = [
+            self._ep(f"task {i}", -1, lessons=f"lesson {i}", intent=f"i{i}", ts=f"2020-01-0{i}")
+            for i in range(1, 6)
+        ]
         lines = _select_experience_lines(scored)
         assert len([l for l in lines if "⚠️" in l]) == _MAX_ANTI_EXAMPLES  # spiral bounded
 
     def test_most_recent_failures_preferred(self):
         from rune.memory.manager import _select_experience_lines
+
         scored = [
             self._ep("old", -1, lessons="old lesson", intent="a", ts="2020-01-01"),
             self._ep("new", -1, lessons="new lesson", intent="b", ts="2020-12-01"),
@@ -233,5 +262,6 @@ class TestEpisodeAntiExampleSelection:
 
     def test_successes_always_listed(self):
         from rune.memory.manager import _select_experience_lines
+
         lines = _select_experience_lines([self._ep("did a thing", +1)])
         assert len(lines) == 1 and "✅" in lines[0]
