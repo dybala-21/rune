@@ -39,7 +39,8 @@ an AI assistant session, extract the following in JSON format:
   "lessons": ["reusable insights - what worked, what failed, how it was fixed"],
   "entities": ["people, projects, services, files mentioned"],
   "decisions": ["key choices or conclusions made"],
-  "conventions": ["durable project conventions or user preferences evident this session - how this project/user does things, applicable to future tasks"]
+  "conventions": ["durable PROJECT conventions evident this session - how this project does things, applicable to future tasks"],
+  "user_facts": ["stable personal facts about the USER themselves - identity/role, dietary or health constraints, accessibility needs, tools they personally use, languages they speak, working-style preferences"]
 }
 
 Rules:
@@ -47,10 +48,13 @@ Rules:
 - Commitments must be user obligations, not completed tasks.
 - Lessons must be actionable for future reference.
 - Entities are proper nouns: names, project names, file paths, service names.
-- Conventions are durable, cross-task rules: coding style (e.g. "use snake_case"),
+- Conventions are durable, cross-task PROJECT rules: coding style (e.g. "use snake_case"),
   required practices (e.g. "every function needs a docstring", "validate inputs and
-  raise ValueError"), tooling/library choices, or stated user preferences. Not
-  one-off task details. Phrase each as a standalone rule.
+  raise ValueError"), tooling/library choices. Not one-off task details. Phrase each as
+  a standalone rule.
+- User facts are about the PERSON, not the project: "is allergic to peanuts", "uses
+  neovim", "prefers Korean for docs", "is a backend engineer". They form a durable user
+  profile that should shape every future task. Keep each short and self-contained.
 - Return empty arrays if nothing fits a category.
 - Respond with ONLY the JSON object, no other text.
 """
@@ -87,9 +91,9 @@ def _parse_extraction(raw: str) -> dict[str, list[str]]:
             try:
                 data = json.loads(text[start:end])
             except (json.JSONDecodeError, ValueError):
-                return {"commitments": [], "lessons": [], "entities": [], "decisions": [], "conventions": []}
+                return {"commitments": [], "lessons": [], "entities": [], "decisions": [], "conventions": [], "user_facts": []}
         else:
-            return {"commitments": [], "lessons": [], "entities": [], "decisions": [], "conventions": []}
+            return {"commitments": [], "lessons": [], "entities": [], "decisions": [], "conventions": [], "user_facts": []}
 
     return {
         "commitments": data.get("commitments", [])[:10],
@@ -97,6 +101,7 @@ def _parse_extraction(raw: str) -> dict[str, list[str]]:
         "entities": data.get("entities", [])[:20],
         "decisions": data.get("decisions", [])[:10],
         "conventions": data.get("conventions", [])[:10],
+        "user_facts": data.get("user_facts", [])[:10],
     }
 
 
@@ -271,6 +276,16 @@ async def consolidate_episode(episode_id: str) -> dict[str, list[str]] | None:
                 for conv in result.get("conventions", []):
                     if isinstance(conv, str) and len(conv) > 5 and not is_suppressed(conv[:80]):
                         save_learned_fact("project", conv[:80], conv, 0.8)
+
+                # User facts form the durable user profile (Hermes USER.md
+                # equivalent). They go to "preference" so get_tiered_context's
+                # ranking treats them as the personal profile and surfaces them
+                # FIRST, ahead of project conventions, on every future task —
+                # even ones with no keyword overlap (e.g. a dietary restriction
+                # shaping an unrelated "suggest dinner" request).
+                for uf in result.get("user_facts", []):
+                    if isinstance(uf, str) and len(uf) > 5 and not is_suppressed(uf[:80]):
+                        save_learned_fact("preference", uf[:80], uf, 0.8)
         except Exception as exc:
             log.debug("learned_md_write_failed", error=str(exc)[:100])
 
