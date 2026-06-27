@@ -31,9 +31,8 @@ from rune.utils.paths import rune_home
 
 log = get_logger(__name__)
 
-# Char budget for the injected "## Durable Knowledge" block. Chosen to mirror
-# Hermes Agent's USER.md cap (~1375 chars) — enough for a stable personal
-# profile, bounded so it can't crowd out the rest of the memory context.
+# Char budget for the injected "## Durable Knowledge" block — enough for a
+# stable profile, bounded so it can't crowd out the rest of the context.
 _DURABLE_INJECT_CHAR_BUDGET = 1500
 _DURABLE_INJECT_MAX_FACTS = 30
 
@@ -63,20 +62,12 @@ def _rank_durable_facts(
     char_budget: int = _DURABLE_INJECT_CHAR_BUDGET,
     max_facts: int = _DURABLE_INJECT_MAX_FACTS,
 ) -> list[Any]:
-    """Order durable facts for unconditional injection, then fill to a budget.
+    """Rank durable facts for injection, then fill to a budget.
 
-    Mirrors Hermes' always-injected USER.md: a user's ``preference`` facts are
-    their stable personal profile (allergies, coding style, dietary rules) and
-    must never be silently dropped, so they rank ahead of ``project`` facts and
-    fill the budget first. Within a category we rank by goal-relevance (keyword
-    overlap with the goal), then recency.
-
-    Recency must be computed *per category*: ``get_durable_facts`` concatenates
-    "preference" then "project", so a global list index makes every project
-    fact look newer than every preference fact. We therefore group by category
-    first — index within a group is the real append order (later == newer from
-    learned.md). This replaces a flat ``[:10]`` parse-order slice that buried a
-    just-saved "allergic to peanuts" preference at rank 15/16.
+    ``preference`` (personal profile) ranks ahead of ``project``; within a
+    category, by goal-relevance then recency. Recency is per-category: the
+    source list concatenates preference+project, so a global index would make
+    every project fact look newer. Replaces a flat ``[:10]`` parse-order slice.
     """
     if not facts:
         return []
@@ -93,9 +84,7 @@ def _rank_durable_facts(
         cat_weight = 1 if category == "preference" else 0
         m = len(items)
         for j, f in enumerate(items):
-            relevance = (
-                len(goal_words & _tokenize(f"{f.key} {f.value}")) if goal_words else 0
-            )
+            relevance = len(goal_words & _tokenize(f"{f.key} {f.value}")) if goal_words else 0
             recency = j / max(m - 1, 1)  # 0..1, newest highest within its category
             scored.append((cat_weight, relevance, recency, f))
     scored.sort(key=lambda t: (t[0], t[1], t[2]), reverse=True)
@@ -109,6 +98,76 @@ def _rank_durable_facts(
         out.append(f)
         used += len(line)
     return out
+
+
+# Cap on injected failure anti-examples so a retry loop can't build a ⚠️ wall.
+_MAX_ANTI_EXAMPLES = 2
+
+
+def _episode_key(ep: Any) -> str:
+    """Identity for supersession matching (intent if present, else summary)."""
+    return (getattr(ep, "intent", "") or getattr(ep, "task_summary", "") or "").strip().lower()[:80]
+
+
+def _actionable_lesson(ep: Any) -> str:
+    """An episode's actionable lesson, or "" — bare failures and save-time
+    telemetry ("Task failed: ...", "Success: domain=...") carry no signal."""
+    raw = (getattr(ep, "lessons", "") or "").strip()
+    if not raw:
+        return ""
+
+    def _mechanical(s: str) -> bool:
+        head = s.lstrip()[:16].lower()
+        return head.startswith("task failed:") or head.startswith("success: domain=")
+
+    try:
+        from rune.utils.fast_serde import json_decode
+
+        decoded = json_decode(raw)
+        if isinstance(decoded, list):
+            parts = [str(x).strip() for x in decoded if str(x).strip() and not _mechanical(str(x))]
+            return "; ".join(parts)[:200]
+    except Exception:
+        pass
+    return "" if _mechanical(raw) else raw[:200]
+
+
+def _select_experience_lines(scored: list[dict[str, Any]]) -> list[str]:
+    """Build "## Past Experience" lines, keeping failures as signal not poison.
+
+    Failures inject as anti-examples only when useful: superseded-by-success
+    ones are dropped, lesson-less ones are dropped, and survivors are capped at
+    ``_MAX_ANTI_EXAMPLES`` (most recent) with their lesson inline.
+    """
+    successes = [e for e in scored if getattr(e["episode"], "utility", 0) > 0]
+    failures = [e for e in scored if getattr(e["episode"], "utility", 0) < 0]
+    succeeded_keys = {_episode_key(e["episode"]) for e in successes}
+
+    anti: list[tuple[Any, str]] = []
+    for e in failures:
+        ep = e["episode"]
+        if _episode_key(ep) in succeeded_keys:  # later/also succeeded → not a lesson
+            continue
+        lesson = _actionable_lesson(ep)
+        if not lesson:  # bare failure = noise
+            continue
+        anti.append((ep, lesson))
+    # most recent / important first, then cap
+    anti.sort(
+        key=lambda t: (getattr(t[0], "timestamp", "") or "", getattr(t[0], "importance", 0.0)),
+        reverse=True,
+    )
+    anti = anti[:_MAX_ANTI_EXAMPLES]
+
+    lines: list[str] = []
+    for e in successes:
+        ep = e["episode"]
+        lines.append(f"- ✅ {ep.task_summary or '(no summary)'} (utility: +{ep.utility})")
+    for ep, lesson in anti:
+        lines.append(
+            f"- ⚠️ {ep.task_summary or '(no summary)'} — previously failed; avoid repeating: {lesson}"
+        )
+    return lines
 
 
 class MemoryManager:
@@ -178,17 +237,29 @@ class MemoryManager:
         if project_rules.exists():
             rules = await loop.run_in_executor(None, parse_rules_md, project_rules)
             self._working.safety_rules = [
-                {"type": r.get("type", ""), "pattern": r.get("pattern", ""), "reason": r.get("reason", "")}
+                {
+                    "type": r.get("type", ""),
+                    "pattern": r.get("pattern", ""),
+                    "reason": r.get("reason", ""),
+                }
                 for r in rules
             ]
 
         # Also load global rules.md if it exists
-        global_rules = memory_dir_path / "rules.md" if (memory_dir_path := rune_home() / "memory").exists() else None
+        global_rules = (
+            memory_dir_path / "rules.md"
+            if (memory_dir_path := rune_home() / "memory").exists()
+            else None
+        )
         if not self._working.safety_rules and global_rules and global_rules.exists():
             try:
                 rules = await loop.run_in_executor(None, parse_rules_md, global_rules)
                 self._working.safety_rules = [
-                    {"type": r.get("type", ""), "pattern": r.get("pattern", ""), "reason": r.get("reason", "")}
+                    {
+                        "type": r.get("type", ""),
+                        "pattern": r.get("pattern", ""),
+                        "reason": r.get("reason", ""),
+                    }
                     for r in rules
                 ]
             except Exception:
@@ -202,6 +273,7 @@ class MemoryManager:
         # If meta has eval data (eval_count > 0), meta wins — it has been
         # validated by actual task outcomes.  Otherwise learned.md wins.
         from rune.memory.state import load_fact_meta, save_fact_meta
+
         meta = await loop.run_in_executor(None, load_fact_meta)
         meta_changed = False
         for fact in learned:
@@ -312,14 +384,9 @@ class MemoryManager:
             parts.append("")
 
         # --- Durable context ---
-        # Durable facts (a user's stable profile: allergies, coding style,
-        # project conventions) should behave like Hermes' always-injected
-        # USER.md — never silently dropped. A flat ``[:10]`` slice in parse
-        # order regressed exactly this: a just-saved "allergic to peanuts" fact
-        # landed at rank 15/16 and fell off the cap even though the context was
-        # only ~1900/4000 chars (budget wasn't the limit, the arbitrary count
-        # was). Rank by goal-relevance then recency, and bound by a char budget
-        # instead of a magic count so newly-saved/relevant facts always survive.
+        # A user's stable profile must not be silently dropped. Rank by
+        # goal-relevance then recency and bound by a char budget, instead of a
+        # flat [:10] parse-order slice that buried just-saved facts.
         durable_facts = self._tiered.get_durable_facts("preference")
         durable_facts += self._tiered.get_durable_facts("project")
         if durable_facts:
@@ -337,7 +404,9 @@ class MemoryManager:
     # Episode scoring & similarity
 
     async def score_episodes(
-        self, query: str, limit: int = 10,
+        self,
+        query: str,
+        limit: int = 10,
     ) -> list[dict[str, Any]]:
         """Score episodes using vector similarity + importance + recency decay.
 
@@ -351,7 +420,9 @@ class MemoryManager:
         """
         loop = asyncio.get_running_loop()
         episodes = await loop.run_in_executor(
-            None, self._store.get_recent_episodes, max(limit * 5, 50),
+            None,
+            self._store.get_recent_episodes,
+            max(limit * 5, 50),
         )
         if not episodes:
             return []
@@ -360,6 +431,7 @@ class MemoryManager:
         vector_scores: dict[str, float] = {}
         try:
             from rune.llm.local_embedding import get_embedding_provider
+
             provider = get_embedding_provider()
             embedding = await provider.embed_single(query)
             vec_results = self._vectors.search(embedding, k=len(episodes))
@@ -396,15 +468,17 @@ class MemoryManager:
 
             composite = vec_score * 0.5 + importance * 0.3 + recency * 0.2
 
-            scored.append({
-                "episode": ep,
-                "score": composite,
-                "breakdown": {
-                    "vector": vec_score,
-                    "importance": importance,
-                    "recency": recency,
-                },
-            })
+            scored.append(
+                {
+                    "episode": ep,
+                    "score": composite,
+                    "breakdown": {
+                        "vector": vec_score,
+                        "importance": importance,
+                        "recency": recency,
+                    },
+                }
+            )
 
         scored.sort(key=lambda x: x["score"], reverse=True)
         return scored[:limit]
@@ -454,7 +528,9 @@ class MemoryManager:
         return combined[:limit]
 
     async def build_memory_context(
-        self, goal: str, classification: Any = None,
+        self,
+        goal: str,
+        classification: Any = None,
     ) -> str:
         """Build a markdown context string for prompt injection.
 
@@ -485,19 +561,19 @@ class MemoryManager:
         # goal too so semantically-similar rules inject regardless of domain.
         try:
             from rune.memory.rule_learner import get_relevant_rules
+
             domain = getattr(classification, "goal_type", None) if classification else None
             if domain is None and goal:
                 try:
                     from rune.agent.goal_classifier import classify_goal
+
                     domain = (await classify_goal(goal)).goal_type
                 except Exception:
                     domain = None
             rules = await get_relevant_rules(goal, domain)
             if rules:
                 rule_lines = [f"- {r['key']}: {r['value']}" for r in rules]
-                _add_section(
-                    "## Learned Rules\n" + "\n".join(rule_lines[:10]) + "\n"
-                )
+                _add_section("## Learned Rules\n" + "\n".join(rule_lines[:10]) + "\n")
         except Exception:
             pass  # Rule injection is best-effort
 
@@ -515,26 +591,25 @@ class MemoryManager:
                 for ep in entity_eps:
                     if ep.id not in scored_ids:
                         scored_ids.add(ep.id)
-                        scored.append({
-                            "episode": ep,
-                            "score": 0.6,
-                            "breakdown": {"vector": 0, "importance": ep.importance, "recency": 0.5},
-                        })
+                        scored.append(
+                            {
+                                "episode": ep,
+                                "score": 0.6,
+                                "breakdown": {
+                                    "vector": 0,
+                                    "importance": ep.importance,
+                                    "recency": 0.5,
+                                },
+                            }
+                        )
             except Exception:
                 pass
 
         if scored:
-            # Keep score_episodes relevance order; utility is for labeling only
-            lines: list[str] = []
-            for entry in scored:
-                ep: Episode = entry["episode"]
-                summary = ep.task_summary or "(no summary)"
-                u = getattr(ep, "utility", 0)
-                if u > 0:
-                    lines.append(f"- ✅ {summary} (utility: +{u})")
-                elif u < 0:
-                    lines.append(f"- ⚠️ {summary} (utility: {u})")
-                # utility=0 episodes are neutral, skip them
+            # Failures are kept as ANTI-EXAMPLES, but guarded against the
+            # poisoning spiral (superseded-by-success dropped, bare failures
+            # dropped, capped). See _select_experience_lines.
+            lines = _select_experience_lines(scored)
             if lines:
                 _add_section("## Past Experience (auto-learned)\n" + "\n".join(lines) + "\n")
 
@@ -546,6 +621,7 @@ class MemoryManager:
                 # lessons is stored as a string (possibly JSON list or plain text)
                 try:
                     from rune.utils.fast_serde import json_decode
+
                     lesson_list = json_decode(ep.lessons)
                     if isinstance(lesson_list, list):
                         for lesson in lesson_list:
@@ -563,7 +639,8 @@ class MemoryManager:
             matching_facts = [
                 (k, v)
                 for k, v in self._working.facts.items()
-                if goal_lower in k.lower() or goal_lower in v.lower()
+                if goal_lower in k.lower()
+                or goal_lower in v.lower()
                 or any(w in k.lower() or w in v.lower() for w in goal_lower.split()[:3])
             ]
             if matching_facts:
@@ -638,11 +715,13 @@ class MemoryManager:
         Rules are stored in-memory for the session. For persistent rules,
         edit .rune/memory/rules.md directly.
         """
-        self._working.safety_rules.append({
-            "type": rule_type,
-            "pattern": pattern,
-            "reason": reason,
-        })
+        self._working.safety_rules.append(
+            {
+                "type": rule_type,
+                "pattern": pattern,
+                "reason": reason,
+            }
+        )
         log.info("safety_rule_added", type=rule_type, pattern=pattern[:50])
 
     async def save_episode(self, episode: Episode) -> None:
@@ -675,6 +754,7 @@ class MemoryManager:
             # Vector index (may fail if embedding provider unavailable)
             try:
                 from rune.llm.local_embedding import get_embedding_provider
+
                 provider = get_embedding_provider()
                 embedding = await provider.embed_single(episode.task_summary)
                 self._vectors.add(embedding, meta)

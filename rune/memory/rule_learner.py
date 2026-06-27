@@ -14,7 +14,7 @@ import hashlib
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from rune.memory.markdown_store import save_learned_fact
+from rune.memory.markdown_store import remove_learned_fact, save_learned_fact
 from rune.memory.state import (
     load_fact_meta,
     load_suppressed,
@@ -62,15 +62,17 @@ _NON_CRISP_ERROR_MARKERS = (
 # Loop-end reasons that are not crisp: resource, exploration, or control
 # outcomes that do not identify a reproducible mistake. A rule learned from
 # "ran out of steps" would not generalize.
-_NON_CRISP_LOOP_REASONS = frozenset({
-    "stalled",
-    "no_progress",
-    "token_budget_exhausted",
-    "max_iterations",
-    "cancelled",
-    "advisor_abort",
-    "no_pydantic_ai",
-})
+_NON_CRISP_LOOP_REASONS = frozenset(
+    {
+        "stalled",
+        "no_progress",
+        "token_budget_exhausted",
+        "max_iterations",
+        "cancelled",
+        "advisor_abort",
+        "no_pydantic_ai",
+    }
+)
 
 
 def _error_signature(tool_name: str, error_message: str) -> str:
@@ -81,6 +83,7 @@ def _error_signature(tool_name: str, error_message: str) -> str:
     """
     # Normalize: strip paths, filenames, numbers for stable matching
     import re
+
     normalized = re.sub(r"/[\w/.\-]+", "<path>", error_message[:200])
     normalized = re.sub(r"[\w\-]+\.\w{1,4}", "<file>", normalized)  # filename.ext
     normalized = re.sub(r"\b\d+\b", "<n>", normalized)
@@ -126,12 +129,14 @@ def find_repeated_failures(
                 "calls": [],
             }
         sig_groups[sig]["count"] += 1
-        sig_groups[sig]["calls"].append({
-            "tool_name": tool_name,
-            "error": error_msg[:200],
-            "params": params_json,
-            "created_at": created_at,
-        })
+        sig_groups[sig]["calls"].append(
+            {
+                "tool_name": tool_name,
+                "error": error_msg[:200],
+                "params": params_json,
+                "created_at": created_at,
+            }
+        )
 
     # Filter to patterns with min_occurrences
     return [g for g in sig_groups.values() if g["count"] >= min_occurrences]
@@ -200,20 +205,69 @@ async def generate_rule_from_failure(
         return None
 
 
+def _rule_keys(meta: dict[str, Any]) -> list[str]:
+    return [k for k in meta if k.startswith(_RULE_CATEGORY_PREFIX)]
+
+
+def _rule_strength(entry: dict[str, Any]) -> tuple[int, float, str]:
+    """Keep-worthiness sort key (higher == keep): engagement, confidence, age.
+
+    Uses ``eval_count``, not ``hit_count`` — the latter is never bumped for rules.
+    """
+    return (
+        entry.get("eval_count", 0) or 0,
+        entry.get("confidence", 0.0) or 0.0,
+        entry.get("created_at", "") or "",
+    )
+
+
+def _evict_weakest_rule(meta: dict[str, Any], incoming_confidence: float) -> str | None:
+    """Free one cap slot by deleting the weakest unproven rule; bounds the set.
+
+    Evictable only if never engaged (``eval_count == 0``) and no stronger than
+    the incoming rule, so proven rules are never dropped. Returns the evicted
+    key, or None when every rule is proven (the cap then holds). Mutates ``meta``.
+    """
+    keys = _rule_keys(meta)
+    if not keys:
+        return None
+    weakest = min(keys, key=lambda k: _rule_strength(meta[k]))
+    e = meta[weakest]
+    if (e.get("eval_count", 0) or 0) == 0 and (
+        e.get("confidence", 0.0) or 0.0
+    ) <= incoming_confidence:
+        human_key = e.get("human_key") or weakest.split(":", 2)[-1]
+        try:
+            remove_learned_fact(human_key)
+        except Exception:  # learned.md line may already be gone
+            pass
+        del meta[weakest]
+        # update_fact_meta() reloads from disk, so persist the removal now or it resurrects.
+        save_fact_meta(meta)
+        log.info(
+            "rule_evicted",
+            key=weakest,
+            confidence=e.get("confidence"),
+            reason="cap_make_room",
+        )
+        return weakest
+    return None
+
+
+def _ensure_rule_capacity(meta: dict[str, Any], incoming_confidence: float) -> bool:
+    """True if there is room for one more rule, evicting a dead rule if needed."""
+    if sum(1 for k in meta if k.startswith(_RULE_CATEGORY_PREFIX)) < _SOFT_CAP:
+        return True
+    return _evict_weakest_rule(meta, incoming_confidence) is not None
+
+
 async def learn_from_failures(store: Any, domain: str = "code_modify") -> list[str]:
     """Main entry point: find repeated failures and generate rules.
 
     Called after a task completes with utility=-1.
     Returns list of newly created rule keys.
     """
-    # Check soft cap
     meta = load_fact_meta()
-    existing_rules = sum(
-        1 for k in meta if k.startswith(_RULE_CATEGORY_PREFIX)
-    )
-    if existing_rules >= _SOFT_CAP:
-        log.debug("rule_learner_cap_reached", count=existing_rules)
-        return []
 
     # Check suppressed rules
     suppressed = load_suppressed()
@@ -234,9 +288,16 @@ async def learn_from_failures(store: Any, domain: str = "code_modify") -> list[s
         if rule_key in suppressed:
             continue
 
+        # Make room before spending an LLM call; stop if the cap genuinely holds.
+        if not _ensure_rule_capacity(meta, _INITIAL_CONFIDENCE):
+            log.debug("rule_learner_cap_reached", count=len(_rule_keys(meta)))
+            break
+
         # Generate rule via LLM
         rule_text = await generate_rule_from_failure(
-            pattern["tool_name"], pattern["error_sample"], domain,
+            pattern["tool_name"],
+            pattern["error_sample"],
+            domain,
             occurrences=pattern["count"],
         )
         if rule_text is None:
@@ -261,7 +322,7 @@ async def learn_from_failures(store: Any, domain: str = "code_modify") -> list[s
         )
 
         # Save metadata
-        update_fact_meta(rule_key, {
+        rule_meta = {
             "confidence": _INITIAL_CONFIDENCE,
             "hit_count": 0,
             "eval_count": 0,
@@ -271,7 +332,11 @@ async def learn_from_failures(store: Any, domain: str = "code_modify") -> list[s
             "failure_count": pattern["count"],
             "human_key": key_part,
             "category": f"rule:{domain}",
-        })
+        }
+        update_fact_meta(rule_key, rule_meta)
+        # Mirror into the local snapshot so cap counting / eviction stay correct
+        # across multiple patterns in this same call.
+        meta[rule_key] = rule_meta
 
         new_rules.append(key_part)
         log.info(
@@ -340,14 +405,15 @@ async def learn_from_crisp_failure(
         return None
 
     meta = load_fact_meta()
-    existing_rules = sum(1 for k in meta if k.startswith(_RULE_CATEGORY_PREFIX))
-    if existing_rules >= _SOFT_CAP:
-        log.debug("crisp_rule_cap_reached", count=existing_rules)
-        return None
 
     sig = _error_signature(tool_name, error_message)
     rule_key = f"{_RULE_CATEGORY_PREFIX}{domain}:{sig}"
     if rule_key in meta or rule_key in load_suppressed():
+        return None
+
+    # Crisp rules inject immediately, so make room even at the cap.
+    if not _ensure_rule_capacity(meta, _CRISP_INITIAL_CONFIDENCE):
+        log.debug("crisp_rule_cap_reached", count=len(_rule_keys(meta)))
         return None
 
     rule_text = await generate_rule_from_failure(
@@ -370,23 +436,28 @@ async def learn_from_crisp_failure(
         value=value_part,
         confidence=_CRISP_INITIAL_CONFIDENCE,
     )
-    update_fact_meta(rule_key, {
-        "confidence": _CRISP_INITIAL_CONFIDENCE,
-        "hit_count": 0,
-        "eval_count": 0,
-        "source": "crisp_failure",
-        "created_at": datetime.now(UTC).isoformat(),
-        "failure_signature": sig,
-        "failure_count": 1,
-        "human_key": key_part,
-        "category": f"rule:{domain}",
-    })
+    update_fact_meta(
+        rule_key,
+        {
+            "confidence": _CRISP_INITIAL_CONFIDENCE,
+            "hit_count": 0,
+            "eval_count": 0,
+            "source": "crisp_failure",
+            "created_at": datetime.now(UTC).isoformat(),
+            "failure_signature": sig,
+            "failure_count": 1,
+            "human_key": key_part,
+            "category": f"rule:{domain}",
+        },
+    )
     log.info("crisp_rule_learned", domain=domain, key=key_part, value=value_part[:80])
     return key_part
 
 
 def _find_meta_key(
-    meta: dict[str, Any], category: str, human_key: str,
+    meta: dict[str, Any],
+    category: str,
+    human_key: str,
 ) -> str | None:
     """Find a meta entry by category + human_key.
 
@@ -397,10 +468,7 @@ def _find_meta_key(
     if direct in meta:
         return direct
     for k, v in meta.items():
-        if (
-            v.get("human_key") == human_key
-            and v.get("category") == category
-        ):
+        if v.get("human_key") == human_key and v.get("category") == category:
             return k
     return None
 
@@ -437,13 +505,15 @@ def _resolved_rule_candidates() -> list[dict[str, Any]]:
             continue
 
         meta_entry = meta.get(meta_key, {}) if meta_key else {}
-        out.append({
-            "key": key,
-            "value": fact.get("value", ""),
-            "confidence": confidence,
-            "domain": fdomain,
-            "hit_count": meta_entry.get("hit_count", 0),
-        })
+        out.append(
+            {
+                "key": key,
+                "value": fact.get("value", ""),
+                "confidence": confidence,
+                "domain": fdomain,
+                "hit_count": meta_entry.get("hit_count", 0),
+            }
+        )
     return out
 
 
@@ -593,20 +663,20 @@ def update_rules_from_outcome(
 
 
 def decay_unused_rules() -> int:
-    """Decay confidence of rules with hit_count=0 and older than 30 days.
-
-    Returns number of rules decayed.
+    """Decay never-engaged rules older than 30 days, deleting any below the GC
+    threshold (previously only logged, so dead rules occupied cap slots forever).
     """
     meta = load_fact_meta()
     now = datetime.now(UTC)
     decayed = 0
+    changed = False
 
     for key, entry in list(meta.items()):
         if not key.startswith(_RULE_CATEGORY_PREFIX):
             continue
         if entry.get("source") not in ("rule_learner", "crisp_failure"):
             continue
-        if entry.get("hit_count", 0) > 0:
+        if entry.get("eval_count", 0) > 0:
             continue
 
         created = entry.get("created_at", "")
@@ -622,13 +692,21 @@ def decay_unused_rules() -> int:
         if age_days >= 30:
             old_conf = entry.get("confidence", _INITIAL_CONFIDENCE)
             new_conf = old_conf * _DECAY_FACTOR
-            entry["confidence"] = new_conf
             decayed += 1
+            changed = True
 
             if new_conf < _GC_THRESHOLD:
-                log.info("rule_gc", key=key, confidence=new_conf)
+                human_key = entry.get("human_key") or key.split(":", 2)[-1]
+                try:
+                    remove_learned_fact(human_key)
+                except Exception:
+                    pass
+                del meta[key]
+                log.info("rule_gc", key=key, confidence=new_conf, action="deleted")
+            else:
+                entry["confidence"] = new_conf
 
-    if decayed:
+    if changed:
         save_fact_meta(meta)
 
     return decayed

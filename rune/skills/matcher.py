@@ -1,14 +1,60 @@
 """Skill matching for RUNE.
 
-Matches a user query against registered skills using keyword overlap
-and fuzzy string similarity.
+Ranks skills against a query by keyword overlap, fuzzy similarity, and semantic
+embedding similarity. The semantic signal catches reworded same-intent goals
+that lexical matching misses, and degrades to lexical-only when embeddings are
+unavailable.
 """
 
 from __future__ import annotations
 
+import math
+import os
 from difflib import SequenceMatcher
 
 from rune.skills.types import Skill, SkillMatch
+
+# Cosine at/above this counts as a semantic match; below it only lexical is used
+# (unrelated short texts still cosine ~0.3). Mirrors RUNE_RULE_SIM_THRESHOLD.
+_SKILL_SIM_THRESHOLD_ENV = "RUNE_SKILL_SIM_THRESHOLD"
+_DEFAULT_SKILL_SIM_THRESHOLD = 0.55
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b, strict=False))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot / (na * nb)
+
+
+def _skill_embed_text(skill: Skill) -> str:
+    return f"{skill.name}. {skill.description}"
+
+
+def _semantic_scores(query: str, skills: list[Skill]) -> dict[str, float]:
+    """Cosine(query, skill) keyed by skill name; {} on failure so the caller
+    falls back to lexical-only. One batched embed call."""
+    if not skills:
+        return {}
+    try:
+        from rune.llm.local_embedding import get_embedding_provider
+
+        provider = get_embedding_provider()
+        texts = [query] + [_skill_embed_text(s) for s in skills]
+        vecs = provider.embed_sync(texts)
+        qv = vecs[0]
+        return {skills[i].name: _cosine(qv, vecs[i + 1]) for i in range(len(skills))}
+    except Exception:
+        return {}
+
+
+def _sim_threshold() -> float:
+    try:
+        return float(os.environ.get(_SKILL_SIM_THRESHOLD_ENV, "") or _DEFAULT_SKILL_SIM_THRESHOLD)
+    except ValueError:
+        return _DEFAULT_SKILL_SIM_THRESHOLD
 
 
 def _tokenize(text: str) -> set[str]:
@@ -45,7 +91,9 @@ def _compute_similarity(query: str, skill: Skill) -> float:
 
     # Fuzzy matching against description
     desc_ratio = SequenceMatcher(
-        None, query_lower, skill.description.lower()[:200],
+        None,
+        query_lower,
+        skill.description.lower()[:200],
     ).ratio()
 
     # Weighted combination
@@ -55,23 +103,31 @@ def _compute_similarity(query: str, skill: Skill) -> float:
 
 
 def match_skills(query: str, skills: list[Skill]) -> list[SkillMatch]:
-    """Match a query against a list of skills.
+    """Match a query against skills, score = max(lexical, semantic) where
+    semantic counts only above the threshold. Sorted desc, zero-scores dropped."""
+    if not query.strip():
+        return []
 
-    Returns matches sorted by descending score, filtering out zero-score results.
-    """
+    semantic = _semantic_scores(query, skills)
+    threshold = _sim_threshold()
+    q_lower = query.lower()
+
     matches: list[SkillMatch] = []
-
     for skill in skills:
-        score = _compute_similarity(query, skill)
+        lexical = _compute_similarity(query, skill)
+        sem = semantic.get(skill.name, 0.0)
+        sem_qualifies = sem >= threshold
+        score = max(lexical, sem if sem_qualifies else 0.0)
         if score > 0.05:
-            # Build a brief reason
-            if query.lower() in skill.name.lower():
+            if q_lower in skill.name.lower():
                 reason = f"Name contains '{query}'"
-            elif query.lower() in skill.description.lower():
+            elif q_lower in skill.description.lower():
                 reason = f"Description matches '{query}'"
+            elif sem_qualifies and sem >= lexical:
+                reason = f"Semantic match: {sem:.0%}"
             else:
                 reason = f"Similarity: {score:.0%}"
-            matches.append(SkillMatch(skill=skill, score=score, reason=reason))
+            matches.append(SkillMatch(skill=skill, score=round(score, 4), reason=reason))
 
     matches.sort(key=lambda m: m.score, reverse=True)
     return matches
