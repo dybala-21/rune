@@ -10,6 +10,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from rune.agent.isolation import enforce as _enforce_isolation
 from rune.capabilities.registry import CapabilityRegistry
 from rune.capabilities.types import CapabilityDefinition
 from rune.config.defaults import DEFAULT_MAX_FILE_SIZE, DEFAULT_MAX_LINE_COUNT
@@ -75,7 +76,7 @@ async def file_read(params: FileReadParams) -> CapabilityResult:
     if not validation.allowed:
         return CapabilityResult(success=False, error=validation.reason)
 
-    file_path = Path(params.path).resolve()
+    file_path = Path(params.path).expanduser().resolve()
     if not file_path.is_file():
         return CapabilityResult(
             success=False,
@@ -130,7 +131,12 @@ async def file_write(params: FileWriteParams) -> CapabilityResult:
     if not validation.allowed:
         return CapabilityResult(success=False, error=validation.reason)
 
-    file_path = Path(params.path).resolve()
+    # deny writes outside an isolated worker's worktree (no-op otherwise)
+    _iso_err = _enforce_isolation(params.path)
+    if _iso_err:
+        return CapabilityResult(success=False, error=_iso_err)
+
+    file_path = Path(params.path).expanduser().resolve()
 
     # Defense-in-depth: block writes near filesystem root
     _home = os.environ.get("HOME", str(Path.home()))
@@ -182,7 +188,12 @@ async def file_edit(params: FileEditParams) -> CapabilityResult:
     if not validation.allowed:
         return CapabilityResult(success=False, error=f"Guardian blocked: {validation.reason}")
 
-    file_path = Path(params.path).resolve()
+    # deny writes outside an isolated worker's worktree (no-op otherwise)
+    _iso_err = _enforce_isolation(params.path)
+    if _iso_err:
+        return CapabilityResult(success=False, error=_iso_err)
+
+    file_path = Path(params.path).expanduser().resolve()
 
     # Defense-in-depth: block edits near filesystem root
     _home = os.environ.get("HOME", str(Path.home()))
@@ -250,7 +261,12 @@ async def file_delete(params: FileDeleteParams) -> CapabilityResult:
     if not validation.allowed:
         return CapabilityResult(success=False, error=validation.reason)
 
-    file_path = Path(params.path).resolve()
+    # deny writes outside an isolated worker's worktree (no-op otherwise)
+    _iso_err = _enforce_isolation(params.path)
+    if _iso_err:
+        return CapabilityResult(success=False, error=_iso_err)
+
+    file_path = Path(params.path).expanduser().resolve()
 
     # -- hard safety net (defense-in-depth, independent of Guardian) -----------
     _home = os.environ.get("HOME", str(Path.home()))
@@ -288,7 +304,7 @@ async def file_delete(params: FileDeleteParams) -> CapabilityResult:
 
 async def file_list(params: FileListParams) -> CapabilityResult:
     """List files in a directory with optional glob pattern."""
-    dir_path = Path(params.path).resolve()
+    dir_path = Path(params.path).expanduser().resolve()
     if not dir_path.is_dir():
         return CapabilityResult(success=False, error=f"Not a directory: {params.path}")
 
@@ -333,7 +349,7 @@ async def file_search(params: FileSearchParams) -> CapabilityResult:
     """Search for a pattern across files in a directory."""
     import re
 
-    dir_path = Path(params.path).resolve()
+    dir_path = Path(params.path).expanduser().resolve()
     if not dir_path.is_dir():
         return CapabilityResult(success=False, error=f"Not a directory: {params.path}")
 

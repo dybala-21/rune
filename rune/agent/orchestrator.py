@@ -100,6 +100,10 @@ class OrchestratorConfig:
     execution_mode: ExecutionMode = "parallel"
     subtask_timeout_s: float = 300.0  # 5 minutes default
     abort_on_failure: bool = False  # If True, stop remaining tasks on first failure
+    # G2: when set ("worktree"/"copy"/"auto"), parallel workers run isolated and
+    # their changes are merged atomically (rune.agent.wave_orchestrator). "none"
+    # (default) keeps the legacy shared-cwd in-process path — behaviour-neutral.
+    isolation: str = "none"
 
 
 TaskFailureType = Literal["transient", "correctable", "systemic", "critical", "unknown"]
