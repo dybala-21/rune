@@ -31,9 +31,8 @@ from rune.utils.paths import rune_home
 
 log = get_logger(__name__)
 
-# Char budget for the injected "## Durable Knowledge" block. Chosen to mirror
-# Hermes Agent's USER.md cap (~1375 chars) — enough for a stable personal
-# profile, bounded so it can't crowd out the rest of the memory context.
+# Char budget for the injected "## Durable Knowledge" block — enough for a
+# stable profile, bounded so it can't crowd out the rest of the context.
 _DURABLE_INJECT_CHAR_BUDGET = 1500
 _DURABLE_INJECT_MAX_FACTS = 30
 
@@ -63,20 +62,12 @@ def _rank_durable_facts(
     char_budget: int = _DURABLE_INJECT_CHAR_BUDGET,
     max_facts: int = _DURABLE_INJECT_MAX_FACTS,
 ) -> list[Any]:
-    """Order durable facts for unconditional injection, then fill to a budget.
+    """Rank durable facts for injection, then fill to a budget.
 
-    Mirrors Hermes' always-injected USER.md: a user's ``preference`` facts are
-    their stable personal profile (allergies, coding style, dietary rules) and
-    must never be silently dropped, so they rank ahead of ``project`` facts and
-    fill the budget first. Within a category we rank by goal-relevance (keyword
-    overlap with the goal), then recency.
-
-    Recency must be computed *per category*: ``get_durable_facts`` concatenates
-    "preference" then "project", so a global list index makes every project
-    fact look newer than every preference fact. We therefore group by category
-    first — index within a group is the real append order (later == newer from
-    learned.md). This replaces a flat ``[:10]`` parse-order slice that buried a
-    just-saved "allergic to peanuts" preference at rank 15/16.
+    ``preference`` (personal profile) ranks ahead of ``project``; within a
+    category, by goal-relevance then recency. Recency is per-category: the
+    source list concatenates preference+project, so a global index would make
+    every project fact look newer. Replaces a flat ``[:10]`` parse-order slice.
     """
     if not facts:
         return []
@@ -111,25 +102,18 @@ def _rank_durable_facts(
     return out
 
 
-# Max failed episodes injected as anti-examples. Bounded so a loop/retry on the
-# same failing goal can't accumulate a wall of ⚠️ entries (negative-reinforcement
-# spiral) — the original code injected EVERY negative-utility episode in scope.
+# Cap on injected failure anti-examples so a retry loop can't build a ⚠️ wall.
 _MAX_ANTI_EXAMPLES = 2
 
 
 def _episode_key(ep: Any) -> str:
-    """Stable identity for supersession matching (intent if present, else summary)."""
+    """Identity for supersession matching (intent if present, else summary)."""
     return (getattr(ep, "intent", "") or getattr(ep, "task_summary", "") or "").strip().lower()[:80]
 
 
 def _actionable_lesson(ep: Any) -> str:
-    """Return a clean, actionable lesson for an episode, or "" if it has none.
-
-    A bare failure ("this goal failed", no reason) is noise — injecting it only
-    discourages. RUNE's own save-time telemetry ("Task failed: ...", "Success:
-    domain=...") is likewise not actionable. Only a real lesson makes a failed
-    episode worth surfacing as an anti-example.
-    """
+    """An episode's actionable lesson, or "" — bare failures and save-time
+    telemetry ("Task failed: ...", "Success: domain=...") carry no signal."""
     raw = (getattr(ep, "lessons", "") or "").strip()
     if not raw:
         return ""
@@ -150,18 +134,11 @@ def _actionable_lesson(ep: Any) -> str:
 
 
 def _select_experience_lines(scored: list[dict[str, Any]]) -> list[str]:
-    """Build the "## Past Experience" lines, using failures as a SIGNAL not POISON.
+    """Build "## Past Experience" lines, keeping failures as signal not poison.
 
-    Three guards turn the old "inject every negative-utility summary" behavior
-    (a documented poisoning spiral) into genuine anti-example learning that
-    still beats simply hiding failures (which throws the signal away):
-      1. Supersession — a failure whose task was ALSO succeeded (same key, in the
-         relevant set) is dropped; you have a working approach now, so the old
-         failure is stale poison, not a lesson.
-      2. Actionability — a failure with no real lesson is dropped (bare "it
-         failed" only discourages); survivors carry their lesson inline.
-      3. Cap — at most ``_MAX_ANTI_EXAMPLES``, most-recent first, so a retry loop
-         can't pile up a wall of warnings.
+    Failures inject as anti-examples only when useful: superseded-by-success
+    ones are dropped, lesson-less ones are dropped, and survivors are capped at
+    ``_MAX_ANTI_EXAMPLES`` (most recent) with their lesson inline.
     """
     successes = [e for e in scored if getattr(e["episode"], "utility", 0) > 0]
     failures = [e for e in scored if getattr(e["episode"], "utility", 0) < 0]
@@ -392,14 +369,9 @@ class MemoryManager:
             parts.append("")
 
         # --- Durable context ---
-        # Durable facts (a user's stable profile: allergies, coding style,
-        # project conventions) should behave like Hermes' always-injected
-        # USER.md — never silently dropped. A flat ``[:10]`` slice in parse
-        # order regressed exactly this: a just-saved "allergic to peanuts" fact
-        # landed at rank 15/16 and fell off the cap even though the context was
-        # only ~1900/4000 chars (budget wasn't the limit, the arbitrary count
-        # was). Rank by goal-relevance then recency, and bound by a char budget
-        # instead of a magic count so newly-saved/relevant facts always survive.
+        # A user's stable profile must not be silently dropped. Rank by
+        # goal-relevance then recency and bound by a char budget, instead of a
+        # flat [:10] parse-order slice that buried just-saved facts.
         durable_facts = self._tiered.get_durable_facts("preference")
         durable_facts += self._tiered.get_durable_facts("project")
         if durable_facts:

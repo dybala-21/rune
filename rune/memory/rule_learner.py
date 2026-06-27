@@ -205,11 +205,9 @@ def _rule_keys(meta: dict[str, Any]) -> list[str]:
 
 
 def _rule_strength(entry: dict[str, Any]) -> tuple[int, float, str]:
-    """Sort key for how worth-keeping a rule is (higher == keep).
+    """Keep-worthiness sort key (higher == keep): engagement, confidence, age.
 
-    Engagement first (``eval_count`` — outcomes that actually exercised the
-    rule; ``hit_count`` is never bumped for rules so it's a dead signal), then
-    confidence, then age (older kept as tie-break recency proxy via created_at).
+    Uses ``eval_count``, not ``hit_count`` — the latter is never bumped for rules.
     """
     return (
         entry.get("eval_count", 0) or 0,
@@ -219,20 +217,11 @@ def _rule_strength(entry: dict[str, Any]) -> tuple[int, float, str]:
 
 
 def _evict_weakest_rule(meta: dict[str, Any], incoming_confidence: float) -> str | None:
-    """Free one cap slot by deleting the single weakest UNPROVEN rule.
+    """Free one cap slot by deleting the weakest unproven rule; bounds the set.
 
-    The soft cap previously hard-froze all learning once reached: nothing ever
-    decrements the rule count (GC only lowered confidence, never deleted), so a
-    saturated set of never-engaged rules blocked every future failure-rule for
-    good. This converts that freeze into a self-maintaining bounded set.
-
-    Deterministic and conservative — unlike an LLM compaction pass it cannot
-    hallucinate or drop a proven rule: a rule is evictable ONLY if it has never
-    been exercised by an outcome (``eval_count == 0``) AND its confidence is no
-    higher than the incoming rule's. Any rule that earned engagement or higher
-    confidence is protected. Returns the evicted rule_key, or None when every
-    rule is proven/stronger (the cap then legitimately holds). Mutates ``meta``
-    in place; the caller persists it.
+    Evictable only if never engaged (``eval_count == 0``) and no stronger than
+    the incoming rule, so proven rules are never dropped. Returns the evicted
+    key, or None when every rule is proven (the cap then holds). Mutates ``meta``.
     """
     keys = _rule_keys(meta)
     if not keys:
@@ -246,9 +235,7 @@ def _evict_weakest_rule(meta: dict[str, Any], incoming_confidence: float) -> str
         except Exception:  # learned.md line may already be gone
             pass
         del meta[weakest]
-        # Persist the removal NOW: update_fact_meta() (called when the new rule
-        # is saved) reloads fact-meta.json from disk, so an un-persisted eviction
-        # would silently resurrect.
+        # update_fact_meta() reloads from disk, so persist the removal now or it resurrects.
         save_fact_meta(meta)
         log.info(
             "rule_evicted",
@@ -294,8 +281,7 @@ async def learn_from_failures(store: Any, domain: str = "code_modify") -> list[s
         if rule_key in suppressed:
             continue
 
-        # Make room at the soft cap (evict a dead rule) BEFORE spending an LLM
-        # call; if every rule is proven, the cap holds and we stop.
+        # Make room before spending an LLM call; stop if the cap genuinely holds.
         if not _ensure_rule_capacity(meta, _INITIAL_CONFIDENCE):
             log.debug("rule_learner_cap_reached", count=len(_rule_keys(meta)))
             break
@@ -416,9 +402,7 @@ async def learn_from_crisp_failure(
     if rule_key in meta or rule_key in load_suppressed():
         return None
 
-    # A crisp rule is usable immediately (starts at the injection threshold), so
-    # it deserves a slot even at the cap: evict a dead rule to make room. If
-    # every existing rule is proven/stronger, the cap holds.
+    # Crisp rules inject immediately, so make room even at the cap.
     if not _ensure_rule_capacity(meta, _CRISP_INITIAL_CONFIDENCE):
         log.debug("crisp_rule_cap_reached", count=len(_rule_keys(meta)))
         return None
@@ -666,15 +650,8 @@ def update_rules_from_outcome(
 
 
 def decay_unused_rules() -> int:
-    """Decay confidence of never-engaged rules older than 30 days, and DELETE
-    any that decay below the GC threshold.
-
-    Returns number of rules decayed or collected. Previously a rule that fell
-    below ``_GC_THRESHOLD`` was only logged ("rule_gc") and left in place at low
-    confidence — so it never re-entered injection yet still occupied a soft-cap
-    slot forever. Now it is removed from both fact-meta and learned.md, so the
-    rule set genuinely frees capacity over time (the on-demand counterpart is
-    ``_evict_weakest_rule`` at the cap).
+    """Decay never-engaged rules older than 30 days, deleting any below the GC
+    threshold (previously only logged, so dead rules occupied cap slots forever).
     """
     meta = load_fact_meta()
     now = datetime.now(UTC)

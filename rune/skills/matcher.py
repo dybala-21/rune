@@ -1,14 +1,9 @@
 """Skill matching for RUNE.
 
-Matches a user query against registered skills using keyword overlap,
-fuzzy string similarity, AND semantic embedding similarity.
-
-Lexical-only matching was brittle: a reworded same-intent goal ("write an
-arithmetic helper with a sum function and tests") scored only ~0.22 against a
-skill distilled from "create mathutils.py with add() and a pytest test", so
-relevant skills silently failed to surface. A parallel semantic (cosine on
-embeddings) signal catches those; it degrades gracefully to lexical-only when
-the embedding model is unavailable.
+Ranks skills against a query by keyword overlap, fuzzy similarity, and semantic
+embedding similarity. The semantic signal catches reworded same-intent goals
+that lexical matching misses, and degrades to lexical-only when embeddings are
+unavailable.
 """
 
 from __future__ import annotations
@@ -19,9 +14,8 @@ from difflib import SequenceMatcher
 
 from rune.skills.types import Skill, SkillMatch
 
-# Semantic cosine at/above this counts as a real match (mirrors the rule
-# retriever's RUNE_RULE_SIM_THRESHOLD). Below it only the lexical signal is
-# used, so unrelated skills (whose short texts still cosine ~0.3) don't surface.
+# Cosine at/above this counts as a semantic match; below it only lexical is used
+# (unrelated short texts still cosine ~0.3). Mirrors RUNE_RULE_SIM_THRESHOLD.
 _SKILL_SIM_THRESHOLD_ENV = "RUNE_SKILL_SIM_THRESHOLD"
 _DEFAULT_SKILL_SIM_THRESHOLD = 0.55
 
@@ -40,11 +34,8 @@ def _skill_embed_text(skill: Skill) -> str:
 
 
 def _semantic_scores(query: str, skills: list[Skill]) -> dict[str, float]:
-    """Cosine(query, skill) keyed by skill name, via local embeddings.
-
-    Returns {} on any failure (model not installed, etc.) so the caller falls
-    back to lexical-only with zero behaviour change. One batched embed call.
-    """
+    """Cosine(query, skill) keyed by skill name; {} on failure so the caller
+    falls back to lexical-only. One batched embed call."""
     if not skills:
         return {}
     try:
@@ -110,14 +101,8 @@ def _compute_similarity(query: str, skill: Skill) -> float:
 
 
 def match_skills(query: str, skills: list[Skill]) -> list[SkillMatch]:
-    """Match a query against a list of skills.
-
-    Combines lexical similarity with a semantic (embedding) signal so a
-    reworded same-intent goal still surfaces the right skill. The final score is
-    ``max(lexical, semantic)`` — semantic only counts when it clears the
-    threshold, so it can rescue lexical misses without adding noise. Returns
-    matches sorted by descending score, dropping zero-score results.
-    """
+    """Match a query against skills, score = max(lexical, semantic) where
+    semantic counts only above the threshold. Sorted desc, zero-scores dropped."""
     if not query.strip():
         return []
 

@@ -1122,13 +1122,11 @@ _STRATEGIC_BODY_MAX_TOKENS = 700
 def _build_strategic_skill_prompt(
     goal: str, steps: list[dict[str, Any]], pattern: str
 ) -> str:
-    """Prompt to distil a tool trace into a REUSABLE, generalised procedure.
+    """Prompt to distil a tool trace into a reusable, generalised procedure.
 
-    The pattern-extracted body is a verbatim transcript of one run (concrete
-    filenames + code), which an LLM agent gains nothing from — it already knows
-    how to call tools. This asks for the strategy (why each step, decision
-    points), generalised away from the specific values, so a future SIMILAR
-    task can actually follow it.
+    The pattern-extracted body is a verbatim transcript of one run; an agent
+    gains nothing from it. This asks for the strategy (why each step),
+    generalised away from the run's specific values.
     """
     tool_seq = " -> ".join(s.get("tool", "?") for s in steps)
     return (
@@ -1157,11 +1155,10 @@ async def _synthesize_strategic_body(
     pattern: str,
     refiner: LLMRefiner | None,
 ) -> str | None:
-    """Return a generalised strategy body, or None to fall back to the template.
+    """Generalised strategy body, or None to fall back to the step template.
 
-    Default-off: only runs when a refiner is wired (auto-skill path). Keeps the
-    executable ``steps`` template in metadata for the replay evaluator; this only
-    replaces the human/LLM-readable BODY that gets injected into the prompt.
+    Only runs when a refiner is wired (auto-skill path). The executable ``steps``
+    stay in metadata for the replay evaluator; this replaces only the injected body.
     """
     if refiner is None or not steps:
         return None
@@ -1225,10 +1222,8 @@ async def maybe_generate_skill(
         )
         template["steps"] = refined_steps
 
-        # Preferred body: an LLM-distilled REUSABLE procedure (strategy + why),
-        # generalised away from this run's concrete values — what an agent can
-        # actually transfer to a similar task. Falls back to the structured
-        # step transcript below when no refiner is wired or synthesis fails.
+        # Prefer an LLM-distilled reusable procedure; fall back to the step
+        # transcript when no refiner is wired or synthesis fails.
         strategic_body = await _synthesize_strategic_body(
             goal, template["steps"], template["pattern"], refiner,
         )
@@ -1279,15 +1274,9 @@ async def maybe_generate_skill(
                 pattern=template["pattern"],
                 steps=len(template["steps"]),
             )
-            # Persist the distilled skill to disk so a FUTURE session can reuse
-            # it. The point of distillation is cross-session reuse, but a skill
-            # registered only in-memory dies with this one-shot process — which
-            # is precisely why auto-skill showed no cross-session lift. The
-            # registry loads SKILL.md files on startup, so persisting here closes
-            # the loop (a later run matches + injects it). We persist whenever
-            # skill learning is on in EITHER mode: gated_learning (the daemon
-            # evaluates the candidate) or plain auto_skill (candidates inject
-            # directly). Default-off config means tests/normal runs write nothing.
+            # Persist so a future session can reuse it (the registry loads
+            # SKILL.md on startup); in-memory-only would die with this process.
+            # Default-off config means normal runs write nothing.
             try:
                 from rune.config import get_config
                 skills_cfg = get_config().skills

@@ -106,12 +106,8 @@ def _auto_skill_enabled() -> bool:
 
 
 class _FastSkillRefiner:
-    """LLMRefiner that distils a skill body via the FAST tier.
-
-    Only used on the auto-skill path (default-off). The skill body is guidance,
-    not correctness-bearing, so the cheapest tier is appropriate. Failures fall
-    back to the deterministic step transcript inside maybe_generate_skill.
-    """
+    """Distil a skill body via the FAST tier — guidance, not correctness, so the
+    cheapest tier fits; failures fall back to the step transcript."""
 
     async def refine(self, prompt: str, max_tokens: int = 600) -> str:
         from rune.llm.client import get_llm_client
