@@ -1208,6 +1208,16 @@ async def maybe_generate_skill(
                 pattern=template["pattern"],
                 steps=len(template["steps"]),
             )
+            # Gated learning persists the CANDIDATE to disk so the daemon (a
+            # separate process) can pick it up for evaluation. Without gating,
+            # skills stay in-memory/session-scoped as before (behaviour-neutral).
+            try:
+                from rune.config import get_config
+                if getattr(get_config().skills, "gated_learning", False):
+                    from rune.skills.persistence import write_skill_to_disk
+                    write_skill_to_disk(skill)
+            except Exception as exc:
+                log.debug("candidate_persist_skipped", error=str(exc)[:120])
 
         return {
             "name": skill_name,

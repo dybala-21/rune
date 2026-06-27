@@ -142,6 +142,9 @@ class RuneDaemon:
         self._channel_registry: Any = None
         self._heartbeat_scheduler: Any = None
         self._heartbeat_task: asyncio.Task[None] | None = None
+        # T1-1 gated skill learning: guard so overlapping eval cycles don't stack
+        # (each cycle runs real agent loops and outlives a heartbeat tick).
+        self._skill_eval_running: bool = False
         self._api_server_task: asyncio.Task[None] | None = None
         self._executor_flush_task: asyncio.Task[None] | None = None
 
@@ -1070,6 +1073,20 @@ class RuneDaemon:
             except Exception as exc:
                 log.debug("heartbeat_md_checker_failed", error=str(exc)[:200])
 
+            # T1-1: periodic gated-skill-learning evaluation. The tick is cheap
+            # and a no-op unless skills.gated_learning is on; the actual replay
+            # (real agent loops) is spawned detached so it never blocks the
+            # heartbeat, with a guard against overlapping runs.
+            try:
+                self._heartbeat_scheduler.add_task(
+                    "skill_eval_cycle",
+                    "*/30 * * * *",  # every 30 min
+                    self._skill_eval_tick,
+                )
+                log.info("skill_eval_cycle_registered")
+            except Exception as exc:
+                log.debug("skill_eval_cycle_register_failed", error=str(exc)[:200])
+
         except Exception as exc:
             log.warning("heartbeat_scheduler_init_failed", error=str(exc))
 
@@ -1083,6 +1100,52 @@ class RuneDaemon:
                 await self._gateway.broadcast_text(message)
         except Exception:
             pass  # Notification is best-effort
+
+    async def _skill_eval_tick(self) -> None:
+        """Heartbeat callback: kick off a gated-skill eval cycle (non-blocking).
+
+        Returns immediately. No-op unless skills.gated_learning is on; the heavy
+        replay runs in a detached task guarded against overlap.
+        """
+        try:
+            from rune.config import get_config
+            if not getattr(get_config().skills, "gated_learning", False):
+                return
+        except Exception:
+            return
+        if self._skill_eval_running:
+            return
+        self._skill_eval_running = True
+        asyncio.create_task(self._run_skill_eval_cycle_bg())
+
+    async def _run_skill_eval_cycle_bg(self) -> None:
+        """Run one bounded gated-skill eval cycle in the background."""
+        try:
+            from rune.config import get_config
+            from rune.memory.store import get_memory_store
+            from rune.skills.eval_cycle import run_skill_eval_cycle
+            from rune.skills.registry import get_skill_registry
+            from rune.skills.replay import AgentLoopTaskRunner
+
+            llm = get_config().llm
+            runner = AgentLoopTaskRunner(
+                provider=llm.active_provider or llm.default_provider,
+                model=llm.active_model or llm.default_model,
+                max_iterations=30,
+                timeout_seconds=300,
+            )
+            reports = await run_skill_eval_cycle(
+                store=get_memory_store(),
+                registry=get_skill_registry(),
+                runner=runner,
+                max_skills=1,
+            )
+            if reports:
+                log.info("skill_eval_cycle_completed", count=len(reports))
+        except Exception as exc:
+            log.debug("skill_eval_cycle_bg_failed", error=str(exc)[:200])
+        finally:
+            self._skill_eval_running = False
 
     async def _heartbeat_file_loop(self) -> None:
         """Periodically update a heartbeat file to indicate daemon is alive."""
