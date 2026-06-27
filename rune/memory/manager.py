@@ -31,6 +31,85 @@ from rune.utils.paths import rune_home
 
 log = get_logger(__name__)
 
+# Char budget for the injected "## Durable Knowledge" block. Chosen to mirror
+# Hermes Agent's USER.md cap (~1375 chars) — enough for a stable personal
+# profile, bounded so it can't crowd out the rest of the memory context.
+_DURABLE_INJECT_CHAR_BUDGET = 1500
+_DURABLE_INJECT_MAX_FACTS = 30
+
+
+def _tokenize(text: str) -> set[str]:
+    """Lowercase alphanumeric tokens of length > 2 (cheap relevance signal)."""
+    out: set[str] = set()
+    word = []
+    for ch in text.lower():
+        if ch.isalnum():
+            word.append(ch)
+        elif word:
+            tok = "".join(word)
+            if len(tok) > 2:
+                out.add(tok)
+            word = []
+    if word:
+        tok = "".join(word)
+        if len(tok) > 2:
+            out.add(tok)
+    return out
+
+
+def _rank_durable_facts(
+    facts: list[Any],
+    goal: str | None,
+    char_budget: int = _DURABLE_INJECT_CHAR_BUDGET,
+    max_facts: int = _DURABLE_INJECT_MAX_FACTS,
+) -> list[Any]:
+    """Order durable facts for unconditional injection, then fill to a budget.
+
+    Mirrors Hermes' always-injected USER.md: a user's ``preference`` facts are
+    their stable personal profile (allergies, coding style, dietary rules) and
+    must never be silently dropped, so they rank ahead of ``project`` facts and
+    fill the budget first. Within a category we rank by goal-relevance (keyword
+    overlap with the goal), then recency.
+
+    Recency must be computed *per category*: ``get_durable_facts`` concatenates
+    "preference" then "project", so a global list index makes every project
+    fact look newer than every preference fact. We therefore group by category
+    first — index within a group is the real append order (later == newer from
+    learned.md). This replaces a flat ``[:10]`` parse-order slice that buried a
+    just-saved "allergic to peanuts" preference at rank 15/16.
+    """
+    if not facts:
+        return []
+    goal_words = _tokenize(goal) if goal else set()
+
+    # Group preserving first-seen category order, then rank within each group.
+    groups: dict[str, list[Any]] = {}
+    for f in facts:
+        groups.setdefault(f.category, []).append(f)
+
+    scored: list[tuple[int, int, float, Any]] = []
+    for category, items in groups.items():
+        # Personal profile (preference) outranks everything else.
+        cat_weight = 1 if category == "preference" else 0
+        m = len(items)
+        for j, f in enumerate(items):
+            relevance = (
+                len(goal_words & _tokenize(f"{f.key} {f.value}")) if goal_words else 0
+            )
+            recency = j / max(m - 1, 1)  # 0..1, newest highest within its category
+            scored.append((cat_weight, relevance, recency, f))
+    scored.sort(key=lambda t: (t[0], t[1], t[2]), reverse=True)
+
+    out: list[Any] = []
+    used = 0
+    for _cw, _relevance, _recency, f in scored:
+        line = f"- [{f.category}] {f.key}: {f.value}"
+        if out and (used + len(line) > char_budget or len(out) >= max_facts):
+            break
+        out.append(f)
+        used += len(line)
+    return out
+
 
 class MemoryManager:
     """Orchestrates memory subsystems: store, vectors, working memory."""
@@ -233,11 +312,20 @@ class MemoryManager:
             parts.append("")
 
         # --- Durable context ---
+        # Durable facts (a user's stable profile: allergies, coding style,
+        # project conventions) should behave like Hermes' always-injected
+        # USER.md — never silently dropped. A flat ``[:10]`` slice in parse
+        # order regressed exactly this: a just-saved "allergic to peanuts" fact
+        # landed at rank 15/16 and fell off the cap even though the context was
+        # only ~1900/4000 chars (budget wasn't the limit, the arbitrary count
+        # was). Rank by goal-relevance then recency, and bound by a char budget
+        # instead of a magic count so newly-saved/relevant facts always survive.
         durable_facts = self._tiered.get_durable_facts("preference")
         durable_facts += self._tiered.get_durable_facts("project")
         if durable_facts:
+            ranked = _rank_durable_facts(durable_facts, goal)
             parts.append("## Durable Knowledge")
-            for fact in durable_facts[:10]:
+            for fact in ranked:
                 parts.append(f"- [{fact.category}] {fact.key}: {fact.value}")
             parts.append("")
 

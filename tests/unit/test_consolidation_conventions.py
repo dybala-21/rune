@@ -165,3 +165,70 @@ async def test_failed_episode_writes_no_durable_facts(monkeypatch):
     await consol.consolidate_episode("epf")
 
     assert saved == [], f"failed episode wrote durable facts (poison): {saved}"
+
+
+def test_parse_extraction_includes_user_facts():
+    raw = (
+        '{"commitments": [], "lessons": [], "entities": [], "decisions": [], '
+        '"conventions": [], "user_facts": ["is allergic to peanuts", "uses neovim"]}'
+    )
+    out = _parse_extraction(raw)
+    assert out["user_facts"] == ["is allergic to peanuts", "uses neovim"]
+
+
+def test_parse_extraction_user_facts_default_empty_when_absent():
+    out = _parse_extraction('{"lessons": ["a"]}')
+    assert out["user_facts"] == []
+
+
+@pytest.mark.asyncio
+async def test_user_facts_saved_under_preference_category(monkeypatch):
+    """End-to-end: personal user facts persist as "preference" so the durable
+    ranking treats them as the always-on user profile (Hermes USER.md parity)."""
+    import rune.memory.consolidation as consol
+
+    class _Ep:
+        id = "epu"
+        task_summary = "write hello world"
+        result = "done"
+        lessons = ""
+        entities = ""
+        utility = 1
+
+    class _Store:
+        conn = type("C", (), {"execute": lambda *a, **k: None})()
+
+        def get_recent_episodes(self, limit=50):
+            return [_Ep()]
+
+    class _Mgr:
+        store = _Store()
+
+    import rune.memory.manager as mgr_mod
+    monkeypatch.setattr(mgr_mod, "get_memory_manager", lambda: _Mgr())
+
+    class _Client:
+        async def completion(self, **kw):
+            return {"choices": [{"message": {"content": (
+                '{"commitments": [], "lessons": [], "entities": [], "decisions": [], '
+                '"conventions": ["use pytest"], '
+                '"user_facts": ["is allergic to peanuts and avoids thai food"]}'
+            )}}]}
+
+    import rune.llm.client as client_mod
+    monkeypatch.setattr(client_mod, "get_llm_client", lambda: _Client())
+
+    saved: list[tuple] = []
+    import rune.memory.markdown_store as md_store
+    monkeypatch.setattr(md_store, "save_learned_fact",
+                        lambda cat, key, val, conf: saved.append((cat, key, val, conf)))
+    import rune.memory.state as state_mod
+    monkeypatch.setattr(state_mod, "is_suppressed", lambda *_a, **_k: False)
+
+    await consol.consolidate_episode("epu")
+
+    pref = [s for s in saved if s[0] == "preference"]
+    assert pref, f"no preference-category user fact saved; got {saved}"
+    _cat, _key, val, conf = pref[0]
+    assert "peanut" in val.lower()
+    assert conf >= 0.7  # durable → injected, profile-ranked first

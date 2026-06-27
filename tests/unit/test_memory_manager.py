@@ -115,3 +115,61 @@ class TestAddSafetyRule:
         await manager.add_safety_rule("path_block", "/root", reason="root home")
 
         assert len(manager.working.safety_rules) == 2
+
+
+class TestRankDurableFacts:
+    """Durable-fact injection ranking (mirrors Hermes' always-on USER.md).
+
+    Regression guard for the flat ``durable_facts[:10]`` parse-order slice that
+    buried a just-saved 'allergic to peanuts' preference at rank 15/16 even
+    though the context was well under its char budget.
+    """
+
+    @staticmethod
+    def _fact(category, key, value):
+        from rune.memory.tiered_memory import DurableMemoryEntry
+
+        return DurableMemoryEntry(category=category, key=key, value=value, confidence=1.0)
+
+    def test_recent_preference_survives_beyond_old_count_cap(self):
+        from rune.memory.manager import _rank_durable_facts
+
+        # 15 older prefs + 1 just-saved allergy at the end (append order).
+        facts = [self._fact("preference", f"p{i}", f"old pref {i}") for i in range(15)]
+        facts.append(self._fact("preference", "diet", "allergic to peanuts, avoids thai food"))
+        ranked = _rank_durable_facts(facts, goal="suggest a cuisine for dinner")
+        values = " ".join(f.value for f in ranked)
+        assert "peanuts" in values  # would fall off a [:10] slice
+
+    def test_preference_ranked_ahead_of_project(self):
+        from rune.memory.manager import _rank_durable_facts
+
+        facts = [
+            self._fact("preference", "diet", "allergic to peanuts"),
+            self._fact("project", "fmt", "use pptx for slides"),
+        ]
+        ranked = _rank_durable_facts(facts, goal=None, char_budget=40)
+        # Only one fits in 40 chars — must be the personal-profile preference.
+        assert ranked[0].category == "preference"
+
+    def test_goal_relevance_orders_within_category(self):
+        from rune.memory.manager import _rank_durable_facts
+
+        facts = [
+            self._fact("preference", "a", "uses neovim editor"),
+            self._fact("preference", "b", "prefers postgres database"),
+        ]
+        ranked = _rank_durable_facts(facts, goal="connect to the database")
+        assert ranked[0].value == "prefers postgres database"
+
+    def test_char_budget_bounds_output(self):
+        from rune.memory.manager import _rank_durable_facts
+
+        facts = [self._fact("preference", f"k{i}", "x" * 50) for i in range(100)]
+        ranked = _rank_durable_facts(facts, goal=None, char_budget=300)
+        assert 0 < len(ranked) < 100
+
+    def test_empty_returns_empty(self):
+        from rune.memory.manager import _rank_durable_facts
+
+        assert _rank_durable_facts([], goal="anything") == []
