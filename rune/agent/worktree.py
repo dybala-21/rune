@@ -118,7 +118,11 @@ def _snapshot_working_tree(repo: str) -> str:
     dangling commit; return its SHA. Uses a temp index so the main index/HEAD
     are untouched."""
     tmp_index = tempfile.mktemp(prefix="rune-iso-index-")
-    env = {"GIT_INDEX_FILE": tmp_index}
+    env = {
+        "GIT_INDEX_FILE": tmp_index,
+        "GIT_AUTHOR_NAME": "rune", "GIT_AUTHOR_EMAIL": "rune@localhost",
+        "GIT_COMMITTER_NAME": "rune", "GIT_COMMITTER_EMAIL": "rune@localhost",
+    }
     try:
         # Seed temp index from HEAD, then stage all current changes (respects
         # .gitignore, so deps stay out).
