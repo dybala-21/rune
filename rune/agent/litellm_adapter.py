@@ -505,6 +505,24 @@ def _clamp_max_tokens(model: str, max_tokens: int) -> int:
     return min(max_tokens, cap)
 
 
+def _ensure_anthropic_user_tail(model: str, messages: list[Any]) -> list[Any]:
+    """Keep Anthropic requests valid when the wire history ends with an
+    assistant turn. Anthropic rejects that ("does not support assistant message
+    prefill; the conversation must end with a user message"), which happens when
+    guidance was injected as a system message after a text-only assistant reply.
+    A minimal user turn restores a valid sequence. Other providers are untouched.
+    """
+    if "claude" not in model and "anthropic" not in model:
+        return messages
+    if not messages:
+        return messages
+    last = messages[-1]
+    role = last.get("role") if isinstance(last, dict) else getattr(last, "role", None)
+    if role == "assistant":
+        return [*messages, {"role": "user", "content": "Continue."}]
+    return messages
+
+
 def _resolve_litellm_model(model_str: str) -> tuple[str, dict[str, str]]:
     """Convert 'provider:model' to LiteLLM format.
 
@@ -675,7 +693,10 @@ class StreamResult:
                 "model": self._model,
                 # Mask stale tool outputs for the wire only; self._messages
                 # stays full so history/rollover are unaffected.
-                "messages": mask_stale_tool_messages(validate_tool_pairs(self._messages)),
+                "messages": _ensure_anthropic_user_tail(
+                    self._model,
+                    mask_stale_tool_messages(validate_tool_pairs(self._messages)),
+                ),
                 "tools": _tools,
                 "stream": True,
                 "max_tokens": _effective_max,

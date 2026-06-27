@@ -22,6 +22,7 @@ from rune.skills.lifecycle import (
     is_injectable,
     set_state,
 )
+from rune.skills.persistence import persist_skill_state, write_skill_to_disk
 from rune.skills.types import Skill
 
 
@@ -474,3 +475,105 @@ class TestReplayCapture:
         # Snapshot must hold the PRE-task content, not the agent's commit.
         snap = Path(tasks[0]["workspace_ref"]) / "f.txt"
         assert snap.read_text() == "original"
+
+
+class TestPersistence:
+    def test_write_and_reparse_roundtrip(self, tmp_dir, monkeypatch):
+        from rune.skills.registry import _parse_skill_file
+
+        # Redirect user skills dir into tmp.
+        monkeypatch.setattr("rune.utils.paths.rune_home", lambda: tmp_dir)
+        s = Skill(name="round-trip", description="does a thing",
+                  body="step one\nstep two", author="auto",
+                  metadata={"source": "auto_distill", "steps": [1, 2, 3]})
+        set_state(s, SkillState.CANDIDATE)
+        path = write_skill_to_disk(s)
+        assert path and Path(path).exists()
+        assert s.file_path == path
+
+        # Registry's flat parser must recover the state + scalar metadata,
+        # and drop the non-scalar 'steps'.
+        reparsed = _parse_skill_file(Path(path))
+        assert reparsed is not None
+        assert get_state(reparsed) == SkillState.CANDIDATE
+        assert reparsed.description == "does a thing"
+        assert reparsed.metadata.get("source") == "auto_distill"
+        assert "steps" not in reparsed.metadata  # non-scalar skipped
+        assert "step one" in reparsed.body
+
+    def test_persist_state_updates_disk(self, tmp_dir, monkeypatch):
+        from rune.skills.registry import _parse_skill_file
+
+        monkeypatch.setattr("rune.utils.paths.rune_home", lambda: tmp_dir)
+        s = Skill(name="promote-me", description="d", body="b")
+        set_state(s, SkillState.CANDIDATE)
+        write_skill_to_disk(s)
+
+        set_state(s, SkillState.ACTIVE)
+        assert persist_skill_state(s) is True
+        assert get_state(_parse_skill_file(Path(s.file_path))) == SkillState.ACTIVE
+
+    def test_persist_state_noop_without_file(self):
+        s = Skill(name="x", description="d")
+        assert persist_skill_state(s) is False
+
+
+class TestEvalCycle:
+    def test_cycle_promotes_and_persists(self, store, tmp_dir, monkeypatch):
+        import asyncio
+
+        from rune.skills.eval_cycle import run_skill_eval_cycle
+        from rune.skills.registry import SkillRegistry, _parse_skill_file
+
+        monkeypatch.setattr("rune.utils.paths.rune_home", lambda: tmp_dir)
+        reg = SkillRegistry()
+        s = Skill(name="winner", description="d", body="steps")
+        set_state(s, SkillState.CANDIDATE)
+        write_skill_to_disk(s)          # gives it a file_path
+        reg.register(s)
+
+        # Corpus the cycle will replay (goals end 'help' -> fake runner helps).
+        for i in range(15):
+            store.add_replay_task(skill_name="winner", goal=f"task {i} help",
+                                  check_cmd="true")
+
+        reports = asyncio.run(run_skill_eval_cycle(
+            store=store, registry=reg, runner=_FakeRunner(), max_skills=1))
+        assert len(reports) == 1
+        assert reports[0].new_state == SkillState.ACTIVE
+        # State change must be written back to disk.
+        assert get_state(_parse_skill_file(Path(s.file_path))) == SkillState.ACTIVE
+
+    def test_cycle_skips_skill_without_corpus(self, store, tmp_dir, monkeypatch):
+        import asyncio
+
+        from rune.skills.eval_cycle import run_skill_eval_cycle
+        from rune.skills.registry import SkillRegistry
+
+        monkeypatch.setattr("rune.utils.paths.rune_home", lambda: tmp_dir)
+        reg = SkillRegistry()
+        s = Skill(name="no-corpus", description="d")
+        set_state(s, SkillState.CANDIDATE)
+        reg.register(s)
+        reports = asyncio.run(run_skill_eval_cycle(
+            store=store, registry=reg, runner=_FakeRunner(), max_skills=5))
+        assert reports == []
+
+    def test_cycle_respects_max_skills(self, store, tmp_dir, monkeypatch):
+        import asyncio
+
+        from rune.skills.eval_cycle import run_skill_eval_cycle
+        from rune.skills.registry import SkillRegistry
+
+        monkeypatch.setattr("rune.utils.paths.rune_home", lambda: tmp_dir)
+        reg = SkillRegistry()
+        for nm in ("a", "b", "c"):
+            sk = Skill(name=nm, description="d", body="x")
+            set_state(sk, SkillState.CANDIDATE)
+            reg.register(sk)
+            for i in range(13):
+                store.add_replay_task(skill_name=nm, goal=f"t{i} help",
+                                      check_cmd="true")
+        reports = asyncio.run(run_skill_eval_cycle(
+            store=store, registry=reg, runner=_FakeRunner(), max_skills=1))
+        assert len(reports) == 1  # only one processed per cycle
