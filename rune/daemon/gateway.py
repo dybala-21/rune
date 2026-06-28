@@ -1069,12 +1069,12 @@ class ChannelGateway:
         if self._conv_manager is not None:
             return self._conv_manager
         try:
-            from pathlib import Path
 
             from rune.conversation.manager import ConversationManager
             from rune.conversation.store import ConversationStore
+            from rune.utils.paths import conversations_db_path
 
-            store = ConversationStore(Path.home() / ".rune" / "conversations.db")
+            store = ConversationStore(conversations_db_path())
             self._conv_manager = ConversationManager(store)
         except Exception as exc:
             log.debug("gateway_conv_manager_init_failed", error=str(exc)[:100])

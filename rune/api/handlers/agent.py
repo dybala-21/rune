@@ -163,13 +163,12 @@ async def _execute_agent(tracker: RunTracker, run_id: str, req: AgentRunRequest)
         session_id = req.session_id or ""
         if session_id:
             try:
-                from pathlib import Path
 
                 from rune.conversation.manager import ConversationManager
                 from rune.conversation.store import ConversationStore
+                from rune.utils.paths import conversations_db_path
 
-                db_path = Path.home() / ".rune" / "conversations.db"
-                conv_store = ConversationStore(db_path)
+                conv_store = ConversationStore(conversations_db_path())
                 conv_manager = ConversationManager(conv_store)
 
                 # Try to find or create the conversation for this session

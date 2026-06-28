@@ -480,17 +480,15 @@ def _simple_repl(model: str | None = None, provider: str | None = None) -> None:
     if model:
         agent_config.model = model
 
-    # --- Conversation manager for multi-turn context ---
+    # Conversation manager for multi-turn context
     conv_manager = None
     conversation_id = ""
     try:
-        import os
-        import tempfile
 
         from rune.conversation.manager import ConversationManager
         from rune.conversation.store import ConversationStore
-        db_path = os.path.join(tempfile.gettempdir(), "rune_repl_conversations.db")
-        conv_store = ConversationStore(db_path)
+        from rune.utils.paths import conversations_db_path
+        conv_store = ConversationStore(conversations_db_path())
         conv_manager = ConversationManager(conv_store)
         conv = conv_manager.start_conversation(user_id="repl:local")
         conversation_id = conv.id
