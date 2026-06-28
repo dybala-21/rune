@@ -104,6 +104,12 @@ class OrchestratorConfig:
     # their changes are merged atomically (rune.agent.wave_orchestrator). "none"
     # (default) keeps the legacy shared-cwd in-process path — behaviour-neutral.
     isolation: str = "none"
+    # G2 verification (docs/design/worktree-subagent-verification.md): gate a
+    # worker's success on a deterministic acceptance check instead of its own
+    # ok=True (I6); >0 escalation steps retry rejected workers (feedback →
+    # stronger model, I7). Both no-op when isolation="none".
+    verify_workers: bool = True
+    max_escalation_steps: int = 0
 
 
 TaskFailureType = Literal["transient", "correctable", "systemic", "critical", "unknown"]
@@ -303,12 +309,77 @@ class Orchestrator(EventEmitter):
     ) -> list[SubTaskResult]:
         """Execute all tasks in *plan*.
 
-        Dispatches to :meth:`_execute_parallel` or
-        :meth:`_execute_sequential` based on ``execution_mode``.
+        When ``isolation`` is set ("worktree"/"copy"/"auto"), tasks run as
+        isolated subprocess workers in dependency waves with deterministic
+        acceptance + escalation (G2 verification); otherwise dispatches to the
+        legacy in-process :meth:`_execute_parallel`/:meth:`_execute_sequential`.
         """
+        if self._config.isolation != "none":
+            return await self._execute_isolated_waves(plan)
         if self._config.execution_mode == "sequential":
             return await self._execute_sequential(plan)
         return await self._execute_parallel(plan)
+
+    async def _execute_isolated_waves(
+        self,
+        plan: OrchestrationPlan,
+    ) -> list[SubTaskResult]:
+        """G2 isolated path: run the plan as dependency waves of isolated workers
+        (``execute_waves``) with Tier-1 acceptance (I6) + escalation (I7), then
+        map worker outcomes back to :class:`SubTaskResult`; verification metrics
+        (§8) are logged. Tier-2 ``post_merge_check`` is not wired from config yet."""
+        import os
+
+        from rune.agent.parallel_isolated import resolve_escalation
+        from rune.agent.wave_orchestrator import (
+            WaveTask,
+            execute_waves,
+            summarize_verification,
+        )
+
+        cfg = self._config
+        steps = cfg.max_escalation_steps if cfg.verify_workers else 0
+        escalation = None
+        if steps > 0:
+            try:
+                from rune.config import get_config
+                llm = get_config().llm
+                escalation = resolve_escalation(
+                    llm.escalation_provider, llm.escalation_model)
+            except Exception as exc:
+                log.warning("isolated_escalation_config_failed", error=str(exc)[:120])
+
+        wtasks = [
+            WaveTask(id=t.id, goal=t.description, dependencies=list(t.dependencies),
+                     provider=t.params.get("provider"), model=t.params.get("model"))
+            for t in plan.tasks
+        ]
+        res = await execute_waves(
+            os.getcwd(), wtasks, isolation=cfg.isolation,
+            timeout_seconds=cfg.subtask_timeout_s,
+            max_escalation_steps=steps, escalation=escalation,
+        )
+        stats = summarize_verification(res.outcomes)
+        log.info(
+            "isolated_waves_done", ok=res.ok, waves=res.waves_run,
+            accepted=stats.accepted, rejected=stats.rejected,
+            self_report_mismatch=stats.self_report_mismatch,
+            escalation_recoveries=stats.escalation_recoveries,
+        )
+
+        out: list[SubTaskResult] = []
+        for t in plan.tasks:
+            o = res.outcomes.get(t.id)
+            if o is None:
+                out.append(SubTaskResult(
+                    task_id=t.id, success=False,
+                    error="not executed (a prior wave failed; run stopped)"))
+            else:
+                out.append(SubTaskResult(
+                    task_id=t.id, success=o.ok,
+                    output=str(o.result.get("answer", "")),
+                    error=None if o.ok else (o.acceptance_reason or "rejected")))
+        return out
 
     # -- Parallel execution (default) --------------------------------------
 
