@@ -84,17 +84,14 @@ class AgentLoopController:
             delay_ms=500,
         )
 
-        # --- Conversation manager for multi-turn context ---
+        # Conversation manager for multi-turn context
         self._conv_manager = None
         self._conversation_id = ""
         try:
-            import os
-            import tempfile
-
             from rune.conversation.manager import ConversationManager
             from rune.conversation.store import ConversationStore
-            db_path = os.path.join(tempfile.gettempdir(), "rune_tui_conversations.db")
-            conv_store = ConversationStore(db_path)
+            from rune.utils.paths import conversations_db_path
+            conv_store = ConversationStore(conversations_db_path())
             self._conv_manager = ConversationManager(conv_store)
             conv = self._conv_manager.start_conversation(user_id="tui:local")
             self._conversation_id = conv.id

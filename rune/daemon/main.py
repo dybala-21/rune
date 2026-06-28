@@ -299,8 +299,8 @@ class RuneDaemon:
         # 3. Conversation store init
         try:
             from rune.conversation.store import ConversationStore
-            db_path = _default_rune_dir() / "conversations.db"
-            self._conversation_store = ConversationStore(db_path)
+            from rune.utils.paths import conversations_db_path
+            self._conversation_store = ConversationStore(conversations_db_path())
             log.info("subsystem_initialised", name="conversation_store")
         except Exception as exc:
             log.warning("conversation_store_init_failed", error=str(exc))

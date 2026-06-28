@@ -43,9 +43,14 @@ def matches_pattern(path: str | Path, pattern: str) -> bool:
 # System / Hidden detection
 
 _SYSTEM_PREFIXES = (
-    "/bin", "/sbin", "/usr/bin", "/usr/sbin",
-    "/System", "/Library",
-    "/etc", "/private/etc",
+    "/bin",
+    "/sbin",
+    "/usr/bin",
+    "/usr/sbin",
+    "/System",
+    "/Library",
+    "/etc",
+    "/private/etc",
 )
 
 _HIDDEN_RE = re.compile(r"(^|/)\.(?!\.)[^/]*")
@@ -64,6 +69,7 @@ def is_hidden_path(p: str | Path) -> bool:
 
 # RUNE-specific paths
 
+
 def rune_home() -> Path:
     """Return the user-level RUNE configuration directory.
 
@@ -81,6 +87,15 @@ def rune_data() -> Path:
     d = rune_home() / "data"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def conversations_db_path() -> Path:
+    """Canonical conversation DB shared by every entry point (CLI/TUI/daemon/API).
+
+    A single persistent location so conversations survive across sessions and
+    can be recalled later; honours RUNE_HOME for test isolation.
+    """
+    return rune_home() / "conversations.db"
 
 
 # Alias used by UI modules

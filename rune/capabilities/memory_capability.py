@@ -42,6 +42,7 @@ def _normalise_memory_section(mem_type: MemoryType) -> str:
 
 # Parameter schemas
 
+
 class MemorySearchParams(BaseModel):
     """Parameters for memory.search (MemGPT memory_read)."""
 
@@ -51,8 +52,9 @@ class MemorySearchParams(BaseModel):
         description="Filter by entry type (omit to search all)",
     )
     limit: int = Field(default=5, alias="maxResults", description="Maximum results (default: 5)")
-    min_score: float = Field(default=0.3, alias="minScore",
-                             description="Minimum similarity score (0-1)")
+    min_score: float = Field(
+        default=0.3, alias="minScore", description="Minimum similarity score (0-1)"
+    )
 
 
 class MemorySaveParams(BaseModel):
@@ -63,7 +65,9 @@ class MemorySaveParams(BaseModel):
     """
 
     content: str = Field(description="Content to store")
-    type: MemoryType = Field(description="Memory type (preference/decision/pattern/note/environment)")
+    type: MemoryType = Field(
+        description="Memory type (preference/decision/pattern/note/environment)"
+    )
     key: str | None = Field(
         default=None,
         description="Key identifier (used for preference / environment types)",
@@ -101,24 +105,33 @@ class MemoryTuneParams(BaseModel):
         default=None, description="Memory policy mode"
     )
     uncertain_score_threshold: float | None = Field(
-        default=None, ge=0, le=1,
+        default=None,
+        ge=0,
+        le=1,
         description="Uncertain intent score threshold (0-1)",
     )
     uncertain_relevance_floor: float | None = Field(
-        default=None, ge=0, le=1,
+        default=None,
+        ge=0,
+        le=1,
         description="Uncertain intent relevance floor (0-1)",
     )
     uncertain_semantic_limit: int | None = Field(
-        default=None, ge=1, le=20,
+        default=None,
+        ge=1,
+        le=20,
         description="Semantic search result count for uncertain intents (1-20)",
     )
     uncertain_semantic_min_score: float | None = Field(
-        default=None, ge=0, le=1,
+        default=None,
+        ge=0,
+        le=1,
         description="Minimum semantic score for uncertain intents (0-1)",
     )
 
 
 # Implementations
+
 
 async def memory_search(params: MemorySearchParams) -> CapabilityResult:
     """Multi-source memory search: facts + episodes + vector index.
@@ -146,29 +159,34 @@ async def memory_search(params: MemorySearchParams) -> CapabilityResult:
         for key, value in working.facts.items():
             text = f"{key} {value}".lower()
             if query_words and any(w in text for w in query_words):
-                all_matches.append({
-                    "type": "fact",
-                    "key": key,
-                    "summary": value,
-                    "score": 0.9,
-                })
+                all_matches.append(
+                    {
+                        "type": "fact",
+                        "key": key,
+                        "summary": value,
+                        "score": 0.9,
+                    }
+                )
 
         # Also search project MEMORY.md file
         try:
             import os
 
             from rune.memory.project_memory import read_project_memory_head
+
             md_content = read_project_memory_head(os.getcwd())
             if md_content:
                 for line in md_content.splitlines():
                     stripped = line.strip()
                     if stripped and query_words and any(w in stripped.lower() for w in query_words):
-                        all_matches.append({
-                            "type": "project_fact",
-                            "key": "project_memory",
-                            "summary": stripped,
-                            "score": 0.8,
-                        })
+                        all_matches.append(
+                            {
+                                "type": "project_fact",
+                                "key": "project_memory",
+                                "summary": stripped,
+                                "score": 0.8,
+                            }
+                        )
         except Exception:
             pass
 
@@ -184,14 +202,16 @@ async def memory_search(params: MemorySearchParams) -> CapabilityResult:
                     if ep.id in seen_ep_ids:
                         continue
                     seen_ep_ids.add(ep.id)
-                    all_matches.append({
-                        "type": "episode",
-                        "key": f"episode:{ep.timestamp[:10]}",
-                        "summary": f"{ep.task_summary} — {ep.result[:200]}",
-                        "score": 0.85,
-                        "entities": ep.entities,
-                        "lessons": ep.lessons,
-                    })
+                    all_matches.append(
+                        {
+                            "type": "episode",
+                            "key": f"episode:{ep.timestamp[:10]}",
+                            "summary": f"{ep.task_summary} — {ep.result[:200]}",
+                            "score": 0.85,
+                            "entities": ep.entities,
+                            "lessons": ep.lessons,
+                        }
+                    )
 
             # Also keyword search in task_summary if few entity results
             if len(seen_ep_ids) < 3 and query_words:
@@ -207,14 +227,16 @@ async def memory_search(params: MemorySearchParams) -> CapabilityResult:
                         if ep.id in seen_ep_ids:
                             continue
                         seen_ep_ids.add(ep.id)
-                        all_matches.append({
-                            "type": "episode",
-                            "key": f"episode:{ep.timestamp[:10]}",
-                            "summary": f"{ep.task_summary} — {ep.result[:200]}",
-                            "score": 0.75,
-                            "entities": ep.entities,
-                            "lessons": ep.lessons,
-                        })
+                        all_matches.append(
+                            {
+                                "type": "episode",
+                                "key": f"episode:{ep.timestamp[:10]}",
+                                "summary": f"{ep.task_summary} — {ep.result[:200]}",
+                                "score": 0.75,
+                                "entities": ep.entities,
+                                "lessons": ep.lessons,
+                            }
+                        )
         except Exception as exc:
             log.debug("episode_search_fallback_error", error=str(exc)[:100])
 
@@ -223,12 +245,14 @@ async def memory_search(params: MemorySearchParams) -> CapabilityResult:
             results = await manager.search(params.query, k=params.limit)
             for r in results:
                 if r.score >= params.min_score:
-                    all_matches.append({
-                        "type": r.metadata.type if r.metadata else "vector",
-                        "key": r.metadata.id if r.metadata else "",
-                        "summary": r.metadata.summary if r.metadata else r.text,
-                        "score": r.score,
-                    })
+                    all_matches.append(
+                        {
+                            "type": r.metadata.type if r.metadata else "vector",
+                            "key": r.metadata.id if r.metadata else "",
+                            "summary": r.metadata.summary if r.metadata else r.text,
+                            "score": r.score,
+                        }
+                    )
         except Exception:
             pass  # Vector search optional
 
@@ -323,8 +347,7 @@ async def memory_save(params: MemorySaveParams) -> CapabilityResult:
         return CapabilityResult(
             success=True,
             output=(
-                f"Saved to [{section}]: {params.content}"
-                + (f" (key: {key})" if params.key else "")
+                f"Saved to [{section}]: {params.content}" + (f" (key: {key})" if params.key else "")
             ),
             metadata={
                 "key": key,
@@ -410,35 +433,180 @@ async def memory_tune(params: MemoryTuneParams) -> CapabilityResult:
 
 # Registration
 
+
+class ConversationSearchParams(BaseModel):
+    """Parameters for searching past conversation transcripts."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    query: str = Field(description="What to recall from past conversations")
+    limit: int = Field(
+        default=5, ge=1, le=50, alias="maxResults", description="Max conversations (default: 5)"
+    )
+    window: int = Field(
+        default=2, ge=0, le=20, description="Turns of surrounding context per hit (default: 2)"
+    )
+
+
+# Min cosine to count as a real recall. Calibrated to the local embedding model:
+# true topical matches score ~0.7+, unrelated turns ~0.3-0.4, so 0.5 cleanly
+# separates signal from noise. The keyword fallback (overlap fraction) reuses it.
+_RELEVANCE_FLOOR = 0.5
+
+
+def _cos(a: list[float], b: list[float]) -> float:
+    import math
+
+    dot = sum(x * y for x, y in zip(a, b, strict=False))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    return dot / (na * nb) if na and nb else 0.0
+
+
+async def conversation_search(params: ConversationSearchParams) -> CapabilityResult:
+    """Search past conversation transcripts (verbatim), ranked semantically.
+
+    Unlike memory_search (derived facts/episodes), this searches the raw turns,
+    so a user can recall what was actually said. Candidates come from keyword +
+    recent-history scan; ranking is embedding cosine (keyword-overlap fallback),
+    which surfaces paraphrased recall that a pure keyword search would miss.
+    """
+    log.debug("conversation_search", query=params.query, limit=params.limit)
+    if not params.query.strip():
+        return CapabilityResult(success=True, output="No past conversations match that.")
+    try:
+        from rune.conversation.store import ConversationStore
+        from rune.memory.manager import get_memory_manager
+        from rune.utils.paths import conversations_db_path
+
+        store = ConversationStore(conversations_db_path())
+        cands = store.fetch_searchable_turns()
+        if not cands:
+            return CapabilityResult(success=True, output="No past conversations match that.")
+
+        q_words = {w for w in params.query.lower().split() if len(w) > 1}
+
+        def _keyword_rank() -> list[tuple[float, dict]]:
+            return [
+                (len(q_words & set(c["content"].lower().split())) / (len(q_words) or 1), c)
+                for c in cands
+            ]
+
+        # Rank by embedding cosine over ALL turns (so old relevant turns are
+        # reachable), falling back to keyword overlap. Embeddings are cached by
+        # content hash (turn ids churn on re-save), so a search only embeds the
+        # query plus turns never seen before — a warm store re-embeds nothing.
+        ranked: list[tuple[float, dict]]
+        try:
+            import numpy as np
+
+            manager = get_memory_manager()
+            cached = store.get_cached_embeddings([c["content_hash"] for c in cands])
+            todo = {
+                c["content_hash"]: c["content"][:500]
+                for c in cands
+                if c["content_hash"] not in cached
+            }
+            vecs = await manager.embed_batch([params.query] + list(todo.values()))
+            if len(vecs) != len(todo) + 1:
+                raise ValueError("embedding count mismatch")
+            qv = np.asarray(vecs[0], dtype=np.float32)
+            fresh = {
+                h: np.asarray(v, dtype=np.float32)
+                for h, v in zip(todo.keys(), vecs[1:], strict=True)
+            }
+            if fresh:
+                store.cache_embeddings(fresh)
+            emb = {**cached, **fresh}
+            rows = [c for c in cands if c["content_hash"] in emb]
+            # Vectorized cosine: one matrix-vector product over all turns.
+            mat = np.stack([emb[c["content_hash"]] for c in rows])
+            sims = (mat @ qv) / (
+                np.linalg.norm(mat, axis=1) * (float(np.linalg.norm(qv)) + 1e-9) + 1e-9
+            )
+            ranked = list(zip(sims.tolist(), rows, strict=True))
+        except Exception:
+            ranked = _keyword_rank()
+
+        ranked.sort(key=lambda t: t[0], reverse=True)
+
+        # One window per conversation, best hit first.
+        seen: set[str] = set()
+        blocks: list[str] = []
+        for score, turn in ranked:
+            cid = turn["conversation_id"]
+            if cid in seen or score < _RELEVANCE_FLOOR:  # drop weak/unrelated matches
+                continue
+            seen.add(cid)
+            win = store.get_turn_window(cid, turn["created_order"], params.window)
+            if not win:
+                continue
+            head = f"### {turn['title'] or cid} · {turn['timestamp'][:10]} (relevance {score:.0%})"
+            body = "\n".join(
+                f"- {w['role']}: {w['content'][:300]}" for w in win if (w["content"] or "").strip()
+            )
+            blocks.append(f"{head}\n{body}")
+            if len(blocks) >= params.limit:
+                break
+
+        if not blocks:
+            return CapabilityResult(success=True, output="No past conversations match that.")
+        return CapabilityResult(
+            success=True,
+            output="\n\n".join(blocks),
+            metadata={"conversations": len(blocks)},
+        )
+    except Exception as exc:
+        log.warning("conversation_search_failed", error=str(exc)[:160])
+        return CapabilityResult(success=False, output=f"Conversation search failed: {exc}")
+
+
 def register_memory_capabilities(registry: CapabilityRegistry) -> None:
     """Register memory capabilities (search, save, tune)."""
-    registry.register(CapabilityDefinition(
-        name="memory_search",
-        description="Search past work, user preferences, and learned patterns from memory",
-        domain=Domain.MEMORY,
-        risk_level=RiskLevel.LOW,
-        group="safe",
-        parameters_model=MemorySearchParams,
-        execute=memory_search,
-    ))
-    registry.register(CapabilityDefinition(
-        name="memory_save",
-        description=(
-            "Save a memory entry (preference/decision/pattern/note/environment) "
-            "with MemGPT-style self-memory management"
-        ),
-        domain=Domain.MEMORY,
-        risk_level=RiskLevel.LOW,
-        group="safe",
-        parameters_model=MemorySaveParams,
-        execute=memory_save,
-    ))
-    registry.register(CapabilityDefinition(
-        name="memory_tune",
-        description="Adjust memory retrieval policy parameters and thresholds",
-        domain=Domain.MEMORY,
-        risk_level=RiskLevel.MEDIUM,
-        group="write",
-        parameters_model=MemoryTuneParams,
-        execute=memory_tune,
-    ))
+    registry.register(
+        CapabilityDefinition(
+            name="memory_search",
+            description="Search past work, user preferences, and learned patterns from memory",
+            domain=Domain.MEMORY,
+            risk_level=RiskLevel.LOW,
+            group="safe",
+            parameters_model=MemorySearchParams,
+            execute=memory_search,
+        )
+    )
+    registry.register(
+        CapabilityDefinition(
+            name="conversation_search",
+            description="Search past conversation transcripts (what was actually said), not just derived facts",
+            domain=Domain.MEMORY,
+            risk_level=RiskLevel.LOW,
+            group="safe",
+            parameters_model=ConversationSearchParams,
+            execute=conversation_search,
+        )
+    )
+    registry.register(
+        CapabilityDefinition(
+            name="memory_save",
+            description=(
+                "Save a memory entry (preference/decision/pattern/note/environment) "
+                "with MemGPT-style self-memory management"
+            ),
+            domain=Domain.MEMORY,
+            risk_level=RiskLevel.LOW,
+            group="safe",
+            parameters_model=MemorySaveParams,
+            execute=memory_save,
+        )
+    )
+    registry.register(
+        CapabilityDefinition(
+            name="memory_tune",
+            description="Adjust memory retrieval policy parameters and thresholds",
+            domain=Domain.MEMORY,
+            risk_level=RiskLevel.MEDIUM,
+            group="write",
+            parameters_model=MemoryTuneParams,
+            execute=memory_tune,
+        )
+    )

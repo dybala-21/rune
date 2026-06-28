@@ -67,6 +67,15 @@ def _ensure_db(db_path: Path) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_conversations_user
         ON conversations(user_id, updated_at DESC)
     """)
+    # Embedding cache for transcript search. Keyed by content hash, not turn id:
+    # save() deletes+reinserts turns (ids churn), but content — and thus its
+    # embedding — is stable, so this survives re-saves and avoids recompute.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS turn_embeddings (
+            content_hash TEXT PRIMARY KEY,
+            embedding BLOB NOT NULL
+        )
+    """)
     conn.commit()
     return conn
 
@@ -140,6 +149,34 @@ class ConversationStore:
 
         conn.commit()
         log.debug("conversation_saved", id=conversation.id)
+        await self._embed_new_turns(conversation.turns)
+
+    async def _embed_new_turns(self, turns: list[ConversationTurn]) -> None:
+        """Embed-on-write: cache embeddings for not-yet-seen turn content so the
+        transcript search never has to backfill on first use. Incremental (only
+        new content is embedded) and best-effort — a failure never breaks save.
+        """
+        try:
+            contents = {
+                self.content_hash(t.content): t.content
+                for t in turns
+                if t.content and t.content.strip() and not t.archived
+            }
+            if not contents:
+                return
+            todo = {
+                h: c
+                for h, c in contents.items()
+                if h not in self.get_cached_embeddings(list(contents))
+            }
+            if not todo:
+                return
+            from rune.llm.local_embedding import get_embedding_provider
+
+            vecs = await get_embedding_provider().embed([c[:500] for c in todo.values()])
+            self.cache_embeddings(dict(zip(todo.keys(), vecs, strict=True)))
+        except Exception as exc:
+            log.debug("embed_on_write_failed", error=str(exc)[:120])
 
     async def load(self, conversation_id: str) -> Conversation | None:
         """Load a conversation by ID."""
@@ -166,7 +203,9 @@ class ConversationStore:
             execution_context=row[4],
         )
 
-    async def list(self, user_id: str, limit: int = 20, status: str | None = None) -> list[Conversation]:
+    async def list(
+        self, user_id: str, limit: int = 20, status: str | None = None
+    ) -> list[Conversation]:
         """List conversations for a user, most recent first (without turns)."""
         if status:
             rows = self._conn.execute(
@@ -211,7 +250,9 @@ class ConversationStore:
         log.debug("conversation_deleted", id=conversation_id)
 
     async def get_recent_digests(
-        self, user_id: str, limit: int = 5,
+        self,
+        user_id: str,
+        limit: int = 5,
     ) -> list[dict[str, Any]]:
         """Get recent conversation digests for context priming."""
         rows = self._conn.execute(
@@ -310,7 +351,11 @@ class ConversationStore:
         )
 
     async def replace_turns_with_summary(
-        self, conversation_id: str, summary: str, *, keep_latest: int = 5,
+        self,
+        conversation_id: str,
+        summary: str,
+        *,
+        keep_latest: int = 5,
     ) -> int:
         """Replace older turns with a summary turn, keeping the latest N turns.
 
@@ -342,13 +387,20 @@ class ConversationStore:
                 execution_context, archived, timestamp, tool_calls, created_order)
             VALUES (?, ?, 'system', ?, '', '', '', 0, ?, '[]', -1)
             """,
-            (uuid4().hex[:16], conversation_id, f"[Summary of {len(ids_to_remove)} earlier turns]\n{summary}", _dt_to_str(now)),
+            (
+                uuid4().hex[:16],
+                conversation_id,
+                f"[Summary of {len(ids_to_remove)} earlier turns]\n{summary}",
+                _dt_to_str(now),
+            ),
         )
         self._conn.commit()
         return len(ids_to_remove)
 
     async def archive_stale(
-        self, idle_minutes: int = 60, user_id: str | None = None,
+        self,
+        idle_minutes: int = 60,
+        user_id: str | None = None,
     ) -> int:
         """Archive conversations idle for more than *idle_minutes*.
 
@@ -357,6 +409,7 @@ class ConversationStore:
         cutoff = datetime.now()
         # Subtract idle_minutes
         from datetime import timedelta
+
         cutoff_str = _dt_to_str(cutoff - timedelta(minutes=idle_minutes))
 
         params: list[Any] = [cutoff_str]
@@ -406,7 +459,9 @@ class ConversationStore:
         )
 
     async def update_conversation(
-        self, conversation_id: str, **fields: Any,
+        self,
+        conversation_id: str,
+        **fields: Any,
     ) -> None:
         """Update specific fields on a conversation."""
         allowed = {"title", "status", "execution_context", "digest"}
@@ -422,4 +477,84 @@ class ConversationStore:
             f"UPDATE conversations SET {set_clause} WHERE id = ?",
             tuple(values),
         )
+        self._conn.commit()
+
+    # --- Transcript search (used by the conversation_search capability) ---
+
+    @staticmethod
+    def content_hash(content: str) -> str:
+        import hashlib
+
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+
+    def fetch_searchable_turns(self, max_turns: int = 20000) -> list[dict[str, Any]]:
+        """All non-archived, non-empty turns for semantic search — no recency or
+        keyword bound, so old relevant turns are still reachable (the ranker
+        scores everything; embeddings are cached so this stays cheap). Capped at
+        ``max_turns`` (recent first) only as a memory backstop far beyond a
+        realistic personal history.
+        """
+        rows = self._conn.execute(
+            "SELECT t.conversation_id, t.role, t.content, t.timestamp, t.created_order, "
+            "c.title FROM turns t LEFT JOIN conversations c ON c.id = t.conversation_id "
+            "WHERE t.archived = 0 AND TRIM(t.content) != '' "
+            "ORDER BY t.timestamp DESC LIMIT ?",
+            (max_turns,),
+        ).fetchall()
+        return [
+            {
+                "conversation_id": r[0],
+                "role": r[1],
+                "content": r[2],
+                "timestamp": r[3],
+                "created_order": r[4],
+                "title": r[5] or "",
+                "content_hash": self.content_hash(r[2]),
+            }
+            for r in rows
+        ]
+
+    def get_turn_window(
+        self,
+        conversation_id: str,
+        center_order: int,
+        window: int = 2,
+    ) -> list[dict[str, Any]]:
+        """Non-archived turns surrounding ``center_order`` (±``window``)."""
+        rows = self._conn.execute(
+            "SELECT role, content, timestamp FROM turns WHERE conversation_id = ? "
+            "AND archived = 0 AND created_order BETWEEN ? AND ? ORDER BY created_order",
+            (conversation_id, center_order - window, center_order + window),
+        ).fetchall()
+        return [{"role": r[0], "content": r[1], "timestamp": r[2]} for r in rows]
+
+    def get_cached_embeddings(self, hashes: list[str]) -> dict[str, Any]:
+        """Return {content_hash: float32 ndarray} for any cached hashes.
+
+        Embeddings are stored as raw float32 bytes and read with
+        ``np.frombuffer`` (no JSON parse) — decoding 10k vectors drops from ~1.4s
+        to ~50ms. Scans the table once and filters in Python to avoid a giant
+        ``IN (...)`` clause hitting SQLite's parameter limit.
+        """
+        if not hashes:
+            return {}
+        import numpy as np
+
+        want = set(hashes)
+        out: dict[str, Any] = {}
+        for h, blob in self._conn.execute("SELECT content_hash, embedding FROM turn_embeddings"):
+            if h in want:
+                out[h] = np.frombuffer(blob, dtype=np.float32)
+        return out
+
+    def cache_embeddings(self, embeddings: dict[str, Any]) -> None:
+        """Persist {content_hash: embedding} as raw float32 bytes."""
+        import numpy as np
+
+        for h, vec in embeddings.items():
+            blob = np.asarray(vec, dtype=np.float32).tobytes()
+            self._conn.execute(
+                "INSERT OR REPLACE INTO turn_embeddings (content_hash, embedding) VALUES (?, ?)",
+                (h, blob),
+            )
         self._conn.commit()
