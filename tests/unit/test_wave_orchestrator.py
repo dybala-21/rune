@@ -12,7 +12,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-from rune.agent.wave_orchestrator import WaveTask, _compute_waves, execute_waves
+from rune.agent.parallel_isolated import WorkerOutcome
+from rune.agent.wave_orchestrator import (
+    WaveTask,
+    _compute_waves,
+    execute_waves,
+    summarize_verification,
+)
 
 # Fake worker ops via goal:
 #   "WRITE <rel> <content>"        -> write file in cwd (worktree)
@@ -112,3 +118,55 @@ class TestWaveExecution:
         assert not res.ok
         assert res.failed_wave == 0
         assert not (tmp_dir / "clash.txt").exists()  # I3: nothing applied
+
+
+class TestPostMergeGate:
+    """I6 Tier-2: post-merge compile/test gate on the final assembled tree."""
+
+    def test_final_wave_check_fail_rolls_back_only_final(self, tmp_dir):
+        import asyncio
+        _git_repo(tmp_dir)
+        tasks = [WaveTask("A", "WRITE data.txt FROM_A"),
+                 WaveTask("B", "PROVE data.txt proof.txt", dependencies=["A"])]
+        res = asyncio.run(execute_waves(
+            str(tmp_dir), tasks, isolation="worktree", cmd_builder=_fake_cmd,
+            post_merge_check="exit 1"))           # "compile" fails on assembled tree
+        assert not res.ok
+        assert res.failed_wave == 1               # the final wave
+        assert "post-merge" in res.reason
+        assert not (tmp_dir / "proof.txt").exists()   # I4: final wave rolled back
+        assert (tmp_dir / "data.txt").read_text() == "FROM_A"  # earlier wave intact
+
+    def test_intermediate_waves_not_checked(self, tmp_dir):
+        import asyncio
+        _git_repo(tmp_dir)
+        tasks = [WaveTask("A", "WRITE data.txt FROM_A"),
+                 WaveTask("B", "PROVE data.txt proof.txt", dependencies=["A"])]
+        # The check requires proof.txt, produced ONLY by the final wave. If it
+        # were (wrongly) applied to wave 0 that merge would fail; it passing
+        # proves only the final wave is gated.
+        res = asyncio.run(execute_waves(
+            str(tmp_dir), tasks, isolation="worktree", cmd_builder=_fake_cmd,
+            post_merge_check="test -f proof.txt"))
+        assert res.ok
+        assert res.waves_run == 2
+        assert (tmp_dir / "proof.txt").read_text() == "saw:FROM_A"
+
+
+class TestVerificationMetrics:
+    """§8: self-report-vs-deterministic mismatch + escalation-recovery stats."""
+
+    def test_summarize_verification(self):
+        outs = {
+            "a": WorkerOutcome("a", result={"ok": True}, ok=True, escalation_step=0),
+            "b": WorkerOutcome("b", result={"ok": True}, ok=True, escalation_step=2),
+            # self-reported ok=True but deterministically rejected → the mismatch we measure
+            "c": WorkerOutcome("c", result={"ok": True}, ok=False),
+            # genuinely crashed (self-reported not-ok) → rejected but NOT a mismatch
+            "d": WorkerOutcome("d", result={"ok": False}, ok=False),
+        }
+        st = summarize_verification(outs)
+        assert (st.total, st.accepted, st.rejected) == (4, 2, 2)
+        assert st.self_report_mismatch == 1            # only c
+        assert st.escalation_recoveries == 1           # b recovered at step 2
+        assert st.by_step == {0: 1, 2: 1}

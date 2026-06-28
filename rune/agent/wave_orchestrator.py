@@ -11,8 +11,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from rune.agent.acceptance import Acceptance
 from rune.agent.merge import AUTO_3WAY
 from rune.agent.parallel_isolated import (
+    Escalation,
     WorkerOutcome,
     WorkerSpec,
     _default_cmd,
@@ -31,6 +33,7 @@ class WaveTask:
     provider: str | None = None
     model: str | None = None
     max_iterations: int | None = None
+    acceptance: Acceptance | None = None   # Tier-1 deterministic gate (I6); None=default floor
 
 
 @dataclass(slots=True)
@@ -40,6 +43,39 @@ class WaveResult:
     outcomes: dict[str, WorkerOutcome] = field(default_factory=dict)
     failed_wave: int = -1
     reason: str = ""
+
+
+@dataclass(slots=True)
+class VerificationStats:
+    """§8 instrumentation. ``self_report_mismatch`` = how often a worker's
+    self-reported ok disagreed with the deterministic gate (self-judgment is
+    unreliable); ``by_step`` = recoveries per escalation rung (escalation-vs-
+    resampling data)."""
+    total: int = 0
+    accepted: int = 0
+    rejected: int = 0
+    self_report_mismatch: int = 0           # self-reported ok=True but deterministically rejected
+    escalation_recoveries: int = 0          # accepted only after >=1 escalation step
+    by_step: dict[int, int] = field(default_factory=dict)  # winning escalation_step -> #accepted
+
+
+def summarize_verification(
+    outcomes: dict[str, WorkerOutcome] | list[WorkerOutcome],
+) -> VerificationStats:
+    """Deterministic verification metrics over a run's worker outcomes."""
+    vals = list(outcomes.values()) if isinstance(outcomes, dict) else list(outcomes)
+    st = VerificationStats(total=len(vals))
+    for o in vals:
+        if o.ok:
+            st.accepted += 1
+            if o.escalation_step > 0:
+                st.escalation_recoveries += 1
+            st.by_step[o.escalation_step] = st.by_step.get(o.escalation_step, 0) + 1
+        else:
+            st.rejected += 1
+            if bool(o.result.get("ok")):
+                st.self_report_mismatch += 1
+    return st
 
 
 def _compute_waves(tasks: list[WaveTask]) -> list[list[WaveTask]] | None:
@@ -67,8 +103,17 @@ async def execute_waves(
     policy: str = AUTO_3WAY,
     timeout_seconds: float = 600.0,
     cmd_builder=_default_cmd,
+    post_merge_check: str | None = None,
+    max_escalation_steps: int = 0,
+    escalation: Escalation | None = None,
 ) -> WaveResult:
-    """Run *tasks* in dependency waves with isolation + atomic per-wave merge."""
+    """Run *tasks* in dependency waves with isolation + atomic per-wave merge.
+
+    - Escalation (I7): *max_escalation_steps*/*escalation* apply to every wave.
+    - Tier-2 acceptance (I6): *post_merge_check* (compile/test) is applied to the
+      FINAL wave only — intermediate waves are partial and may not build. On
+      non-pass the final merge rolls back (I4), fail-closed.
+    """
     waves = _compute_waves(tasks)
     if waves is None:
         return WaveResult(ok=False, reason="dependency cycle or unknown dependency")
@@ -85,10 +130,16 @@ async def execute_waves(
                 worker_id=t.id, goal=t.goal, provider=t.provider,
                 model=t.model, max_iterations=t.max_iterations,
                 context={"dependencies": ctx} if ctx else None,
+                acceptance=t.acceptance,
             ))
+        # Tier-2 compile/test gate runs only after the FINAL wave (the fully
+        # assembled tree); intermediate waves are partial and may not build.
+        is_final = i == len(waves) - 1
         wave_res = await run_wave_and_merge(
             repo, specs, isolation=isolation, policy=policy,
-            timeout_seconds=timeout_seconds, cmd_builder=cmd_builder)
+            timeout_seconds=timeout_seconds, cmd_builder=cmd_builder,
+            post_merge_check=post_merge_check if is_final else None,
+            max_escalation_steps=max_escalation_steps, escalation=escalation)
         res.waves_run += 1
         for o in wave_res.workers:
             res.outcomes[o.worker_id] = o
