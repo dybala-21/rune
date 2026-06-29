@@ -82,10 +82,11 @@ def test_empty_known_set_recovers_nothing():
 
 # Guided-decoding schema (constrained tool-call output for local models)
 
-def test_guided_flag_default_off(monkeypatch):
+def test_guided_flag_default_on(monkeypatch):
     from rune.agent.litellm_adapter import _guided_tools_enabled
+    # Default ON (the per-model gate restricts it to local ollama); opt out with =0/off.
     monkeypatch.delenv("RUNE_GUIDED_TOOLS", raising=False)
-    assert _guided_tools_enabled() is False
+    assert _guided_tools_enabled() is True
     monkeypatch.setenv("RUNE_GUIDED_TOOLS", "1")
     assert _guided_tools_enabled() is True
     monkeypatch.setenv("RUNE_GUIDED_TOOLS", "off")
@@ -109,6 +110,17 @@ def test_build_action_schema_enum_names_plus_final():
     assert call["properties"]["tool"]["enum"] == ["file_write", "bash_execute"]
     assert call["properties"]["arguments"] == {"type": "object"}
     assert any("final" in b["properties"] for b in branches)
+
+
+def test_build_action_schema_no_final_when_disallowed():
+    # allow_final=False drops the {final} branch so a weak model can't bail to a
+    # prose answer before producing a real artifact — only a tool call is valid.
+    from rune.agent.litellm_adapter import _build_action_schema
+    schemas = [{"function": {"name": "file_write", "parameters": {"type": "object"}}}]
+    schema = _build_action_schema(schemas, allow_final=False)
+    assert "anyOf" not in schema  # single tool-call branch, no final escape
+    assert schema["required"] == ["tool", "arguments"]
+    assert schema["properties"]["tool"]["enum"] == ["file_write"]
 
 
 def test_arg_key_aliases_normalized():

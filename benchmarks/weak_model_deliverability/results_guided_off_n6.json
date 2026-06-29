@@ -1,0 +1,110 @@
+[
+  {
+    "task": "stats",
+    "produced_artifact": false,
+    "files": [],
+    "score": 0,
+    "max": 6,
+    "checks": [
+      {
+        "name": "module_importable",
+        "pass": false,
+        "detail": "stats.py / summary() missing or broken"
+      }
+    ],
+    "seconds": 52.0,
+    "rule_injected": false,
+    "tool_called": false,
+    "trial": 1
+  },
+  {
+    "task": "stats",
+    "produced_artifact": false,
+    "files": [],
+    "score": 0,
+    "max": 6,
+    "checks": [
+      {
+        "name": "module_importable",
+        "pass": false,
+        "detail": "stats.py / summary() missing or broken"
+      }
+    ],
+    "seconds": 55.1,
+    "rule_injected": false,
+    "tool_called": false,
+    "trial": 2
+  },
+  {
+    "task": "stats",
+    "produced_artifact": false,
+    "files": [],
+    "score": 0,
+    "max": 6,
+    "checks": [
+      {
+        "name": "module_importable",
+        "pass": false,
+        "detail": "stats.py / summary() missing or broken"
+      }
+    ],
+    "seconds": 54.7,
+    "rule_injected": false,
+    "tool_called": false,
+    "trial": 3
+  },
+  {
+    "task": "stats",
+    "produced_artifact": false,
+    "files": [],
+    "score": 0,
+    "max": 6,
+    "checks": [
+      {
+        "name": "module_importable",
+        "pass": false,
+        "detail": "stats.py / summary() missing or broken"
+      }
+    ],
+    "seconds": 53.6,
+    "rule_injected": false,
+    "tool_called": false,
+    "trial": 4
+  },
+  {
+    "task": "stats",
+    "produced_artifact": false,
+    "files": [],
+    "score": 0,
+    "max": 6,
+    "checks": [
+      {
+        "name": "module_importable",
+        "pass": false,
+        "detail": "stats.py / summary() missing or broken"
+      }
+    ],
+    "seconds": 54.5,
+    "rule_injected": false,
+    "tool_called": false,
+    "trial": 5
+  },
+  {
+    "task": "stats",
+    "produced_artifact": false,
+    "files": [],
+    "score": 0,
+    "max": 6,
+    "checks": [
+      {
+        "name": "module_importable",
+        "pass": false,
+        "detail": "stats.py / summary() missing or broken"
+      }
+    ],
+    "seconds": 56.0,
+    "rule_injected": false,
+    "tool_called": false,
+    "trial": 6
+  }
+]
