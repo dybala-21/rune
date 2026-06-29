@@ -215,7 +215,14 @@ class LLMClient:
             resolved_model = f"{prefix}{resolved_model}"
 
         # Clamp to model's hard output cap
-        from rune.agent.litellm_adapter import _clamp_max_tokens
+        # importing the adapter sets litellm.drop_params; _TEMPERATURE_REJECTED +
+        # the retry below handle models it gets wrong (see litellm_adapter).
+        from rune.agent.litellm_adapter import (
+            _TEMPERATURE_REJECTED,
+            _clamp_max_tokens,
+            _is_temperature_error,
+            _note_temperature_rejected,
+        )
         effective_max_tokens = _clamp_max_tokens(resolved_model, max_tokens)
 
         kwargs: dict = {
@@ -225,16 +232,22 @@ class LLMClient:
             "timeout": timeout,
             **provider_extra,
         }
-        # gpt-5 models only support temperature=1; skip temperature param for them
-        model_lower = resolved_model.lower()
-        if "gpt-5" in model_lower and "gpt-5." not in model_lower:
-            pass  # omit temperature entirely
-        else:
+        if resolved_model not in _TEMPERATURE_REJECTED:
             kwargs["temperature"] = temperature
         if tools:
             kwargs["tools"] = tools
 
-        response = await litellm.acompletion(**kwargs)
+        try:
+            response = await litellm.acompletion(**kwargs)
+        except litellm.BadRequestError as e:
+            # model rejected temperature; drop it and retry, remember for next time
+            if "temperature" in kwargs and _is_temperature_error(e):
+                _note_temperature_rejected(resolved_model)
+                kwargs.pop("temperature", None)
+                log.warning("temperature_unsupported_retry", model=resolved_model)
+                response = await litellm.acompletion(**kwargs)
+            else:
+                raise
         return response  # type: ignore[return-value]
 
 

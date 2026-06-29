@@ -19,6 +19,11 @@ import litellm
 # Suppress cost-calculation warnings for models not in LiteLLM's price DB
 # (e.g., local ollama models routed via openai/ prefix).
 litellm.suppress_debug_info = True
+# Drop params a model doesn't accept rather than raising. Lets litellm decide
+# per model instead of us hardcoding which ones reject temperature != 1 (gpt-5,
+# o-series, ...). Without it, temperature=0 on those raises and failover treats
+# it as a dead model.
+litellm.drop_params = True
 
 from rune.agent.message_utils import validate_tool_pairs
 from rune.agent.obs_cap import mask_stale_tool_messages
@@ -287,12 +292,16 @@ def _guided_tools_enabled() -> bool:
     Local models (ollama) often fail to emit native tool_calls and instead write
     them as text, so the loop runs nothing. With guided decoding the output is
     grammar-forced to a tool-call schema, so the model produces a valid action.
-    Opt-in via RUNE_GUIDED_TOOLS.
+
+    Default ON — measured to take qwen2.5-coder:7b from 0%->100% artifact delivery
+    on a multi-step coding task (benchmarks/weak_model_deliverability). It only
+    applies to local ollama, non-cloud models (see ``_guided_for_model``), so
+    cloud/strong models are unaffected. Opt out with RUNE_GUIDED_TOOLS=0.
     """
     import os
 
-    return os.environ.get("RUNE_GUIDED_TOOLS", "").strip().lower() in (
-        "1", "true", "on", "yes",
+    return os.environ.get("RUNE_GUIDED_TOOLS", "").strip().lower() not in (
+        "0", "false", "off", "no",
     )
 
 
@@ -307,9 +316,17 @@ def _guided_for_model(model: str, has_tools: bool, provider_extra: object) -> bo
     )
 
 
-def _build_action_schema(tool_schemas: list[dict[str, Any]]) -> dict[str, Any]:
-    """A JSON schema the model's output must satisfy each turn: either a tool
-    call (``{tool, arguments}``) or a final answer (``{final}``).
+# How many consecutive turns the guided schema forbids {final} (forcing a tool
+# call) while no real artifact has been produced, before allowing a no-op final
+# so a genuinely actionless task can still terminate.
+_GUIDED_FORCE_ACTION_CAP = 5
+
+
+def _build_action_schema(
+    tool_schemas: list[dict[str, Any]], allow_final: bool = True
+) -> dict[str, Any]:
+    """A JSON schema the model's output must satisfy each turn: a tool call
+    (``{tool, arguments}``) or, when ``allow_final``, a final answer (``{final}``).
 
     The tool name is constrained to the real tool set (an enum), so the model
     can't invent a tool; ``arguments`` is a free object. Per-tool argument
@@ -319,22 +336,32 @@ def _build_action_schema(tool_schemas: list[dict[str, Any]]) -> dict[str, Any]:
     and is accepted (argument-key correctness is left to the tools' own
     validation). This guarantees a parseable call naming a real tool, which weak
     local models otherwise fail to emit.
+
+    ``allow_final=False`` drops the final branch entirely: the grammar then
+    permits ONLY a tool call, so a weak model that has not yet produced a real
+    artifact cannot bail out with a prose final answer (the observed wordfreq
+    failure: write rejected for a syntax error -> model emits {final} -> 0 files).
+    Forcing another tool call makes it retry the write with corrected code.
     """
     names = [
         (s.get("function") or {}).get("name")
         for s in tool_schemas
     ]
     names = [n for n in names if n]
+    call_branch = {
+        "type": "object",
+        "properties": {
+            "tool": {"type": "string", "enum": names},
+            "arguments": {"type": "object"},
+        },
+        "required": ["tool", "arguments"],
+    }
+    if not allow_final:
+        # Only a tool call is schema-valid — no escape to a prose final.
+        return call_branch
     return {
         "anyOf": [
-            {
-                "type": "object",
-                "properties": {
-                    "tool": {"type": "string", "enum": names},
-                    "arguments": {"type": "object"},
-                },
-                "required": ["tool", "arguments"],
-            },
+            call_branch,
             {
                 "type": "object",
                 "properties": {"final": {"type": "string"}},
@@ -421,21 +448,22 @@ _PROVIDER_EXTRA: dict[str, dict[str, str]] = {
 }
 
 
-def _is_o_series(model: str) -> bool:
-    """O-series reasoning models (o1/o3/o4) only support temperature=1."""
-    import re as _re
-    base = model.rsplit("/", 1)[-1]
-    return bool(_re.match(r"^o[134](-|$)", base))
+# Backstop for models litellm's DB has wrong: it reports temperature as
+# supported but the API rejects it (e.g. gpt-5.5). drop_params can't catch those,
+# so we learn them from the error and skip temperature next time this process.
+_TEMPERATURE_REJECTED: set[str] = set()
 
 
-def _rejects_temperature(model: str) -> bool:
-    """True for reasoning models that reject temperature != 1: o1/o3/o4 and the
-    gpt-5 family (but not gpt-5.x point releases like gpt-5.1, which allow it).
-    """
-    if _is_o_series(model):
-        return True
-    base = model.rsplit("/", 1)[-1].lower()
-    return "gpt-5" in base and "gpt-5." not in base
+def _note_temperature_rejected(model: str) -> None:
+    _TEMPERATURE_REJECTED.add(model)
+
+
+def _is_temperature_error(exc: Exception) -> bool:
+    """Whether a BadRequest is about temperature (unsupported/invalid/deprecated)."""
+    m = str(exc).lower()
+    return "temperature" in m and (
+        "support" in m or "deprecat" in m or "invalid" in m
+    )
 
 
 def _vertex_active() -> bool:
@@ -604,6 +632,9 @@ class StreamResult:
         # still terminate).
         self._action_ok = False
         self._final_blocks = 0
+        # Turns we've forced a tool-only schema (no {final}) while waiting for the
+        # first real artifact. Capped so a genuinely no-op task still terminates.
+        self._forced_action_turns = 0
         if self._guided:
             self._messages.append({
                 "role": "system",
@@ -701,9 +732,10 @@ class StreamResult:
                 "stream": True,
                 "max_tokens": _effective_max,
                 "stream_options": {"include_usage": True},
+                "temperature": self._temperature,
             }
-            if not _rejects_temperature(self._model):
-                _acompletion_kwargs["temperature"] = self._temperature
+            if self._model in _TEMPERATURE_REJECTED:
+                _acompletion_kwargs.pop("temperature", None)
             if self._extra_headers:
                 _acompletion_kwargs["extra_headers"] = dict(self._extra_headers)
             _acompletion_kwargs.update(self._provider_extra)
@@ -717,16 +749,39 @@ class StreamResult:
             if self._guided:
                 _acompletion_kwargs.pop("tools", None)
                 _acompletion_kwargs.pop("tool_choice", None)
-                _gschema = _build_action_schema(self._tool_schemas)
+                # Forbid {final} until a real artifact exists (capped), so a weak
+                # model can't bail to a prose answer after a rejected write — it
+                # must retry the tool call instead.
+                _allow_final = (
+                    self._action_ok
+                    or self._forced_action_turns >= _GUIDED_FORCE_ACTION_CAP
+                )
+                if not _allow_final:
+                    self._forced_action_turns += 1
+                _gschema = _build_action_schema(
+                    self._tool_schemas, allow_final=_allow_final
+                )
                 log.info("guided_decoding_active",
                          tools=len(self._tool_schemas),
-                         branches=len(_gschema.get("anyOf", [])))
+                         allow_final=_allow_final,
+                         forced_turns=self._forced_action_turns)
                 _acompletion_kwargs["response_format"] = {
                     "type": "json_schema",
                     "json_schema": {"name": "rune_action", "schema": _gschema},
                 }
 
-            self._stream = await litellm.acompletion(**_acompletion_kwargs)
+            try:
+                self._stream = await litellm.acompletion(**_acompletion_kwargs)
+            except litellm.BadRequestError as _e:
+                # Model rejected temperature and litellm didn't strip it; drop it
+                # and retry once, remembering for next time.
+                if "temperature" in _acompletion_kwargs and _is_temperature_error(_e):
+                    _note_temperature_rejected(self._model)
+                    _acompletion_kwargs.pop("temperature", None)
+                    log.warning("temperature_unsupported_retry", model=self._model)
+                    self._stream = await litellm.acompletion(**_acompletion_kwargs)
+                else:
+                    raise
 
             text_this_turn = ""
             tool_calls_by_index: dict[int, dict[str, Any]] = {}

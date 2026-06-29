@@ -21,8 +21,14 @@ def test_guided_off_for_cloud_model(monkeypatch):
     assert la._guided_for_model("deepseek-v3.1:671b-cloud", True, _OLLAMA) is False
 
 
-def test_guided_off_when_env_disabled(monkeypatch):
+def test_guided_on_by_default_for_local(monkeypatch):
+    # Default ON for local ollama models (measured 0%->100% delivery on a 7B).
     monkeypatch.delenv("RUNE_GUIDED_TOOLS", raising=False)
+    assert la._guided_for_model("qwen2.5-coder:7b", True, _OLLAMA) is True
+
+
+def test_guided_off_when_env_disabled(monkeypatch):
+    monkeypatch.setenv("RUNE_GUIDED_TOOLS", "0")
     assert la._guided_for_model("qwen2.5-coder:7b", True, _OLLAMA) is False
 
 

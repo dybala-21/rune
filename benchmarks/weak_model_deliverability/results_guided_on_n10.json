@@ -1,0 +1,462 @@
+[
+  {
+    "task": "stats",
+    "produced_artifact": true,
+    "files": [
+      "stats.py",
+      "test_stats.py"
+    ],
+    "score": 6,
+    "max": 6,
+    "checks": [
+      {
+        "name": "median_even",
+        "pass": true,
+        "detail": "2.5"
+      },
+      {
+        "name": "mode_tie_smallest",
+        "pass": true,
+        "detail": "1"
+      },
+      {
+        "name": "population_stdev",
+        "pass": true,
+        "detail": "1.4142135623730951"
+      },
+      {
+        "name": "single_element",
+        "pass": true,
+        "detail": "{'count': 1, 'mean': 5.0, 'median': 5, 'mode': 5, 'stdev': 0.0, 'min': 5, 'max': 5}"
+      },
+      {
+        "name": "empty_raises_valueerror",
+        "pass": true,
+        "detail": "ValueError"
+      },
+      {
+        "name": "basics",
+        "pass": true,
+        "detail": "ok"
+      }
+    ],
+    "seconds": 73.1,
+    "rule_injected": false,
+    "tool_called": true,
+    "trial": 1
+  },
+  {
+    "task": "stats",
+    "produced_artifact": true,
+    "files": [
+      "stats.py",
+      "test_stats.py"
+    ],
+    "score": 6,
+    "max": 6,
+    "checks": [
+      {
+        "name": "median_even",
+        "pass": true,
+        "detail": "2.5"
+      },
+      {
+        "name": "mode_tie_smallest",
+        "pass": true,
+        "detail": "1"
+      },
+      {
+        "name": "population_stdev",
+        "pass": true,
+        "detail": "1.4142135623730951"
+      },
+      {
+        "name": "single_element",
+        "pass": true,
+        "detail": "{'count': 1, 'mean': 5.0, 'median': 5, 'mode': 5, 'stdev': 0.0, 'min': 5, 'max': 5}"
+      },
+      {
+        "name": "empty_raises_valueerror",
+        "pass": true,
+        "detail": "ValueError"
+      },
+      {
+        "name": "basics",
+        "pass": true,
+        "detail": "ok"
+      }
+    ],
+    "seconds": 63.7,
+    "rule_injected": false,
+    "tool_called": true,
+    "trial": 2
+  },
+  {
+    "task": "stats",
+    "produced_artifact": true,
+    "files": [
+      "stats.py",
+      "test_stats.py"
+    ],
+    "score": 6,
+    "max": 6,
+    "checks": [
+      {
+        "name": "median_even",
+        "pass": true,
+        "detail": "2.5"
+      },
+      {
+        "name": "mode_tie_smallest",
+        "pass": true,
+        "detail": "1"
+      },
+      {
+        "name": "population_stdev",
+        "pass": true,
+        "detail": "1.4142135623730951"
+      },
+      {
+        "name": "single_element",
+        "pass": true,
+        "detail": "{'count': 1, 'mean': 5.0, 'median': 5, 'mode': 5, 'stdev': 0.0, 'min': 5, 'max': 5}"
+      },
+      {
+        "name": "empty_raises_valueerror",
+        "pass": true,
+        "detail": "ValueError"
+      },
+      {
+        "name": "basics",
+        "pass": true,
+        "detail": "ok"
+      }
+    ],
+    "seconds": 67.4,
+    "rule_injected": false,
+    "tool_called": true,
+    "trial": 3
+  },
+  {
+    "task": "stats",
+    "produced_artifact": true,
+    "files": [
+      "stats.py",
+      "test_stats.py"
+    ],
+    "score": 6,
+    "max": 6,
+    "checks": [
+      {
+        "name": "median_even",
+        "pass": true,
+        "detail": "2.5"
+      },
+      {
+        "name": "mode_tie_smallest",
+        "pass": true,
+        "detail": "1"
+      },
+      {
+        "name": "population_stdev",
+        "pass": true,
+        "detail": "1.4142135623730951"
+      },
+      {
+        "name": "single_element",
+        "pass": true,
+        "detail": "{'count': 1, 'mean': 5.0, 'median': 5, 'mode': 5, 'stdev': 0.0, 'min': 5, 'max': 5}"
+      },
+      {
+        "name": "empty_raises_valueerror",
+        "pass": true,
+        "detail": "ValueError"
+      },
+      {
+        "name": "basics",
+        "pass": true,
+        "detail": "ok"
+      }
+    ],
+    "seconds": 46.7,
+    "rule_injected": false,
+    "tool_called": true,
+    "trial": 4
+  },
+  {
+    "task": "stats",
+    "produced_artifact": true,
+    "files": [
+      "stats.py",
+      "test_stats.py"
+    ],
+    "score": 6,
+    "max": 6,
+    "checks": [
+      {
+        "name": "median_even",
+        "pass": true,
+        "detail": "2.5"
+      },
+      {
+        "name": "mode_tie_smallest",
+        "pass": true,
+        "detail": "1"
+      },
+      {
+        "name": "population_stdev",
+        "pass": true,
+        "detail": "1.4142135623730951"
+      },
+      {
+        "name": "single_element",
+        "pass": true,
+        "detail": "{'count': 1, 'mean': 5.0, 'median': 5, 'mode': 5, 'stdev': 0.0, 'min': 5, 'max': 5}"
+      },
+      {
+        "name": "empty_raises_valueerror",
+        "pass": true,
+        "detail": "ValueError"
+      },
+      {
+        "name": "basics",
+        "pass": true,
+        "detail": "ok"
+      }
+    ],
+    "seconds": 48.3,
+    "rule_injected": false,
+    "tool_called": true,
+    "trial": 5
+  },
+  {
+    "task": "stats",
+    "produced_artifact": true,
+    "files": [
+      "stats.py",
+      "test_stats.py"
+    ],
+    "score": 6,
+    "max": 6,
+    "checks": [
+      {
+        "name": "median_even",
+        "pass": true,
+        "detail": "2.5"
+      },
+      {
+        "name": "mode_tie_smallest",
+        "pass": true,
+        "detail": "1"
+      },
+      {
+        "name": "population_stdev",
+        "pass": true,
+        "detail": "1.4142135623730951"
+      },
+      {
+        "name": "single_element",
+        "pass": true,
+        "detail": "{'count': 1, 'mean': 5.0, 'median': 5, 'mode': 5, 'stdev': 0.0, 'min': 5, 'max': 5}"
+      },
+      {
+        "name": "empty_raises_valueerror",
+        "pass": true,
+        "detail": "ValueError"
+      },
+      {
+        "name": "basics",
+        "pass": true,
+        "detail": "ok"
+      }
+    ],
+    "seconds": 51.7,
+    "rule_injected": false,
+    "tool_called": true,
+    "trial": 6
+  },
+  {
+    "task": "stats",
+    "produced_artifact": true,
+    "files": [
+      "stats.py",
+      "test_stats.py"
+    ],
+    "score": 6,
+    "max": 6,
+    "checks": [
+      {
+        "name": "median_even",
+        "pass": true,
+        "detail": "2.5"
+      },
+      {
+        "name": "mode_tie_smallest",
+        "pass": true,
+        "detail": "1"
+      },
+      {
+        "name": "population_stdev",
+        "pass": true,
+        "detail": "1.4142135623730951"
+      },
+      {
+        "name": "single_element",
+        "pass": true,
+        "detail": "{'count': 1, 'mean': 5.0, 'median': 5, 'mode': 5, 'stdev': 0.0, 'min': 5, 'max': 5}"
+      },
+      {
+        "name": "empty_raises_valueerror",
+        "pass": true,
+        "detail": "ValueError"
+      },
+      {
+        "name": "basics",
+        "pass": true,
+        "detail": "ok"
+      }
+    ],
+    "seconds": 71.0,
+    "rule_injected": false,
+    "tool_called": true,
+    "trial": 7
+  },
+  {
+    "task": "stats",
+    "produced_artifact": true,
+    "files": [
+      "stats.py",
+      "test_stats.py"
+    ],
+    "score": 6,
+    "max": 6,
+    "checks": [
+      {
+        "name": "median_even",
+        "pass": true,
+        "detail": "2.5"
+      },
+      {
+        "name": "mode_tie_smallest",
+        "pass": true,
+        "detail": "1"
+      },
+      {
+        "name": "population_stdev",
+        "pass": true,
+        "detail": "1.4142135623730951"
+      },
+      {
+        "name": "single_element",
+        "pass": true,
+        "detail": "{'count': 1, 'mean': 5.0, 'median': 5, 'mode': 5, 'stdev': 0.0, 'min': 5, 'max': 5}"
+      },
+      {
+        "name": "empty_raises_valueerror",
+        "pass": true,
+        "detail": "ValueError"
+      },
+      {
+        "name": "basics",
+        "pass": true,
+        "detail": "ok"
+      }
+    ],
+    "seconds": 49.5,
+    "rule_injected": false,
+    "tool_called": true,
+    "trial": 8
+  },
+  {
+    "task": "stats",
+    "produced_artifact": true,
+    "files": [
+      "stats.py",
+      "test_stats.py"
+    ],
+    "score": 6,
+    "max": 6,
+    "checks": [
+      {
+        "name": "median_even",
+        "pass": true,
+        "detail": "2.5"
+      },
+      {
+        "name": "mode_tie_smallest",
+        "pass": true,
+        "detail": "1"
+      },
+      {
+        "name": "population_stdev",
+        "pass": true,
+        "detail": "1.4142135623730951"
+      },
+      {
+        "name": "single_element",
+        "pass": true,
+        "detail": "{'count': 1, 'mean': 5.0, 'median': 5, 'mode': 5, 'stdev': 0.0, 'min': 5, 'max': 5}"
+      },
+      {
+        "name": "empty_raises_valueerror",
+        "pass": true,
+        "detail": "ValueError"
+      },
+      {
+        "name": "basics",
+        "pass": true,
+        "detail": "ok"
+      }
+    ],
+    "seconds": 47.3,
+    "rule_injected": false,
+    "tool_called": true,
+    "trial": 9
+  },
+  {
+    "task": "stats",
+    "produced_artifact": true,
+    "files": [
+      "stats.py",
+      "test_stats.py"
+    ],
+    "score": 6,
+    "max": 6,
+    "checks": [
+      {
+        "name": "median_even",
+        "pass": true,
+        "detail": "2.5"
+      },
+      {
+        "name": "mode_tie_smallest",
+        "pass": true,
+        "detail": "1"
+      },
+      {
+        "name": "population_stdev",
+        "pass": true,
+        "detail": "1.4142135623730951"
+      },
+      {
+        "name": "single_element",
+        "pass": true,
+        "detail": "{'count': 1, 'mean': 5.0, 'median': 5, 'mode': 5, 'stdev': 0.0, 'min': 5, 'max': 5}"
+      },
+      {
+        "name": "empty_raises_valueerror",
+        "pass": true,
+        "detail": "ValueError"
+      },
+      {
+        "name": "basics",
+        "pass": true,
+        "detail": "ok"
+      }
+    ],
+    "seconds": 51.9,
+    "rule_injected": false,
+    "tool_called": true,
+    "trial": 10
+  }
+]

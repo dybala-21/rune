@@ -1,0 +1,92 @@
+[
+  {
+    "task": "wordfreq",
+    "produced_artifact": false,
+    "files": [],
+    "score": 0,
+    "max": 5,
+    "checks": [
+      {
+        "name": "module_importable",
+        "pass": false,
+        "detail": "wordfreq.py / top_words() missing or broken"
+      }
+    ],
+    "seconds": 102.7,
+    "rule_injected": false,
+    "tool_called": true,
+    "trial": 1
+  },
+  {
+    "task": "wordfreq",
+    "produced_artifact": false,
+    "files": [],
+    "score": 0,
+    "max": 5,
+    "checks": [
+      {
+        "name": "module_importable",
+        "pass": false,
+        "detail": "wordfreq.py / top_words() missing or broken"
+      }
+    ],
+    "seconds": 55.9,
+    "rule_injected": false,
+    "tool_called": true,
+    "trial": 2
+  },
+  {
+    "task": "wordfreq",
+    "produced_artifact": false,
+    "files": [],
+    "score": 0,
+    "max": 5,
+    "checks": [
+      {
+        "name": "module_importable",
+        "pass": false,
+        "detail": "wordfreq.py / top_words() missing or broken"
+      }
+    ],
+    "seconds": 51.5,
+    "rule_injected": false,
+    "tool_called": true,
+    "trial": 3
+  },
+  {
+    "task": "wordfreq",
+    "produced_artifact": false,
+    "files": [],
+    "score": 0,
+    "max": 5,
+    "checks": [
+      {
+        "name": "module_importable",
+        "pass": false,
+        "detail": "wordfreq.py / top_words() missing or broken"
+      }
+    ],
+    "seconds": 41.7,
+    "rule_injected": false,
+    "tool_called": true,
+    "trial": 4
+  },
+  {
+    "task": "wordfreq",
+    "produced_artifact": false,
+    "files": [],
+    "score": 0,
+    "max": 5,
+    "checks": [
+      {
+        "name": "module_importable",
+        "pass": false,
+        "detail": "wordfreq.py / top_words() missing or broken"
+      }
+    ],
+    "seconds": 47.2,
+    "rule_injected": false,
+    "tool_called": true,
+    "trial": 5
+  }
+]
