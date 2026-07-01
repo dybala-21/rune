@@ -457,6 +457,10 @@ class NativeAgentLoop(EventEmitter):
         # R19: tool-call sequence counter (not step) to catch intra-step patterns
         self._last_code_write_step: int = 0
         self._last_verify_step: int = 0
+        # Did the last test/verify command fail, and how many times we've held
+        # back a finish because the code wasn't verified yet.
+        self._last_verify_failed: bool = False
+        self._unverified_completion_blocks: int = 0
         self._tool_call_seq: int = 0
         # Activity phase for adaptive observation windows
         self._activity_phase: str = "exploration"
@@ -527,6 +531,8 @@ class NativeAgentLoop(EventEmitter):
         self._hard_failures.clear()
         self._last_code_write_step = 0
         self._last_verify_step = 0
+        self._last_verify_failed = False
+        self._unverified_completion_blocks = 0
         self._tool_call_seq = 0
         self._activity_phase = "exploration"
         self._prev_activity_phase = "exploration"
@@ -1399,8 +1405,10 @@ class NativeAgentLoop(EventEmitter):
                 self._pending_verification_nudge = True  # (#27)
                 # Written file paths are tracked in _on_tool_start where
                 # params are available - no duplicate tracking needed here.
-                # R19: track code-file writes for freshness gate
-                if result.success and cap_name != "file_delete":
+                # Note code-file writes for the verification gate. Count attempts,
+                # not just successes: a rejected write still leaves the task
+                # unverified, so it shouldn't finish on the model's word alone.
+                if cap_name != "file_delete":
                     fp = _last_tool_params.get("file_path") or _last_tool_params.get("path", "")
                     from rune.intelligence.ast_analyzer import is_code_extension
 
@@ -1412,15 +1420,18 @@ class NativeAgentLoop(EventEmitter):
                 evidence.executions += 1
                 self._consecutive_reads_without_write = 0  # (#27) reset
                 # R19: any successful bash counts as verification
+                from rune.agent.bash_parsing import is_verification_command
+
+                _bash_cmd = _last_tool_params.get("command", "")
                 if result.success:
                     self._tool_call_seq += 1
                     self._last_verify_step = self._tool_call_seq
                     # R06: count formal verification commands separately
-                    cmd = _last_tool_params.get("command", "")
-                    from rune.agent.bash_parsing import is_verification_command
-
-                    if cmd and is_verification_command(cmd):
+                    if _bash_cmd and is_verification_command(_bash_cmd):
                         evidence.verifications += 1
+                        self._last_verify_failed = False  # tests just passed
+                elif _bash_cmd and is_verification_command(_bash_cmd):
+                    self._last_verify_failed = True  # tests just failed
             elif cap_name == "web_search":
                 evidence.web_searches += 1
                 self._stall.web_search_count += 1  # (#15)
@@ -1592,6 +1603,30 @@ class NativeAgentLoop(EventEmitter):
         verify_freshness_enabled = _os_for_freshness.environ.get(
             "RUNE_VERIFY_FRESHNESS", ""
         ).strip().lower() in ("1", "true", "yes", "on")
+
+        # Don't let a code task finish while its latest change is unverified —
+        # nothing ran since the change, or the last test failed and never passed.
+        # On by default (RUNE_REQUIRE_TEST_PASS=0 turns it off), and only for
+        # tasks that actually need verification. Getting a green test clears it;
+        # if it never clears, the run ends as max_gate_blocked, which points the
+        # user at /escalate.
+        _require_test_pass = _os_for_freshness.environ.get(
+            "RUNE_REQUIRE_TEST_PASS", "1"
+        ).strip().lower() not in ("0", "false", "no", "off")
+        try:
+            _require_test_pass = _require_test_pass and resolve_intent_contract(
+                classification, classification.confidence
+            ).requires_code_verification
+        except Exception:
+            _require_test_pass = False
+
+        def _unverified_code() -> bool:
+            """True when the latest code change still has no passing test behind it."""
+            if not _require_test_pass:
+                return False
+            if self._last_code_write_step > self._last_verify_step:
+                return True
+            return self._last_verify_failed
 
         # main loop
         _prev_evidence_total = 0
@@ -2217,6 +2252,38 @@ class NativeAgentLoop(EventEmitter):
                             f"#{self._last_verify_step}). Re-run the script and "
                             f"show the real output before declaring done.",
                         )
+                    elif _unverified_code():
+                        # Code changed but nothing verifies it yet. Don't take the
+                        # model's word — nudge it to get tests green; if it can't,
+                        # stop honestly (max_gate_blocked -> /escalate).
+                        self._unverified_completion_blocks += 1
+                        log.info(
+                            "require_test_pass_block",
+                            step=self._step,
+                            last_write=self._last_code_write_step,
+                            last_verify=self._last_verify_step,
+                            verify_failed=self._last_verify_failed,
+                            count=self._unverified_completion_blocks,
+                        )
+                        if self._unverified_completion_blocks >= 5:
+                            log.warning("require_test_pass_exhausted", step=self._step)
+                            trace.reason = self._max_gate_reason()
+                            trace.final_step = self._step
+                            break
+                        messages = self._inject_system_message(
+                            messages,
+                            "[Completion Gate] You changed code (tool call "
+                            f"#{self._last_code_write_step}) but no test/verification "
+                            "command has PASSED since that change"
+                            + (
+                                " — your last test run FAILED."
+                                if self._last_verify_failed
+                                else "."
+                            )
+                            + " Run the tests now and make them pass before declaring"
+                            " done. If they genuinely cannot pass, say so explicitly"
+                            " and do NOT claim the task is complete.",
+                        )
                     else:
                         blocker = await self._benchmark_completion_blocker()
                         if blocker:
@@ -2372,6 +2439,36 @@ class NativeAgentLoop(EventEmitter):
                     hard_failures=list(self._hard_failures),
                 )
                 gate_result = evaluate_completion_gate(gate_input)
+
+                # Same check here — the fast path isn't the only way to finish, so
+                # the full gate must not wave through unverified code either.
+                if _unverified_code():
+                    self._unverified_completion_blocks += 1
+                    log.info(
+                        "require_test_pass_block_fullgate",
+                        step=self._step,
+                        last_write=self._last_code_write_step,
+                        last_verify=self._last_verify_step,
+                        verify_failed=self._last_verify_failed,
+                        count=self._unverified_completion_blocks,
+                    )
+                    if self._unverified_completion_blocks >= 5:
+                        log.warning("require_test_pass_exhausted", step=self._step)
+                        trace.reason = self._max_gate_reason()
+                        trace.final_step = self._step
+                        break
+                    messages = self._inject_system_message(
+                        messages,
+                        "[Completion Gate] No test/verification command has PASSED "
+                        f"since you last changed code (tool call #{self._last_code_write_step})"
+                        + (
+                            " and your last test run FAILED."
+                            if self._last_verify_failed
+                            else "."
+                        )
+                        + " Run the tests and make them pass before declaring done.",
+                    )
+                    continue
 
                 if gate_result.outcome == "verified":
                     blocker = await self._benchmark_completion_blocker()

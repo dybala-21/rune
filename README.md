@@ -89,7 +89,7 @@ rune --model gemini-2.5-flash --provider vertex_ai
 rune                                    # interactive TUI
 rune --message "explain the auth flow"  # one-shot
 rune web                                # web UI
-rune voice                              # voice mode (STT/TTS)
+rune --voice                            # voice mode (STT/TTS)
 ```
 
 ### Try it: only verified work counts
@@ -314,7 +314,7 @@ rune                              # interactive TUI
 rune --message "..."              # single prompt
 rune --model <model>              # specify model
 rune web                          # web UI + MCP management
-rune voice                        # voice mode
+rune --voice                      # voice mode
 
 rune memory show                  # view memory
 rune memory search <query>        # search

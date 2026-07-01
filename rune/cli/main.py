@@ -358,11 +358,26 @@ def _handle_non_interactive(
         if output_parts:
             print()
         if trace.reason != "completed":
-            console.print(f"[dim]({trace.reason})[/dim]")
-            from rune.agent.escalation import escalation_hint
+            from rune.agent.escalation import (
+                escalation_hint,
+                escalation_setup_hint,
+                honest_failure_note,
+            )
+
+            # Say why we didn't claim success, then the next step: /escalate, or
+            # how to set it up if there's no escalation model yet.
+            _note = honest_failure_note(trace.reason)
+            if _note:
+                console.print(f"[yellow]⚠ {_note}[/yellow]")
+            else:
+                console.print(f"[dim]({trace.reason})[/dim]")
             _hint = escalation_hint(trace.reason)
             if _hint:
-                console.print(f"[yellow]{_hint}[/yellow]")
+                console.print(f"[cyan]→ {_hint}[/cyan]")
+            else:
+                _setup = escalation_setup_hint(trace.reason)
+                if _setup:
+                    console.print(f"[dim]→ {_setup}[/dim]")
 
         if not _throwaway:
             try:
