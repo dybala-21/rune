@@ -89,3 +89,51 @@ def test_goal_hint_none_without_profile(monkeypatch):
     from rune.agent.escalation import goal_escalation_hint
     _set(monkeypatch, None, None)
     assert goal_escalation_hint("stagnation") is None
+
+
+# --- honest-failure surface (independent of escalation config) ----------------
+
+
+def test_honest_note_for_max_gate_blocked():
+    from rune.agent.escalation import honest_failure_note
+
+    note = honest_failure_note("max_gate_blocked")
+    assert note and "test" in note.lower()
+    # The honest stance: do not claim an unverified result.
+    assert "verif" in note.lower() or "claim" in note.lower()
+
+
+def test_honest_note_is_config_independent(monkeypatch):
+    # Unlike escalation_hint, the honest note shows even with no escalation model.
+    from rune.agent.escalation import honest_failure_note
+
+    _set(monkeypatch, None, None)
+    assert honest_failure_note("max_gate_blocked")
+    assert honest_failure_note("advisor_abort")
+
+
+def test_honest_note_none_for_success_and_unknown():
+    from rune.agent.escalation import honest_failure_note
+
+    assert honest_failure_note("completed") is None
+    assert honest_failure_note("no_progress") is None
+    assert honest_failure_note("") is None
+
+
+def test_setup_hint_only_when_capability_fail_and_unconfigured(monkeypatch):
+    from rune.agent.escalation import escalation_setup_hint
+
+    # No escalation configured + a capability failure -> tell user how to enable.
+    _set(monkeypatch, None, None)
+    s = escalation_setup_hint("max_gate_blocked")
+    assert s and "escalation_provider" in s and "/escalate" in s
+    # Non-capability reason -> no setup hint (escalation wouldn't be suggested).
+    assert escalation_setup_hint("stalled") is None
+
+
+def test_setup_hint_silent_when_already_configured(monkeypatch):
+    from rune.agent.escalation import escalation_setup_hint
+
+    # When configured, escalation_hint() carries the actionable line instead.
+    _set(monkeypatch, "anthropic", "claude-sonnet-4-6")
+    assert escalation_setup_hint("max_gate_blocked") is None

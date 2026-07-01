@@ -54,6 +54,54 @@ def escalation_hint(reason: str) -> str | None:
     return _with_advisor_suffix(base)
 
 
+# Why the run stopped, in plain words. Shown whether or not an escalation model
+# is set — RUNE says what it couldn't verify rather than claiming it's done.
+_HONEST_STOP_NOTES = {
+    "max_gate_blocked": (
+        "Not marking this done: the solution still fails its tests after repeated "
+        "self-fix attempts, so I won't claim a result I can't verify."
+    ),
+    "advisor_abort": (
+        "Stopping here: a stronger reviewer inspected this run and advised against "
+        "shipping an unverified result."
+    ),
+    "completed_gate_warnings": (
+        "Delivered with caveats: the artifact exists but some quality checks did "
+        "not fully pass — treat it as unverified."
+    ),
+    "stalled": (
+        "Stopping: I stopped making progress and won't claim a result I didn't "
+        "actually reach."
+    ),
+    "token_budget_exhausted": (
+        "Stopping: I ran out of budget before I could verify the result, so I'm "
+        "not marking it done."
+    ),
+}
+
+
+def honest_failure_note(reason: str) -> str | None:
+    """Why the run stopped, in plain words. None for success or unknown reasons."""
+    return _HONEST_STOP_NOTES.get(reason)
+
+
+def escalation_setup_hint(reason: str) -> str | None:
+    """How to enable escalation, when it would help but isn't set up yet.
+
+    None if escalation is already configured (escalation_hint covers it) or the
+    reason isn't one a stronger model would fix."""
+    if reason not in _HINT_REASONS:
+        return None
+    from rune.config import get_config
+
+    if get_config().llm.escalation_provider:
+        return None
+    return (
+        "To retry once on a stronger model, set llm.escalation_provider and "
+        "llm.escalation_model, then run /escalate."
+    )
+
+
 def goal_escalation_hint(stop_cause: str) -> str | None:
     """Escalation suggestion for a /goal outer-loop run that ended stuck.
 

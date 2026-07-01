@@ -19,7 +19,6 @@
 #   rune self uninstall                              # uninstall (after install)
 #
 # Environment variables:
-#   RUNE_VERSION=0.1.0     — install a specific version (default: latest)
 #   RUNE_EXTRAS=full       — extras to install (default: full)
 #                            Options: full, vector, browser, embedding
 #                            Use "none" for minimal core-only install
@@ -172,7 +171,14 @@ do_update() {
     fi
 
     info "Updating RUNE from GitHub..."
-    uv tool install --force --python "$RUNE_PYTHON" "${RUNE_PACKAGE} @ git+${RUNE_REPO}"
+    # Preserve extras on update — a bare "rune-ai @ git+..." would silently
+    # downgrade a [full] install to core-only.
+    if [ "$RUNE_EXTRAS" = "none" ]; then
+        UPDATE_SPEC="${RUNE_PACKAGE} @ git+${RUNE_REPO}"
+    else
+        UPDATE_SPEC="${RUNE_PACKAGE}[${RUNE_EXTRAS}] @ git+${RUNE_REPO}"
+    fi
+    uv tool install --force --python "$RUNE_PYTHON" "$UPDATE_SPEC"
 
     NEW_VERSION="unknown"
     if command_exists rune; then
@@ -224,7 +230,6 @@ main() {
             echo "  uninstall   Remove RUNE"
             echo ""
             echo "Environment variables:"
-            echo "  RUNE_VERSION=0.1.0   Install specific version"
             echo "  RUNE_EXTRAS=full     Extras: full, vector, browser, embedding, none"
             ;;
         *)
