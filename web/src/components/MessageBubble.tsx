@@ -1,11 +1,14 @@
 import { useState } from 'react';
 import type { ChatMessage } from '../types';
+import { PixelWolf } from './PixelWolf';
 
 interface MessageBubbleProps {
   message: ChatMessage;
+  /** True while this assistant message is still streaming in. */
+  streaming?: boolean;
 }
 
-export function MessageBubble({ message }: MessageBubbleProps) {
+export function MessageBubble({ message, streaming = false }: MessageBubbleProps) {
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
 
@@ -63,31 +66,27 @@ export function MessageBubble({ message }: MessageBubbleProps) {
         <div style={{
           width: 28,
           height: 28,
-          borderRadius: 'var(--radius-md)',
-          background: 'linear-gradient(135deg, var(--accent), #8b5cf6)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
           flexShrink: 0,
           marginTop: 2,
         }}>
-          <span style={{
-            fontSize: 12,
-            fontWeight: 700,
-            color: 'white',
-            letterSpacing: '0.5px',
-          }}>R</span>
+          <PixelWolf state={streaming ? 'working' : 'idle'} px={1.6} title="RUNE" />
         </div>
 
         {/* Content */}
-        <div style={{
-          flex: 1,
-          minWidth: 0,
-          fontSize: 15,
-          lineHeight: 1.7,
-          color: 'var(--text-primary)',
-          wordBreak: 'break-word',
-        }}>
+        <div
+          className={streaming ? 'streaming-cursor' : undefined}
+          style={{
+            flex: 1,
+            minWidth: 0,
+            fontSize: 15,
+            lineHeight: 1.7,
+            color: 'var(--text-primary)',
+            wordBreak: 'break-word',
+          }}
+        >
           <RenderedContent content={message.content} />
         </div>
       </div>

@@ -94,13 +94,12 @@ export function ToolCallCard({ toolCall, isLatest = false }: ToolCallCardProps) 
 
   return (
     <div className="fade-in" style={{
-      margin: '2px 0',
-      borderLeft: `2px solid ${failed ? 'var(--danger, #e55)' : toolColor}`,
-      borderRadius: 'var(--radius-md)',
-      background: failed ? 'rgba(220, 50, 50, 0.06)' : 'var(--bg-secondary)',
+      margin: 0,
+      borderBottom: '1px solid var(--border-subtle)',
+      background: failed ? 'var(--danger-subtle)' : 'transparent',
       overflow: 'hidden',
     }}>
-      {/* Header */}
+      {/* Header — a quiet mono line, not a card */}
       <div
         role="button"
         tabIndex={0}
@@ -110,13 +109,20 @@ export function ToolCallCard({ toolCall, isLatest = false }: ToolCallCardProps) 
         style={{
           display: 'flex',
           alignItems: 'center',
-          gap: 8,
-          padding: '6px 12px',
+          gap: 9,
+          padding: '6px 4px',
           cursor: 'pointer',
           userSelect: 'none',
           fontSize: 13,
         }}
       >
+        <span aria-hidden="true" style={{
+          width: 3,
+          height: 12,
+          borderRadius: 2,
+          background: failed ? 'var(--danger)' : toolColor,
+          flexShrink: 0,
+        }} />
         <span style={{
           fontFamily: 'var(--font-mono)',
           fontSize: 12,
@@ -166,20 +172,20 @@ export function ToolCallCard({ toolCall, isLatest = false }: ToolCallCardProps) 
         )}
 
         <span style={{
-          fontSize: 10,
+          fontSize: 11,
           color: 'var(--text-muted)',
-          transform: expanded ? 'rotate(180deg)' : 'none',
-          transition: 'transform 0.2s',
+          transform: expanded ? 'rotate(90deg)' : 'none',
+          transition: 'transform 0.16s',
           flexShrink: 0,
+          fontFamily: 'var(--font-mono)',
         }}>
-          {'\u25BC'}
+          {'\u203A'}
         </span>
       </div>
 
       {expanded && (
         <div className="expand-content" style={{
-          padding: '4px 12px 10px',
-          borderTop: '1px solid var(--border-subtle)',
+          padding: '4px 4px 12px 16px',
         }}>
           {Object.keys(toolCall.args).length > 0 && (
             <div style={{ marginBottom: 8 }}>

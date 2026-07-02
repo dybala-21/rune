@@ -28,6 +28,18 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
     }
   }, [isRunning]);
 
+  // ⌘K / Ctrl+K: focus the composer.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        textareaRef.current?.focus();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   const processFiles = useCallback((files: FileList | File[]) => {
     for (const file of Array.from(files)) {
       if (!SUPPORTED_MIMES.has(file.type)) continue;
@@ -162,7 +174,7 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
     >
-      <div className="glass" style={{
+      <div className="glass composer-shell" style={{
         maxWidth: 768,
         margin: '0 auto',
         borderRadius: 'var(--radius-xl)',
@@ -170,7 +182,6 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
         boxShadow: 'var(--shadow-lg)',
         pointerEvents: 'auto',
         overflow: showCommands ? 'visible' : 'hidden',
-        transition: 'border-color 0.15s',
         position: 'relative',
       }}>
         {/* Attachment previews */}
@@ -202,7 +213,10 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
                     }}
                   />
                 ) : (
-                  <span style={{ fontSize: 14 }}>{'\uD83D\uDCC4'}</span>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M7 3h8l4 4v14H7z" />
+                    <path d="M14 3v5h5" />
+                  </svg>
                 )}
                 <span style={{
                   overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1,
@@ -270,10 +284,12 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
                   color: disabled ? 'var(--text-muted)' : 'var(--text-secondary)',
                   cursor: disabled ? 'default' : 'pointer',
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  flexShrink: 0, fontSize: 18, marginBottom: 4,
+                  flexShrink: 0, marginBottom: 4,
                 }}
               >
-                {'\uD83D\uDCCE'}
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M19 11l-8 8a4 4 0 0 1-6-6l9-9a2.7 2.7 0 0 1 4 4l-8.5 8.5a1.4 1.4 0 0 1-2-2l7.5-7.5" />
+                </svg>
               </button>
             </>
           )}
@@ -340,7 +356,8 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
               style={{
                 width: 36, height: 36, borderRadius: '50%',
                 background: disabled ? 'var(--bg-tertiary)' : 'var(--accent)',
-                color: disabled ? 'var(--text-muted)' : 'white',
+                color: disabled ? 'var(--text-muted)' : '#0A1319',
+                fontWeight: 700,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                 flexShrink: 0, fontSize: 16, marginBottom: 4,
               }}

@@ -1,0 +1,220 @@
+<title>RUNE — chat + workbench (mixed session)</title>
+<meta name="description" content="RUNE keeps the conversation as the spine; a coding task opens a terminal-flavored workbench panel beside it — mixed sessions, nothing lost." />
+<style>
+  :root{--bg:#0E1116;--surface:#14181F;--raised:#1B2029;--hair:rgba(255,255,255,0.08);--hair2:rgba(255,255,255,0.045);
+    --fg:#E9EAED;--muted:#9AA1AC;--faint:#6A717C;--acc:#6EA9C4;--accw:rgba(110,169,196,0.14);--accl:rgba(110,169,196,0.42);
+    --pass:#82A992;--fail:#BE8074;--work:#D9A566;
+    --mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;--sans:"Avenir Next","Segoe UI",system-ui,-apple-system,sans-serif;}
+  *{box-sizing:border-box;} body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--sans);line-height:1.55;-webkit-font-smoothing:antialiased;}
+  :focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:4px;}
+  .wrap{max-width:1080px;margin:0 auto;padding:52px 26px 88px;}
+  .ey{font-family:var(--mono);font-size:11px;letter-spacing:0.2em;text-transform:uppercase;color:var(--faint);margin:0 0 10px;}
+  h1{margin:0 0 8px;font-size:23px;font-weight:600;letter-spacing:-0.02em;}
+  .lede{margin:0 0 22px;font-size:14px;color:var(--muted);max-width:640px;}
+  .try{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;}
+  .try button{font:inherit;font-size:12.5px;color:var(--fg);background:var(--surface);border:1px solid var(--hair);border-radius:8px;padding:8px 12px;cursor:pointer;display:inline-flex;gap:8px;align-items:center;}
+  .try button:hover{border-color:var(--accl);}
+  .try .k{font-family:var(--mono);font-size:10px;color:var(--faint);}
+
+  .app{border:1px solid var(--hair);border-radius:12px;overflow:hidden;background:var(--bg);}
+  .bar{display:flex;align-items:center;gap:10px;padding:11px 16px;background:var(--surface);border-bottom:1px solid var(--hair);}
+  .bar .dot{width:10px;height:10px;border-radius:50%;background:var(--raised);} .bar .dot.live{background:var(--acc);}
+  .bar .ttl{margin-left:6px;font-family:var(--mono);font-size:12px;color:var(--muted);}
+  .bar .wbtoggle{margin-left:auto;font:inherit;font-family:var(--mono);font-size:11px;color:var(--muted);background:none;border:1px solid var(--hair);border-radius:7px;padding:5px 11px;cursor:pointer;display:inline-flex;gap:7px;align-items:center;}
+  .bar .wbtoggle.on{color:var(--fg);border-color:var(--accl);background:var(--accw);}
+  .bar .wbtoggle .ic{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;}
+
+  .split{display:grid;grid-template-columns:1fr;min-height:500px;}
+  .split.open{grid-template-columns:minmax(0,1fr) minmax(0,1.12fr);}
+  .thread{display:flex;flex-direction:column;min-width:0;}
+  .msgs{padding:22px;display:flex;flex-direction:column;gap:16px;overflow-y:auto;flex:1;}
+  .composer{border-top:1px solid var(--hair);padding:12px 20px;background:var(--surface);}
+  .inbox{border:1px solid var(--hair);border-radius:10px;background:var(--bg);padding:11px 13px;color:var(--faint);font-size:14px;}
+
+  .msg{display:flex;gap:11px;max-width:560px;}
+  .msg.me{align-self:flex-end;flex-direction:row-reverse;}
+  .av{width:28px;height:28px;border-radius:8px;flex:none;display:grid;place-items:center;background:var(--surface);border:1px solid var(--hair);}
+  .av.me{font-family:var(--mono);font-size:10px;color:var(--faint);}
+  .who{font-family:var(--mono);font-size:11px;color:var(--faint);margin-bottom:5px;} .me .who{text-align:right;}
+  .bubble{font-size:13.5px;background:var(--surface);border:1px solid var(--hair);border-radius:12px;border-top-left-radius:4px;padding:11px 13px;}
+  .me .bubble{background:var(--raised);border-top-left-radius:12px;border-top-right-radius:4px;}
+  .bubble p{margin:0 0 7px;} .bubble p:last-child{margin:0;}
+  .bubble ul{margin:5px 0 0;padding-left:17px;} .bubble li{margin:3px 0;font-size:13px;color:var(--muted);}
+  .bubble code{font-family:var(--mono);font-size:12px;color:var(--acc);background:var(--accw);padding:1px 5px;border-radius:4px;}
+
+  /* task card in the thread (links to workbench) */
+  .task{max-width:560px;border:1px solid var(--hair);border-left:2px solid var(--acc);border-radius:10px;background:var(--surface);padding:11px 13px;display:flex;align-items:center;gap:11px;cursor:pointer;}
+  .task:hover{border-color:var(--accl);}
+  .task.active{background:var(--accw);}
+  .task .ic{width:16px;height:16px;stroke:var(--acc);fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none;}
+  .task .tx{min-width:0;} .task .t{font-size:13px;color:var(--fg);} .task .s{font-family:var(--mono);font-size:11px;color:var(--muted);}
+  .task .chip{margin-left:auto;font-family:var(--mono);font-size:10px;letter-spacing:0.04em;text-transform:uppercase;padding:2px 8px;border-radius:5px;border:1px solid currentColor;}
+  .chip.work{color:var(--work);} .chip.done{color:var(--pass);}
+  .task .arrow{width:14px;height:14px;stroke:var(--faint);fill:none;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;flex:none;}
+
+  /* workbench panel — terminal-flavored + structured */
+  .workbench{display:none;flex-direction:column;border-left:1px solid var(--hair);background:#0B0D12;min-width:0;}
+  .split.open .workbench{display:flex;}
+  .wb-head{display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--hair);background:var(--surface);}
+  .wb-head .pin{font-family:var(--mono);font-size:11px;color:var(--faint);}
+  .wb-head .wt{font-family:var(--mono);font-size:12px;color:var(--fg);}
+  .wb-head .close{margin-left:auto;font:inherit;font-family:var(--mono);font-size:11px;color:var(--muted);background:none;border:1px solid var(--hair);border-radius:6px;padding:3px 9px;cursor:pointer;}
+  .wb-head .close:hover{color:var(--fg);}
+  .wb-body{padding:16px;font-family:var(--mono);font-size:12.5px;overflow:auto;flex:1;}
+  .wb-body .cmd{color:var(--fg);white-space:pre;} .wb-body .cmd .p{color:var(--acc);margin-right:8px;} .wb-body .flag{color:var(--faint);}
+  .wb-body .line{padding:2px 0;color:var(--muted);white-space:pre;}
+  .wb-body .bar2{color:var(--faint);} .wb-body .pass{color:var(--pass);} .wb-body .fail{color:var(--fail);} .wb-body .kept{color:var(--pass);} .wb-body .drop{color:var(--faint);} .wb-body .run{color:var(--work);}
+  .wb-body .ship{color:var(--fg);margin:9px 0;} .wb-body .ship b{color:var(--pass);}
+  .wb-body .dh{color:var(--faint);margin-top:10px;white-space:pre;} .wb-body .add{color:var(--pass);white-space:pre;} .wb-body .del{color:var(--fail);white-space:pre;} .wb-body .hl{background:var(--accw);border-bottom:1px solid var(--accl);}
+  .wb-foot{display:flex;align-items:center;gap:10px;padding:9px 14px;border-top:1px solid var(--hair2);background:var(--surface);font-family:var(--mono);font-size:11px;color:var(--faint);}
+  .wb-foot .ok{color:var(--pass);} .wb-foot .wk{color:var(--work);} .wb-foot .acc{color:var(--acc);}
+
+  .pix{display:inline-flex;} .pix svg{image-rendering:pixelated;display:block;}
+  .note{margin-top:18px;border:1px solid var(--hair);border-radius:12px;background:var(--surface);padding:16px 18px;font-size:13px;color:var(--muted);} .note b{color:var(--fg);} .note code{font-family:var(--mono);color:var(--acc);}
+  .why{margin-top:14px;border:1px solid var(--hair);border-radius:12px;background:var(--surface);padding:16px 18px;}
+  .why h3{margin:0 0 12px;font-family:var(--mono);font-size:11px;letter-spacing:0.14em;text-transform:uppercase;color:var(--muted);}
+  .why ul{margin:0;padding:0;list-style:none;display:grid;gap:8px;} .why li{font-size:12.5px;color:var(--muted);display:flex;gap:9px;} .why li b{color:var(--fg);font-weight:500;} .why li .d{color:var(--pass);}
+  @media(prefers-reduced-motion:no-preference){.split{transition:grid-template-columns .26s ease;}}
+  @media(max-width:800px){.split.open{grid-template-columns:1fr;} .workbench{border-left:0;border-top:1px solid var(--hair);} }
+</style>
+
+<div class="wrap">
+  <p class="ey">Mixed session · conversation is the spine</p>
+  <h1>Chat stays; the workbench opens for code</h1>
+  <p class="lede">RUNE keeps one conversation. A general question is answered inline; a coding task opens a <b style="color:var(--fg)">terminal-flavored workbench</b> beside the thread — so a single session can hold both, and nothing scrolls away.</p>
+
+  <div class="try">
+    <button data-act="ask"><span class="k">try</span> Ask a general question</button>
+    <button data-act="fix"><span class="k">try</span> Start a coding task (fix test)</button>
+    <button data-act="refactor"><span class="k">try</span> Start a long task (refactor)</button>
+    <button data-act="close"><span class="k">try</span> Collapse workbench</button>
+  </div>
+
+  <div class="app">
+    <div class="bar">
+      <span class="dot"></span><span class="dot"></span><span class="dot live"></span>
+      <span class="ttl">rune — session</span>
+      <button class="wbtoggle" id="wbtoggle"><svg class="ic" viewBox="0 0 24 24"><path d="M5 7l4 5-4 5"/><path d="M12 17h7"/></svg> <span id="wblabel">Workbench</span></button>
+    </div>
+    <div class="split open" id="split">
+      <div class="thread">
+        <div class="msgs" id="msgs"></div>
+        <div class="composer"><div class="inbox">Ask anything, or describe a task…</div></div>
+      </div>
+      <aside class="workbench" id="workbench">
+        <div class="wb-head">
+          <span class="pin" id="wbpet"></span>
+          <span class="wt" id="wbtitle">fix the failing auth test</span>
+          <button class="close" id="wbclose">Collapse</button>
+        </div>
+        <div class="wb-body" id="wbbody"></div>
+        <div class="wb-foot"><span id="wbfoot"><span class="ok">verified</span> · 42ms</span><span style="margin-left:auto" id="wbhint">&#10095; type a command…</span></div>
+      </aside>
+    </div>
+  </div>
+
+  <div class="why">
+    <h3>Why this is the optimal shape</h3>
+    <ul>
+      <li><span class="d">✓</span><span><b>Nothing is lost.</b> The chat thread persists; coding opens a side panel, not a whole-app swap. Mixed sessions just work.</span></li>
+      <li><span class="d">✓</span><span><b>Native to each job.</b> Chat is friendly bubbles; the workbench is terminal-flavored <i>and</i> structured (stream → diff → verify) — dev-native, not pure chat.</span></li>
+      <li><span class="d">✓</span><span><b>Reversible & explicit.</b> A task card in the thread links to its workbench; collapse any time, reopen by clicking the card. No trap.</span></li>
+      <li><span class="d">✓</span><span><b>Ambiguity stays in chat.</b> Only clearly-coding intents open the workbench (RUNE's <code>classify_goal</code>); unclear ones answer inline first.</span></li>
+      <li><span class="d">✓</span><span><b>One pet, one truth.</b> The wolf's rune shows idle / <span style="color:var(--work)">working</span> / <span style="color:var(--pass)">verified</span> in the workbench head + foot.</span></li>
+    </ul>
+  </div>
+  <div class="note" id="note"></div>
+</div>
+
+<script>
+(function(){
+  var C={o:'#37687f',b:'#dceffa',s:'#a9d6ee',e:'#0d2733',n:'#0d2733',p:'#e79ab2',w:'#ffffff'};
+  var BASE=["...o........o...","..ooo......ooo..","..obo......obo..",".obboooooooobbo.",
+    "obbbbbbccbbbbbo.","obbbbbbcbbbbbbo.","obbewbbbbbbwebbo","obbeebbbbbbeebbo",
+    "obpbbbbnnbbbbpbo","obbbbbbnnbbbbbso",".obbbbbbbbbbbso.",".obbbbbbbbbbbo..",
+    ".obboobbboobbo..",".oooo.ooo.oooo.."];
+  var RUNE={idle:'#42d0f2',working:'#f0a24e',passed:'#7fcf9a'};
+  var NS='http://www.w3.org/2000/svg';
+  function build(eyes){var m=BASE.slice(); if(eyes==='happy'){m[6]="obbbbbbbbbbbbbbo";m[7]="obbeebbbbbbeebbo";} else {m[6]="obbewbbbbbbwebbo";m[7]="obbeebbbbbbeebbo";} return m;}
+  function paint(state,px){var col=Object.assign({},C,{c:RUNE[state]||RUNE.idle}); var m=build(state==='passed'?'happy':'open'),h=m.length,w=16;
+    var svg=document.createElementNS(NS,'svg');svg.setAttribute('viewBox','0 0 '+w+' '+h);svg.setAttribute('width',w*px);svg.setAttribute('height',h*px);svg.setAttribute('shape-rendering','crispEdges');
+    for(var y=0;y<h;y++){var row=m[y];for(var x=0;x<row.length;x++){var c=col[row[x]];if(!c)continue;var r=document.createElementNS(NS,'rect');r.setAttribute('x',x);r.setAttribute('y',y);r.setAttribute('width',1.03);r.setAttribute('height',1.03);r.setAttribute('fill',c);svg.appendChild(r);}}
+    var sp=document.createElement('span');sp.className='pix';sp.appendChild(svg);return sp;}
+
+  var msgs=document.getElementById('msgs'),split=document.getElementById('split'),wb=document.getElementById('workbench');
+  var wbtitle=document.getElementById('wbtitle'),wbbody=document.getElementById('wbbody'),wbfoot=document.getElementById('wbfoot'),wbhint=document.getElementById('wbhint'),wbpet=document.getElementById('wbpet');
+  var wbtoggle=document.getElementById('wbtoggle'),wblabel=document.getElementById('wblabel'),wbclose=document.getElementById('wbclose'),note=document.getElementById('note');
+
+  var TASKS={
+    auth:{title:'fix the failing auth test',status:'done',
+      body:'<div class="cmd"><span class="p">&#10095;</span>fix the failing auth test <span class="flag">--validate "pytest -q tests/auth"</span></div>'
+        +'<div class="line"><span class="bar2">&#9475;</span> attempt 1  claimed done  <span class="fail">&#10007; 1 failed</span>  <span class="drop">discarded</span></div>'
+        +'<div class="line"><span class="bar2">&#9475;</span> attempt 2  claimed done  <span class="pass">&#10003; passed</span>   <span class="kept">kept</span></div>'
+        +'<div class="line"><span class="bar2">&#9475;</span> attempt 3  claimed done  <span class="fail">&#10007; 1 failed</span>  <span class="drop">discarded</span></div>'
+        +'<div class="ship"><span class="pass">&#10003;</span> shipped <b>attempt #2</b> — the only one that passed your test</div>'
+        +'<div class="dh">&#9472;&#9472; session.py &#9472;&#9472;&#9472;&#9472;</div>'
+        +'<div class="del">- return decode(tok)</div>'
+        +'<div class="add">+ claims = decode(tok, <span class="hl">verify_exp=True</span>)</div>'
+        +'<div class="add">+ return claims if <span class="hl">claims["exp"] &gt; now()</span> else None</div>'},
+    memory:{title:'refactor the memory store',status:'work',
+      body:'<div class="cmd"><span class="p">&#10095;</span>refactor the memory store <span class="flag">--validate "pytest -q tests/memory"</span></div>'
+        +'<div class="line run">&#9475; planning: split store into index + metadata &hellip;</div>'
+        +'<div class="line"><span class="bar2">&#9475;</span> attempt 1  <span class="run">running pytest &#9696;</span></div>'
+        +'<div class="line" style="color:var(--faint)">&#9475; editing rune/memory/vector.py &hellip;</div>'}
+  };
+
+  function openWB(id){
+    var t=TASKS[id]; split.classList.add('open'); wbtoggle.classList.add('on'); wblabel.textContent='Workbench';
+    wbtitle.textContent=t.title; wbbody.innerHTML=t.body;
+    var st=(t.status==='work')?'working':'passed';
+    wbpet.replaceChildren(paint(st,1.5));
+    if(t.status==='work'){ wbfoot.innerHTML='<span class="wk">working</span> · running pytest'; wbhint.textContent='esc to interrupt'; }
+    else{ wbfoot.innerHTML='<span class="ok">verified</span> · 42ms'; wbhint.innerHTML='&#10095; type a command…'; }
+    // mark matching task card active
+    [].slice.call(document.querySelectorAll('.task')).forEach(function(el){ el.classList.toggle('active', el.getAttribute('data-id')===id); });
+    wbbody.scrollTop=0;
+  }
+  function closeWB(){ split.classList.remove('open'); wbtoggle.classList.remove('on'); [].slice.call(document.querySelectorAll('.task')).forEach(function(el){el.classList.remove('active');}); }
+
+  function addBubblePair(q, aHtml){
+    var me=document.createElement('div'); me.className='msg me';
+    me.innerHTML='<div class="av me">YOU</div><div><div class="who">you</div><div class="bubble">'+q+'</div></div>';
+    msgs.appendChild(me);
+    var rune=document.createElement('div'); rune.className='msg';
+    rune.innerHTML='<div class="av"></div><div><div class="who">rune</div><div class="bubble">'+aHtml+'</div></div>';
+    msgs.appendChild(rune); rune.querySelector('.av').appendChild(paint('idle',1.5));
+    msgs.scrollTop=msgs.scrollHeight;
+  }
+  function addTaskCard(id){
+    var t=TASKS[id];
+    var me=document.createElement('div'); me.className='msg me';
+    me.innerHTML='<div class="av me">YOU</div><div><div class="who">you</div><div class="bubble">'+t.title.charAt(0).toUpperCase()+t.title.slice(1)+'.</div></div>';
+    msgs.appendChild(me);
+    var card=document.createElement('div'); card.className='task'; card.setAttribute('data-id',id);
+    var chip=(t.status==='work')?'<span class="chip work">working</span>':'<span class="chip done">done</span>';
+    var sub=(t.status==='work')?'running in workbench':'shipped #2 · verified';
+    card.innerHTML='<svg class="ic" viewBox="0 0 24 24"><path d="M5 7l4 5-4 5"/><path d="M12 17h7"/></svg>'
+      +'<div class="tx"><div class="t">'+t.title+'</div><div class="s">'+sub+'</div></div>'+chip
+      +'<svg class="arrow" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>';
+    card.addEventListener('click',function(){ openWB(id); });
+    msgs.appendChild(card); msgs.scrollTop=msgs.scrollHeight;
+    openWB(id);
+  }
+
+  // seed a mixed session
+  addBubblePair('Explain how our auth flow works.',
+    '<p>At a glance:</p><ul><li>A request hits <code>verify_token()</code>, which decodes the JWT and checks expiry.</li><li>Valid tokens resolve to a user; expired/malformed ones are rejected before any handler runs.</li><li>Guardian gates anything downstream that touches files or the shell.</li></ul><p>Want me to change any part?</p>');
+  addTaskCard('auth');
+
+  document.querySelector('[data-act="ask"]').addEventListener('click',function(){
+    addBubblePair('Which providers can I plug in?','<p>Any of 100+ via LiteLLM — OpenAI, Anthropic, Gemini, Ollama for local, and more. Switch with one flag; the workbench stays put.</p>');
+  });
+  document.querySelector('[data-act="fix"]').addEventListener('click',function(){ addTaskCard('auth'); });
+  document.querySelector('[data-act="refactor"]').addEventListener('click',function(){ addTaskCard('memory'); });
+  document.querySelector('[data-act="close"]').addEventListener('click',closeWB);
+  wbtoggle.addEventListener('click',function(){ if(split.classList.contains('open')) closeWB(); else openWB('auth'); });
+  wbclose.addEventListener('click',closeWB);
+
+  note.innerHTML='<b>The switch is contextual, not global.</b> There is no "chat vs terminal" app mode — the conversation is always there, and a workbench opens per coding task (Cursor / Canvas-style). RUNE\'s <code>classify_goal</code> decides when to open it; you can collapse or reopen from the task card any time.';
+})();
+</script>

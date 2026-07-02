@@ -57,6 +57,16 @@ async def _check_ollama(timeout: float = _DEFAULT_TIMEOUT) -> bool:
         return False
 
 
+def loop_model_string(provider: str, model: str) -> str:
+    """Agent-loop model string: bare id for openai, provider/model otherwise.
+
+    Single owner of the formatting rule — the loop, fast lane, and failover
+    restore must all produce the same format or LiteLLM routing breaks for
+    one of them.
+    """
+    return model if provider == "openai" else f"{provider}/{model}"
+
+
 # LLM Client
 
 class LLMClient:

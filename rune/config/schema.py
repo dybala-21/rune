@@ -61,6 +61,15 @@ class LLMConfig(BaseModel):
     escalation_provider: str | None = Field(default=None, alias="escalationProvider")
     escalation_model: str | None = Field(default=None, alias="escalationModel")
     models: ProviderModels = Field(default_factory=ProviderModels)
+    # Simple-query fast lane: high-confidence chat/web goals run on the
+    # provider's fast tier (docs/design/simple-query-fast-path.md).
+    route_simple_queries: bool = Field(default=True, alias="routeSimpleQueries")
+    simple_query_tier: str = Field(
+        default="fast", pattern="^(best|coding|fast)$", alias="simpleQueryTier"
+    )
+    simple_query_confidence: float = Field(
+        default=0.8, ge=0.0, le=1.0, alias="simpleQueryConfidence"
+    )
     routing_mode: str = Field(default="cloud-first", alias="routingMode")
     request_timeout_ms: int = Field(default=600_000, alias="requestTimeoutMs")
     max_retries: int = Field(default=2, alias="maxRetries")

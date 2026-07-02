@@ -1,0 +1,141 @@
+<title>RUNE — pixel wolf (cuter + reactive)</title>
+<meta name="description" content="RUNE's 8-bit ice-wolf, cuter and with clear per-action expressions: idle, thinking, working, pass, fail, context-warning." />
+<style>
+  :root{--bg:#0E1116;--surface:#14181F;--raised:#1B2029;--hair:rgba(255,255,255,0.08);
+    --fg:#E9EAED;--muted:#9AA1AC;--faint:#656C77;--acc:#6EA9C4;
+    --mono:"JetBrains Mono",ui-monospace,"SF Mono",Menlo,monospace;--sans:"Avenir Next","Segoe UI",system-ui,-apple-system,sans-serif;}
+  *{box-sizing:border-box;} body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--sans);line-height:1.55;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:920px;margin:0 auto;padding:56px 28px 90px;}
+  .ey{font-family:var(--mono);font-size:11px;letter-spacing:0.2em;text-transform:uppercase;color:var(--faint);margin:0 0 10px;}
+  h1{margin:0 0 8px;font-size:24px;font-weight:600;letter-spacing:-0.02em;}
+  .lede{margin:0 0 28px;font-size:14px;color:var(--muted);max-width:600px;}
+  .hero{border:1px solid var(--hair);border-radius:16px;background:var(--surface);padding:30px;display:flex;align-items:center;gap:30px;flex-wrap:wrap;margin-bottom:16px;}
+  .heroSprite{min-width:170px;display:flex;justify-content:center;}
+  .heroInfo .st{font-family:var(--mono);font-size:11px;letter-spacing:0.14em;text-transform:uppercase;color:var(--acc);margin-bottom:6px;}
+  .heroInfo h2{margin:0 0 4px;font-size:19px;font-weight:600;}
+  .heroInfo p{margin:0;font-size:13px;color:var(--muted);}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:16px;}
+  .scard{border:1px solid var(--hair);border-radius:12px;background:var(--surface);padding:16px;display:flex;flex-direction:column;align-items:center;text-align:center;gap:10px;}
+  .scard .sp{height:80px;display:flex;align-items:center;}
+  .scard .nm{font-family:var(--mono);font-size:11px;letter-spacing:0.06em;color:var(--fg);}
+  .scard .wn{font-size:11.5px;color:var(--muted);}
+  .scard .chip{font-family:var(--mono);font-size:10px;padding:2px 8px;border-radius:5px;border:1px solid currentColor;}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  .card{border:1px solid var(--hair);border-radius:12px;background:var(--surface);padding:20px;}
+  .card h3{margin:0 0 4px;font-size:14px;font-weight:600;} .card .sub{font-size:12px;color:var(--muted);margin:0 0 16px;}
+  .ramp{display:flex;align-items:flex-end;gap:20px;} .ramp figure{margin:0;text-align:center;} .ramp figcaption{font-family:var(--mono);font-size:10px;color:var(--faint);margin-top:8px;}
+  .ctx{display:flex;align-items:center;gap:12px;background:var(--raised);border:1px solid var(--hair);border-radius:10px;padding:10px 14px;}
+  .ctx .who{font-family:var(--mono);font-size:11px;color:var(--faint);} .ctx .msg{font-size:13px;}
+  .foot{margin-top:20px;font-size:13px;color:var(--muted);border:1px solid var(--hair);border-radius:12px;padding:16px 18px;background:var(--surface);}
+  .foot b{color:var(--fg);}
+  svg{image-rendering:pixelated;display:block;}
+  @keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}
+  .bobbing{animation:bob 2.4s ease-in-out infinite;}
+  @media(prefers-reduced-motion:reduce){.bobbing{animation:none;}}
+  @media(max-width:760px){.grid{grid-template-columns:1fr 1fr;}.row2{grid-template-columns:1fr;}}
+</style>
+
+<div class="wrap">
+  <p class="ey">Pixel mascot · cuter + reactive</p>
+  <h1>Bigger eyes, clearer moods</h1>
+  <p class="lede">Rounder face, forward eyes, a little blush, a blink and a gentle bob. And the rune on its brow now <b style="color:var(--fg)">color-codes what RUNE is doing</b> — a distinct look per action.</p>
+
+  <div class="hero">
+    <div class="heroSprite"><span id="hero" class="bobbing"></span></div>
+    <div class="heroInfo">
+      <div class="st" id="hst">idle</div>
+      <h2 id="hh">Waiting for you</h2>
+      <p id="hp">Auto-cycling through every state so you can see each behavior.</p>
+    </div>
+  </div>
+
+  <div class="grid" id="states"></div>
+
+  <div class="row2">
+    <div class="card">
+      <h3>Scales down clean</h3><p class="sub">favicon to hero.</p>
+      <div class="ramp" id="ramp"></div>
+    </div>
+    <div class="card">
+      <h3>In context</h3><p class="sub">Chat avatar + status-line pet.</p>
+      <div style="display:flex;flex-direction:column;gap:12px;">
+        <div class="ctx"><span id="ava"></span><div><div class="who">rune</div><div class="msg">Kept attempt #2 — it passed your test.</div></div></div>
+        <div class="ctx" style="padding:8px 12px"><span id="tiny"></span><span class="who">rune · daemon · verified</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">
+    Cuter now? Tweak anything — "blush less", "ears rounder", "rune bigger", or add states (celebrate, sleeping). On OK I'll wire this reactive sprite into the app: <b>mark, avatar, and a status-line pet that changes with each tool call.</b>
+  </div>
+</div>
+
+<script>
+  const C = { o:'#37687f', b:'#dceffa', s:'#a9d6ee', e:'#0d2733', n:'#0d2733', p:'#e79ab2', w:'#ffffff' };
+  const BASE = [
+    "...o........o...",
+    "..ooo......ooo..",
+    "..obo......obo..",
+    ".obboooooooobbo.",
+    "obbbbbbccbbbbbo.",
+    "obbbbbbcbbbbbbo.",
+    "obbewbbbbbbwebbo",
+    "obbeebbbbbbeebbo",
+    "obpbbbbnnbbbbpbo",
+    "obbbbbbnnbbbbbso",
+    ".obbbbbbbbbbbso.",
+    ".obbbbbbbbbbbo..",
+    ".obboobbboobbo..",
+    ".oooo.ooo.oooo..",
+  ];
+  function build(eyes){
+    const m=BASE.slice();
+    if(eyes==='happy'||eyes==='blink'){ m[6]="obbbbbbbbbbbbbbo"; m[7]="obbeebbbbbbeebbo"; }
+    else { m[6]="obbewbbbbbbwebbo"; m[7]="obbeebbbbbbeebbo"; }
+    return m;
+  }
+  const NS='http://www.w3.org/2000/svg';
+  function paint(map, rune, px){
+    const colors={...C, c:rune};
+    const h=map.length, w=Math.max(...map.map(r=>r.length));
+    const svg=document.createElementNS(NS,'svg');
+    svg.setAttribute('viewBox',`0 0 ${w} ${h}`); svg.setAttribute('width',w*px); svg.setAttribute('height',h*px);
+    svg.setAttribute('shape-rendering','crispEdges');
+    for(let y=0;y<h;y++){const row=map[y];for(let x=0;x<row.length;x++){const col=colors[row[x]];if(!col)continue;
+      const r=document.createElementNS(NS,'rect');r.setAttribute('x',x);r.setAttribute('y',y);
+      r.setAttribute('width',1.03);r.setAttribute('height',1.03);r.setAttribute('fill',col);svg.appendChild(r);}}
+    return svg;
+  }
+  const STATES=[
+    {st:'idle',     h:'Waiting for you',     p:'Calm. Rune glows soft cyan.',           eyes:'open',  rune:'#42d0f2'},
+    {st:'thinking', h:'Planning the steps',  p:'Reasoning before it acts.',             eyes:'open',  rune:'#8aa0e0'},
+    {st:'working',  h:'Running a tool',      p:'Editing, running commands, browsing.',  eyes:'open',  rune:'#f0a24e'},
+    {st:'passed',   h:'Check passed',        p:'Your test went green - happy wolf.',    eyes:'happy', rune:'#7fcf9a'},
+    {st:'failed',   h:'Check failed',        p:'Did not pass - it says so, no faking.', eyes:'open',  rune:'#dd6b5d'},
+    {st:'warning',  h:'Context almost full', p:'Clawd-style panic - rune flares red.',  eyes:'open',  rune:'#ff5a4d'},
+  ];
+  const CN={'#42d0f2':'cyan','#8aa0e0':'indigo','#f0a24e':'amber','#7fcf9a':'green','#dd6b5d':'red','#ff5a4d':'red'};
+  const grid=document.getElementById('states');
+  STATES.forEach(s=>{
+    const card=document.createElement('div'); card.className='scard';
+    const sp=document.createElement('div'); sp.className='sp'; sp.appendChild(paint(build(s.eyes), s.rune, 5));
+    card.appendChild(sp);
+    card.insertAdjacentHTML('beforeend',`<div class="nm">${s.st}</div><div class="wn">${s.h}</div><div class="chip" style="color:${s.rune}">rune ${CN[s.rune]}</div>`);
+    grid.appendChild(card);
+  });
+  const ramp=document.getElementById('ramp');
+  [[1,'16px'],[2,'32px'],[4,'64px'],[6,'96px']].forEach(([px,cap])=>{
+    const f=document.createElement('figure'); f.appendChild(paint(build('open'),'#42d0f2',px));
+    f.insertAdjacentHTML('beforeend',`<figcaption>${cap}</figcaption>`); ramp.appendChild(f);
+  });
+  document.getElementById('ava').appendChild(paint(build('open'),'#42d0f2',2));
+  document.getElementById('tiny').appendChild(paint(build('open'),'#42d0f2',1));
+  const hero=document.getElementById('hero'),hst=document.getElementById('hst'),hh=document.getElementById('hh'),hp=document.getElementById('hp');
+  const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let i=0,tick=0;
+  function show(s,blink){ hero.replaceChildren(paint(build(blink?'blink':s.eyes), s.rune, 10)); hst.textContent=s.st; hh.textContent=s.h; hp.textContent=s.p; }
+  if(reduce){ show(STATES[0],false); }
+  else { show(STATES[0],false);
+    setInterval(()=>{ tick++; const s=STATES[i]; const blink=(tick%9===4); show(s,blink); if(tick%9===0){ i=(i+1)%STATES.length; } }, 200);
+  }
+</script>

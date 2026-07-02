@@ -22,6 +22,18 @@ log = get_logger(__name__)
 
 MAX_CACHE_ENTRIES = 50
 MAX_CACHEABLE_OUTPUT_CHARS = 100_000
+
+# Mirrors WebFetchParams.max_length (rune/capabilities/web.py); a unit test
+# guards against drift.
+WEB_FETCH_DEFAULT_MAX_LENGTH = 50_000
+
+# Cache-hit retry hints per capability. Every suggested parameter changes
+# that capability's cache key, so following the hint always escapes the hit.
+_CACHE_HIT_RETRY_HINTS = {
+    "file_read": "a different offset/limit",
+    "web_fetch": "a larger maxLength or a CSS selector",
+    "web_search": "a different query",
+}
 PREVIEW_HEAD_LINES = 3
 PREVIEW_TAIL_LINES = 3
 SMART_EXPAND_THRESHOLD_LINES = 500
@@ -194,9 +206,20 @@ class SessionToolCache:
                 return f"web_search:{h}"
 
             case "web_fetch":
+                # Everything that changes the output is part of the key:
+                # selector-extracted content differs from the full page, and
+                # truncated fetches (fast lane, budget scaling) must not be
+                # served to full-length requests.
                 url = params.get("url", "")
-                h = hashlib.md5(url.encode(), usedforsecurity=False).hexdigest()[:12]
-                return f"web_fetch:{h}"
+                selector = params.get("selector") or ""
+                h = hashlib.md5(
+                    f"{url}|{selector}".encode(), usedforsecurity=False
+                ).hexdigest()[:12]
+                raw_max = params.get("maxLength", params.get("max_length"))
+                maxlen = (
+                    int(raw_max) if raw_max is not None else WEB_FETCH_DEFAULT_MAX_LENGTH
+                )
+                return f"web_fetch:{h}:m{maxlen}"
 
             case "think":
                 # Think is never cached; always unique reasoning
@@ -469,10 +492,20 @@ class SessionToolCache:
 
     def _format_cache_hit_output(self, entry: CacheEntry) -> str:
         """Format the output for a cache hit response."""
+        hint = _CACHE_HIT_RETRY_HINTS.get(entry.capability_name)
+        if hint:
+            guard = (
+                "Do not repeat the identical call — either work from this, "
+                f"or request what is missing with {hint}."
+            )
+        else:
+            guard = "Do not repeat the identical call — work from this result."
         parts = [
             f"[CACHE HIT — step {entry.cached_at_step}, "
             f"hits: {entry.hit_count}, "
             f"~{entry.estimated_tokens} tokens saved]",
+            "You already ran this exact call this session; this is its cached "
+            "summary/preview. " + guard,
         ]
         if entry.summary:
             parts.append(f"Summary: {entry.summary}")

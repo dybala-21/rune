@@ -42,7 +42,19 @@ export function ThinkingBlockView({ block }: ThinkingBlockViewProps) {
         onMouseEnter={e => { e.currentTarget.style.background = 'var(--bg-secondary)'; }}
         onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
       >
-        <span style={{ fontSize: 11, fontWeight: 600, fontStyle: 'italic', flexShrink: 0 }}>
+        <span aria-hidden="true" style={{
+          width: 3,
+          height: 12,
+          borderRadius: 2,
+          background: 'var(--tool-think)',
+          flexShrink: 0,
+        }} />
+        <span style={{
+          fontFamily: 'var(--font-mono)',
+          fontSize: 11,
+          fontWeight: 500,
+          flexShrink: 0,
+        }}>
           thinking
         </span>
         {!expanded && (
@@ -58,12 +70,13 @@ export function ThinkingBlockView({ block }: ThinkingBlockViewProps) {
           </span>
         )}
         <span style={{
-          fontSize: 10,
-          transform: expanded ? 'rotate(180deg)' : 'none',
-          transition: 'transform 0.2s',
+          fontSize: 11,
+          fontFamily: 'var(--font-mono)',
+          transform: expanded ? 'rotate(90deg)' : 'none',
+          transition: 'transform 0.16s',
           flexShrink: 0,
         }}>
-          {'\u25BC'}
+          {'\u203A'}
         </span>
       </div>
 
