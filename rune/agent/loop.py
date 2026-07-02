@@ -235,8 +235,14 @@ def _compute_tool_rounds(
     classification: Any,
     executor_model: str,
     advisor_enabled: bool,
+    fast_lane: bool = False,
 ) -> int:
     """Tool-round budget by task complexity and executor tier."""
+    if fast_lane:
+        from rune.agent.fast_lane import FAST_LANE_TOOL_ROUNDS
+
+        return FAST_LANE_TOOL_ROUNDS
+
     from rune.agent.advisor.tiers import extract_provider_and_model, resolve_tier
 
     provider, model_name = extract_provider_and_model(executor_model)
@@ -1485,15 +1491,41 @@ class NativeAgentLoop(EventEmitter):
         # Build PydanticAI agent and tool set
 
         # Resolve model from failover profile (reads active_provider/active_model from config)
+        from rune.llm.client import loop_model_string
+
         profile = failover.current_profile
         if profile.provider not in ("none", ""):
-            model = (
-                f"{profile.provider}/{profile.model}"
-                if profile.provider != "openai"
-                else profile.model
-            )
+            model = loop_model_string(profile.provider, profile.model)
         else:
             model = self._config.model
+
+        # Simple-query fast lane: high-confidence chat/web goals run on the
+        # provider's fast tier. Must come before advisor pairing, vision trim
+        # and tool-round scaling so they all see the lane model.
+        from rune.agent.fast_lane import FAST_LANE_UPSHIFT_BLOCKS, decide_fast_lane
+
+        _primary_model = model
+        _lane = decide_fast_lane(classification)
+        _fast_lane_active = _lane.active
+        if _lane.active and _lane.model:
+            model = _lane.model
+            if model != _primary_model:
+                log.info(
+                    "fast_lane_downshift",
+                    model=model,
+                    primary=_primary_model,
+                    goal_type=classification.goal_type,
+                    confidence=classification.confidence,
+                )
+            else:
+                # Primary already is the fast-tier model (light-model /
+                # ollama sessions); only the round cap and grounding change.
+                log.info(
+                    "fast_lane_active_no_downshift",
+                    model=model,
+                    goal_type=classification.goal_type,
+                    confidence=classification.confidence,
+                )
 
         adapter_opts = ToolAdapterOptions(
             cognitive_cache=cache,
@@ -1503,6 +1535,7 @@ class NativeAgentLoop(EventEmitter):
             on_tool_start=_on_tool_start,
             on_tool_end=_on_tool_end,
             approval_callback=self._approval_callback,
+            fast_lane_active=lambda: _fast_lane_active,
         )
         tool_functions = build_tool_set(adapter_opts)
 
@@ -1556,6 +1589,7 @@ class NativeAgentLoop(EventEmitter):
             classification,
             model,
             advisor_service.enabled,
+            fast_lane=_fast_lane_active,
         )
         agent = LiteLLMAgent(
             model=model,
@@ -1703,6 +1737,54 @@ class NativeAgentLoop(EventEmitter):
             if self._cancel_event.is_set():
                 trace.reason = "cancelled"
                 break
+
+            # Fast-lane escape hatch: failover only fires on exceptions and
+            # only moves down the chain, so gate pressure is what restores
+            # full rigor. Checked here, not in one gate branch, so blocks
+            # from every gate path (_finalize_gates, _auto_verify_gate,
+            # Evidence Gate) count toward the upshift.
+            if _fast_lane_active and _gate_blocked_count >= FAST_LANE_UPSHIFT_BLOCKS:
+                _fast_lane_active = False
+                log.info(
+                    "fast_lane_upshift",
+                    step=self._step,
+                    gate_blocked=_gate_blocked_count,
+                )
+                # The restored model gets the full block budget and a clean
+                # no-progress window (the lane's empty steps raised both).
+                # Bounded: the upshift fires once, so a run absorbs at most
+                # the lane's ~3 blocks plus the normal 5.
+                _gate_blocked_count = 0
+                self._gate_blocked_count = 0
+                _no_new_evidence_steps = 0
+                # Restore from the live failover profile, not the run-start
+                # snapshot — failover may have switched providers mid-lane.
+                _up_profile = failover.current_profile
+                if _up_profile.provider not in ("none", ""):
+                    model = loop_model_string(_up_profile.provider, _up_profile.model)
+                else:
+                    model = _primary_model
+                # Re-resolve the native advisor config for the restored
+                # model — the setup one was paired with the lane model.
+                _native_cfg = resolve_native_config(
+                    executor_model=model,
+                    advisor_model_full=advisor_service.model_full,
+                    max_uses=advisor_service.budget.max_calls,
+                )
+                # Rebuild even when the model is unchanged (light-model
+                # sessions) — the 3-round cap goes away with the rigor.
+                _tool_rounds = _compute_tool_rounds(
+                    classification,
+                    model,
+                    advisor_service.enabled,
+                )
+                agent = LiteLLMAgent(
+                    model=model,
+                    system_prompt=system_prompt,
+                    tools=list(tool_functions.values()),
+                    max_tool_rounds=_tool_rounds,
+                    extra_headers=_native_cfg.beta_headers,
+                )
 
             # BCT: check compliance for a pending advisor plan
             if _pending_advice is not None:
@@ -2411,7 +2493,9 @@ class NativeAgentLoop(EventEmitter):
                     analysis_min_reads = 1
                 if intent_contract.grounding_requirement == "required":
                     min_web_searches = 1
-                    min_web_fetches = 1
+                    # Fast lane: a fresh search counts as grounding (R14
+                    # passes on search or fetch; R18 reads these minimums).
+                    min_web_fetches = 0 if _fast_lane_active else 1
 
                 gate_input = CompletionGateInput(
                     intent_resolved=bool(output_text),
@@ -2600,8 +2684,11 @@ class NativeAgentLoop(EventEmitter):
                             trace.final_step = self._step
                             break
                         if _adv_dec and _adv_dec.plan_steps:
-                            # Deferred: full reset only after compliance verdict
-                            _gate_blocked_count = max(0, _gate_blocked_count - 1)
+                            # Deferred: full reset only after compliance verdict.
+                            # Not while the lane is active — the decrement would
+                            # hold the count below the upshift threshold.
+                            if not _fast_lane_active:
+                                _gate_blocked_count = max(0, _gate_blocked_count - 1)
                             _ev_total = (
                                 evidence.reads
                                 + evidence.writes
@@ -2699,10 +2786,16 @@ class NativeAgentLoop(EventEmitter):
                 failover_result = await failover.handle_error(exc)
 
                 if failover_result.success:
+                    # Provider instability outranks the latency optimization:
+                    # drop the fast lane so the recovered profile runs with
+                    # full gate rigor and uncapped fetches.
+                    if _fast_lane_active:
+                        _fast_lane_active = False
+                        log.info("fast_lane_deactivated_on_failover")
                     # Failover recovered - rebuild agent if profile changed
                     new_profile = failover.current_profile
                     new_model = (
-                        f"{new_profile.provider}:{new_profile.model}"
+                        loop_model_string(new_profile.provider, new_profile.model)
                         if new_profile.provider != "none"
                         else model
                     )

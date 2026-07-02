@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from rune.agent.cognitive_cache import SessionToolCache
+from rune.agent.cognitive_cache import WEB_FETCH_DEFAULT_MAX_LENGTH, SessionToolCache
 from rune.capabilities.output_prefixes import (
     BASH_CMD_PREFIX,
     BASH_EXIT_PREFIX,
@@ -261,6 +261,37 @@ class ToolAdapterOptions:
     on_tool_end: Callable[[str, CapabilityResult], Coroutine[Any, Any, None]] | None = None
     approval_callback: Callable[[str, str], Awaitable[bool]] | None = None  # (capability, reason) -> approved
     budget_percent: float = 0.0  # current budget consumption ratio (0.0-1.0)
+    # Callable, not a bool: the in-run upshift turns the lane off mid-run.
+    fast_lane_active: Callable[[], bool] | None = None
+
+
+# web_fetch maxLength while the fast lane is active: a simple lookup
+# needs snippet-level grounding, not a full-page dump.
+_FAST_LANE_FETCH_MAX_CHARS = 8_000
+
+
+def _read_fetch_max(params: dict[str, Any]) -> int | None:
+    """Effective maxLength, honoring both key spellings; None when absent."""
+    raw = params.get("maxLength", params.get("max_length"))
+    return int(raw) if raw is not None else None
+
+
+def _write_fetch_max(params: dict[str, Any], value: int) -> None:
+    params["maxLength"] = value
+    params["max_length"] = value
+
+
+def _cap_fast_lane_fetch(params: dict[str, Any]) -> dict[str, Any]:
+    # An explicit maxLength (even 0) is respected up to the cap; only an
+    # absent value falls back to the lane cap.
+    current = _read_fetch_max(params)
+    lane_max = (
+        min(current, _FAST_LANE_FETCH_MAX_CHARS)
+        if current is not None
+        else _FAST_LANE_FETCH_MAX_CHARS
+    )
+    _write_fetch_max(params, lane_max)
+    return params
 
 
 # File-mutating capability names
@@ -498,9 +529,20 @@ def _build_typed_tool(
                             total_lines=total_lines,
                         )
 
+        if (
+            cap_name == "web_fetch"
+            and opts.fast_lane_active is not None
+            and opts.fast_lane_active()
+        ):
+            effective_params = _cap_fast_lane_fetch(effective_params)
+
         # -- Feature 2: Budget-aware web.fetch maxLength scaling --
         if cap_name == "web_fetch" and opts.budget_percent > 0.4:
-            current_max = int(effective_params.get("maxLength") or effective_params.get("max_length") or 20000)
+            # Absent maxLength means the capability default, so scale from
+            # that — not from an unrelated constant.
+            current_max = _read_fetch_max(effective_params)
+            if current_max is None:
+                current_max = WEB_FETCH_DEFAULT_MAX_LENGTH
             bp = opts.budget_percent
             if bp >= 0.85:
                 scale = 0.25
@@ -512,8 +554,7 @@ def _build_typed_tool(
                 scale = 1.0
             adaptive_max = max(3000, round(current_max * scale))
             if adaptive_max < current_max:
-                effective_params["maxLength"] = adaptive_max
-                effective_params["max_length"] = adaptive_max
+                _write_fetch_max(effective_params, adaptive_max)
 
         if cap_name == _BASH_CAPABILITY:
             effective_params = _cap_benchmark_bash_timeout(effective_params)
