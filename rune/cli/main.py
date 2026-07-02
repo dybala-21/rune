@@ -943,7 +943,7 @@ def daemon_stop() -> None:
         os.kill(pid, signal.SIGTERM)
     except OSError as exc:
         console.print(f"[red]Failed to signal daemon (PID {pid}): {exc}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from exc
 
     for _ in range(25):  # ~5s
         try:
@@ -973,7 +973,6 @@ def daemon_status() -> None:
     import asyncio
 
     async def _query() -> None:
-        import contextlib
         from rune.daemon.client import DaemonClient
         client = DaemonClient(socket_path=sock)
         try:
