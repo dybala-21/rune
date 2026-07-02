@@ -13,6 +13,7 @@ import { MessageBubble } from './MessageBubble';
 import { ToolCallCard, getToolColor } from './ToolCallCard';
 import { ThinkingBlockView } from './ThinkingBlock';
 import { normalizeToolName, inferWorkPhase } from '../utils/tooling';
+import { PixelWolf } from './PixelWolf';
 import { buildCompletionNarrative } from '../utils/completionSummary';
 import {
   APPROVAL_COPY,
@@ -38,6 +39,8 @@ interface ChatPanelProps {
   onRespondQuestion: (answer: string, selectedIndex?: number) => void;
   pendingApproval: PendingApproval | null;
   onRespondApproval: (decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) => void;
+  /** Sends an empty-state suggestion; omit to render suggestions disabled. */
+  onSuggest?: (text: string) => void;
 }
 
 export function ChatPanel({
@@ -53,6 +56,7 @@ export function ChatPanel({
   onRespondQuestion,
   pendingApproval,
   onRespondApproval,
+  onSuggest,
 }: ChatPanelProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -109,6 +113,13 @@ export function ChatPanel({
     return toolCalls[toolCalls.length - 1].id;
   }, [isRunning, toolCalls]);
 
+  const lastAssistantId = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'assistant') return messages[i].id;
+    }
+    return null;
+  }, [messages]);
+
   const isEmpty = timeline.length === 0;
 
   return (
@@ -130,7 +141,7 @@ export function ChatPanel({
         flexDirection: 'column',
         gap: 2,
       }}>
-        {isEmpty && <EmptyState />}
+        {isEmpty && <EmptyState onSuggest={onSuggest} />}
 
         {grouped.map((entry, idx) => {
           if (entry.type === 'group') {
@@ -149,7 +160,14 @@ export function ChatPanel({
             const needsGap = prevItem && (prevItem.type === 'group' || (prevItem.type === 'single' && prevItem.item.type !== 'message'));
             return (
               <div key={item.item.id} style={{ marginTop: needsGap ? 12 : 0 }}>
-                <MessageBubble message={item.item} />
+                <MessageBubble
+                  message={item.item}
+                  streaming={
+                    isRunning
+                    && item.item.role === 'assistant'
+                    && item.item.id === lastAssistantId
+                  }
+                />
               </div>
             );
           }
@@ -209,16 +227,19 @@ export function ChatPanel({
         <button
           onClick={() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' })}
           aria-label="Scroll to bottom"
+          className="glass"
           style={{
             position: 'absolute', bottom: 180, right: 24,
-            width: 36, height: 36, borderRadius: '50%',
-            background: 'var(--bg-tertiary, #333)', border: '1px solid var(--border, #444)',
-            color: 'var(--text-secondary, #aaa)', cursor: 'pointer',
+            width: 34, height: 34, borderRadius: '50%',
+            border: '1px solid var(--border)',
+            color: 'var(--text-secondary)', cursor: 'pointer',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 16, zIndex: 50, boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
+            zIndex: 50, boxShadow: 'var(--shadow-md)',
           }}
         >
-          ↓
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 5v14M6 13l6 6 6-6" />
+          </svg>
         </button>
       )}
     </div>
@@ -227,70 +248,127 @@ export function ChatPanel({
 
 // ── Empty state ──
 
-function EmptyState() {
+const SUGGESTIONS: Array<{ icon: React.ReactNode; text: string; cat: string }> = [
+  {
+    icon: <path d="M9 8l-5 4 5 4M15 8l5 4-5 4" />,
+    text: 'Find and fix a failing test in this project',
+    cat: 'code',
+  },
+  {
+    icon: (
+      <>
+        <circle cx="12" cy="12" r="9" />
+        <path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18" />
+      </>
+    ),
+    text: "What's the latest news on AI agents?",
+    cat: 'web',
+  },
+  {
+    icon: (
+      <>
+        <path d="M7 3h8l4 4v14H7z" />
+        <path d="M14 3v5h5" />
+      </>
+    ),
+    text: 'Summarize the structure of this project',
+    cat: 'files',
+  },
+  {
+    icon: (
+      <>
+        <path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1" />
+        <path d="M3 4v4.2h4.2" />
+      </>
+    ),
+    text: 'What did you learn from our last session?',
+    cat: 'memory',
+  },
+];
+
+function EmptyState({ onSuggest }: { onSuggest?: (text: string) => void }) {
   return (
     <div style={{
       flex: 1,
       display: 'flex',
       flexDirection: 'column',
-      alignItems: 'center',
       justifyContent: 'center',
-      gap: 16,
-      padding: '40px 20px',
+      maxWidth: 560,
+      width: '100%',
+      margin: '0 auto',
+      padding: '40px 8px',
     }}>
+      <PixelWolf state="idle" px={3.5} title="RUNE" />
       <div style={{
-        width: 48,
-        height: 48,
-        borderRadius: 'var(--radius-lg)',
-        background: 'var(--accent-subtle)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
         fontSize: 20,
-        fontWeight: 700,
-        color: 'var(--accent)',
-        letterSpacing: '1px',
-      }}>
-        R
-      </div>
-      <div style={{
-        fontSize: 18,
         fontWeight: 600,
+        letterSpacing: '-0.015em',
         color: 'var(--text-primary)',
+        margin: '16px 0 6px',
       }}>
-        How can I help you?
+        What should RUNE take on?
       </div>
       <div style={{
-        fontSize: 14,
+        fontSize: 13.5,
+        color: 'var(--text-secondary)',
+        lineHeight: 1.6,
+        maxWidth: 460,
+      }}>
+        Fix code, run commands, browse the web, or dig through files.{' '}
+        <span style={{ color: 'var(--text-primary)' }}>It verifies before it says done</span>
+        {' '}— on your machine, on your model.
+      </div>
+
+      <div style={{
+        fontFamily: 'var(--font-mono)',
+        fontSize: 10.5,
+        letterSpacing: '0.16em',
+        textTransform: 'uppercase',
         color: 'var(--text-muted)',
-        textAlign: 'center',
-        maxWidth: 360,
+        margin: '26px 0 4px',
       }}>
-        RUNE can help with coding, analysis, web searches, file management, and more.
+        Try
       </div>
-      <div style={{
-        display: 'flex',
-        gap: 8,
-        flexWrap: 'wrap',
-        justifyContent: 'center',
-        marginTop: 8,
-      }}>
-        {[
-          'Analyze my project',
-          'Search the web',
-          'Read and edit files',
-        ].map(text => (
-          <div key={text} style={{
-            padding: '8px 16px',
-            background: 'var(--bg-secondary)',
-            border: '1px solid var(--border)',
-            borderRadius: 'var(--radius-lg)',
-            fontSize: 13,
-            color: 'var(--text-secondary)',
-            cursor: 'default',
-          }}>
-            {text}
-          </div>
+      <div style={{ display: 'flex', flexDirection: 'column' }}>
+        {SUGGESTIONS.map(s => (
+          <button
+            key={s.text}
+            onClick={onSuggest ? () => onSuggest(s.text) : undefined}
+            disabled={!onSuggest}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 12,
+              padding: '11px 4px',
+              background: 'none',
+              border: 'none',
+              borderTop: '1px solid var(--border-subtle)',
+              color: 'var(--text-primary)',
+              fontSize: 14,
+              textAlign: 'left',
+              cursor: onSuggest ? 'pointer' : 'default',
+              borderRadius: 0,
+            }}
+            onMouseEnter={e => { e.currentTarget.style.paddingLeft = '10px'; }}
+            onMouseLeave={e => { e.currentTarget.style.paddingLeft = '4px'; }}
+          >
+            <svg
+              width="16" height="16" viewBox="0 0 24 24" fill="none"
+              stroke="var(--accent)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"
+              style={{ flexShrink: 0 }}
+            >
+              {s.icon}
+            </svg>
+            <span style={{ flex: 1 }}>{s.text}</span>
+            <span style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 10.5,
+              color: 'var(--text-muted)',
+              flexShrink: 0,
+            }}>
+              {s.cat}
+            </span>
+          </button>
         ))}
       </div>
     </div>
@@ -346,8 +424,8 @@ function RunningIndicator({ toolCalls, currentStepInfo }: { toolCalls: ToolCall[
       gap: 10,
       color: 'var(--text-secondary)',
     }}>
-      <span className="spinner" />
-      <span style={{ fontSize: 13, fontWeight: 500 }}>
+      <PixelWolf state="working" px={1.4} title="RUNE is working" />
+      <span className="shimmer-text" style={{ fontSize: 13, fontWeight: 500 }}>
         {activity || 'Working through the request...'}
       </span>
       {currentStepInfo && (
@@ -561,11 +639,8 @@ function ToolGroup({ tools, isLatest = false, latestToolId }: { tools: ToolCall[
 
   return (
     <div className="fade-in" style={{
-      margin: '2px 0',
-      border: '1px solid var(--border-subtle)',
-      borderLeft: `2px solid ${toolColor}`,
-      borderRadius: 'var(--radius-md)',
-      background: 'var(--bg-secondary)',
+      margin: 0,
+      borderBottom: '1px solid var(--border-subtle)',
       overflow: 'hidden',
     }}>
       <div
@@ -577,14 +652,21 @@ function ToolGroup({ tools, isLatest = false, latestToolId }: { tools: ToolCall[
         style={{
           display: 'flex',
           alignItems: 'center',
-          gap: 8,
-          padding: '7px 12px',
+          gap: 9,
+          padding: '6px 4px',
           color: 'var(--text-primary)',
           fontSize: 13,
           cursor: 'pointer',
           userSelect: 'none',
         }}
       >
+        <span aria-hidden="true" style={{
+          width: 3,
+          height: 12,
+          borderRadius: 2,
+          background: toolColor,
+          flexShrink: 0,
+        }} />
         <span style={{
           fontFamily: 'var(--font-mono)',
           fontSize: 12,
@@ -594,26 +676,24 @@ function ToolGroup({ tools, isLatest = false, latestToolId }: { tools: ToolCall[
         </span>
         <span style={{
           fontSize: 11,
-          padding: '1px 7px',
-          borderRadius: 'var(--radius-sm)',
-          background: 'var(--bg-tertiary)',
           color: 'var(--text-muted)',
           fontFamily: 'var(--font-mono)',
         }}>
-          {completed}/{tools.length}
+          {completed}/{tools.length} done
         </span>
         <span style={{
           marginLeft: 'auto',
-          fontSize: 10,
+          fontSize: 11,
           color: 'var(--text-muted)',
-          transform: open ? 'rotate(180deg)' : 'none',
-          transition: 'transform 0.2s',
+          transform: open ? 'rotate(90deg)' : 'none',
+          transition: 'transform 0.16s',
+          fontFamily: 'var(--font-mono)',
         }}>
-          {'\u25BC'}
+          {'\u203A'}
         </span>
       </div>
       {open && (
-        <div className="expand-content" style={{ padding: '2px 6px 6px' }}>
+        <div className="expand-content" style={{ padding: '0 0 6px 12px' }}>
           {tools.map(tc => (
             <ToolCallCard
               key={tc.id}
@@ -881,9 +961,10 @@ function InlineApprovalCard({
 
   return (
     <div className="slide-up" style={{
-      margin: '4px 0',
-      border: `1px solid ${riskColor}`,
-      borderRadius: 'var(--radius-lg)',
+      margin: '8px 0',
+      border: '1px solid var(--border)',
+      borderLeft: `2px solid ${riskColor}`,
+      borderRadius: 'var(--radius-md)',
       background: 'var(--bg-secondary)',
       overflow: 'hidden',
       position: 'relative',

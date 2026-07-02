@@ -62,3 +62,7 @@ htmlcov/
 # Node (web/ and extension/)
 node_modules/
 .claude/
+
+# Runtime artifacts / build caches
+checkpoints/
+*.tsbuildinfo

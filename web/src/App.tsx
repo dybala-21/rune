@@ -11,7 +11,8 @@ import { EnvPanel } from './components/EnvPanel';
 import { CronPanel } from './components/CronPanel';
 import { MCPPanel } from './components/MCPPanel';
 import { MarkdownPanel } from './components/MarkdownPanel';
-import { normalizeToolName } from './utils/tooling';
+import { WorkbenchPanel } from './components/WorkbenchPanel';
+import { normalizeToolName, inferWorkPhase } from './utils/tooling';
 import { fetchConfig, type ConfigInfo } from './api';
 
 type SidebarTab = 'chats' | 'settings';
@@ -28,6 +29,8 @@ export function App() {
   const [mcpPanelOpen, setMcpPanelOpen] = useState(false);
   const [markdownPanelOpen, setMarkdownPanelOpen] = useState(false);
   const [configInfo, setConfigInfo] = useState<ConfigInfo | null>(null);
+  const [workbenchOpen, setWorkbenchOpen] = useState(false);
+  const [workbenchDismissed, setWorkbenchDismissed] = useState(false);
 
   const isViewingHistory = history.viewingSessionId !== null;
 
@@ -78,6 +81,40 @@ export function App() {
     };
   }, []);
 
+  // Workbench auto-open honors a per-run dismissal; a new run (empty toolCalls)
+  // clears it so the panel can open again.
+  useEffect(() => {
+    if (isViewingHistory) {
+      setWorkbenchOpen(false);
+      return;
+    }
+    if (agent.toolCalls.length === 0) {
+      setWorkbenchOpen(false);
+      setWorkbenchDismissed(false);
+      return;
+    }
+    if (!workbenchDismissed && inferWorkPhase(agent.toolCalls) !== 'analyzing') {
+      setWorkbenchOpen(true);
+    }
+  }, [agent.toolCalls, isViewingHistory, workbenchDismissed]);
+
+  // ⌘J / Ctrl+J: toggle the workbench.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'j') {
+        e.preventDefault();
+        if (isViewingHistory) return;
+        setWorkbenchOpen(open => {
+          // Closing counts as a dismissal so auto-open doesn't fight the user.
+          setWorkbenchDismissed(open);
+          return !open;
+        });
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isViewingHistory]);
+
   const handleSelectSession = (sessionId: string | null) => {
     history.loadSession(sessionId);
   };
@@ -108,7 +145,28 @@ export function App() {
         currentStepInfo={!isViewingHistory ? agent.currentStepInfo : undefined}
         currentActivity={currentActivity}
         activeModel={configInfo?.activeModel ?? null}
+        lastRunSuccess={!isViewingHistory ? (agent.activitySummary?.success ?? null) : null}
       />
+
+      {!agent.connected && (
+        <div className="fade-in" style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          padding: '7px 16px',
+          background: 'var(--danger-subtle)',
+          borderBottom: '1px solid var(--border)',
+          fontFamily: 'var(--font-mono)',
+          fontSize: 12,
+          color: 'var(--danger)',
+        }}>
+          <span className="spinner" style={{ width: 11, height: 11, borderTopColor: 'var(--danger)' }} />
+          <span>Engine unreachable — reconnecting…</span>
+          <span style={{ color: 'var(--text-muted)', marginLeft: 'auto' }}>
+            start it with: rune daemon start
+          </span>
+        </div>
+      )}
 
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
         {/* Sidebar with slide animation */}
@@ -275,57 +333,106 @@ export function App() {
             </div>
           )}
 
-          {/* Chat area */}
+          {/* Chat area + workbench */}
           <div style={{
             flex: 1,
             overflow: 'hidden',
             position: 'relative',
             display: 'flex',
-            flexDirection: 'column',
+            flexDirection: 'row',
           }}>
-            <ChatPanel
-              messages={displayMessages}
-              toolCalls={displayToolCalls}
-              thinkingBlocks={displayThinkingBlocks}
-              isRunning={!isViewingHistory && agent.state === 'running'}
-              activitySummary={displayActivitySummary}
-              delegateEvents={displayDelegateEvents}
-              compactionEvents={displayCompactionEvents}
-              currentStepInfo={isViewingHistory ? null : agent.currentStepInfo}
-              pendingQuestion={isViewingHistory ? null : agent.pendingQuestion}
-              onRespondQuestion={agent.respondQuestion}
-              pendingApproval={isViewingHistory ? null : agent.pendingApproval}
-              onRespondApproval={agent.respondApproval}
-            />
+            <div style={{
+              flex: 1,
+              minWidth: 0,
+              display: 'flex',
+              flexDirection: 'column',
+              position: 'relative',
+            }}>
+              <ChatPanel
+                messages={displayMessages}
+                toolCalls={displayToolCalls}
+                thinkingBlocks={displayThinkingBlocks}
+                isRunning={!isViewingHistory && agent.state === 'running'}
+                activitySummary={displayActivitySummary}
+                delegateEvents={displayDelegateEvents}
+                compactionEvents={displayCompactionEvents}
+                currentStepInfo={isViewingHistory ? null : agent.currentStepInfo}
+                pendingQuestion={isViewingHistory ? null : agent.pendingQuestion}
+                onRespondQuestion={agent.respondQuestion}
+                pendingApproval={isViewingHistory ? null : agent.pendingApproval}
+                onRespondApproval={agent.respondApproval}
+                onSuggest={
+                  !isViewingHistory && agent.connected && agent.state === 'idle'
+                    ? agent.sendMessage
+                    : undefined
+                }
+              />
 
-            {/* Input area */}
-            {isViewingHistory ? (
-              <div style={{
-                position: 'absolute',
-                bottom: 0,
-                left: 0,
-                right: 0,
-                padding: '12px 20px',
-                textAlign: 'center',
-                zIndex: 10,
-              }}>
-                <div className="glass" style={{
-                  display: 'inline-block',
-                  padding: '8px 20px',
-                  borderRadius: 'var(--radius-lg)',
-                  border: '1px solid var(--border)',
-                  color: 'var(--text-muted)',
-                  fontSize: 13,
+              {!isViewingHistory && !workbenchOpen && agent.toolCalls.length > 0 &&
+                inferWorkPhase(agent.toolCalls) !== 'analyzing' && (
+                <button
+                  onClick={() => { setWorkbenchDismissed(false); setWorkbenchOpen(true); }}
+                  title="Show the coding workbench (⌘J)"
+                  style={{
+                    position: 'absolute',
+                    top: 12,
+                    right: 16,
+                    zIndex: 15,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 7,
+                    padding: '5px 11px',
+                    background: 'var(--bg-secondary)',
+                    border: '1px solid var(--accent-subtle)',
+                    borderRadius: 'var(--radius-md)',
+                    color: 'var(--text-secondary)',
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 11,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Workbench {'›'}
+                </button>
+              )}
+
+              {/* Input area */}
+              {isViewingHistory ? (
+                <div style={{
+                  position: 'absolute',
+                  bottom: 0,
+                  left: 0,
+                  right: 0,
+                  padding: '12px 20px',
+                  textAlign: 'center',
+                  zIndex: 10,
                 }}>
-                  Read-only: viewing session history
+                  <div className="glass" style={{
+                    display: 'inline-block',
+                    padding: '8px 20px',
+                    borderRadius: 'var(--radius-lg)',
+                    border: '1px solid var(--border)',
+                    color: 'var(--text-muted)',
+                    fontSize: 13,
+                  }}>
+                    Read-only: viewing session history
+                  </div>
                 </div>
-              </div>
-            ) : (
-              <InputArea
-                onSend={agent.sendMessage}
-                onAbort={agent.abort}
-                isRunning={agent.state !== 'idle'}
-                disabled={!agent.connected}
+              ) : (
+                <InputArea
+                  onSend={agent.sendMessage}
+                  onAbort={agent.abort}
+                  isRunning={agent.state !== 'idle'}
+                  disabled={!agent.connected}
+                />
+              )}
+            </div>
+
+            {!isViewingHistory && workbenchOpen && (
+              <WorkbenchPanel
+                toolCalls={agent.toolCalls}
+                isRunning={agent.state === 'running'}
+                activitySummary={agent.activitySummary}
+                onClose={() => { setWorkbenchOpen(false); setWorkbenchDismissed(true); }}
               />
             )}
           </div>

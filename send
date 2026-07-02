@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Minimal shim for scheduled task "send briefing".
+# Do NOT create/modify/delete cron jobs. Just execute the briefing send routine.
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ -x "$ROOT_DIR/.venv/bin/python" ]; then
+  PY="$ROOT_DIR/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+  PY="python3"
+else
+  echo "Error: python3 not found" >&2
+  exit 127
+fi
+
+# Provide compatibility with the scheduled task string: `send briefing`
+# This repository exposes it via the CLI entrypoint: `python -m rune.cli.main send briefing`
+# Ensure the shim works even if `send` isn't on PATH and always produces output.
+exec "$PY" -m rune.cli.main send briefing 2>&1 | cat

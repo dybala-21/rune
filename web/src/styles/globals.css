@@ -1,28 +1,28 @@
 :root {
-  /* ── Color Palette ── */
-  --bg-primary: #0a0a0c;
-  --bg-secondary: #131316;
-  --bg-tertiary: #1c1c21;
-  --bg-hover: #252529;
-  --bg-surface: #18181b;
-  --border: #27272a;
-  --border-subtle: #1f1f23;
-  --text-primary: #f4f4f5;
-  --text-secondary: #a1a1aa;
-  --text-muted: #52525b;
-  --accent: #6366f1;
-  --accent-hover: #818cf8;
-  --accent-subtle: rgba(99, 102, 241, 0.12);
-  --success: #22c55e;
-  --success-subtle: rgba(34, 197, 94, 0.12);
-  --warning: #eab308;
-  --warning-subtle: rgba(234, 179, 8, 0.12);
-  --danger: #ef4444;
-  --danger-subtle: rgba(239, 68, 68, 0.12);
-  --code-bg: #0f0f12;
+  /* ── Color Palette — RUNE "glacier on basalt" ── */
+  --bg-primary: #0E1116;
+  --bg-secondary: #14181F;
+  --bg-tertiary: #1B2029;
+  --bg-hover: #232935;
+  --bg-surface: #14181F;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-subtle: rgba(255, 255, 255, 0.045);
+  --text-primary: #E9EAED;
+  --text-secondary: #9AA1AC;
+  --text-muted: #6A717C;
+  --accent: #6EA9C4;
+  --accent-hover: #8AC0D6;
+  --accent-subtle: rgba(110, 169, 196, 0.14);
+  --success: #82A992;
+  --success-subtle: rgba(130, 169, 146, 0.14);
+  --warning: #D9A566;
+  --warning-subtle: rgba(217, 165, 102, 0.14);
+  --danger: #BE8074;
+  --danger-subtle: rgba(190, 128, 116, 0.14);
+  --code-bg: #0B0D12;
 
   /* ── Typography ── */
-  --font-sans: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-sans: "Avenir Next", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
 
   /* ── Radius ── */
@@ -34,8 +34,13 @@
   /* ── Shadows ── */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.25);
-  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.3);
-  --shadow-glow: 0 0 20px rgba(99, 102, 241, 0.15);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.35);
+  --shadow-glow: 0 8px 24px rgba(0, 0, 0, 0.35);
+
+  /* ── Wolf mascot — brow-rune state colors ── */
+  --rune-idle: #42D0F2;
+  --rune-working: #F0A24E;
+  --rune-passed: #7FCF9A;
 
   /* ── Tool category colors ── */
   --tool-file: #60a5fa;
@@ -70,10 +75,23 @@ body {
   font-size: 15px;
   line-height: 1.6;
   color: var(--text-primary);
-  background: var(--bg-primary);
+  background:
+    radial-gradient(1000px 560px at 82% -12%, rgba(110, 169, 196, 0.055), transparent 60%),
+    radial-gradient(760px 480px at -6% 108%, rgba(130, 169, 146, 0.035), transparent 55%),
+    var(--bg-primary);
+  background-attachment: fixed;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+}
+
+/* Inline styles can't express :focus-within, so the composer ring lives here. */
+.composer-shell {
+  transition: border-color 0.15s, box-shadow 0.2s;
+}
+.composer-shell:focus-within {
+  border-color: rgba(110, 169, 196, 0.5) !important;
+  box-shadow: 0 0 0 3px var(--accent-subtle), var(--shadow-lg);
 }
 
 /* ── Scrollbar ── */
@@ -248,7 +266,7 @@ textarea {
 
 @keyframes borderGlow {
   0%, 100% { box-shadow: 0 0 0 3px var(--accent-subtle); }
-  50% { box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.2); }
+  50% { box-shadow: 0 0 0 4px rgba(110, 169, 196, 0.22); }
 }
 
 @keyframes dotPulse {
@@ -308,7 +326,7 @@ textarea {
 
 /* ── Glass effect ── */
 .glass {
-  background: rgba(19, 19, 22, 0.8);
+  background: rgba(20, 24, 31, 0.8);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
 }
@@ -375,6 +393,6 @@ textarea {
 
 /* ── Selection ── */
 ::selection {
-  background: rgba(99, 102, 241, 0.3);
+  background: rgba(110, 169, 196, 0.28);
   color: var(--text-primary);
 }

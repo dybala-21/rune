@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { AgentState, StepInfo, TokenUsage as TokenUsageType } from '../types';
 import { TokenUsage } from './TokenUsage';
+import { PixelWolf } from './PixelWolf';
 
 interface StatusBarProps {
   connected: boolean;
@@ -17,6 +18,8 @@ interface StatusBarProps {
     model: string;
     source: 'active' | 'default';
   } | null;
+  /** Outcome of the last completed run; null when none this session. */
+  lastRunSuccess?: boolean | null;
 }
 
 const STATE_LABELS: Record<AgentState, string> = {
@@ -41,6 +44,7 @@ export function StatusBar({
   currentStepInfo,
   currentActivity,
   activeModel,
+  lastRunSuccess = null,
 }: StatusBarProps) {
   const [showTokens, setShowTokens] = useState(false);
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -95,14 +99,33 @@ export function StatusBar({
       )}
 
       {/* Logo */}
-      <span style={{
-        fontWeight: 700,
-        fontSize: 14,
-        letterSpacing: '1.5px',
-        color: 'var(--accent)',
-      }}>
-        RUNE
-      </span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <PixelWolf
+          state={
+            !connected
+              ? 'warning'
+              : state === 'running'
+                ? 'working'
+                : state !== 'idle'
+                  ? 'thinking'
+                  : lastRunSuccess === true
+                    ? 'passed'
+                    : lastRunSuccess === false
+                      ? 'failed'
+                      : 'idle'
+          }
+          px={1.6}
+          title={connected ? `RUNE (${STATE_LABELS[state]})` : 'RUNE — engine unreachable'}
+        />
+        <span style={{
+          fontWeight: 700,
+          fontSize: 14,
+          letterSpacing: '1.5px',
+          color: 'var(--accent)',
+        }}>
+          RUNE
+        </span>
+      </div>
 
       <div style={{ flex: 1 }} />
 

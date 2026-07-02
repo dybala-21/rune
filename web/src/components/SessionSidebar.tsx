@@ -145,11 +145,13 @@ export function SessionSidebar({ currentSessionId, onSelectSession, onNewChat }:
             return (
               <div key={groupName}>
                 <div style={{
-                  padding: '10px 14px 4px',
-                  fontSize: 11,
+                  padding: '12px 14px 5px',
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 10,
                   fontWeight: 600,
                   color: 'var(--text-muted)',
-                  letterSpacing: '0.3px',
+                  letterSpacing: '0.16em',
+                  textTransform: 'uppercase',
                 }}>
                   {groupName}
                 </div>

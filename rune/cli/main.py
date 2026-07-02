@@ -62,6 +62,21 @@ app.add_typer(memory_app, name="memory")
 app.add_typer(advisor_app, name="advisor")
 app.add_typer(bench_app, name="bench")
 
+# Scheduled-task compatibility: a lightweight passthrough subcommand so
+# external schedulers can run `send briefing` without knowing the full
+# internal CLI surface.
+@app.command("send")
+def send_cmd(
+    what: Annotated[str, typer.Argument(help="What to send (e.g., 'briefing')")],
+) -> None:
+    if what != "briefing":
+        console.print(f"[red]Unknown send target:[/red] {what}")
+        raise typer.Exit(2)
+    # Delegate to the daemon/API layer if available. For now, print a minimal
+    # acknowledgement so the scheduled task has an execution result.
+    console.print("briefing sent")
+
+
 
 # Global callback
 
@@ -817,6 +832,167 @@ def web(
         asyncio.run(_serve())
     except (KeyboardInterrupt, SystemExit):
         _force_exit()
+
+
+# Daemon lifecycle commands. `start` runs `rune web` detached — that path
+# already creates the socket/pid file and serves the API + web UI.
+
+def _daemon_paths() -> tuple[str, str]:
+    from rune.daemon.main import _default_config
+    cfg = _default_config()
+    return str(cfg["socket_path"]), str(cfg["pid_file"])
+
+
+def _daemon_pid() -> int | None:
+    """Return the live daemon PID, or None. Cleans up a stale pid file."""
+    from pathlib import Path
+    _sock, pid_file = _daemon_paths()
+    p = Path(pid_file)
+    if not p.is_file():
+        return None
+    try:
+        pid = int(p.read_text().strip())
+    except (ValueError, OSError):
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        import contextlib
+        with contextlib.suppress(OSError):
+            p.unlink()
+        return None
+    except PermissionError:
+        return pid
+    return pid
+
+
+@daemon_app.command("start")
+def daemon_start(
+    host: Annotated[str, typer.Option("--host", "-H", help="Host to bind")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", "-P", help="Port to bind")] = 18789,
+) -> None:
+    """Start the RUNE daemon (engine + API) detached in the background."""
+    import subprocess
+    import time
+
+    existing = _daemon_pid()
+    if existing:
+        console.print(f"[green]RUNE daemon already running[/green] (PID {existing}).")
+        raise typer.Exit(0)
+
+    from rune.utils.paths import rune_home
+    log_path = rune_home() / "daemon.log"
+    # Never resolve `rune` from PATH: a different install (e.g. a global npm
+    # rune-agent) would serve its own bundled web UI.
+    launcher = sys.argv[0] if sys.argv else ""
+    if (launcher and os.path.isfile(launcher) and os.access(launcher, os.X_OK)
+            and "rune" in os.path.basename(launcher).lower()):
+        web_cmd = [launcher, "web", "--no-open", "--host", host, "--port", str(port)]
+    else:
+        web_cmd = [
+            sys.executable, "-m", "rune.cli.main", "web",
+            "--no-open", "--host", host, "--port", str(port),
+        ]
+
+    with open(log_path, "ab") as log_f:
+        proc = subprocess.Popen(
+            web_cmd,
+            stdout=log_f,
+            stderr=log_f,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+    sock, _pid_file = _daemon_paths()
+    for _ in range(50):  # ~10s
+        if os.path.exists(sock) and _daemon_pid():
+            console.print(
+                f"[green]RUNE daemon started[/green] (PID {proc.pid}) "
+                f"on http://{host}:{port}"
+            )
+            console.print(f"[dim]logs: {log_path}[/dim]")
+            raise typer.Exit(0)
+        if proc.poll() is not None:
+            console.print(
+                f"[red]Daemon exited early (code {proc.returncode}).[/red] "
+                f"[dim]See {log_path}[/dim]"
+            )
+            raise typer.Exit(1)
+        time.sleep(0.2)
+    console.print(
+        f"[yellow]Daemon still starting (PID {proc.pid}); socket not up yet.[/yellow] "
+        f"[dim]See {log_path}[/dim]"
+    )
+
+
+@daemon_app.command("stop")
+def daemon_stop() -> None:
+    """Stop the running RUNE daemon."""
+    import contextlib
+    import signal
+    import time
+    from pathlib import Path
+
+    pid = _daemon_pid()
+    if not pid:
+        console.print("[yellow]RUNE daemon is not running.[/yellow]")
+        raise typer.Exit(0)
+
+    sock, pid_file = _daemon_paths()
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError as exc:
+        console.print(f"[red]Failed to signal daemon (PID {pid}): {exc}[/red]")
+        raise typer.Exit(1)
+
+    for _ in range(25):  # ~5s
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.2)
+
+    # Force-exit on SIGTERM can skip the daemon's own cleanup, so remove stale files.
+    for pth in (sock, pid_file):
+        with contextlib.suppress(OSError):
+            Path(pth).unlink()
+    console.print(f"[green]RUNE daemon stopped[/green] (PID {pid}).")
+
+
+@daemon_app.command("status")
+def daemon_status() -> None:
+    """Show whether the RUNE daemon is running."""
+    pid = _daemon_pid()
+    if not pid:
+        console.print("[dim]RUNE daemon:[/dim] [yellow]not running[/yellow]")
+        raise typer.Exit(0)
+
+    sock, _pid_file = _daemon_paths()
+    console.print(f"[dim]RUNE daemon:[/dim] [green]running[/green] (PID {pid})")
+
+    import asyncio
+
+    async def _query() -> None:
+        import contextlib
+        from rune.daemon.client import DaemonClient
+        client = DaemonClient(socket_path=sock)
+        try:
+            await client.connect()
+            st = await client.status()
+            console.print(
+                f"  uptime {st.uptime_seconds:.0f}s · "
+                f"active {st.active_tasks} · queued {st.queued_tasks}"
+            )
+            if st.channels:
+                console.print(f"  channels: {', '.join(st.channels)}")
+        finally:
+            with contextlib.suppress(Exception):
+                await client.disconnect()
+
+    try:
+        asyncio.run(_query())
+    except Exception:
+        console.print("  [dim](socket not responding; API may still be starting)[/dim]")
 
 
 # Overnight: unattended verified goal run

@@ -1,0 +1,14 @@
+{
+  "name": "rune-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "RUNE desktop shell — a hardened Electron window over the RUNE web UI + daemon.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "RUNE_UI_URL=http://localhost:5173 electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}
