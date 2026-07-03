@@ -91,8 +91,11 @@ async def agent_run(req: AgentRunRequest) -> AgentRunResponse:
 
     tracker.create(run_id, client_id="api", session_id=session_id, goal=req.goal)
 
-    # Launch background execution
-    task = asyncio.create_task(_execute_agent(tracker, run_id, req))
+    # Launch background execution. Pass the resolved session_id (which may be
+    # server-generated): deriving it again from req inside _execute_agent would
+    # drop the generated id, so the first turn of a new session would never be
+    # recorded and the sessionId returned to the client would start empty.
+    task = asyncio.create_task(_execute_agent(tracker, run_id, req, session_id))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
@@ -145,7 +148,9 @@ async def agent_cancel(run_id: str = "") -> AgentCancelResponse:
 # Background execution
 
 
-async def _execute_agent(tracker: RunTracker, run_id: str, req: AgentRunRequest) -> None:
+async def _execute_agent(
+    tracker: RunTracker, run_id: str, req: AgentRunRequest, session_id: str = "",
+) -> None:
     """Execute the agent in the background, updating the tracker."""
     tracker.mark_running(run_id)
     try:
@@ -160,7 +165,7 @@ async def _execute_agent(tracker: RunTracker, run_id: str, req: AgentRunRequest)
 
         # Load conversation manager for multi-turn context
         conv_manager = None
-        session_id = req.session_id or ""
+        session_id = session_id or req.session_id or ""
         if session_id:
             try:
 
@@ -250,8 +255,8 @@ async def _execute_agent(tracker: RunTracker, run_id: str, req: AgentRunRequest)
                     goal_type=getattr(loop, "_last_goal_type", ""),
                 )
                 await conv_manager._store.save(conv_manager._active[session_id])
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("api_conv_save_failed", error=str(exc)[:100])
 
         # 5. Post-process (memory persistence)
         try:
