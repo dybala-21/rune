@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import type { ToolCall } from '../types';
 import { normalizeToolName } from '../utils/tooling';
 
@@ -66,9 +66,7 @@ interface ToolCallCardProps {
   isLatest?: boolean;
 }
 
-export function ToolCallCard({ toolCall, isLatest = false }: ToolCallCardProps) {
-  if (!toolCall.toolName?.trim()) return null;
-
+export const ToolCallCard = memo(function ToolCallCard({ toolCall, isLatest = false }: ToolCallCardProps) {
   const [manualExpanded, setManualExpanded] = useState<boolean | null>(null);
 
   const prevIsLatest = useRef(isLatest);
@@ -78,6 +76,9 @@ export function ToolCallCard({ toolCall, isLatest = false }: ToolCallCardProps) 
     }
     prevIsLatest.current = isLatest;
   }, [isLatest]);
+
+  // Guard after hooks so hook order stays stable (Rules of Hooks).
+  if (!toolCall.toolName?.trim()) return null;
 
   const hasResult = toolCall.result !== undefined;
   const isPending = !hasResult;
@@ -254,7 +255,7 @@ export function ToolCallCard({ toolCall, isLatest = false }: ToolCallCardProps) 
       )}
     </div>
   );
-}
+});
 
 function formatResult(text: string): string {
   const trimmed = text.trim();

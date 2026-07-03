@@ -78,6 +78,8 @@ export interface ChatMessage {
   role: MessageRole;
   content: string;
   timestamp: number;
+  /** Severity for system messages; 'error' renders with a danger tone. */
+  level?: 'info' | 'error';
 }
 
 /** 프로액티브 제안 (RUNE이 먼저 말을 걸 때) */

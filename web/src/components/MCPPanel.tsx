@@ -7,6 +7,7 @@ import {
   type MCPServerInfo,
   type MCPTestResult,
 } from '../api';
+import { useFocusTrap } from '../hooks/useFocusTrap';
 
 interface MCPPanelProps {
   onClose: () => void;
@@ -22,6 +23,13 @@ const TRANSPORT_LABELS: Record<TransportType, string> = {
 };
 
 export function MCPPanel({ onClose }: MCPPanelProps) {
+  const trapRef = useFocusTrap<HTMLDivElement>();
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
   const [servers, setServers] = useState<MCPServerInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -105,9 +113,9 @@ export function MCPPanel({ onClose }: MCPPanelProps) {
   };
 
   return (
-    <div style={{
+    <div ref={trapRef} role="dialog" aria-modal="true" aria-label="MCP servers" style={{
       position: 'fixed', top: 0, right: 0, bottom: 0,
-      width: 480, background: 'var(--bg-secondary, #1a1a2e)',
+      width: 480, maxWidth: '100vw', background: 'var(--bg-secondary, #1a1a2e)',
       borderLeft: '1px solid var(--border, #333)',
       display: 'flex', flexDirection: 'column',
       zIndex: 100, boxShadow: '-4px 0 20px rgba(0,0,0,0.3)',
@@ -140,6 +148,7 @@ export function MCPPanel({ onClose }: MCPPanelProps) {
           )}
           <button
             onClick={onClose}
+            aria-label="Close"
             style={{
               background: 'transparent', border: 'none',
               color: 'var(--text-muted, #888)', cursor: 'pointer',

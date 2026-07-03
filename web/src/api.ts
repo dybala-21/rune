@@ -44,7 +44,13 @@ export async function ensureWebAuth(): Promise<void> {
   return _webAuthPromise;
 }
 
-async function post<T>(path: string, body?: unknown): Promise<T> {
+/** Force the next request to re-bootstrap auth (e.g. after a 401 or a dropped stream). */
+export function resetWebAuth(): void {
+  _webAuthReady = false;
+  _webAuthPromise = null;
+}
+
+async function post<T>(path: string, body?: unknown, retried = false): Promise<T> {
   await ensureWebAuth();
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -58,6 +64,11 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
     credentials: 'include',
     body: body ? JSON.stringify(body) : undefined,
   });
+  // Auth expired: re-bootstrap once and retry, so the app recovers without a reload.
+  if ((res.status === 401 || res.status === 403) && !retried) {
+    resetWebAuth();
+    return post<T>(path, body, true);
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error((err as { error?: string }).error || res.statusText);
@@ -71,8 +82,8 @@ async function rpc<T>(method: string, params: unknown = {}): Promise<T> {
     '/api/v1/rpc',
     { method, params },
   );
-  if (!result.success && result.error) {
-    throw new Error(result.error.message);
+  if (!result.success) {
+    throw new Error(result.error?.message || 'Request failed');
   }
   return result.data as T;
 }

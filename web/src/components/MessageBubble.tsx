@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo, useState } from 'react';
 import type { ChatMessage } from '../types';
 import { PixelWolf } from './PixelWolf';
 
@@ -8,19 +8,27 @@ interface MessageBubbleProps {
   streaming?: boolean;
 }
 
-export function MessageBubble({ message, streaming = false }: MessageBubbleProps) {
+// memo: only the streaming message's ref changes, so other bubbles skip re-parsing markdown.
+export const MessageBubble = memo(function MessageBubble({ message, streaming = false }: MessageBubbleProps) {
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
 
   if (!message.content?.trim()) return null;
 
   if (isSystem) {
+    const isError = message.level === 'error';
     return (
       <div className="fade-in" style={{
-        padding: '6px 0',
-        fontSize: 12,
-        color: 'var(--text-muted)',
-        fontStyle: 'italic',
+        padding: isError ? '8px 12px' : '6px 0',
+        margin: isError ? '4px 0' : 0,
+        fontSize: isError ? 13 : 12,
+        color: isError ? 'var(--danger)' : 'var(--text-muted)',
+        fontStyle: isError ? 'normal' : 'italic',
+        borderLeft: isError ? '2px solid var(--danger)' : 'none',
+        background: isError ? 'var(--danger-subtle)' : 'transparent',
+        borderRadius: isError ? 'var(--radius-sm)' : 0,
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-word',
       }}>
         {message.content}
       </div>
@@ -54,7 +62,7 @@ export function MessageBubble({ message, streaming = false }: MessageBubbleProps
 
   // Assistant message - full-width card style
   return (
-    <div className="slide-up" style={{
+    <div className="slide-up msg-hover" style={{
       padding: '8px 0',
     }}>
       <div style={{
@@ -76,22 +84,44 @@ export function MessageBubble({ message, streaming = false }: MessageBubbleProps
         </div>
 
         {/* Content */}
-        <div
-          className={streaming ? 'streaming-cursor' : undefined}
-          style={{
-            flex: 1,
-            minWidth: 0,
-            fontSize: 15,
-            lineHeight: 1.7,
-            color: 'var(--text-primary)',
-            wordBreak: 'break-word',
-          }}
-        >
-          <RenderedContent content={message.content} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div
+            className={streaming ? 'streaming-cursor' : undefined}
+            style={{
+              fontSize: 15,
+              lineHeight: 1.7,
+              color: 'var(--text-primary)',
+              wordBreak: 'break-word',
+            }}
+          >
+            <RenderedContent content={message.content} />
+          </div>
+          {!streaming && (
+            <div className="msg-actions" style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 10 }}>
+              <CopyButton text={message.content} />
+              {message.timestamp > 0 && (
+                <span style={{
+                  fontFamily: 'var(--font-mono)',
+                  fontSize: 11,
+                  color: 'var(--text-muted)',
+                }}>
+                  {formatClock(message.timestamp)}
+                </span>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>
   );
+});
+
+function formatClock(ts: number): string {
+  try {
+    return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  } catch {
+    return '';
+  }
 }
 
 // ── Copy button ──
