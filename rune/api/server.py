@@ -140,7 +140,7 @@ def create_app() -> Any:
         )
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import StreamingResponse
-        from pydantic import BaseModel, Field
+        from pydantic import BaseModel, ConfigDict, Field
     except ImportError as exc:
         raise ImportError(
             "FastAPI and uvicorn are required for the API server. "
@@ -246,6 +246,11 @@ def create_app() -> Any:
     class MessageRequest(BaseModel):
         text: str = ""
         attachments: list[MessageAttachment] | None = None
+        # Optional conversation pin (camelCase on the wire). Omitted by the
+        # web UI → server-side sticky conversation keeps live-chat continuity.
+        session_id: str | None = Field(default=None, alias="sessionId")
+
+        model_config = ConfigDict(populate_by_name=True)
 
     class ApprovalRequestModel(BaseModel):
         id: str
@@ -280,6 +285,8 @@ def create_app() -> Any:
         run_id: str,
         client_id: str | None,
         attachments: list[dict[str, Any]] | None = None,
+        session_id: str | None = None,
+        sticky: bool = False,
     ) -> str:
         """Run the agent loop, broadcasting events to SSE/WS clients.
 
@@ -294,6 +301,15 @@ def create_app() -> Any:
             events are broadcast to all connected clients.
         attachments:
             Optional list of attachment dicts (name, mimeType, data).
+        session_id:
+            Optional conversation id for multi-turn continuity. When set,
+            turns are recorded under it and prior turns are passed to the
+            loop as message history.
+        sticky:
+            When True and no session_id is given, fall back to the
+            server-side sticky web conversation (browser live chat). Must
+            stay False for headless execute callers so scripts don't
+            pollute the human's chat.
         """
         try:
             from rune.agent.agent_context import (
@@ -303,14 +319,31 @@ def create_app() -> Any:
                 prepare_agent_context,
             )
             from rune.agent.loop import NativeAgentLoop
+            from rune.api import conversation_wiring as conv_wiring
 
-            # 1. Prepare agent context
+            # 0. Resolve multi-turn conversation and record the user turn
+            conv_manager = conv_wiring.get_conv_manager()
+            conv_id: str | None = None
+            if conv_manager is not None:
+                try:
+                    conv_id = await conv_wiring.resolve_conversation(
+                        conv_manager, session_id, sticky=sticky,
+                    )
+                except Exception as exc:
+                    log.debug("web_conv_resolve_failed", error=str(exc)[:100])
+                    conv_manager = None
+            if conv_manager is not None and conv_id:
+                conv_wiring.record_user_turn(conv_manager, conv_id, goal)
+
+            # 1. Prepare agent context (loads prior turns as history)
             agent_ctx = await prepare_agent_context(
                 PrepareContextOptions(
                     goal=goal,
                     channel="web",
                     attachments=attachments or [],
-                )
+                    conversation_id=conv_id or "",
+                ),
+                conversation_manager=conv_manager,
             )
 
             loop = NativeAgentLoop()
@@ -375,8 +408,15 @@ def create_app() -> Any:
             # -- wire event callbacks ------------------------------------
 
             _run_start_time = time.monotonic()
+            # Index of the current step's first delta in `collected` — history
+            # records only the last step's text so intermediate commentary
+            # ("검색하겠습니다…") doesn't get replayed as the answer (same
+            # trick as the gateway path).
+            _step_text_start = [0]
 
             async def _on_step(step: int) -> None:
+                if len(collected) > _step_text_start[0]:
+                    _step_text_start[0] = len(collected)
                 await _broadcast(
                     "step_start",
                     {"stepNumber": step, "tokens": 0, "runId": run_id},
@@ -474,13 +514,21 @@ def create_app() -> Any:
                 {"runId": run_id, "goal": agent_ctx.goal},
             )
 
-            # 4. Run with context
+            # 4. Run with context + conversation history
             trace = await loop.run(
                 agent_ctx.goal,
                 context={"workspace_root": agent_ctx.workspace_root},
+                message_history=agent_ctx.messages if agent_ctx.messages else None,
             )
             answer = "".join(collected)
             duration_ms = int((time.monotonic() - _run_start_time) * 1000)
+
+            # 4b. Record the assistant turn so the next message has context.
+            if conv_manager is not None and conv_id:
+                last_step_text = "".join(collected[_step_text_start[0]:]) or answer
+                await conv_wiring.record_assistant_turn(
+                    conv_manager, conv_id, loop, last_step_text,
+                )
 
             # 5. Post-process (memory persistence)
             try:
@@ -516,9 +564,22 @@ def create_app() -> Any:
             _active_loops.pop(run_id, None)
 
     async def _ndjson_execution(
-        goal: str, run_id: str
+        goal: str, run_id: str, session_id: str | None = None
     ) -> AsyncGenerator[str]:
-        """NDJSON streaming generator for agent execution."""
+        """NDJSON streaming generator for agent execution.
+
+        ``session_id`` pins a conversation for multi-turn continuity (explicit
+        only — headless streaming callers never fall back to the sticky web
+        chat). The assistant turn is recorded in ``finally`` because a client
+        disconnect raises GeneratorExit at a ``yield``: code after the drain
+        loop is not guaranteed to run, and a recorded user turn without its
+        assistant turn would pollute the next turn's history.
+        """
+        conv_manager: Any | None = None
+        conv_id: str | None = None
+        loop = None
+        collected: list[str] = []
+        _step_text_start = [0]
         try:
             from rune.agent.agent_context import (
                 PostProcessInput,
@@ -527,10 +588,27 @@ def create_app() -> Any:
                 prepare_agent_context,
             )
             from rune.agent.loop import NativeAgentLoop
+            from rune.api import conversation_wiring as conv_wiring
 
-            # 1. Prepare agent context
+            # 0. Resolve multi-turn conversation and record the user turn
+            conv_manager = conv_wiring.get_conv_manager()
+            if conv_manager is not None:
+                try:
+                    conv_id = await conv_wiring.resolve_conversation(
+                        conv_manager, session_id, sticky=False,
+                    )
+                except Exception as exc:
+                    log.debug("ndjson_conv_resolve_failed", error=str(exc)[:100])
+                    conv_manager = None
+            if conv_manager is not None and conv_id:
+                conv_wiring.record_user_turn(conv_manager, conv_id, goal)
+
+            # 1. Prepare agent context (loads prior turns as history)
             agent_ctx = await prepare_agent_context(
-                PrepareContextOptions(goal=goal, channel="web")
+                PrepareContextOptions(
+                    goal=goal, channel="web", conversation_id=conv_id or "",
+                ),
+                conversation_manager=conv_manager,
             )
 
             yield (
@@ -545,7 +623,6 @@ def create_app() -> Any:
 
             loop = NativeAgentLoop()
             _active_loops[run_id] = loop
-            collected: list[str] = []
 
             # Use a queue so event callbacks can feed the generator
             event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
@@ -589,6 +666,8 @@ def create_app() -> Any:
             loop.set_ask_user_callback(_ndjson_ask_user_cb)
 
             async def _on_step(step: int) -> None:
+                if len(collected) > _step_text_start[0]:
+                    _step_text_start[0] = len(collected)
                 await event_queue.put(
                     {
                         "event": "step_start",
@@ -640,6 +719,9 @@ def create_app() -> Any:
                 loop.run(
                     agent_ctx.goal,
                     context={"workspace_root": agent_ctx.workspace_root},
+                    message_history=(
+                        agent_ctx.messages if agent_ctx.messages else None
+                    ),
                 )
             )
 
@@ -702,6 +784,19 @@ def create_app() -> Any:
             )
         finally:
             _active_loops.pop(run_id, None)
+            # Record the assistant turn here (awaits are fine during aclose();
+            # yields are not): on client disconnect GeneratorExit fires at a
+            # yield and the code after the drain loop never runs, which would
+            # leave a dangling user turn in the conversation history.
+            if conv_manager is not None and conv_id and loop is not None:
+                last_step_text = (
+                    "".join(collected[_step_text_start[0]:]) or "".join(collected)
+                )
+                from rune.api import conversation_wiring as conv_wiring
+
+                await conv_wiring.record_assistant_turn(
+                    conv_manager, conv_id, loop, last_step_text,
+                )
 
     # Health (no auth)
 
@@ -828,6 +923,8 @@ def create_app() -> Any:
                                 run_id=run_id,
                                 client_id=client_id,
                                 attachments=ws_attachments,
+                                session_id=msg.get("sessionId") or None,
+                                sticky=True,
                             )
                         )
                         _active_tasks[run_id] = task
@@ -904,7 +1001,7 @@ def create_app() -> Any:
         if req.stream:
             # NDJSON streaming response
             return StreamingResponse(
-                _ndjson_execution(req.goal, run_id),
+                _ndjson_execution(req.goal, run_id, session_id=req.session_id),
                 media_type="application/x-ndjson",
                 headers={
                     "Cache-Control": "no-cache",
@@ -913,10 +1010,13 @@ def create_app() -> Any:
                 },
             )
 
-        # Non-streaming: run and broadcast events via SSE/WS
+        # Non-streaming: run and broadcast events via SSE/WS. Multi-turn only
+        # with an explicit session_id — headless callers must not fall back to
+        # the human's sticky web chat (sticky stays False).
         task = asyncio.create_task(
             _run_agent_for_client(
-                goal=req.goal, run_id=run_id, client_id=None
+                goal=req.goal, run_id=run_id, client_id=None,
+                session_id=req.session_id,
             )
         )
         _active_tasks[run_id] = task
@@ -968,6 +1068,8 @@ def create_app() -> Any:
             _run_agent_for_client(
                 goal=req.text, run_id=run_id, client_id=None,
                 attachments=raw_attachments or None,
+                session_id=req.session_id,
+                sticky=True,
             )
         )
         _active_tasks[run_id] = task

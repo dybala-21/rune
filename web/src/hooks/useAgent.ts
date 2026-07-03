@@ -285,6 +285,9 @@ export function useAgent() {
   }, [savedDraft.available]);
 
   const resetLiveConversation = useCallback(() => {
+    // New chat = new server-side conversation; without this the server keeps
+    // threading the old history into "new" chats for up to the idle window.
+    api.rotateLiveSessionId();
     pendingTextRef.current = '';
     assistantMsgIdRef.current = null;
     savedDraftStateRef.current = null;

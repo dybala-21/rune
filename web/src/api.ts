@@ -94,8 +94,29 @@ export interface MessageAttachment {
   data: string;  // base64
 }
 
+// Per-tab conversation key so the server threads multi-turn history for the
+// live chat. sessionStorage scope = continuity across reloads in one tab,
+// isolation between tabs. Rotated by "New chat".
+const LIVE_SESSION_KEY = 'rune.live.sessionId';
+
+export function rotateLiveSessionId(): string {
+  const id = typeof crypto !== 'undefined' && crypto.randomUUID
+    ? `web_${crypto.randomUUID()}`
+    : `web_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  try { sessionStorage.setItem(LIVE_SESSION_KEY, id); } catch { /* storage unavailable */ }
+  return id;
+}
+
+function liveSessionId(): string {
+  try {
+    return sessionStorage.getItem(LIVE_SESSION_KEY) ?? rotateLiveSessionId();
+  } catch {
+    return rotateLiveSessionId();
+  }
+}
+
 export function sendMessage(text: string, attachments?: MessageAttachment[]) {
-  return post('/api/message', { text, attachments });
+  return post('/api/message', { text, attachments, sessionId: liveSessionId() });
 }
 
 export function sendAbort() {
