@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { SseEventType } from '../types';
-import { ensureWebAuth, setClientId as setApiClientId } from '../api';
+import { ensureWebAuth, resetWebAuth, setClientId as setApiClientId } from '../api';
 
 export interface SseConnection {
   connected: boolean;
@@ -16,12 +16,27 @@ export function useSSE(): SseConnection {
 
   useEffect(() => {
     let disposed = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    // The browser retries transient errors itself but gives up at CLOSED (e.g.
+    // daemon restart). Re-auth and open a fresh stream ourselves after a backoff.
+    const scheduleReconnect = () => {
+      if (disposed || retryTimer) return;
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        void connect();
+      }, 2000);
+    };
 
     const connect = async () => {
+      if (disposed) return;
       try {
         await ensureWebAuth();
       } catch {
-        if (!disposed) setConnected(false);
+        if (!disposed) {
+          setConnected(false);
+          scheduleReconnect();
+        }
         return;
       }
       if (disposed) return;
@@ -61,7 +76,15 @@ export function useSSE(): SseConnection {
 
       source.onerror = () => {
         setConnected(false);
-        // EventSource auto-reconnects
+        // CONNECTING → native retry in flight, leave it. CLOSED → browser gave
+        // up, so tear down and re-establish ourselves after a short backoff.
+        if (source.readyState === EventSource.CLOSED) {
+          source.close();
+          if (sourceRef.current === source) sourceRef.current = null;
+          // The close may be an expired session; re-bootstrap auth on reconnect.
+          resetWebAuth();
+          scheduleReconnect();
+        }
       };
 
       source.onopen = () => {
@@ -73,6 +96,7 @@ export function useSSE(): SseConnection {
 
     return () => {
       disposed = true;
+      if (retryTimer) clearTimeout(retryTimer);
       sourceRef.current?.close();
       sourceRef.current = null;
       setConnected(false);

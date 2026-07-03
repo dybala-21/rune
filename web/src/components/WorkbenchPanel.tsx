@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import type { ActivitySummary, ToolCall } from '../types';
 import { normalizeToolName, inferWorkPhase, type WorkPhase } from '../utils/tooling';
 import { PixelWolf, type WolfState } from './PixelWolf';
@@ -12,6 +12,7 @@ interface WorkbenchPanelProps {
   toolCalls: ToolCall[];
   isRunning: boolean;
   activitySummary: ActivitySummary | null;
+  connected?: boolean;
   onClose: () => void;
 }
 
@@ -48,10 +49,15 @@ function diffLines(text: string): { lines: string[]; truncated: boolean } {
   return { lines: all.slice(0, DIFF_MAX_LINES), truncated: all.length > DIFF_MAX_LINES };
 }
 
-/** Renders file.edit's search/replace args — not a real file diff. */
+/**
+ * Renders file.edit's search/replace args — not a real file diff. An empty
+ * search is a pure insertion (show only + lines); an empty replace is a pure
+ * deletion (show only − lines).
+ */
 function EditDiff({ search, replace }: { search: string; replace: string }) {
-  const del = diffLines(search);
-  const add = diffLines(replace);
+  const del = search ? diffLines(search) : null;
+  const add = replace ? diffLines(replace) : null;
+  if (!del && !add) return null;
   const row = (mark: string, color: string, bg: string, line: string, i: number) => (
     <div key={`${mark}${i}`} style={{
       display: 'flex',
@@ -71,15 +77,16 @@ function EditDiff({ search, replace }: { search: string; replace: string }) {
       overflow: 'hidden',
       fontSize: 11.5,
     }}>
-      {del.lines.map((l, i) => row('−', 'var(--danger)', 'var(--danger-subtle)', l, i))}
-      {del.truncated && row('−', 'var(--text-muted)', 'var(--danger-subtle)', '…', -1)}
-      {add.lines.map((l, i) => row('+', 'var(--success)', 'var(--success-subtle)', l, i))}
-      {add.truncated && row('+', 'var(--text-muted)', 'var(--success-subtle)', '…', -2)}
+      {del?.lines.map((l, i) => row('−', 'var(--danger)', 'var(--danger-subtle)', l, i))}
+      {del?.truncated && row('−', 'var(--text-muted)', 'var(--danger-subtle)', '…', -1)}
+      {add?.lines.map((l, i) => row('+', 'var(--success)', 'var(--success-subtle)', l, i))}
+      {add?.truncated && row('+', 'var(--text-muted)', 'var(--success-subtle)', '…', -2)}
     </div>
   );
 }
 
-function CommandLine({ tc }: { tc: ToolCall }) {
+// memo: the panel's 1s elapsed-timer re-render shouldn't re-diff unchanged commands.
+const CommandLine = memo(function CommandLine({ tc }: { tc: ToolCall }) {
   const name = normalizeToolName(tc.toolName);
   const pending = tc.result === undefined;
   const ok = tc.success !== false;
@@ -92,8 +99,9 @@ function CommandLine({ tc }: { tc: ToolCall }) {
     ? target ?? '(command)'
     : `${fileVerb(name)}  ${target ?? ''}`.trim();
 
-  const search = name === 'file.edit' ? argString(tc.args, 'search') : null;
-  const replace = name === 'file.edit' ? argString(tc.args, 'replace') ?? '' : null;
+  const isEdit = name === 'file.edit';
+  const search = isEdit ? (argString(tc.args, 'search') ?? '') : null;
+  const replace = isEdit ? (argString(tc.args, 'replace') ?? '') : null;
 
   const resultText =
     typeof tc.result === 'string' && tc.result.trim()
@@ -115,10 +123,10 @@ function CommandLine({ tc }: { tc: ToolCall }) {
           </span>
         )}
       </div>
-      {search !== null && replace !== null && (
-        <EditDiff search={search} replace={replace} />
+      {isEdit && (
+        <EditDiff search={search ?? ''} replace={replace ?? ''} />
       )}
-      {resultText && !(search !== null && ok) && (
+      {resultText && !(isEdit && ok) && (
         <div style={{
           color: 'var(--text-muted)',
           paddingLeft: 20,
@@ -133,7 +141,7 @@ function CommandLine({ tc }: { tc: ToolCall }) {
       )}
     </div>
   );
-}
+});
 
 function formatElapsed(ms: number): string {
   const s = Math.floor(ms / 1000);
@@ -141,7 +149,7 @@ function formatElapsed(ms: number): string {
   return `${Math.floor(s / 60)}m${s % 60}s`;
 }
 
-export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, onClose }: WorkbenchPanelProps) {
+export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, connected = true, onClose }: WorkbenchPanelProps) {
   const phase = inferWorkPhase(toolCalls);
   const coding = toolCalls.filter(tc => CODING_TOOLS.has(normalizeToolName(tc.toolName)));
 
@@ -271,7 +279,9 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, onClose 
             {activitySummary.bashExecutions > 0 && `${activitySummary.bashExecutions} ran`}
           </span>
         )}
-        <span style={{ marginLeft: 'auto' }}>daemon · 127.0.0.1</span>
+        <span style={{ marginLeft: 'auto', color: connected ? undefined : 'var(--danger)' }}>
+          {connected ? 'daemon · 127.0.0.1' : 'daemon · offline'}
+        </span>
       </div>
     </aside>
   );

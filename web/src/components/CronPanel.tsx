@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   fetchCronJobs,
   createCronJob,
@@ -6,6 +6,7 @@ import {
   deleteCronJob,
   type CronJobInfo,
 } from '../api';
+import { useFocusTrap } from '../hooks/useFocusTrap';
 
 interface CronPanelProps {
   onClose: () => void;
@@ -21,7 +22,7 @@ function formatDateTime(iso?: string): string {
 }
 
 export function CronPanel({ onClose }: CronPanelProps) {
-  const panelRef = useRef<HTMLDivElement>(null);
+  const panelRef = useFocusTrap<HTMLDivElement>();
   const [jobs, setJobs] = useState<CronJobInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -171,6 +172,9 @@ export function CronPanel({ onClose }: CronPanelProps) {
     >
       <div
         ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Scheduled jobs"
         className="fade-scale"
         style={{
           width: '92vw',
@@ -228,6 +232,7 @@ export function CronPanel({ onClose }: CronPanelProps) {
           </button>
           <button
             onClick={onClose}
+            aria-label="Close"
             style={{
               background: 'none',
               border: 'none',

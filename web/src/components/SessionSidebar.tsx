@@ -130,9 +130,13 @@ export function SessionSidebar({ currentSessionId, onSelectSession, onNewChat }:
       {/* Session list */}
       <div style={{ flex: 1, overflowY: 'auto', paddingTop: 8 }}>
         {loading ? (
-          <div style={{ padding: '24px 14px', color: 'var(--text-muted)', fontSize: 12, textAlign: 'center' }}>
-            <span className="spinner" style={{ display: 'inline-block', marginBottom: 8 }} />
-            <br />Loading sessions...
+          <div style={{ padding: '8px', display: 'flex', flexDirection: 'column', gap: 10 }} aria-label="Loading sessions" aria-busy="true">
+            {[0, 1, 2, 3].map(i => (
+              <div key={i} style={{ padding: '0 4px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <div className="skeleton" style={{ height: 12, width: `${85 - i * 8}%` }} />
+                <div className="skeleton" style={{ height: 9, width: '40%', opacity: 0.6 }} />
+              </div>
+            ))}
           </div>
         ) : sessions.length === 0 ? (
           <div style={{ padding: '24px 14px', color: 'var(--text-muted)', fontSize: 12, textAlign: 'center' }}>

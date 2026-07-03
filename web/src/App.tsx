@@ -12,8 +12,9 @@ import { CronPanel } from './components/CronPanel';
 import { MCPPanel } from './components/MCPPanel';
 import { MarkdownPanel } from './components/MarkdownPanel';
 import { WorkbenchPanel } from './components/WorkbenchPanel';
+import { CommandK, type Command } from './components/CommandK';
 import { normalizeToolName, inferWorkPhase } from './utils/tooling';
-import { fetchConfig, type ConfigInfo } from './api';
+import { fetchConfig, fetchSessions, type ConfigInfo, type SessionInfo } from './api';
 
 type SidebarTab = 'chats' | 'settings';
 
@@ -31,6 +32,8 @@ export function App() {
   const [configInfo, setConfigInfo] = useState<ConfigInfo | null>(null);
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const [workbenchDismissed, setWorkbenchDismissed] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteSessions, setPaletteSessions] = useState<SessionInfo[]>([]);
 
   const isViewingHistory = history.viewingSessionId !== null;
 
@@ -68,8 +71,9 @@ export function App() {
         if (!cancelled) {
           setConfigInfo(next);
         }
-      } catch {
+      } catch (err) {
         // Keep the status bar stable if config loading fails.
+        console.debug('config poll failed', err);
       }
     };
 
@@ -98,10 +102,15 @@ export function App() {
     }
   }, [agent.toolCalls, isViewingHistory, workbenchDismissed]);
 
-  // ⌘J / Ctrl+J: toggle the workbench.
+  // ⌘K opens the palette; ⌘J toggles the workbench.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'j') {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const key = e.key.toLowerCase();
+      if (key === 'k') {
+        e.preventDefault();
+        setPaletteOpen(o => !o);
+      } else if (key === 'j') {
         e.preventDefault();
         if (isViewingHistory) return;
         setWorkbenchOpen(open => {
@@ -114,6 +123,16 @@ export function App() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [isViewingHistory]);
+
+  // Load recent sessions when the palette opens, for quick jump-to-session.
+  useEffect(() => {
+    if (!paletteOpen) return;
+    let cancelled = false;
+    fetchSessions({ limit: 8 })
+      .then(r => { if (!cancelled) setPaletteSessions(r.sessions); })
+      .catch(err => { console.debug('palette session fetch failed', err); });
+    return () => { cancelled = true; };
+  }, [paletteOpen]);
 
   const handleSelectSession = (sessionId: string | null) => {
     history.loadSession(sessionId);
@@ -128,6 +147,36 @@ export function App() {
     setSkillsPanelInitial(selectedName);
     setSkillsPanelOpen(true);
   };
+
+  const paletteCommands: Command[] = [
+    { id: 'new', label: 'New chat', run: handleNewChat },
+  ];
+  if (!isViewingHistory) {
+    paletteCommands.push({
+      id: 'workbench',
+      label: workbenchOpen ? 'Hide workbench' : 'Show workbench',
+      hint: '⌘J',
+      run: () => { setWorkbenchDismissed(workbenchOpen); setWorkbenchOpen(o => !o); },
+    });
+  } else {
+    paletteCommands.push({ id: 'live', label: 'Back to live', run: () => handleSelectSession(null) });
+  }
+  paletteCommands.push(
+    { id: 'skills', label: 'Open Skills', run: () => handleOpenSkillPanel() },
+    { id: 'env', label: 'Open Environment variables', run: () => setEnvPanelOpen(true) },
+    { id: 'cron', label: 'Open Scheduled tasks', run: () => setCronPanelOpen(true) },
+    { id: 'mcp', label: 'Open MCP servers', run: () => setMcpPanelOpen(true) },
+    { id: 'memory', label: 'Open Memory files', run: () => setMarkdownPanelOpen(true) },
+  );
+  for (const s of paletteSessions) {
+    if (s.id === history.viewingSessionId) continue;
+    paletteCommands.push({
+      id: `sess-${s.id}`,
+      label: `Go to: ${s.title || 'Untitled'}`,
+      hint: `${s.turnCount} turns`,
+      run: () => handleSelectSession(s.id),
+    });
+  }
 
   return (
     <div style={{
@@ -146,6 +195,7 @@ export function App() {
         currentActivity={currentActivity}
         activeModel={configInfo?.activeModel ?? null}
         lastRunSuccess={!isViewingHistory ? (agent.activitySummary?.success ?? null) : null}
+        onOpenPalette={() => setPaletteOpen(true)}
       />
 
       {!agent.connected && (
@@ -349,6 +399,7 @@ export function App() {
               position: 'relative',
             }}>
               <ChatPanel
+                conversationKey={history.viewingSessionId ?? 'live'}
                 messages={displayMessages}
                 toolCalls={displayToolCalls}
                 thinkingBlocks={displayThinkingBlocks}
@@ -432,6 +483,7 @@ export function App() {
                 toolCalls={agent.toolCalls}
                 isRunning={agent.state === 'running'}
                 activitySummary={agent.activitySummary}
+                connected={agent.connected}
                 onClose={() => { setWorkbenchOpen(false); setWorkbenchDismissed(true); }}
               />
             )}
@@ -458,6 +510,12 @@ export function App() {
       {markdownPanelOpen && (
         <MarkdownPanel onClose={() => setMarkdownPanelOpen(false)} />
       )}
+
+      <CommandK
+        open={paletteOpen}
+        commands={paletteCommands}
+        onClose={() => setPaletteOpen(false)}
+      />
     </div>
   );
 }

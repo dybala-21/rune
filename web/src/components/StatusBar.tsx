@@ -20,6 +20,8 @@ interface StatusBarProps {
   } | null;
   /** Outcome of the last completed run; null when none this session. */
   lastRunSuccess?: boolean | null;
+  /** Opens the ⌘K command palette. */
+  onOpenPalette?: () => void;
 }
 
 const STATE_LABELS: Record<AgentState, string> = {
@@ -45,6 +47,7 @@ export function StatusBar({
   currentActivity,
   activeModel,
   lastRunSuccess = null,
+  onOpenPalette,
 }: StatusBarProps) {
   const [showTokens, setShowTokens] = useState(false);
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -249,6 +252,30 @@ export function StatusBar({
             </div>
           )}
         </div>
+      )}
+
+      {/* Command palette */}
+      {onOpenPalette && (
+        <button
+          onClick={onOpenPalette}
+          title="Command palette (⌘K)"
+          aria-label="Open command palette"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 5,
+            padding: '3px 8px',
+            background: 'transparent',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-sm)',
+            color: 'var(--text-muted)',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 11,
+            cursor: 'pointer',
+          }}
+        >
+          {'⌘K'}
+        </button>
       )}
 
       {/* Connection indicator */}

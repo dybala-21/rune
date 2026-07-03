@@ -22,6 +22,8 @@ import {
 } from '../shared/ui-copy.ts';
 
 interface ChatPanelProps {
+  /** Identity of the shown conversation ('live' or a session id); scroll re-anchors when it changes. */
+  conversationKey: string;
   messages: ChatMessage[];
   toolCalls: ToolCall[];
   thinkingBlocks: ThinkingBlock[];
@@ -44,6 +46,7 @@ interface ChatPanelProps {
 }
 
 export function ChatPanel({
+  conversationKey,
   messages,
   toolCalls,
   thinkingBlocks,
@@ -60,21 +63,39 @@ export function ChatPanel({
 }: ChatPanelProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  // Only auto-scroll when the user is already near the bottom, so scrolling up
+  // to read doesn't get yanked down by incoming content.
+  const atBottomRef = useRef(true);
 
   const [showScrollBtn, setShowScrollBtn] = useState(false);
 
   useEffect(() => {
+    if (!atBottomRef.current) return;
     const timer = requestAnimationFrame(() => {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     });
     return () => cancelAnimationFrame(timer);
   }, [messages, toolCalls, thinkingBlocks, delegateEvents, compactionEvents, pendingApproval, pendingQuestion]);
 
+  // On conversation switch, anchor scroll instead of inheriting the old position:
+  // live → latest turn, history replay → its start.
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const isLive = conversationKey === 'live';
+    atBottomRef.current = isLive;
+    const timer = requestAnimationFrame(() => {
+      container.scrollTop = isLive ? container.scrollHeight : 0;
+    });
+    return () => cancelAnimationFrame(timer);
+  }, [conversationKey]);
+
   useEffect(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
     const onScroll = () => {
       const fromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+      atBottomRef.current = fromBottom < 80;
       setShowScrollBtn(fromBottom > 200);
     };
     container.addEventListener('scroll', onScroll);
@@ -88,7 +109,8 @@ export function ChatPanel({
     | { type: 'delegate'; item: DelegateItem }
     | { type: 'compaction'; item: CompactionItem };
 
-  const timeline: TimelineItem[] = [
+  // Rebuilt only when a source list changes, not on every streaming re-render.
+  const timeline = useMemo<TimelineItem[]>(() => [
     ...messages
       .filter(m => m.content?.trim())
       .map(m => ({ type: 'message' as const, item: m, ts: m.timestamp })),
@@ -104,9 +126,9 @@ export function ChatPanel({
     ...compactionEvents
       .filter(c => c.message?.trim())
       .map(c => ({ type: 'compaction' as const, item: c, ts: c.timestamp })),
-  ].sort((a, b) => a.ts - b.ts);
+  ].sort((a, b) => a.ts - b.ts), [messages, toolCalls, thinkingBlocks, delegateEvents, compactionEvents]);
 
-  const grouped = groupConsecutiveTools(timeline);
+  const grouped = useMemo(() => groupConsecutiveTools(timeline), [timeline]);
 
   const latestToolId = useMemo(() => {
     if (!isRunning || toolCalls.length === 0) return null;
@@ -739,7 +761,10 @@ function InlineQuestionCard({
   onRespond: (answer: string, selectedIndex?: number) => void;
 }) {
   const [freeText, setFreeText] = useState('');
-  const isPending = toolCall.result === undefined;
+  // `answered` locks the card on the first action so a rapid second click
+  // can't fire a duplicate RPC before the parent's result arrives.
+  const [answered, setAnswered] = useState(false);
+  const isPending = toolCall.result === undefined && !answered;
 
   const questionText = pendingQuestion?.question
     || (toolCall.args.question as string)
@@ -753,12 +778,14 @@ function InlineQuestionCard({
 
   const handleOptionClick = (opt: { label: string; description?: string }, idx: number) => {
     if (isPending) {
+      setAnswered(true);
       onRespond(opt.label, idx);
     }
   };
 
   const handleFreeTextSubmit = () => {
-    if (freeText.trim()) {
+    if (isPending && freeText.trim()) {
+      setAnswered(true);
       onRespond(freeText.trim());
       setFreeText('');
     }
@@ -945,6 +972,7 @@ function InlineApprovalCard({
   const [showDenyInput, setShowDenyInput] = useState(false);
   const [guidance, setGuidance] = useState('');
   const [remaining, setRemaining] = useState(Math.ceil(approval.timeoutMs / 1000));
+  const [submitted, setSubmitted] = useState(false);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -958,6 +986,13 @@ function InlineApprovalCard({
 
   const riskColor = RISK_COLORS[approval.riskLevel] || 'var(--text-secondary)';
   const progressPct = Math.max(0, (remaining / (approval.timeoutMs / 1000)) * 100);
+  // Locked after a response or once the timeout fired, to block a duplicate RPC.
+  const locked = submitted || remaining <= 0;
+  const respond = (decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) => {
+    if (locked) return;
+    setSubmitted(true);
+    onRespond(decision, userGuidance);
+  };
 
   return (
     <div className="slide-up" style={{
@@ -1011,7 +1046,7 @@ function InlineApprovalCard({
           color: remaining <= 10 ? 'var(--danger)' : 'var(--text-muted)',
           fontFamily: 'var(--font-mono)',
         }}>
-          {remaining}s
+          {remaining <= 0 ? 'timed out' : `${remaining}s`}
         </span>
       </div>
 
@@ -1118,7 +1153,8 @@ function InlineApprovalCard({
             />
             <div style={{ display: 'flex', gap: 8 }}>
               <button
-                onClick={() => onRespond('deny', guidance || undefined)}
+                onClick={() => respond('deny', guidance || undefined)}
+                disabled={locked}
                 style={{
                   padding: '9px 18px',
                   background: 'var(--danger)',
@@ -1126,6 +1162,8 @@ function InlineApprovalCard({
                   border: 'none',
                   borderRadius: 'var(--radius-md)',
                   fontWeight: 600,
+                  opacity: locked ? 0.5 : 1,
+                  cursor: locked ? 'default' : 'pointer',
                 }}
               >
                 {APPROVAL_COPY.denyWithInstructionsLabel}
@@ -1135,7 +1173,8 @@ function InlineApprovalCard({
         ) : (
           <div style={{ display: 'flex', gap: 8 }}>
             <button
-              onClick={() => onRespond('approve_once')}
+              onClick={() => respond('approve_once')}
+              disabled={locked}
               style={{
                 flex: 1,
                 padding: '9px 16px',
@@ -1145,12 +1184,15 @@ function InlineApprovalCard({
                 borderRadius: 'var(--radius-md)',
                 fontWeight: 600,
                 fontSize: 13,
+                opacity: locked ? 0.5 : 1,
+                cursor: locked ? 'default' : 'pointer',
               }}
             >
               {APPROVAL_COPY.allowOnceLabel}
             </button>
             <button
-              onClick={() => onRespond('approve_always')}
+              onClick={() => respond('approve_always')}
+              disabled={locked}
               style={{
                 flex: 1,
                 padding: '9px 16px',
@@ -1160,12 +1202,15 @@ function InlineApprovalCard({
                 fontWeight: 600,
                 border: '1px solid var(--success)',
                 fontSize: 13,
+                opacity: locked ? 0.5 : 1,
+                cursor: locked ? 'default' : 'pointer',
               }}
             >
               {APPROVAL_COPY.alwaysAllowLabel}
             </button>
             <button
-              onClick={() => setShowDenyInput(true)}
+              onClick={() => { if (!locked) setShowDenyInput(true); }}
+              disabled={locked}
               style={{
                 flex: 1,
                 padding: '9px 16px',
@@ -1175,6 +1220,8 @@ function InlineApprovalCard({
                 fontWeight: 600,
                 border: '1px solid var(--danger)',
                 fontSize: 13,
+                opacity: locked ? 0.5 : 1,
+                cursor: locked ? 'default' : 'pointer',
               }}
             >
               {APPROVAL_COPY.denyLabel}

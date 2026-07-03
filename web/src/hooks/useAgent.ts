@@ -246,12 +246,20 @@ export function useAgent() {
     });
   }, []);
 
+  // Read draft state via refs so beginLiveSession stays a stable dep of the SSE
+  // effect — otherwise its identity churns and the effect re-subscribes mid-run,
+  // dropping events.
+  const draftDecisionPendingRef = useRef(draftDecisionPending);
+  const savedDraftAvailableRef = useRef(savedDraft.available);
+  useEffect(() => { draftDecisionPendingRef.current = draftDecisionPending; }, [draftDecisionPending]);
+  useEffect(() => { savedDraftAvailableRef.current = savedDraft.available; }, [savedDraft.available]);
+
   const beginLiveSession = useCallback(() => {
-    if (!draftDecisionPending && !savedDraft.available) return;
+    if (!draftDecisionPendingRef.current && !savedDraftAvailableRef.current) return;
     savedDraftStateRef.current = null;
     setSavedDraft(EMPTY_SAVED_DRAFT);
     setDraftDecisionPending(false);
-  }, [draftDecisionPending, savedDraft.available]);
+  }, []);
 
   const restoreSavedDraft = useCallback(() => {
     const draft = savedDraftStateRef.current;
@@ -398,6 +406,7 @@ export function useAgent() {
           role: 'system',
           content: `Error: ${data.error}`,
           timestamp: Date.now(),
+          level: 'error',
         }, MAX_MESSAGES);
       });
     }));
@@ -454,12 +463,11 @@ export function useAgent() {
       const data = raw as ToolResultData;
       const now = Date.now();
       setToolCalls(prev => {
-        // Find the last matching tool call without a result
-        const idx = [...prev].reverse().findIndex(
+        // FIFO: results arrive in call order, so pair with the oldest unresolved call.
+        const actualIdx = prev.findIndex(
           tc => tc.toolName === data.toolName && tc.result === undefined
         );
-        if (idx === -1) return prev;
-        const actualIdx = prev.length - 1 - idx;
+        if (actualIdx === -1) return prev;
         const original = prev[actualIdx];
         const updated = [...prev];
         updated[actualIdx] = {
@@ -546,6 +554,7 @@ export function useAgent() {
         role: 'system',
         content: `Failed to send: ${err instanceof Error ? err.message : String(err)}`,
         timestamp: Date.now(),
+        level: 'error',
       }, MAX_MESSAGES));
     });
   }, [beginLiveSession]);
@@ -557,12 +566,13 @@ export function useAgent() {
       role: 'system',
       content: `${prefix}: ${message}`,
       timestamp: Date.now(),
+      level: 'error',
     }, MAX_MESSAGES));
   }, []);
 
   const abort = useCallback(() => {
-    api.sendAbort().catch(() => {});
-  }, []);
+    api.sendAbort().catch(err => pushSystemError('Failed to stop the run', err));
+  }, [pushSystemError]);
 
   const respondApproval = useCallback((decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) => {
     if (!pendingApproval) return;

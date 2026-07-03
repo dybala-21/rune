@@ -219,6 +219,15 @@ textarea {
   outline-offset: -2px;
 }
 
+/* Keyboard focus for the rest. Inputs/textarea keep their own focus treatment. */
+button:focus-visible,
+a:focus-visible,
+[tabindex="0"]:not([role="button"]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
 /* ── Animations ── */
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(6px); }
@@ -395,4 +404,39 @@ textarea {
 ::selection {
   background: rgba(110, 169, 196, 0.28);
   color: var(--text-primary);
+}
+
+/* Hover-revealed message actions (copy). Also shown on keyboard focus. */
+.msg-actions {
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+.msg-hover:hover .msg-actions,
+.msg-actions:focus-within {
+  opacity: 1;
+}
+
+/* Skeleton placeholder for load states. */
+.skeleton {
+  background: linear-gradient(90deg, var(--bg-secondary) 25%, var(--bg-hover) 37%, var(--bg-secondary) 63%);
+  background-size: 400px 100%;
+  animation: skeletonShimmer 1.4s ease-in-out infinite;
+  border-radius: var(--radius-sm);
+}
+@keyframes skeletonShimmer {
+  0% { background-position: -200px 0; }
+  100% { background-position: 200px 0; }
+}
+
+/* ── Reduced motion ── */
+/* Honors OS "reduce motion": state still changes, it just doesn't animate. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }

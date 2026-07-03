@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { fetchSessionEvents, type EventLogEntry } from '../api';
 import { computeActivitySummary } from '../utils/tooling';
 import type {
@@ -83,11 +83,11 @@ function hydrateEvents(events: EventLogEntry[]): SessionHistoryState {
       case 'tool_result': {
         const toolName = String(data.toolName ?? '');
         const now = ts;
-        const idx = [...toolCalls].reverse().findIndex(
+        // FIFO: pair a result with the oldest unresolved call of the same name.
+        const actualIdx = toolCalls.findIndex(
           tc => tc.toolName === toolName && tc.result === undefined,
         );
-        if (idx !== -1) {
-          const actualIdx = toolCalls.length - 1 - idx;
+        if (actualIdx !== -1) {
           toolCalls[actualIdx] = {
             ...toolCalls[actualIdx],
             result: String(data.result ?? ''),
@@ -135,6 +135,7 @@ function hydrateEvents(events: EventLogEntry[]): SessionHistoryState {
           role: 'system',
           content: `Error: ${data.error ?? 'Unknown error'}`,
           timestamp: ts,
+          level: 'error',
         });
         break;
       }
@@ -191,8 +192,11 @@ export function useSessionHistory() {
   const [historyState, setHistoryState] = useState<SessionHistoryState | null>(null);
   const [viewingSessionId, setViewingSessionId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // Guards against a slow load for session A overwriting a later-selected B.
+  const reqRef = useRef(0);
 
   const loadSession = useCallback(async (sessionId: string | null) => {
+    const reqId = ++reqRef.current;
     if (!sessionId) {
       setViewingSessionId(null);
       setHistoryState(null);
@@ -203,11 +207,13 @@ export function useSessionHistory() {
     setViewingSessionId(sessionId);
     try {
       const result = await fetchSessionEvents(sessionId);
+      if (reqId !== reqRef.current) return; // superseded by a newer selection
       const state = hydrateEvents(result.events);
       setHistoryState(state);
     } catch {
+      if (reqId !== reqRef.current) return;
       setHistoryState({
-        messages: [{ id: 'err', role: 'system', content: 'Failed to load session history.', timestamp: Date.now() }],
+        messages: [{ id: 'err', role: 'system', content: 'Failed to load session history.', timestamp: Date.now(), level: 'error' }],
         toolCalls: [],
         thinkingBlocks: [],
         activitySummary: null,
@@ -215,7 +221,7 @@ export function useSessionHistory() {
         compactionEvents: [],
       });
     } finally {
-      setLoading(false);
+      if (reqId === reqRef.current) setLoading(false);
     }
   }, []);
 

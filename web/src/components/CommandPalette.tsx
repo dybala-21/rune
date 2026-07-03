@@ -39,6 +39,7 @@ export function CommandPalette({ filter, onSelect, onClose }: Props) {
   const [subMenu, setSubMenu] = useState<'none' | 'provider' | 'model'>('none');
   const [providers, setProviders] = useState<Record<string, string[]>>({});
   const [selectedProvider, setSelectedProvider] = useState('');
+  const [error, setError] = useState('');
   const listRef = useRef<HTMLDivElement>(null);
 
   // Load commands
@@ -73,13 +74,15 @@ export function CommandPalette({ filter, onSelect, onClose }: Props) {
       const cmd = filtered[idx];
       if (!cmd) return;
       if (cmd.name === '/model') {
-        // Open provider submenu
+        setError('');
         rpc('models.list').then(data => {
           if (data && typeof data === 'object') {
             setProviders(data as Record<string, string[]>);
             setSubMenu('provider');
+          } else {
+            setError('Could not load model list.');
           }
-        });
+        }).catch(() => setError('Could not load model list.'));
         return;
       }
       onSelect(cmd.name);
@@ -88,10 +91,10 @@ export function CommandPalette({ filter, onSelect, onClose }: Props) {
       setSubMenu('model');
     } else if (subMenu === 'model') {
       const model = modelList[idx];
-      // Apply model change via config.patch
-      rpc('config.patch', { activeModel: { provider: selectedProvider, model } });
-      onSelect('');  // close palette, don't insert text
-      onClose();
+      setError('');
+      rpc('config.patch', { activeModel: { provider: selectedProvider, model } })
+        .then(() => { onSelect(''); onClose(); })
+        .catch(() => setError('Could not switch model.'));
     }
   }, [subMenu, filtered, providerList, modelList, selectedProvider, onSelect, onClose]);
 
@@ -124,6 +127,8 @@ export function CommandPalette({ filter, onSelect, onClose }: Props) {
 
   return (
     <div
+      role="listbox"
+      aria-label="Commands"
       style={{
         position: 'absolute', bottom: '100%', left: 0, right: 0,
         maxHeight: '280px', overflowY: 'auto',
@@ -137,9 +142,17 @@ export function CommandPalette({ filter, onSelect, onClose }: Props) {
           {title}
         </div>
       )}
+      {error && (
+        <div style={{ padding: '6px 12px', color: 'var(--danger, #d66)', fontSize: '12px', borderBottom: '1px solid var(--border, #333)' }}>
+          {error}
+        </div>
+      )}
       {subMenu === 'none' && filtered.map((cmd, i) => (
         <div
           key={cmd.name}
+          role="option"
+          aria-selected={i === selectedIdx}
+          onMouseEnter={() => setSelectedIdx(i)}
           onClick={() => handleSelect(i)}
           style={{ ...ITEM_STYLE, background: i === selectedIdx ? '#2a2a4a' : 'transparent' }}
         >
@@ -150,6 +163,9 @@ export function CommandPalette({ filter, onSelect, onClose }: Props) {
       {subMenu === 'provider' && providerList.map((prov, i) => (
         <div
           key={prov}
+          role="option"
+          aria-selected={i === selectedIdx}
+          onMouseEnter={() => setSelectedIdx(i)}
           onClick={() => handleSelect(i)}
           style={{ ...ITEM_STYLE, background: i === selectedIdx ? '#2a2a4a' : 'transparent' }}
         >
@@ -160,6 +176,9 @@ export function CommandPalette({ filter, onSelect, onClose }: Props) {
       {subMenu === 'model' && modelList.map((model, i) => (
         <div
           key={model}
+          role="option"
+          aria-selected={i === selectedIdx}
+          onMouseEnter={() => setSelectedIdx(i)}
           onClick={() => handleSelect(i)}
           style={{ ...ITEM_STYLE, background: i === selectedIdx ? '#2a2a4a' : 'transparent' }}
         >

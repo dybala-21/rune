@@ -8,6 +8,7 @@ import {
   type SkillInfo,
   type SkillDetail,
 } from '../api';
+import { useFocusTrap } from '../hooks/useFocusTrap';
 
 interface SkillsPanelProps {
   onClose: () => void;
@@ -53,7 +54,9 @@ export function SkillsPanel({ onClose, initialSkillName }: SkillsPanelProps) {
 
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
 
-  const panelRef = useRef<HTMLDivElement>(null);
+  const panelRef = useFocusTrap<HTMLDivElement>();
+  // Guards against a slow fetch for skill A overwriting a later-clicked B.
+  const selectReqRef = useRef(0);
 
   const loadSkills = useCallback(async () => {
     setLoading(true);
@@ -71,13 +74,26 @@ export function SkillsPanel({ onClose, initialSkillName }: SkillsPanelProps) {
   }, []);
 
   useEffect(() => {
-    loadSkills().then(() => {
-      if (initialSkillName) {
-        handleSelectSkill(initialSkillName);
-      }
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    void loadSkills();
   }, [loadSkills]);
+
+  const handleSelectSkill = useCallback(async (name: string) => {
+    const reqId = ++selectReqRef.current;
+    try {
+      const detail = await fetchSkill(name);
+      if (reqId !== selectReqRef.current) return; // superseded by a newer click
+      setSelectedSkill(detail);
+      setViewMode('view');
+    } catch (err) {
+      if (reqId !== selectReqRef.current) return;
+      setError(err instanceof Error ? err.message : 'Failed to load skill');
+    }
+  }, []);
+
+  // Re-select when the target changes, even if the panel is already open.
+  useEffect(() => {
+    if (initialSkillName) void handleSelectSkill(initialSkillName);
+  }, [initialSkillName, handleSelectSkill]);
 
   // Escape key to close
   useEffect(() => {
@@ -93,16 +109,6 @@ export function SkillsPanel({ onClose, initialSkillName }: SkillsPanelProps) {
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
   }, [onClose, viewMode, selectedSkill]);
-
-  const handleSelectSkill = async (name: string) => {
-    try {
-      const detail = await fetchSkill(name);
-      setSelectedSkill(detail);
-      setViewMode('view');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load skill');
-    }
-  };
 
   const handleStartEdit = () => {
     if (!selectedSkill) return;
@@ -203,6 +209,9 @@ export function SkillsPanel({ onClose, initialSkillName }: SkillsPanelProps) {
     >
       <div
         ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Skills"
         className="fade-scale"
         style={{
           width: '90vw',
@@ -253,6 +262,7 @@ export function SkillsPanel({ onClose, initialSkillName }: SkillsPanelProps) {
           </button>
           <button
             onClick={onClose}
+            aria-label="Close"
             style={{
               background: 'none',
               border: 'none',

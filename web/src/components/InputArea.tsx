@@ -6,6 +6,8 @@ const SUPPORTED_MIMES = new Set([
   'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'application/pdf',
 ]);
 
+const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024; // 20MB
+
 interface InputAreaProps {
   onSend: (text: string, attachments?: PendingAttachment[]) => void;
   onAbort: () => void;
@@ -20,6 +22,11 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
   const [isDragOver, setIsDragOver] = useState(false);
   const [showCommands, setShowCommands] = useState(false);
   const [cmdFilter, setCmdFilter] = useState('');
+  // Feedback for files that couldn't be attached (wrong type / too big / unreadable).
+  const [attachNotice, setAttachNotice] = useState('');
+  // Sent messages for ↑/↓ recall; histIdx -1 = live draft.
+  const historyRef = useRef<string[]>([]);
+  const histIdxRef = useRef(-1);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -28,21 +35,24 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
     }
   }, [isRunning]);
 
-  // ⌘K / Ctrl+K: focus the composer.
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-        e.preventDefault();
-        textareaRef.current?.focus();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, []);
+    if (!attachNotice) return;
+    const t = setTimeout(() => setAttachNotice(''), 5000);
+    return () => clearTimeout(t);
+  }, [attachNotice]);
+
 
   const processFiles = useCallback((files: FileList | File[]) => {
+    const rejected: string[] = [];
     for (const file of Array.from(files)) {
-      if (!SUPPORTED_MIMES.has(file.type)) continue;
+      if (!SUPPORTED_MIMES.has(file.type)) {
+        rejected.push(`${file.name}: unsupported type`);
+        continue;
+      }
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        rejected.push(`${file.name}: over 20MB`);
+        continue;
+      }
       const reader = new FileReader();
       reader.onload = () => {
         const isImage = file.type.startsWith('image/');
@@ -55,8 +65,10 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
           preview: isImage ? URL.createObjectURL(file) : undefined,
         }]);
       };
+      reader.onerror = () => setAttachNotice(`Could not read ${file.name}`);
       reader.readAsDataURL(file);
     }
+    setAttachNotice(rejected.join(' · '));
   }, []);
 
   const removeAttachment = useCallback((id: string) => {
@@ -67,13 +79,27 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
     });
   }, []);
 
+  const setValue = (v: string) => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.value = v;
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 160) + 'px';
+    el.selectionStart = el.selectionEnd = v.length;
+  };
+
   const handleSubmit = () => {
     const text = textareaRef.current?.value.trim() ?? '';
     if (!text && attachments.length === 0) return;
+    if (text && historyRef.current[historyRef.current.length - 1] !== text) {
+      historyRef.current.push(text);
+    }
+    histIdxRef.current = -1;
     onSend(text, attachments.length > 0 ? attachments : undefined);
     // Revoke all object URLs
     attachments.forEach(a => { if (a.preview) URL.revokeObjectURL(a.preview); });
     setAttachments([]);
+    setAttachNotice('');
     if (textareaRef.current) {
       textareaRef.current.value = '';
       textareaRef.current.style.height = 'auto';
@@ -90,6 +116,31 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
       if (e.key === 'Escape') {
         e.preventDefault();
         setShowCommands(false);
+        return;
+      }
+    }
+    // ↑/↓ recall only when the caret is at the very start, so multi-line editing keeps the arrows.
+    const el = textareaRef.current;
+    const hist = historyRef.current;
+    if (el && hist.length > 0 && !isRunning && el.selectionStart === 0 && el.selectionEnd === 0) {
+      if (e.key === 'ArrowUp') {
+        const next = histIdxRef.current === -1 ? hist.length - 1 : Math.max(0, histIdxRef.current - 1);
+        histIdxRef.current = next;
+        e.preventDefault();
+        setValue(hist[next]);
+        el.selectionStart = el.selectionEnd = 0; // keep caret at start so ↑ keeps cycling
+        return;
+      }
+      if (e.key === 'ArrowDown' && histIdxRef.current !== -1) {
+        e.preventDefault();
+        if (histIdxRef.current >= hist.length - 1) {
+          histIdxRef.current = -1;
+          setValue('');
+        } else {
+          histIdxRef.current += 1;
+          setValue(hist[histIdxRef.current]);
+          el.selectionStart = el.selectionEnd = 0;
+        }
         return;
       }
     }
@@ -184,6 +235,18 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
         overflow: showCommands ? 'visible' : 'hidden',
         position: 'relative',
       }}>
+        {/* Rejected-file feedback */}
+        {attachNotice && (
+          <div style={{
+            padding: '8px 16px 0',
+            fontSize: 12,
+            color: 'var(--danger)',
+            wordBreak: 'break-word',
+          }}>
+            {attachNotice}
+          </div>
+        )}
+
         {/* Attachment previews */}
         {attachments.length > 0 && (
           <div style={{
@@ -378,7 +441,7 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
               ? ''
               : isDragOver
                 ? 'Drop to attach'
-                : 'Enter to send \u00B7 Shift+Enter for newline \u00B7 Drop or paste files'}
+                : 'Enter to send \u00B7 Shift+Enter for newline \u00B7 \u2191 recall'}
         </div>
       </div>
     </div>

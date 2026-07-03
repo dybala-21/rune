@@ -5,6 +5,7 @@ import {
   unsetEnvVar,
   type EnvVarInfo,
 } from '../api';
+import { useFocusTrap } from '../hooks/useFocusTrap';
 
 interface EnvPanelProps {
   onClose: () => void;
@@ -33,6 +34,7 @@ const SCOPE_COLORS: Record<string, string> = {
 };
 
 export function EnvPanel({ onClose }: EnvPanelProps) {
+  const trapRef = useFocusTrap<HTMLDivElement>();
   const [variables, setVariables] = useState<EnvVarInfo[]>([]);
   const [paths, setPaths] = useState<{ user: string; project: string }>({ user: '', project: '' });
   const [loading, setLoading] = useState(true);
@@ -51,15 +53,17 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
 
   const [deleteConfirm, setDeleteConfirm] = useState<EnvVarInfo | null>(null);
 
-  const loadVars = useCallback(async () => {
+  const loadVars = useCallback(async (): Promise<EnvVarInfo[] | null> => {
     setLoading(true);
     setError(null);
     try {
       const result = await fetchEnvVars();
       setVariables(result.variables);
       if (result.paths) setPaths(result.paths);
+      return result.variables;
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load env vars');
+      return null;
     } finally {
       setLoading(false);
     }
@@ -109,8 +113,8 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
       const key = formKey.trim().toUpperCase();
       await setEnvVar(key, formValue, formScope);
       setHasChanges(true);
-      await loadVars();
-      const updated = (await fetchEnvVars()).variables.find((v) => v.key === key);
+      const updatedList = await loadVars();
+      const updated = updatedList?.find((v) => v.key === key);
       if (updated) {
         setSelected(updated);
         setViewMode('view');
@@ -174,6 +178,10 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
       <div
+        ref={trapRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Environment variables"
         className="fade-scale"
         style={{
           width: '90vw',
@@ -222,6 +230,7 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
           </button>
           <button
             onClick={onClose}
+            aria-label="Close"
             style={{
               background: 'none',
               border: 'none',
