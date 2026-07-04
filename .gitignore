@@ -66,3 +66,4 @@ node_modules/
 # Runtime artifacts / build caches
 checkpoints/
 *.tsbuildinfo
+desktop/release/

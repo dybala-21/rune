@@ -312,6 +312,26 @@ export function App() {
                 {history.loading && ' ...'}
               </span>
               <button
+                onClick={() => {
+                  // /load pins the live chat to this conversation, then we
+                  // leave history view.
+                  const id = history.viewingSessionId;
+                  if (id) agent.sendMessage(`/load ${id}`);
+                  handleSelectSession(null);
+                }}
+                style={{
+                  padding: '5px 14px',
+                  background: 'var(--bg-tertiary)',
+                  color: 'var(--text-primary)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-md)',
+                  fontSize: 12,
+                  fontWeight: 600,
+                }}
+              >
+                Continue this chat
+              </button>
+              <button
                 onClick={() => handleSelectSession(null)}
                 style={{
                   padding: '5px 14px',

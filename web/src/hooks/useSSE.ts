@@ -58,6 +58,7 @@ export function useSSE(): SseConnection {
         'agent_start', 'agent_complete', 'agent_error', 'agent_aborted',
         'step_start', 'thinking', 'tool_call', 'tool_result', 'text_delta',
         'approval_request', 'question', 'context_compaction', 'delegate_event',
+        'command_result', 'goal_iteration',
       ];
 
       for (const eventType of eventTypes) {

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from rune.config.schema import GoalLoopConfig, RuneConfig
-from rune.ui.commands import _ALIAS_MAP, COMMANDS, _goal_handler
+from rune.slash_commands import _ALIAS_MAP, COMMANDS, _goal_handler
 
 
 async def test_goal_handler_usage_when_empty() -> None:
