@@ -60,39 +60,9 @@ _PT_STYLE = PTStyle.from_dict({
 
 # Tab completer: slash commands + @file references
 
-def _build_known_models() -> list[tuple[str, str]]:
-    """Build model list from the central registry (models.py)."""
-    from rune.llm.models import (
-        ANTHROPIC_MODELS,
-        AZURE_MODELS,
-        COHERE_MODELS,
-        DEEPSEEK_MODELS,
-        FALLBACK_OPENAI_MODELS,
-        GEMINI_MODELS,
-        MISTRAL_MODELS,
-        XAI_MODELS,
-    )
-    result: list[tuple[str, str]] = []
-    for m in FALLBACK_OPENAI_MODELS:
-        result.append((m.provider, m.id))
-    for m in ANTHROPIC_MODELS:
-        result.append((m.provider, m.id))
-    for m in GEMINI_MODELS:
-        result.append((m.provider, m.id))
-    for m in XAI_MODELS:
-        result.append((m.provider, m.id))
-    for m in AZURE_MODELS:
-        result.append((m.provider, m.id))
-    for m in MISTRAL_MODELS:
-        result.append((m.provider, m.id))
-    for m in DEEPSEEK_MODELS:
-        result.append((m.provider, m.id))
-    for m in COHERE_MODELS:
-        result.append((m.provider, m.id))
-    return result
+from rune.llm.models import known_models as _known_models
 
-
-_KNOWN_MODELS: list[tuple[str, str]] = _build_known_models()
+_KNOWN_MODELS: list[tuple[str, str]] = _known_models()
 
 _KNOWN_THEMES = ["dark", "light", "minimal"]
 
@@ -1873,20 +1843,26 @@ class RuneApp:
                 self.console.print(f"\n[bold]Project Memory:[/bold]\n\n{content}\n")
             else:
                 self.console.print("[dim]No project memory found.[/dim]")
-        elif sub == "add":
+        elif sub == "add" or sub.startswith("add:"):
             try:
-                text = await self._session.prompt_async(
-                    [("class:prompt", "memory> ")],
-                    multiline=True,
-                )
+                # Inline text ("add:<text>", from /memory add <text>); bare
+                # "add" prompts interactively.
+                text = sub[4:] if sub.startswith("add:") else ""
+                if not text:
+                    text = await self._session.prompt_async(
+                        [("class:prompt", "memory> ")],
+                        multiline=True,
+                    )
                 text = text.strip()
                 if not text:
                     self.console.print("[dim]Cancelled.[/dim]")
                     return
                 mem_file = find_project_memory_file(workspace)
                 if mem_file is None:
-                    mem_file = workspace / ".rune" / "memory.md"
-                    mem_file.parent.mkdir(parents=True, exist_ok=True)
+                    # Canonical name — /memory show (read_project_memory_head)
+                    # only finds MEMORY.md, so a .rune/memory.md fallback would
+                    # be write-only and never show up.
+                    mem_file = workspace / "MEMORY.md"
                 existing = mem_file.read_text(encoding="utf-8") if mem_file.exists() else ""
                 mem_file.write_text(
                     existing.rstrip() + "\n\n" + text + "\n" if existing.strip() else text + "\n",

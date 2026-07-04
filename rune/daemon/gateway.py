@@ -1016,13 +1016,20 @@ class ChannelGateway:
                 with contextlib.suppress(Exception):
                     assistant_answer = resolve_assistant_answer(
                         getattr(loop, "_last_answer_text", ""), response)
-                    if assistant_answer:
-                        conv_manager.add_turn(
-                            conv_id, "assistant", assistant_answer,
-                            goal_type=getattr(loop, "_last_goal_type", ""),
+                    if not assistant_answer:
+                        # Record a placeholder rather than leaving a dangling
+                        # user turn — an unanswered question in history makes
+                        # the next turn re-run it.
+                        assistant_answer = (
+                            "(the run ended without a textual answer: "
+                            f"{trace.reason or 'unknown'})"
                         )
-                        await conv_manager._store.save(
-                            conv_manager._active[conv_id])
+                    conv_manager.add_turn(
+                        conv_id, "assistant", assistant_answer,
+                        goal_type=getattr(loop, "_last_goal_type", ""),
+                    )
+                    await conv_manager._store.save(
+                        conv_manager._active[conv_id])
 
             # 6. Post-process (memory persistence)
             try:

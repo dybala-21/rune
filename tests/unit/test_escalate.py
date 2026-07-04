@@ -12,8 +12,8 @@ from rich.console import Console
 
 from rune.config import get_config
 from rune.config.schema import LLMConfig
+from rune.slash_commands import _ALIAS_MAP, COMMANDS, _escalate_handler
 from rune.ui.app import RuneApp
-from rune.ui.commands import _ALIAS_MAP, COMMANDS, _escalate_handler
 
 # Command wiring
 

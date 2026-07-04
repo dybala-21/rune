@@ -246,8 +246,8 @@ def create_app() -> Any:
     class MessageRequest(BaseModel):
         text: str = ""
         attachments: list[MessageAttachment] | None = None
-        # Optional conversation pin (camelCase on the wire). Omitted by the
-        # web UI → server-side sticky conversation keeps live-chat continuity.
+        # Conversation pin; without it the server-side sticky conversation
+        # keeps live-chat continuity.
         session_id: str | None = Field(default=None, alias="sessionId")
 
         model_config = ConfigDict(populate_by_name=True)
@@ -287,6 +287,7 @@ def create_app() -> Any:
         attachments: list[dict[str, Any]] | None = None,
         session_id: str | None = None,
         sticky: bool = False,
+        agent_config: Any = None,
     ) -> str:
         """Run the agent loop, broadcasting events to SSE/WS clients.
 
@@ -306,10 +307,9 @@ def create_app() -> Any:
             turns are recorded under it and prior turns are passed to the
             loop as message history.
         sticky:
-            When True and no session_id is given, fall back to the
-            server-side sticky web conversation (browser live chat). Must
-            stay False for headless execute callers so scripts don't
-            pollute the human's chat.
+            Fall back to the server-side sticky web conversation when no
+            session_id is given (browser live chat). Keep False for headless
+            callers.
         """
         try:
             from rune.agent.agent_context import (
@@ -321,7 +321,7 @@ def create_app() -> Any:
             from rune.agent.loop import NativeAgentLoop
             from rune.api import conversation_wiring as conv_wiring
 
-            # 0. Resolve multi-turn conversation and record the user turn
+            # 0. Resolve the conversation and record the user turn
             conv_manager = conv_wiring.get_conv_manager()
             conv_id: str | None = None
             if conv_manager is not None:
@@ -346,7 +346,7 @@ def create_app() -> Any:
                 conversation_manager=conv_manager,
             )
 
-            loop = NativeAgentLoop()
+            loop = NativeAgentLoop(config=agent_config) if agent_config else NativeAgentLoop()
             _active_loops[run_id] = loop
 
             # 2. Wire approval callback (SSE/WS ↔ future)
@@ -408,10 +408,8 @@ def create_app() -> Any:
             # -- wire event callbacks ------------------------------------
 
             _run_start_time = time.monotonic()
-            # Index of the current step's first delta in `collected` — history
-            # records only the last step's text so intermediate commentary
-            # ("검색하겠습니다…") doesn't get replayed as the answer (same
-            # trick as the gateway path).
+            # History records only the last step's text so intermediate
+            # commentary doesn't get replayed as the answer.
             _step_text_start = [0]
 
             async def _on_step(step: int) -> None:
@@ -523,11 +521,12 @@ def create_app() -> Any:
             answer = "".join(collected)
             duration_ms = int((time.monotonic() - _run_start_time) * 1000)
 
-            # 4b. Record the assistant turn so the next message has context.
+            # 4b. Record the assistant turn for the next message's context.
             if conv_manager is not None and conv_id:
                 last_step_text = "".join(collected[_step_text_start[0]:]) or answer
                 await conv_wiring.record_assistant_turn(
                     conv_manager, conv_id, loop, last_step_text,
+                    reason=trace.reason or "",
                 )
 
             # 5. Post-process (memory persistence)
@@ -569,11 +568,10 @@ def create_app() -> Any:
         """NDJSON streaming generator for agent execution.
 
         ``session_id`` pins a conversation for multi-turn continuity (explicit
-        only — headless streaming callers never fall back to the sticky web
-        chat). The assistant turn is recorded in ``finally`` because a client
-        disconnect raises GeneratorExit at a ``yield``: code after the drain
-        loop is not guaranteed to run, and a recorded user turn without its
-        assistant turn would pollute the next turn's history.
+        only — streaming callers never fall back to the sticky web chat). The
+        assistant turn is recorded in ``finally``: a client disconnect raises
+        GeneratorExit at a ``yield``, so code after the drain loop may never
+        run, which would leave a dangling user turn in the history.
         """
         conv_manager: Any | None = None
         conv_id: str | None = None
@@ -590,7 +588,7 @@ def create_app() -> Any:
             from rune.agent.loop import NativeAgentLoop
             from rune.api import conversation_wiring as conv_wiring
 
-            # 0. Resolve multi-turn conversation and record the user turn
+            # 0. Resolve the conversation and record the user turn
             conv_manager = conv_wiring.get_conv_manager()
             if conv_manager is not None:
                 try:
@@ -784,10 +782,7 @@ def create_app() -> Any:
             )
         finally:
             _active_loops.pop(run_id, None)
-            # Record the assistant turn here (awaits are fine during aclose();
-            # yields are not): on client disconnect GeneratorExit fires at a
-            # yield and the code after the drain loop never runs, which would
-            # leave a dangling user turn in the conversation history.
+            # Awaits are fine during aclose(); yields are not.
             if conv_manager is not None and conv_id and loop is not None:
                 last_step_text = (
                     "".join(collected[_step_text_start[0]:]) or "".join(collected)
@@ -796,7 +791,30 @@ def create_app() -> Any:
 
                 await conv_wiring.record_assistant_turn(
                     conv_manager, conv_id, loop, last_step_text,
+                    reason="stream interrupted",
                 )
+
+    def _make_action_run_agent(session_id: str | None) -> Any:
+        """Closure for slash-command actions (e.g. /escalate) that need to run
+        a full agent turn on the live conversation with an optional per-run
+        model override — without mutating global config."""
+
+        async def _run(goal: str, agent_config: Any = None) -> str:
+            run_id = uuid4().hex[:16]
+            task = asyncio.create_task(
+                _run_agent_for_client(
+                    goal=goal, run_id=run_id, client_id=None,
+                    session_id=session_id, sticky=True,
+                    agent_config=agent_config,
+                )
+            )
+            _active_tasks[run_id] = task
+            task.add_done_callback(
+                lambda _t, _rid=run_id: _active_tasks.pop(_rid, None)
+            )
+            return await task
+
+        return _run
 
     # Health (no auth)
 
@@ -1011,8 +1029,8 @@ def create_app() -> Any:
             )
 
         # Non-streaming: run and broadcast events via SSE/WS. Multi-turn only
-        # with an explicit session_id — headless callers must not fall back to
-        # the human's sticky web chat (sticky stays False).
+        # with an explicit session_id; headless callers never touch the
+        # sticky web chat.
         task = asyncio.create_task(
             _run_agent_for_client(
                 goal=req.goal, run_id=run_id, client_id=None,
@@ -1036,23 +1054,47 @@ def create_app() -> Any:
 
     @app.post("/api/message", dependencies=[Depends(auth)])
     async def api_message(req: MessageRequest) -> dict[str, Any]:
-        # Intercept slash commands — execute without agent
+        # Slash commands run without a chat turn; __ACTION__ markers execute
+        # server-side and the result goes out as a command_result SSE event.
         if req.text.startswith("/"):
-            from rune.ui.commands import COMMANDS, parse_slash_command
+            from rune.api import command_actions
+            from rune.slash_commands import COMMANDS, parse_slash_command
             parsed = parse_slash_command(req.text)
             if parsed:
                 cmd_name, args = parsed
                 cmd = COMMANDS.get(cmd_name)
                 if cmd:
                     try:
-                        result = await cmd.handler(args)
-                        # __ACTION__ results are TUI-specific; return as info
-                        output = result or f"{cmd_name} executed."
-                        if isinstance(output, str) and output.startswith("__ACTION__:"):
-                            output = f"{cmd_name}: {output.replace('__ACTION__:', '')}"
+                        output = await command_actions.handle_direct_command(
+                            cmd_name, args,
+                        )
+                        if output is None:
+                            result = await cmd.handler(args)
+                            output = result or f"{cmd_name} executed."
+                            if isinstance(output, str) and output.startswith(
+                                "__ACTION__:"
+                            ):
+                                action = output[len("__ACTION__:"):]
+                                ctx = command_actions.ActionContext(
+                                    broadcast=_broadcast,
+                                    workspace=Path.cwd(),
+                                    session_id=req.session_id,
+                                    run_agent=_make_action_run_agent(
+                                        req.session_id
+                                    ),
+                                    active_run_count=lambda: len(_active_loops),
+                                    started_at=_start_time,
+                                )
+                                output = await command_actions.execute_action(
+                                    action, ctx,
+                                )
                     except Exception as exc:
                         output = f"Error: {exc}"
-                    await _broadcast("command_result", {"command": cmd_name, "output": output})
+                    if output:
+                        await _broadcast(
+                            "command_result",
+                            {"command": cmd_name, "output": output},
+                        )
                     return {"ok": True, "command": cmd_name}
 
         run_id = uuid4().hex[:16]
@@ -1075,6 +1117,43 @@ def create_app() -> Any:
         _active_tasks[run_id] = task
         task.add_done_callback(lambda _t, _rid=run_id: _active_tasks.pop(_rid, None))
         return {"ok": True}
+
+    @app.post("/api/voice/transcribe", dependencies=[Depends(auth)])
+    async def api_voice_transcribe(request: Request) -> dict[str, Any]:
+        """Transcribe uploaded audio (base64 JSON body) to text.
+
+        Brings the CLI --voice capability to the app: the client records via
+        MediaRecorder and sends {audio: <base64>, mimeType}.
+        """
+        import base64
+
+        try:
+            body = await request.json()
+            audio_b64 = body.get("audio", "") if isinstance(body, dict) else ""
+            if not audio_b64:
+                return {"ok": False, "error": "No audio data."}
+            audio_bytes = base64.b64decode(audio_b64)
+        except Exception:
+            return {"ok": False, "error": "Invalid request body."}
+
+        try:
+            from rune.voice.service import get_voice_service
+
+            svc = get_voice_service()
+            if not svc.has_stt:
+                return {
+                    "ok": False,
+                    "error": (
+                        "No speech-to-text provider available. Set "
+                        "DEEPGRAM_API_KEY / OPENAI_API_KEY, or install "
+                        "sherpa-onnx for local STT."
+                    ),
+                }
+            text = await svc.transcribe(audio_bytes)
+            return {"ok": True, "text": text}
+        except Exception as exc:
+            log.warning("voice_transcribe_failed", error=str(exc)[:150])
+            return {"ok": False, "error": f"Transcription failed: {type(exc).__name__}"}
 
     @app.post("/api/abort", dependencies=[Depends(auth)])
     async def api_abort(
@@ -1225,18 +1304,58 @@ def create_app() -> Any:
             }
 
         try:
-            # sessions
+            # sessions — canonical conversation store, same id space as
+            # /sessions, /load and the live-chat sessionId.
             if method == "sessions.list":
-                from rune.api.handlers.sessions import list_sessions
-                result = await list_sessions(
-                    status=params.get("status"),
+                from rune.api import conversation_wiring
+
+                convs = await conversation_wiring.list_web_conversations(
                     limit=params.get("limit", 20),
-                    offset=params.get("offset", 0),
                 )
-                return _ok(result)
+                manager = conversation_wiring.get_conv_manager()
+                sessions = []
+                for c in convs:
+                    turn_count = 0
+                    if manager is not None:
+                        try:
+                            turn_count = await manager._store.get_turn_count(c.id)
+                        except Exception:
+                            turn_count = 0
+                    sessions.append({
+                        "id": c.id,
+                        "userId": c.user_id,
+                        "title": c.title or "",
+                        "status": c.status,
+                        "channel": "web",
+                        "turnCount": turn_count,
+                        "createdAt": c.created_at.isoformat(),
+                        "updatedAt": c.updated_at.isoformat(),
+                    })
+                return _ok({"sessions": sessions, "total": len(sessions)})
+
+            elif method == "sessions.turns":
+                from rune.api import conversation_wiring
+
+                manager = conversation_wiring.get_conv_manager()
+                conv = None
+                if manager is not None:
+                    conv = await manager._store.load(params.get("sessionId", ""))
+                if conv is None:
+                    return _err("not_found", "Session not found")
+                return _ok({
+                    "turns": [
+                        {
+                            "role": t.role,
+                            "content": t.content,
+                            "timestamp": t.timestamp.isoformat(),
+                        }
+                        for t in conv.turns
+                        if t.role in ("user", "assistant")
+                    ],
+                })
 
             elif method == "sessions.events":
-                # Return event log for a session (placeholder)
+                # Legacy placeholder (superseded by sessions.turns)
                 params.get("sessionId", "")
                 return _ok({"events": [], "runs": []})
 
@@ -1363,7 +1482,7 @@ def create_app() -> Any:
                 return _ok(result.model_dump())
 
             elif method == "commands.list":
-                from rune.ui.commands import COMMANDS
+                from rune.slash_commands import COMMANDS
                 return _ok([
                     {
                         "name": c.name,
@@ -1376,9 +1495,9 @@ def create_app() -> Any:
                 ])
 
             elif method == "models.list":
-                from rune.ui.app import _KNOWN_MODELS
+                from rune.llm.models import known_models
                 providers: dict[str, list[str]] = {}
-                for prov, model in _KNOWN_MODELS:
+                for prov, model in known_models():
                     providers.setdefault(prov, []).append(model)
                 return _ok(providers)
 

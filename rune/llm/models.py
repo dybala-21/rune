@@ -339,3 +339,22 @@ def invalidate_cache() -> None:
     global _cached_models, _cache_timestamp
     _cached_models = None
     _cache_timestamp = 0.0
+
+
+def known_models() -> list[tuple[str, str]]:
+    """(provider, model_id) pairs from the central registry, for model pickers
+    (TUI /model selector, web models.list RPC)."""
+    result: list[tuple[str, str]] = []
+    for group in (
+        FALLBACK_OPENAI_MODELS,
+        ANTHROPIC_MODELS,
+        GEMINI_MODELS,
+        XAI_MODELS,
+        AZURE_MODELS,
+        MISTRAL_MODELS,
+        DEEPSEEK_MODELS,
+        COHERE_MODELS,
+    ):
+        for m in group:
+            result.append((m.provider, m.id))
+    return result

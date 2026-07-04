@@ -1,19 +1,8 @@
-"""Multi-turn conversation wiring for the API/web server execution paths.
+"""Multi-turn conversation wiring shared by the API server, REPL and CLI.
 
-The web UI (``rune web`` → POST /api/message, WebSocket messages) and the
-HTTP execute endpoints run agents through ``rune/api/server.py``. Before this
-module existed those paths never touched the conversation layer: no turns were
-recorded and ``loop.run`` received no ``message_history``, so every web message
-was a stateless single-turn run (measured: a turn-2 recall question failed and
-``conversations.db`` stayed empty).
-
-This mirrors the proven daemon-gateway pattern (rune/daemon/gateway.py):
-load-or-create conversation → record user turn → prepare context with the
-conversation manager → run with history → record assistant turn → save.
-
-Kept separate from ``server.py`` (already far over the repo's module-size cap)
-so both the server and future callers share one copy instead of a third
-hand-rolled variant.
+Same flow as the daemon gateway (rune/daemon/gateway.py): load-or-create
+conversation → record user turn → prepare context with the conversation
+manager → run with history → record assistant turn → save.
 """
 
 from __future__ import annotations
@@ -26,9 +15,8 @@ from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
 
-# user_id namespaces. "web:local" is the server-side sticky conversation for
-# the browser UI live chat (the web client historically sent no session key);
-# "web:session" marks conversations pinned by an explicit client sessionId.
+# "web:local" = server-side sticky conversation for the browser live chat;
+# "web:session" = conversations pinned by an explicit client sessionId.
 WEB_STICKY_USER_ID = "web:local"
 WEB_SESSION_USER_ID = "web:session"
 
@@ -82,30 +70,26 @@ async def resolve_conversation(
     session_id: str | None,
     *,
     sticky: bool,
+    user_id: str = WEB_SESSION_USER_ID,
 ) -> str | None:
-    """Resolve the conversation id for one run; ensure it is in ``_active``.
+    """Resolve the conversation id for one run and make sure it is in ``_active``.
 
-    ``session_id`` pins an explicit conversation (client-managed key). With no
-    session_id and ``sticky=True`` (web UI live chat), a server-side sticky
-    conversation for ``web:local`` is reused until it has been idle for
-    CONVERSATION_IDLE_MINUTES, then rotated. ``sticky=False`` (headless
-    execute endpoints without a session) stays stateless — those callers must
-    not pollute the human's live web chat.
-
-    Note: web-UI sessionIds are conversation-store ids. SessionManager ids
-    (the TUI session files listed by rpc sessions.*) are a different id space;
-    an unknown id here simply starts an empty conversation under that id.
+    ``session_id`` pins an explicit conversation. Without one, ``sticky=True``
+    (browser live chat) reuses the server-side ``web:local`` conversation until
+    it has been idle for CONVERSATION_IDLE_MINUTES, then rotates. Headless
+    callers without a session stay stateless (``sticky=False``) so scripts
+    don't leak into the live chat.
     """
     from rune.conversation.manager import CONVERSATION_IDLE_MINUTES
     from rune.conversation.types import Conversation
 
     if session_id:
-        # Guard like the gateway: never clobber an in-memory conversation with
-        # the DB copy — a concurrent run's just-added turns live only there.
+        # Don't replace an in-memory conversation with the DB copy — a
+        # concurrent run's unsaved turns live on the in-memory object.
         if session_id not in conv_manager._active:
             existing = await conv_manager._store.load(session_id)
             conv_manager._active[session_id] = existing or Conversation(
-                id=session_id, user_id=WEB_SESSION_USER_ID,
+                id=session_id, user_id=user_id,
             )
         return session_id
 
@@ -116,9 +100,8 @@ async def resolve_conversation(
     if _resolve_lock is None:
         _resolve_lock = asyncio.Lock()
     async with _resolve_lock:
-        # In-memory first: start_conversation does not persist, so a DB-only
-        # lookup would miss a conversation whose first run is still in flight
-        # and split consecutive fast messages across two conversations.
+        # Check memory before the DB: start_conversation doesn't persist, so a
+        # conversation whose first run is still in flight only exists here.
         if _sticky_conv_id:
             conv = conv_manager._active.get(_sticky_conv_id)
             if conv is not None and _is_fresh(
@@ -126,7 +109,7 @@ async def resolve_conversation(
             ):
                 return _sticky_conv_id
 
-        # Cold start (fresh process): most recent active web conversation.
+        # Cold start: most recent active web conversation from disk.
         try:
             row = await conv_manager._store.find_active_conversation(
                 WEB_STICKY_USER_ID
@@ -147,6 +130,34 @@ async def resolve_conversation(
         return _sticky_conv_id
 
 
+# Local chat surfaces whose conversations show in /sessions and the sidebar.
+_LOCAL_SURFACE_USER_IDS = (
+    WEB_SESSION_USER_ID,
+    WEB_STICKY_USER_ID,
+    "repl:local",
+    "cli:session",
+)
+
+
+async def list_web_conversations(limit: int = 20) -> list[Any]:
+    """All local-surface conversations (web, REPL, --session), newest first.
+
+    Single source for the sessions sidebar, /sessions and /load so every
+    surface shares one id space (the canonical conversation store — not the
+    legacy memory store, whose ids the store here cannot resolve)."""
+    manager = get_conv_manager()
+    if manager is None:
+        return []
+    convs: list[Any] = []
+    for user_id in _LOCAL_SURFACE_USER_IDS:
+        try:
+            convs.extend(await manager._store.list(user_id, limit=limit))
+        except Exception as exc:
+            log.debug("list_web_conversations_failed", error=str(exc)[:100])
+    convs.sort(key=lambda c: c.updated_at, reverse=True)
+    return convs[:limit]
+
+
 def record_user_turn(conv_manager: Any, conversation_id: str, text: str) -> None:
     """Record the user turn (before prepare_agent_context, which drops the
     trailing user message from loaded history — the goal is passed to the
@@ -162,10 +173,14 @@ async def record_assistant_turn(
     conversation_id: str,
     loop: Any,
     streamed_text: str,
+    reason: str = "",
 ) -> None:
     """Record the assistant turn and persist the conversation.
 
     Uses the loop's final answer when available; falls back to streamed text.
+    An empty answer still records a short placeholder: a user turn with no
+    assistant reply makes the next turn's model re-answer the previous
+    question instead of treating it as done.
     Persisting here (not on the user turn) matches the gateway: an aborted run
     leaves no half-written conversation on disk.
     """
@@ -176,7 +191,7 @@ async def record_assistant_turn(
             getattr(loop, "_last_answer_text", ""), streamed_text,
         )
         if not answer:
-            return
+            answer = f"(the run ended without a textual answer: {reason or 'unknown'})"
         conv_manager.add_turn(
             conversation_id, "assistant", answer,
             goal_type=getattr(loop, "_last_goal_type", ""),

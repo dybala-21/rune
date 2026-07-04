@@ -32,8 +32,10 @@ log = get_logger(__name__)
 
 CONVERSATION_IDLE_MINUTES = 30
 
-# S2: assistant message smart truncation (token-based, head + tail preservation)
-MAX_ASSISTANT_TOKENS = 2000
+# S2: assistant message smart truncation (token-based, head + tail).
+# Store-time safety net against pathological turns; context size is the
+# budgeter/compaction's job. 8000 keeps real code answers intact.
+MAX_ASSISTANT_TOKENS = 8000
 TAIL_PRESERVE_TOKENS = 500
 
 # Low-signal title pattern -- matched titles get refreshed on next message
@@ -114,6 +116,7 @@ class ConversationManager:
         "_classification_cache",
         "_background_tasks",
         "_compact_failures",
+        "_compact_lock",
         "_rehydration_recorder",
     )
 
@@ -133,6 +136,9 @@ class ConversationManager:
         self._classification_cache: dict[str, GoalClassification] = {}
         # Circuit breaker: stop retrying compaction after consecutive failures
         self._compact_failures: int = 0
+        # Serializes compactions — two could otherwise interleave across the
+        # summarize await.
+        self._compact_lock: asyncio.Lock = asyncio.Lock()
         # Rehydration recorder — set externally by the agent loop
         self._rehydration_recorder: Any | None = None
 
@@ -396,6 +402,28 @@ class ConversationManager:
         for turn in reversed(other_turns):
             cost = self._turn_tokens(turn)
             if cost > remaining:
+                if not selected and remaining > 200:
+                    # The newest turn alone exceeds the budget; keep its tail
+                    # rather than returning no context at all.
+                    content = truncate_to_last_tokens(turn.content, remaining - 50)
+                    selected.append({
+                        "role": turn.role,
+                        "content": "…(earlier part omitted)…\n" + content,
+                    })
+                    remaining = 0
+                    continue
+                if cost > budget_tokens // 2:
+                    # Skip an oversized older turn (placeholder) instead of
+                    # letting it evict everything before it.
+                    placeholder = {
+                        "role": turn.role,
+                        "content": "(a long earlier message was omitted to fit context)",
+                    }
+                    ph_cost = 16
+                    if ph_cost <= remaining:
+                        selected.append(placeholder)
+                        remaining -= ph_cost
+                    continue
                 break
             msg: dict[str, str] = {"role": turn.role, "content": turn.content}
             if turn.goal_type:
@@ -419,6 +447,17 @@ class ConversationManager:
         The latest 5 turns are preserved. The older portion is summarized
         via the LLM (with a 10s timeout) or an extractive fallback.
         """
+        async with self._compact_lock:
+            await self._compact_conversation_locked(
+                conversation_id, budget_tokens, on_compaction
+            )
+
+    async def _compact_conversation_locked(
+        self,
+        conversation_id: str,
+        budget_tokens: int,
+        on_compaction: CompactionCallback | None,
+    ) -> None:
         conv = self._active.get(conversation_id)
         if conv is None or not conv.turns:
             return
@@ -466,8 +505,10 @@ class ConversationManager:
 
         summary = await self.summarize_turns(to_compact)
 
-        # Replace the compacted turns with a single summary turn
-        preserved = conv.turns[len(conv.turns) - preserve_count :]
+        # Slice from split_idx on the current list: add_turn only appends, so
+        # turns that arrived during the summarize await sit after split_idx
+        # and must be preserved.
+        preserved = conv.turns[split_idx:]
         summary_turn = ConversationTurn(
             role="system",
             content=summary,

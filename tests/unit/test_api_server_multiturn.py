@@ -264,6 +264,39 @@ def test_execute_with_session_threads_history(client, tmp_path):
     assert "heron" in str(FakeLoop.captured[1]["history"])
 
 
+def test_sessions_rpc_serves_canonical_store(client, tmp_path):
+    """The sidebar RPC must share the id space of /load and live sessionIds."""
+    r = client.post(
+        "/api/message",
+        json={"text": "sidebar test turn", "sessionId": "web_sb1"},
+    )
+    assert r.status_code == 200
+    assert _wait_for(lambda: len(_turn_rows(tmp_path / "conversations.db")) >= 2)
+
+    r = client.post("/api/v1/rpc", json={"method": "sessions.list", "params": {}})
+    body = r.json()
+    assert body["success"] is True
+    ids = [s["id"] for s in body["data"]["sessions"]]
+    assert "web_sb1" in ids
+    entry = next(s for s in body["data"]["sessions"] if s["id"] == "web_sb1")
+    assert entry["turnCount"] >= 2
+
+    r = client.post(
+        "/api/v1/rpc",
+        json={"method": "sessions.turns", "params": {"sessionId": "web_sb1"}},
+    )
+    body = r.json()
+    assert body["success"] is True
+    turns = body["data"]["turns"]
+    assert turns[0]["role"] == "user" and "sidebar test turn" in turns[0]["content"]
+
+    r = client.post(
+        "/api/v1/rpc",
+        json={"method": "sessions.turns", "params": {"sessionId": "missing"}},
+    )
+    assert r.json()["success"] is False
+
+
 # /agent/run handler: server-generated sessionId must record turn 1.
 # (The router is not mounted on create_app today, so this calls the handler
 # directly rather than going through the app.)

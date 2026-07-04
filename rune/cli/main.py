@@ -98,8 +98,24 @@ def main(
     message: Annotated[
         str | None, typer.Option("--message", help="Non-interactive message")
     ] = None,
+    session: Annotated[
+        str,
+        typer.Option(
+            "--session",
+            help="Non-interactive only: conversation id for multi-turn context. "
+            "Repeated --message calls with the same id continue one "
+            "conversation (history is loaded and each turn is persisted).",
+        ),
+    ] = "",
     voice: Annotated[
         bool, typer.Option("--voice", help="Voice input mode (speak instead of type)")
+    ] = False,
+    tui: Annotated[
+        bool,
+        typer.Option(
+            "--tui",
+            help="Launch the full-screen TUI instead of the default REPL.",
+        ),
     ] = False,
     best_of: Annotated[
         int,
@@ -166,9 +182,21 @@ def main(
                     seed_cwd=include_cwd,
                 )
             else:
-                _handle_non_interactive(message, model=model, provider=provider)
-        else:
+                _handle_non_interactive(
+                    message, model=model, provider=provider, session=session,
+                )
+        elif tui:
             _start_interactive(model=model, provider=provider)
+        else:
+            # Default terminal surface is the minimal REPL; the full-screen
+            # TUI is opt-in via --tui.
+            if not _ensure_llm_key():
+                console.print(
+                    "[red]No API key configured. "
+                    "Set OPENAI_API_KEY or ANTHROPIC_API_KEY.[/red]"
+                )
+                raise typer.Exit(1)
+            _simple_repl(model=model, provider=provider)
 
 
 # Voice mode handling
@@ -263,6 +291,7 @@ def _handle_non_interactive(
     message: str,
     model: str | None = None,
     provider: str | None = None,
+    session: str = "",
 ) -> None:
     """Handle a single non-interactive message."""
     import asyncio
@@ -338,9 +367,28 @@ def _handle_non_interactive(
         except Exception:
             pass  # MCP init is best-effort
 
+        # --session <id>: load prior turns and persist this exchange.
+        # Throwaway best-of samples never persist.
+        conv_manager = None
+        conv_id: str | None = None
+        if session and not _throwaway:
+            from rune.api import conversation_wiring as conv_wiring
+
+            conv_manager = conv_wiring.get_conv_manager()
+            if conv_manager is not None:
+                try:
+                    conv_id = await conv_wiring.resolve_conversation(
+                        conv_manager, session, sticky=False,
+                        user_id="cli:session",
+                    )
+                    conv_wiring.record_user_turn(conv_manager, conv_id, message)
+                except Exception as exc:
+                    console.print(f"[dim]session unavailable: {exc}[/dim]")
+                    conv_manager = None
+
         ctx = await prepare_agent_context(PrepareContextOptions(
-            goal=message, channel="cli",
-        ))
+            goal=message, channel="cli", conversation_id=conv_id or "",
+        ), conversation_manager=conv_manager)
 
         # Classify once: goal_type drives both rule injection and learning,
         # so they share one key.
@@ -368,7 +416,19 @@ def _handle_non_interactive(
         except Exception:
             pass
 
-        trace = await loop.run(ctx.goal, context=run_context)
+        trace = await loop.run(
+            ctx.goal,
+            context=run_context,
+            message_history=ctx.messages if ctx.messages else None,
+        )
+
+        if conv_manager is not None and conv_id:
+            from rune.api import conversation_wiring as conv_wiring
+
+            await conv_wiring.record_assistant_turn(
+                conv_manager, conv_id, loop, "".join(output_parts),
+                reason=trace.reason or "",
+            )
 
         if output_parts:
             print()
@@ -525,6 +585,9 @@ def _simple_repl(model: str | None = None, provider: str | None = None) -> None:
     except Exception:
         pass
 
+    # Mutable so /load can switch the live conversation from a closure.
+    conv_state = {"id": conversation_id}
+
     def _make_loop() -> NativeAgentLoop:
         lp = NativeAgentLoop(config=agent_config)
         lp.on("text_delta", _on_text_delta)
@@ -552,7 +615,7 @@ def _simple_repl(model: str | None = None, provider: str | None = None) -> None:
 
     loop = _make_loop()
 
-    async def _run_goal(goal: str) -> None:
+    async def _run_goal(goal: str, override_loop: NativeAgentLoop | None = None) -> None:
         from rune.agent.agent_context import (
             PostProcessInput,
             PrepareContextOptions,
@@ -560,24 +623,25 @@ def _simple_repl(model: str | None = None, provider: str | None = None) -> None:
             prepare_agent_context,
         )
 
+        run_loop = override_loop or loop
         collected_text.clear()
 
         # Record user turn in conversation manager
-        if conv_manager and conversation_id:
+        if conv_manager and conv_state["id"]:
             with contextlib.suppress(Exception):
-                conv_manager.add_turn(conversation_id, "user", goal)
+                conv_manager.add_turn(conv_state["id"], "user", goal)
 
         ctx = await prepare_agent_context(
             PrepareContextOptions(
                 goal=goal,
                 channel="tui",
-                conversation_id=conversation_id,
+                conversation_id=conv_state["id"],
             ),
             conversation_manager=conv_manager,
         )
 
         # Pass conversation messages as message_history to the agent loop
-        trace = await loop.run(
+        trace = await run_loop.run(
             ctx.goal,
             context={"workspace_root": ctx.workspace_root},
             message_history=ctx.messages if ctx.messages else None,
@@ -588,15 +652,19 @@ def _simple_repl(model: str | None = None, provider: str | None = None) -> None:
         # assistant turn makes the next turn re-run already-answered tasks.
         from rune.agent.agent_context import resolve_assistant_answer
         answer = resolve_assistant_answer(
-            getattr(loop, "_last_answer_text", ""), "".join(collected_text),
+            getattr(run_loop, "_last_answer_text", ""), "".join(collected_text),
         )
 
-        # Record assistant turn in conversation manager
-        if conv_manager and conversation_id and answer:
+        # Record the assistant turn and persist so /sessions can list this
+        # conversation and a later /load can resume it.
+        if conv_manager and conv_state["id"] and answer:
             with contextlib.suppress(Exception):
                 conv_manager.add_turn(
-                    conversation_id, "assistant", answer,
-                    goal_type=getattr(loop, "_last_goal_type", ""),
+                    conv_state["id"], "assistant", answer,
+                    goal_type=getattr(run_loop, "_last_goal_type", ""),
+                )
+                await conv_manager._store.save(
+                    conv_manager._active[conv_state["id"]]
                 )
 
         if collected_text:
@@ -610,10 +678,87 @@ def _simple_repl(model: str | None = None, provider: str | None = None) -> None:
                 answer=answer,
                 reason=trace.reason,
                 evidence_gate=trace.evidence_gate,
-                changed_files=loop.files_written,
+                changed_files=run_loop.files_written,
             ))
 
+    async def _action_run_agent(goal: str, agent_config: Any = None) -> str:
+        """run_agent hook for slash actions (/escalate): optional per-run
+        model override on a temporary loop, same conversation."""
+        if agent_config is not None:
+            tmp = NativeAgentLoop(config=agent_config)
+            tmp.on("text_delta", _on_text_delta)
+            tmp.on("tool_call", _on_tool_call)
+            _wire_cli_approval(tmp)
+            _wire_cli_ask_user(tmp)
+            await _run_goal(goal, override_loop=tmp)
+        else:
+            await _run_goal(goal)
+        return ""
+
+    async def _console_broadcast(event: str, data: dict) -> None:
+        """Render slash-action events (the web surface gets these over SSE)."""
+        if event == "goal_iteration":
+            console.print(
+                f"[dim][goal {data.get('n')}] {data.get('verdict')} · "
+                f"{data.get('reason')} · evidence={data.get('evidence')} · "
+                f"{data.get('tokens')} tokens[/dim]"
+            )
+            return
+        if event == "command_result":
+            d = data.get("data") or {}
+            if d.get("action") == "load_session" and d.get("sessionId"):
+                conv_state["id"] = d["sessionId"]
+                for t in (d.get("turns") or [])[-6:]:
+                    console.print(
+                        f"[dim]{t.get('role', '?')}: "
+                        f"{t.get('content', '')[:120]}[/dim]"
+                    )
+            out = data.get("output")
+            if out:
+                console.print(out)
+
+    async def _dispatch_command(text: str) -> bool:
+        """Run a slash command via the shared registry + server-side actions
+        (same engine the web app uses; foreground so the prompt blocks)."""
+        from pathlib import Path
+
+        from rune.api import command_actions
+        from rune.slash_commands import COMMANDS, parse_slash_command, suggest_command
+
+        parsed = parse_slash_command(text)
+        if parsed is None:
+            sug = suggest_command(text)
+            hint = f" Did you mean {sug}?" if sug else ""
+            console.print(f"[yellow]Unknown command.{hint}[/yellow]")
+            return True
+
+        cmd_name, args = parsed
+        output = await command_actions.handle_direct_command(cmd_name, args)
+        if output is None:
+            cmd = COMMANDS.get(cmd_name)
+            result = await cmd.handler(args) if cmd else None
+            output = result or ""
+            if output.startswith("__ACTION__:"):
+                action_ctx = command_actions.ActionContext(
+                    broadcast=_console_broadcast,
+                    workspace=Path.cwd(),
+                    session_id=conv_state["id"] or None,
+                    run_agent=_action_run_agent,
+                    foreground=True,
+                )
+                output = await command_actions.execute_action(
+                    output[len("__ACTION__:"):], action_ctx,
+                )
+        if output:
+            console.print(output)
+        return True
+
     console.print("[dim]Type your message. /exit to quit, /help for commands.[/dim]\n")
+
+    # One event loop for the whole session: slash actions keep background
+    # state (file tracker, locks) that has to survive across turns.
+    aio = asyncio.new_event_loop()
+    last_goal = ""
 
     while True:
         try:
@@ -622,30 +767,56 @@ def _simple_repl(model: str | None = None, provider: str | None = None) -> None:
             console.print("\n[dim]Goodbye![/dim]")
             break
 
-        if not user_input.strip():
+        stripped = user_input.strip()
+        if not stripped:
             continue
 
-        if user_input.strip() in ("/exit", "/quit", "/q"):
+        if stripped in ("/exit", "/quit", "/q"):
             console.print("[dim]Goodbye![/dim]")
             break
 
-        if user_input.strip() == "/help":
-            console.print("[bold]Commands:[/bold]")
-            console.print("  /exit, /quit, /q  — Exit RUNE")
-            console.print("  /help             — Show this help")
-            console.print("  /model <name>     — Switch model")
+        if stripped in ("/clear", "/cls"):
+            if conv_manager:
+                with contextlib.suppress(Exception):
+                    conv = conv_manager.start_conversation(user_id="repl:local")
+                    conv_state["id"] = conv.id
+            console.print("[dim]Started a new conversation.[/dim]\n")
             continue
 
-        if user_input.strip().startswith("/model "):
-            new_model = user_input.strip().split(None, 1)[1]
-            display_model = new_model
-            agent_config.model = new_model
+        if stripped in ("/retry", "/r"):
+            if not last_goal:
+                console.print("[dim]Nothing to retry.[/dim]\n")
+                continue
+            console.print(f"[dim]Retrying: {last_goal[:80]}[/dim]")
+            try:
+                aio.run_until_complete(_run_goal(last_goal))
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Cancelled.[/yellow]\n")
+                loop = _make_loop()
+            continue
+
+        if stripped.startswith("/model"):
+            arg = stripped[len("/model"):].strip()
+            if not arg:
+                console.print(f"[dim]Current model: {display_model}[/dim]\n")
+                continue
+            display_model = arg
+            agent_config.model = arg
             loop = _make_loop()
-            console.print(f"[green]Switched to {new_model}[/green]\n")
+            console.print(f"[green]Switched to {arg}[/green]\n")
+            continue
+
+        if stripped.startswith("/"):
+            try:
+                aio.run_until_complete(_dispatch_command(stripped))
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Cancelled.[/yellow]\n")
+                loop = _make_loop()
             continue
 
         try:
-            asyncio.run(_run_goal(user_input))
+            aio.run_until_complete(_run_goal(user_input))
+            last_goal = user_input
         except KeyboardInterrupt:
             console.print("\n[yellow]Cancelled.[/yellow]\n")
             loop = _make_loop()
