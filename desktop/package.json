@@ -6,9 +6,48 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "dev": "RUNE_UI_URL=http://localhost:5173 electron ."
+    "dev": "RUNE_UI_URL=http://localhost:5173 electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
   },
   "devDependencies": {
-    "electron": "^33.0.0"
+    "electron": "^33.0.0",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "dev.rune.desktop",
+    "productName": "RUNE",
+    "files": [
+      "main.js",
+      "preload.js"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "identity": null
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Development"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "dybala-21",
+      "repo": "rune"
+    }
   }
 }

@@ -7,9 +7,11 @@
 
 'use strict';
 
-const { app, BrowserWindow, shell, session } = require('electron');
+const { app, BrowserWindow, dialog, shell, session } = require('electron');
 const { spawn } = require('node:child_process');
+const fs = require('node:fs');
 const http = require('node:http');
+const os = require('node:os');
 const path = require('node:path');
 
 const PORT = Number(process.env.RUNE_API_PORT || 18789);
@@ -41,14 +43,55 @@ function waitForBackend(url, timeoutMs = 30000) {
 }
 
 /**
+ * Locate the `rune` CLI. Finder-launched apps get a minimal PATH
+ * (/usr/bin:/bin:/usr/sbin:/sbin), so a bare spawn('rune') only works when
+ * started from a terminal. Order: RUNE_BIN → PATH → common install dirs.
+ */
+function resolveRuneBinary() {
+  const override = process.env.RUNE_BIN;
+  if (override && fs.existsSync(override)) return override;
+
+  const exe = process.platform === 'win32' ? 'rune.exe' : 'rune';
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+    if (dir && fs.existsSync(path.join(dir, exe))) return path.join(dir, exe);
+  }
+
+  const home = os.homedir();
+  const candidates = [
+    path.join(home, '.local', 'bin', exe), // uv tool / pipx default
+    '/opt/homebrew/bin/' + exe,
+    '/usr/local/bin/' + exe,
+    path.join(home, '.cargo', 'bin', exe),
+  ];
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c;
+  }
+  return null;
+}
+
+/**
  * `rune daemon start` is idempotent and detached: it attaches to a running
  * engine, and the engine outlives this app. In dev (RUNE_UI_URL set) the
  * user runs the engine themselves.
  */
 function ensureDaemon() {
   if (DEV_URL) return Promise.resolve();
+  const bin = resolveRuneBinary();
+  if (!bin) {
+    console.error('[rune-desktop] rune CLI not found (RUNE_BIN unset, not on PATH)');
+    if (process.env.RUNE_DESKTOP_SMOKE === '1') return Promise.resolve();
+    dialog.showErrorBox(
+      'RUNE engine not found',
+      'The rune CLI is not installed (or not in a known location).\n\n' +
+        'Install it first:\n  uv tool install rune-agent\n\n' +
+        'Or point the app at your binary:\n  RUNE_BIN=/path/to/rune\n\n' +
+        'The window will still open and connect if an engine is already ' +
+        `running on port ${PORT}.`,
+    );
+    return Promise.resolve();
+  }
   return new Promise((resolve) => {
-    const p = spawn('rune', ['daemon', 'start', '--port', String(PORT)], {
+    const p = spawn(bin, ['daemon', 'start', '--port', String(PORT)], {
       stdio: 'inherit',
       env: { ...process.env },
     });
@@ -64,7 +107,8 @@ function ensureDaemon() {
 function maybeStopDaemon() {
   if (DEV_URL) return;
   if (process.env.RUNE_STOP_DAEMON_ON_QUIT !== '1') return;
-  spawn('rune', ['daemon', 'stop'], { stdio: 'inherit' });
+  const bin = resolveRuneBinary();
+  if (bin) spawn(bin, ['daemon', 'stop'], { stdio: 'inherit' });
 }
 
 function hardenSession() {
