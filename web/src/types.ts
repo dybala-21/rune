@@ -23,6 +23,8 @@ export type SseEventType =
   | 'question'
   | 'context_compaction'
   | 'delegate_event'
+  | 'command_result'
+  | 'goal_iteration'
   | 'suggestion_created'
   | 'proactive_execution_started'
   | 'proactive_execution_completed'
@@ -46,6 +48,22 @@ export interface QuestionData {
 }
 export interface ContextCompactionData { message: string }
 export interface DelegateEventData { stage: string; message: string }
+export interface CommandResultData {
+  command: string;
+  output: string;
+  data?: {
+    action?: string;
+    sessionId?: string;
+    turns?: { role: string; content: string }[];
+  };
+}
+export interface GoalIterationData {
+  n: number;
+  verdict: string;
+  reason: string;
+  evidence: number;
+  tokens: number;
+}
 export interface SuggestionCreatedData {
   id: string;
   type: string;

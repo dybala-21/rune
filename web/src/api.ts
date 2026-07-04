@@ -115,12 +115,24 @@ function liveSessionId(): string {
   }
 }
 
+// Pin the live chat to an existing conversation (used by /load).
+export function setLiveSessionId(id: string): void {
+  try { sessionStorage.setItem(LIVE_SESSION_KEY, id); } catch { /* storage unavailable */ }
+}
+
 export function sendMessage(text: string, attachments?: MessageAttachment[]) {
   return post('/api/message', { text, attachments, sessionId: liveSessionId() });
 }
 
 export function sendAbort() {
   return post('/api/abort');
+}
+
+export function transcribeAudio(audioBase64: string, mimeType: string) {
+  return post<{ ok: boolean; text?: string; error?: string }>(
+    '/api/voice/transcribe',
+    { audio: audioBase64, mimeType },
+  );
 }
 
 export function sendApproval(id: string, decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) {
@@ -156,6 +168,16 @@ export async function fetchSessions(params?: {
   offset?: number;
 }): Promise<{ sessions: SessionInfo[]; total: number }> {
   return rpc('sessions.list', params ?? {});
+}
+
+export interface SessionTurn {
+  role: string;
+  content: string;
+  timestamp: string;
+}
+
+export async function fetchSessionTurns(sessionId: string): Promise<{ turns: SessionTurn[] }> {
+  return rpc('sessions.turns', { sessionId });
 }
 
 export async function fetchSessionEvents(sessionId: string, params?: {

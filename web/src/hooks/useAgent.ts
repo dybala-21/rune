@@ -27,6 +27,8 @@ import type {
   StepStartData,
   ContextCompactionData,
   DelegateEventData,
+  CommandResultData,
+  GoalIterationData,
 } from '../types';
 
 let idCounter = 0;
@@ -285,8 +287,7 @@ export function useAgent() {
   }, [savedDraft.available]);
 
   const resetLiveConversation = useCallback(() => {
-    // New chat = new server-side conversation; without this the server keeps
-    // threading the old history into "new" chats for up to the idle window.
+    // New chat = new server-side conversation.
     api.rotateLiveSessionId();
     pendingTextRef.current = '';
     assistantMsgIdRef.current = null;
@@ -532,10 +533,166 @@ export function useAgent() {
       }, MAX_DELEGATE_EVENTS));
     }));
 
+    unsubs.push(sseOn('command_result', (raw) => {
+      const data = raw as CommandResultData;
+      // /load: pin the live chat to the loaded conversation and show its turns.
+      if (data.data?.action === 'load_session' && data.data.sessionId) {
+        api.setLiveSessionId(data.data.sessionId);
+        const turns = data.data.turns ?? [];
+        setMessages(turns.map(t => ({
+          id: nextId(),
+          role: t.role === 'assistant' ? 'assistant' as const : 'user' as const,
+          content: t.content,
+          timestamp: Date.now(),
+        })));
+      }
+      if (data.output) {
+        setMessages(prev => appendWithLimit(prev, {
+          id: nextId(),
+          role: 'system',
+          content: data.output,
+          timestamp: Date.now(),
+        }, MAX_MESSAGES));
+      }
+    }));
+
+    unsubs.push(sseOn('goal_iteration', (raw) => {
+      const d = raw as GoalIterationData;
+      setMessages(prev => appendWithLimit(prev, {
+        id: nextId(),
+        role: 'system',
+        content: `[goal ${d.n}] ${d.verdict} · ${d.reason} · evidence=${d.evidence.toFixed(2)} · ${d.tokens} tokens`,
+        timestamp: Date.now(),
+      }, MAX_MESSAGES));
+    }));
+
     return () => { unsubs.forEach(fn => fn()); };
   }, [sseOn, flushTextDelta, beginLiveSession]);
 
+  // Snapshot for client-side slash commands (/retry, /copy, /export, /stats).
+  const messagesRef = useRef<ChatMessage[]>([]);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
+  const tokenUsageRef = useRef<TokenUsage | null>(null);
+  useEffect(() => { tokenUsageRef.current = tokenUsage; }, [tokenUsage]);
+
+  const pushSystem = useCallback((content: string) => {
+    setMessages(prev => appendWithLimit(prev, {
+      id: nextId(), role: 'system', content, timestamp: Date.now(),
+    }, MAX_MESSAGES));
+  }, []);
+
+  const postToServer = useCallback((text: string, apiAttachments?: { name: string; mimeType: string; data: string }[]) => {
+    api.sendMessage(text, apiAttachments).catch(err => {
+      setMessages(prev => appendWithLimit(prev, {
+        id: nextId(),
+        role: 'system',
+        content: `Failed to send: ${err instanceof Error ? err.message : String(err)}`,
+        timestamp: Date.now(),
+        level: 'error',
+      }, MAX_MESSAGES));
+    });
+  }, []);
+
+  // Client-side slash commands; everything else goes to the server and
+  // answers over the command_result SSE event.
+  const handleClientCommand = useCallback((text: string): boolean => {
+    const [cmd, ...rest] = text.trim().split(/\s+/);
+    const args = rest.join(' ');
+    const msgs = messagesRef.current;
+
+    switch (cmd.toLowerCase()) {
+      case '/clear':
+      case '/cls':
+        resetLiveConversation();
+        return true;
+
+      case '/retry':
+      case '/r': {
+        const lastUser = [...msgs].reverse().find(m => m.role === 'user');
+        if (!lastUser) { pushSystem('Nothing to retry.'); return true; }
+        setMessages(prev => appendWithLimit(prev, {
+          id: nextId(), role: 'user', content: lastUser.content, timestamp: Date.now(),
+        }, MAX_MESSAGES));
+        postToServer(lastUser.content);
+        return true;
+      }
+
+      case '/copy':
+      case '/cp': {
+        const lastAssistant = [...msgs].reverse().find(m => m.role === 'assistant');
+        if (!lastAssistant) { pushSystem('No assistant message to copy.'); return true; }
+        navigator.clipboard?.writeText(lastAssistant.content)
+          .then(() => pushSystem('Response copied to clipboard.'))
+          .catch(() => pushSystem('Clipboard unavailable.'));
+        return true;
+      }
+
+      case '/export': {
+        const fmt = (args || 'markdown').toLowerCase();
+        if (!['markdown', 'json', 'md'].includes(fmt)) {
+          pushSystem(`Unknown format: ${fmt}. Use: markdown, json`);
+          return true;
+        }
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        let blob: Blob; let name: string;
+        if (fmt === 'json') {
+          blob = new Blob(
+            [JSON.stringify(msgs.map(m => ({ role: m.role, content: m.content, timestamp: m.timestamp })), null, 2)],
+            { type: 'application/json' },
+          );
+          name = `rune-${stamp}.json`;
+        } else {
+          const md = ['# RUNE Conversation', ''];
+          for (const m of msgs) {
+            md.push(`## ${m.role}`, '', m.content, '');
+          }
+          blob = new Blob([md.join('\n')], { type: 'text/markdown' });
+          name = `rune-${stamp}.md`;
+        }
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = name; a.click();
+        URL.revokeObjectURL(url);
+        pushSystem(`Exported ${msgs.length} messages to ${name}.`);
+        return true;
+      }
+
+      case '/stats': {
+        const users = msgs.filter(m => m.role === 'user').length;
+        const assistants = msgs.filter(m => m.role === 'assistant').length;
+        const t = tokenUsageRef.current;
+        const tokens = t ? `${t.input} in / ${t.output} out` : 'n/a';
+        const first = msgs[0]?.timestamp;
+        const mins = first ? Math.round((Date.now() - first) / 60000) : 0;
+        pushSystem(`Session stats: ${users} user / ${assistants} assistant messages · tokens ${tokens} · ${mins} min`);
+        return true;
+      }
+
+      case '/cost': {
+        const t = tokenUsageRef.current;
+        pushSystem(t
+          ? `Token usage: ${t.input} input / ${t.output} output (total ${t.total}). Local (ollama) runs are free; cloud cost depends on the active model.`
+          : 'No token usage recorded yet.');
+        return true;
+      }
+
+      case '/style':
+      case '/compact':
+      case '/normal':
+      case '/verbose':
+      case '/theme':
+        pushSystem('Display options live in the app Settings sidebar; /style·/theme apply to the terminal UI.');
+        return true;
+
+      default:
+        return false;
+    }
+  }, [pushSystem, postToServer, resetLiveConversation]);
+
   const sendMessage = useCallback((text: string, pendingAttachments?: PendingAttachment[]) => {
+    if (text.trim().startsWith('/') && !pendingAttachments?.length && handleClientCommand(text)) {
+      return;
+    }
     beginLiveSession();
     const displayContent = pendingAttachments && pendingAttachments.length > 0
       ? `${text}\n[${pendingAttachments.map(a => a.name).join(', ')}]`
@@ -551,16 +708,8 @@ export function useAgent() {
       mimeType: a.mimeType,
       data: a.dataUrl.replace(/^data:[^;]+;base64,/, ''),
     }));
-    api.sendMessage(text, apiAttachments).catch(err => {
-      setMessages(prev => appendWithLimit(prev, {
-        id: nextId(),
-        role: 'system',
-        content: `Failed to send: ${err instanceof Error ? err.message : String(err)}`,
-        timestamp: Date.now(),
-        level: 'error',
-      }, MAX_MESSAGES));
-    });
-  }, [beginLiveSession]);
+    postToServer(text, apiAttachments);
+  }, [beginLiveSession, handleClientCommand, postToServer]);
 
   const pushSystemError = useCallback((prefix: string, err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);

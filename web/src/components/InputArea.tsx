@@ -1,5 +1,6 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
 import { CommandPalette } from './CommandPalette';
+import { transcribeAudio } from '../api';
 import type { PendingAttachment } from '../types';
 
 const SUPPORTED_MIMES = new Set([
@@ -27,6 +28,55 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
   // Sent messages for ↑/↓ recall; histIdx -1 = live draft.
   const historyRef = useRef<string[]>([]);
   const histIdxRef = useRef(-1);
+  // Voice input (MediaRecorder → server STT)
+  const [recState, setRecState] = useState<'idle' | 'recording' | 'transcribing'>('idle');
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const recChunksRef = useRef<Blob[]>([]);
+
+  const stopRecording = useCallback(() => {
+    recorderRef.current?.stop();
+  }, []);
+
+  const startRecording = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      recChunksRef.current = [];
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) recChunksRef.current.push(e.data); };
+      recorder.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop());
+        setRecState('transcribing');
+        try {
+          const blob = new Blob(recChunksRef.current, { type: recorder.mimeType });
+          const buf = await blob.arrayBuffer();
+          let bin = '';
+          const bytes = new Uint8Array(buf);
+          for (let i = 0; i < bytes.length; i += 0x8000) {
+            bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+          }
+          const res = await transcribeAudio(btoa(bin), recorder.mimeType);
+          if (res.ok && res.text) {
+            const el = textareaRef.current;
+            if (el) {
+              el.value = el.value ? `${el.value} ${res.text}` : res.text;
+              el.focus();
+            }
+          } else {
+            setAttachNotice(res.error || 'Transcription failed.');
+          }
+        } catch {
+          setAttachNotice('Transcription failed.');
+        } finally {
+          setRecState('idle');
+        }
+      };
+      recorder.start();
+      recorderRef.current = recorder;
+      setRecState('recording');
+    } catch {
+      setAttachNotice('Microphone unavailable (permission denied?).');
+    }
+  }, []);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -352,6 +402,32 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
               >
                 <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M19 11l-8 8a4 4 0 0 1-6-6l9-9a2.7 2.7 0 0 1 4 4l-8.5 8.5a1.4 1.4 0 0 1-2-2l7.5-7.5" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                onClick={() => (recState === 'recording' ? stopRecording() : startRecording())}
+                disabled={disabled || recState === 'transcribing'}
+                title={recState === 'recording' ? 'Stop recording' : recState === 'transcribing' ? 'Transcribing…' : 'Voice input'}
+                aria-label={recState === 'recording' ? 'Stop recording' : 'Voice input'}
+                style={{
+                  width: 36, height: 36, borderRadius: '50%',
+                  background: recState === 'recording' ? 'var(--danger)' : 'none',
+                  border: 'none',
+                  color: recState === 'recording'
+                    ? 'white'
+                    : disabled || recState === 'transcribing'
+                      ? 'var(--text-muted)'
+                      : 'var(--text-secondary)',
+                  cursor: disabled ? 'default' : 'pointer',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  flexShrink: 0, marginBottom: 4,
+                }}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="9" y="2" width="6" height="11" rx="3" />
+                  <path d="M5 10v1a7 7 0 0 0 14 0v-1" />
+                  <path d="M12 18v4" />
                 </svg>
               </button>
             </>
