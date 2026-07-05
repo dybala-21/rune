@@ -32,13 +32,19 @@ def _is_trusted_browser_source(raw_url: str | None, expected_port: int) -> bool:
         return True  # No Origin/Referer => non-browser request, allow
     try:
         parsed = urlparse(raw_url)
+        hostname = parsed.hostname
+        # .port is lazy and raises ValueError on an out-of-range/non-numeric
+        # port (e.g. ":70000", ":abc") — must be inside the try, or a crafted
+        # Origin header turns every auth check into a 500 instead of failing
+        # closed cleanly.
+        port = parsed.port
     except Exception:
         return False
 
-    if not _is_loopback_host(parsed.hostname):
+    if not _is_loopback_host(hostname):
         return False
 
-    return not (parsed.port is not None and parsed.port != expected_port)
+    return not (port is not None and port != expected_port)
 
 
 def is_trusted_local_bypass_request(

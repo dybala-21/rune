@@ -1147,7 +1147,7 @@ function InlineApprovalCard({
                 fontSize: 13,
               }}
               onKeyDown={e => {
-                if (e.key === 'Enter') onRespond('deny', guidance || undefined);
+                if (e.key === 'Enter') respond('deny', guidance || undefined);
                 if (e.key === 'Escape') { setShowDenyInput(false); setGuidance(''); }
               }}
             />

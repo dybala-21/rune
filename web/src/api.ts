@@ -120,6 +120,46 @@ export function setLiveSessionId(id: string): void {
   try { sessionStorage.setItem(LIVE_SESSION_KEY, id); } catch { /* storage unavailable */ }
 }
 
+export function getLiveSessionId(): string {
+  return liveSessionId();
+}
+
+// ── Workspace API (directory pinned per conversation) ──
+
+export async function fetchWorkspace(): Promise<{ path: string }> {
+  return rpc('workspace.get', { sessionId: liveSessionId() });
+}
+
+export async function setWorkspace(path: string): Promise<{ path: string }> {
+  return rpc('workspace.set', { sessionId: liveSessionId(), path });
+}
+
+export async function fetchWorkspaceRecents(): Promise<{ paths: string[] }> {
+  return rpc('workspace.recents', {});
+}
+
+export async function listWorkspaceDirs(dir?: string): Promise<{ dir: string; parent: string; entries: string[] }> {
+  return rpc('workspace.listdirs', dir ? { dir } : {});
+}
+
+export async function fetchWorkspaceDiff(): Promise<{ diff: string }> {
+  return rpc('workspace.diff', { sessionId: liveSessionId() });
+}
+
+export async function readWorkspaceFile(path: string): Promise<{ path: string; content: string }> {
+  return rpc('files.read', { sessionId: liveSessionId(), path });
+}
+
+// ── Embedded terminal ──
+
+export async function fetchTerminalStatus(): Promise<{ enabled: boolean }> {
+  return rpc('terminal.status', {});
+}
+
+export async function mintTerminalToken(): Promise<{ token: string; workspace: string }> {
+  return rpc('terminal.token', { sessionId: liveSessionId() });
+}
+
 export function sendMessage(text: string, attachments?: MessageAttachment[]) {
   return post('/api/message', { text, attachments, sessionId: liveSessionId() });
 }

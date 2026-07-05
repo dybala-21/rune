@@ -1,9 +1,14 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { AgentState, StepInfo, TokenUsage as TokenUsageType } from '../types';
 import { TokenUsage } from './TokenUsage';
 import { PixelWolf } from './PixelWolf';
 
 interface StatusBarProps {
+  /** Trailing slot rendered before the palette button (e.g. workspace chip) */
+  trailing?: ReactNode;
+  /** Toggle the coding workbench (file/diff/terminal). */
+  onToggleWorkbench?: () => void;
+  workbenchOpen?: boolean;
   connected: boolean;
   state: AgentState;
   sidebarOpen?: boolean;
@@ -38,6 +43,7 @@ function formatTokensCompact(n: number): string {
 }
 
 export function StatusBar({
+  trailing,
   connected,
   state,
   sidebarOpen,
@@ -48,6 +54,8 @@ export function StatusBar({
   activeModel,
   lastRunSuccess = null,
   onOpenPalette,
+  onToggleWorkbench,
+  workbenchOpen,
 }: StatusBarProps) {
   const [showTokens, setShowTokens] = useState(false);
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -254,7 +262,32 @@ export function StatusBar({
         </div>
       )}
 
+      {/* Workbench toggle — always visible so the file/diff/terminal panel
+          (and its Terminal tab) is discoverable without a shortcut. */}
+      {onToggleWorkbench && (
+        <button
+          onClick={onToggleWorkbench}
+          title="Toggle workbench: files, diff, terminal (⌘J)"
+          aria-label="Toggle workbench"
+          aria-pressed={workbenchOpen}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 5, padding: '3px 8px',
+            background: workbenchOpen ? 'var(--bg-tertiary)' : 'transparent',
+            border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+            color: workbenchOpen ? 'var(--text-primary)' : 'var(--text-muted)',
+            fontFamily: 'var(--font-mono)', fontSize: 11, cursor: 'pointer',
+          }}
+        >
+          <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+            <rect x="1.5" y="2.5" width="11" height="9" rx="1" />
+            <path d="M8.5 2.5v9" />
+          </svg>
+          Workbench
+        </button>
+      )}
+
       {/* Command palette */}
+      {trailing}
       {onOpenPalette && (
         <button
           onClick={onOpenPalette}

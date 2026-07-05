@@ -440,3 +440,29 @@ a:focus-visible,
     scroll-behavior: auto !important;
   }
 }
+
+/* Chat ⇄ workbench morph: the grid tracks animate so the chat column squeezes
+   to ~40% and the workbench fills ~60%. Content never repositions. */
+.chat-workbench-grid {
+  grid-template-columns: 1fr 0fr;
+  transition: grid-template-columns 0.42s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.chat-workbench-grid[data-bench="open"] {
+  grid-template-columns: 2fr 3fr;
+}
+/* Narrow windows: the workbench overlays the chat instead of crushing the
+   composer to an unusable width. */
+@media (max-width: 960px) {
+  .chat-workbench-grid[data-bench="open"] {
+    grid-template-columns: 1fr;
+  }
+  .chat-workbench-grid[data-bench="open"] > :last-child {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    box-shadow: -8px 0 40px rgba(0, 0, 0, 0.5);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-workbench-grid { transition: none; }
+}

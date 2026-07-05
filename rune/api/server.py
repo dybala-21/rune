@@ -335,11 +335,17 @@ def create_app() -> Any:
             if conv_manager is not None and conv_id:
                 conv_wiring.record_user_turn(conv_manager, conv_id, goal)
 
+            # Workspace pinned to this conversation (picker in the app);
+            # an @path in the message still overrides for the turn.
+            workspace = await conv_wiring.get_workspace(conv_id or "")
+
             # 1. Prepare agent context (loads prior turns as history)
             agent_ctx = await prepare_agent_context(
                 PrepareContextOptions(
                     goal=goal,
                     channel="web",
+                    cwd=workspace or "",
+                    pinned_cwd=workspace,
                     attachments=attachments or [],
                     conversation_id=conv_id or "",
                 ),
@@ -442,7 +448,8 @@ def create_app() -> Any:
                     "tool_result",
                     {
                         "toolName": info.get("name", ""),
-                        "result": "",
+                        "result": info.get("output_head", "")
+                        or info.get("error_head", ""),
                         "success": info.get("success", True),
                         "runId": run_id,
                     },
@@ -700,7 +707,8 @@ def create_app() -> Any:
                         "event": "tool_result",
                         "data": {
                             "toolName": info.get("name", ""),
-                            "result": "",
+                            "result": info.get("output_head", "")
+                            or info.get("error_head", ""),
                             "success": info.get("success", True),
                             "runId": run_id,
                         },
@@ -869,6 +877,87 @@ def create_app() -> Any:
                 "X-Accel-Buffering": "no",
             },
         )
+
+    # Embedded terminal WebSocket (/ws/terminal) — opt-in, token-gated.
+    # Protocol (terminado-style JSON arrays): client→ ["stdin", text] /
+    # ["set_size", rows, cols]; server→ ["stdout", text] / ["disconnect", 1].
+
+    @app.websocket("/ws/terminal")
+    async def terminal_endpoint(ws: WebSocket) -> None:
+        from rune.api import terminal as term
+        from rune.api.local_auth_guard import (
+            is_localhost_request,
+            is_trusted_local_bypass_request,
+        )
+
+        if not term.is_enabled():
+            await ws.close(code=4003, reason="Terminal is disabled")
+            return
+
+        # Loopback only.
+        if not is_localhost_request(ws.client.host if ws.client else ""):
+            await ws.close(code=4001, reason="Terminal is local-only")
+            return
+        # Origin/CSRF check (browsers don't apply same-origin to WebSockets),
+        # mirroring /ws — defense-in-depth against a cross-site handshake on top
+        # of the single-use token.
+        server_port = ws.scope.get("server", (None, 0))[1] or 0
+        headers = {k.decode(): v.decode() for k, v in ws.scope.get("headers", [])}
+        if not is_trusted_local_bypass_request(headers, server_port):
+            await ws.close(code=4001, reason="Cross-origin terminal handshake refused")
+            return
+        # Short-lived, single-use token minted via the auth-gated terminal.token
+        # RPC. NOTE: same-origin renderer XSS can mint one — see terminal.py.
+        workspace = term.redeem_token(ws.query_params.get("token", ""))
+        if workspace is None:
+            await ws.close(code=4001, reason="Invalid or spent terminal token")
+            return
+
+        await ws.accept()
+        session = term.TerminalSession(workspace)
+        try:
+            session.start()
+        except Exception as exc:
+            log.warning("terminal_start_failed", error=str(exc)[:150])
+            await ws.send_text(json_encode(["disconnect", 1]))
+            await ws.close()
+            return
+
+        async def _pump_out() -> None:
+            while True:
+                chunk = await session.out_queue.get()
+                session.notify_consumed()  # re-arm PTY reader if it was paused
+                if chunk is None:
+                    with suppress(Exception):
+                        await ws.send_text(json_encode(["disconnect", 1]))
+                    return
+                with suppress(Exception):
+                    await ws.send_text(
+                        json_encode(["stdout", chunk.decode("utf-8", "replace")])
+                    )
+
+        pump = asyncio.create_task(_pump_out())
+        try:
+            while True:
+                raw = await ws.receive_text()
+                try:
+                    msg = json_decode(raw)
+                except Exception:
+                    continue
+                if not isinstance(msg, list) or not msg:
+                    continue
+                if msg[0] == "stdin" and len(msg) > 1:
+                    session.write(str(msg[1]))
+                elif msg[0] == "set_size" and len(msg) >= 3:
+                    with suppress(Exception):
+                        session.resize(int(msg[1]), int(msg[2]))
+        except WebSocketDisconnect:
+            pass
+        except Exception as exc:
+            log.debug("terminal_ws_error", error=str(exc)[:100])
+        finally:
+            pump.cancel()
+            session.close()
 
     # WebSocket endpoint (/ws)
 
@@ -1358,6 +1447,148 @@ def create_app() -> Any:
                 # Legacy placeholder (superseded by sessions.turns)
                 params.get("sessionId", "")
                 return _ok({"events": [], "runs": []})
+
+            # workspace — a directory pinned per conversation; the agent runs
+            # there and the app's file/diff views read from it.
+            elif method == "workspace.get":
+                from rune.api import conversation_wiring
+
+                ws = await conversation_wiring.get_workspace(
+                    params.get("sessionId", ""),
+                )
+                return _ok({"path": ws or ""})
+
+            elif method == "workspace.set":
+                from rune.api import conversation_wiring
+
+                try:
+                    resolved = await conversation_wiring.set_workspace(
+                        params.get("sessionId", ""), params.get("path", ""),
+                    )
+                except ValueError as exc:
+                    return _err("invalid_path", str(exc))
+                return _ok({"path": resolved})
+
+            elif method == "workspace.recents":
+                from rune.api import conversation_wiring
+
+                recents = await conversation_wiring.recent_workspaces()
+                default_ws = str(Path.cwd())
+                if default_ws not in recents:
+                    recents.append(default_ws)
+                return _ok({"paths": recents})
+
+            elif method == "workspace.listdirs":
+                # Subdirectories under `dir` (default home), for the folder
+                # picker's type-ahead. Local single-user daemon: listing the
+                # user's own filesystem to choose a project folder is expected.
+                raw = params.get("dir", "") or "~"
+                _skip_dirs = {"__pycache__", "node_modules", ".git"}
+
+                def _scan(raw_dir: str) -> tuple[str, str, list[str]]:
+                    # ALL filesystem work (is_dir/resolve/scandir) runs here,
+                    # off the event loop, so a hung mount (`/Volumes/stale-nfs`)
+                    # can't freeze the daemon. Early-break at the cap bounds a
+                    # 100k-entry dir.
+                    base = Path(raw_dir).expanduser()
+                    if not base.is_dir():
+                        base = base.parent if base.parent.is_dir() else Path.home()
+                    base = base.resolve()
+                    names: list[str] = []
+                    with os.scandir(base) as it:
+                        for de in it:
+                            name = de.name
+                            if name.startswith(".") or name in _skip_dirs:
+                                continue
+                            try:
+                                # Follow symlinks so symlinked project dirs
+                                # (~/dev, /tmp on macOS) still show — safe here
+                                # because we're off the event loop.
+                                if de.is_dir():
+                                    names.append(name)
+                            except OSError:
+                                continue
+                            if len(names) >= 1000:
+                                break
+                    names.sort(key=str.lower)
+                    parent = str(base.parent) if base.parent != base else ""
+                    return str(base), parent, names[:500]
+
+                try:
+                    d, parent, entries = await asyncio.to_thread(_scan, raw)
+                except (OSError, ValueError) as exc:
+                    return _err("read_failed", str(exc)[:150])
+                return _ok({"dir": d, "parent": parent, "entries": entries})
+
+            elif method == "workspace.diff":
+                from rune.api import command_actions, conversation_wiring
+
+                ws = await conversation_wiring.get_workspace(
+                    params.get("sessionId", ""),
+                ) or str(Path.cwd())
+                ctx = command_actions.ActionContext(
+                    broadcast=_broadcast, workspace=Path(ws),
+                )
+                text = await command_actions.execute_action(
+                    "toggle_git_diff", ctx,
+                )
+                return _ok({"diff": text})
+
+            elif method == "terminal.status":
+                from rune.api import terminal as term
+
+                return _ok({"enabled": term.is_enabled()})
+
+            elif method == "terminal.token":
+                from rune.api import conversation_wiring
+                from rune.api import terminal as term
+
+                if not term.is_enabled():
+                    return _err(
+                        "disabled",
+                        "Terminal is off. Enable with RUNE_TERMINAL_ENABLED=1.",
+                    )
+                ws = await conversation_wiring.get_workspace(
+                    params.get("sessionId", ""),
+                ) or str(Path.cwd())
+                return _ok({"token": term.mint_token(ws), "workspace": ws})
+
+            elif method == "files.read":
+                from rune.api import conversation_wiring
+
+                ws = await conversation_wiring.get_workspace(
+                    params.get("sessionId", ""),
+                ) or str(Path.cwd())
+                rel = params.get("path", "")
+
+                def _read(ws_dir: str, rel_path: str) -> tuple[str, str]:
+                    # (code, payload) — all blocking fs work off the event loop.
+                    try:
+                        root = Path(ws_dir).resolve()
+                        target = (root / rel_path).resolve()
+                    except ValueError:
+                        # e.g. embedded null byte in the path.
+                        return ("forbidden", "Invalid path")
+                    # Jail: resolved target must sit inside the resolved
+                    # workspace (defeats .., absolute paths, and symlinks —
+                    # resolve() follows links before the prefix check).
+                    if target != root and not str(target).startswith(
+                        str(root) + os.sep
+                    ):
+                        return ("forbidden", "Path escapes the workspace")
+                    if not target.is_file():
+                        return ("not_found", f"No such file: {rel_path}")
+                    if target.stat().st_size > 512_000:
+                        return ("too_large", "File exceeds 500KB view limit")
+                    try:
+                        return ("ok", target.read_text(encoding="utf-8", errors="replace"))
+                    except OSError as exc:
+                        return ("read_failed", str(exc)[:150])
+
+                code, payload = await asyncio.to_thread(_read, ws, rel)
+                if code != "ok":
+                    return _err(code, payload)
+                return _ok({"path": rel, "content": payload})
 
             # skills
             elif method == "skills.list":

@@ -411,7 +411,10 @@ async def _action_git_diff(ctx: ActionContext) -> str:
         proc.kill()
         return "git diff timed out."
     if proc.returncode != 0:
-        return f"git diff failed: {stderr.decode(errors='replace')[:200]}"
+        err = stderr.decode(errors="replace")
+        if "not a git repository" in err.lower():
+            return "This workspace is not a git repository — no diff to show."
+        return f"git diff failed: {err[:200]}"
     text = stdout.decode(errors="replace")
     if not text.strip():
         return "No uncommitted changes."

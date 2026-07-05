@@ -178,9 +178,13 @@ def _tool_result_event_payload(cap_name: str, result: CapabilityResult) -> dict[
         "name": cap_name,
         "success": result.success,
         "output_length": len(result.output or ""),
+        # Clipped output so UI surfaces can show what a command/tool actually
+        # returned (the workbench activity feed); full output stays loop-side.
+        "output_head": (result.output or "")[:2000],
     }
     if result.error:
         payload["error_length"] = len(result.error)
+        payload["error_head"] = result.error[:500]
 
     if not result.success and _env_flag("RUNE_BENCH_CAPTURE_FAILED_TOOL_OUTPUT"):
         tail_bytes = _env_int(
@@ -1536,6 +1540,7 @@ class NativeAgentLoop(EventEmitter):
             on_tool_end=_on_tool_end,
             approval_callback=self._approval_callback,
             fast_lane_active=lambda: _fast_lane_active,
+            workspace_root=(context or {}).get("workspace_root", ""),
         )
         tool_functions = build_tool_set(adapter_opts)
 

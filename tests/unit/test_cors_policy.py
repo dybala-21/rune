@@ -56,3 +56,12 @@ class TestResolveCorsDecision:
         )
         assert decision.allowed is True
         assert decision.allow_origin is None
+
+
+def test_bad_port_origin_fails_closed_no_crash():
+    from rune.api.local_auth_guard import is_trusted_local_bypass_request
+    for bad in ("http://localhost:70000", "http://127.0.0.1:abc"):
+        assert is_trusted_local_bypass_request({"origin": bad, "referer": bad}, 18789) is False
+    assert is_trusted_local_bypass_request(
+        {"origin": "http://127.0.0.1:18789", "referer": "http://127.0.0.1:18789"}, 18789
+    ) is True

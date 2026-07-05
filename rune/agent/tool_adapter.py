@@ -251,6 +251,10 @@ def get_effective_stall_limits(extended: bool = False) -> dict[str, Any]:
 class ToolAdapterOptions:
     """Options passed to :func:`build_tool_set`."""
     profile_name: str = ""
+    # Directory relative tool paths anchor to (file_* path params, bash cwd).
+    # Empty = process cwd, which matches the CLI/TUI where the process runs in
+    # the project; the daemon serves many workspaces so it must pass this.
+    workspace_root: str = ""
     enable_guardian: bool = True
     sandbox_policy: str = "balanced"
     cognitive_cache: SessionToolCache | None = None
@@ -507,6 +511,23 @@ def _build_typed_tool(
 
         # -- Feature 4: Smart file expansion ---------------------
         effective_params = dict(params)
+
+        # Anchor relative paths to the run's workspace. Capabilities resolve
+        # paths against the process cwd, which is the daemon's start dir when
+        # serving the app — a bare "app.py" must mean the pinned project.
+        if opts.workspace_root:
+            if cap_name.startswith("file_"):
+                for _pk in ("file_path", "path", "target"):
+                    _pv = effective_params.get(_pk)
+                    if (
+                        isinstance(_pv, str) and _pv
+                        and not os.path.isabs(os.path.expanduser(_pv))
+                    ):
+                        effective_params[_pk] = os.path.join(
+                            opts.workspace_root, _pv,
+                        )
+            elif cap_name == _BASH_CAPABILITY and not effective_params.get("cwd"):
+                effective_params["cwd"] = opts.workspace_root
         if (
             cap_name == "file_read"
             and (effective_params.get("offset") or effective_params.get("limit"))

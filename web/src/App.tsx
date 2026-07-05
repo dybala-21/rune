@@ -13,10 +13,16 @@ import { MCPPanel } from './components/MCPPanel';
 import { MarkdownPanel } from './components/MarkdownPanel';
 import { WorkbenchPanel } from './components/WorkbenchPanel';
 import { CommandK, type Command } from './components/CommandK';
+import { WorkspaceChip } from './components/WorkspaceChip';
+import { InlineWorkspacePicker } from './components/InlineWorkspacePicker';
 import { normalizeToolName, inferWorkPhase } from './utils/tooling';
 import { fetchConfig, fetchSessions, type ConfigInfo, type SessionInfo } from './api';
 
 type SidebarTab = 'chats' | 'settings';
+
+// Tools that mean the agent is working in a folder — the signal to ask for a
+// workspace if none is pinned (zero false positives, unlike text guessing).
+const WORKSPACE_TOOLS = new Set(['file.read', 'file.write', 'file.edit', 'file.delete', 'bash']);
 
 export function App() {
   const agent = useAgent();
@@ -102,9 +108,15 @@ export function App() {
     }
   }, [agent.toolCalls, isViewingHistory, workbenchDismissed]);
 
-  // ⌘K opens the palette; ⌘J toggles the workbench.
+  // ⌘K opens the palette; ⌘J toggles the workbench; Esc aborts a live run
+  // (the composer is blurred while running, so it can't catch Esc itself).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !isViewingHistory && agent.state === 'running') {
+        e.preventDefault();
+        agent.abort();
+        return;
+      }
       if (!(e.metaKey || e.ctrlKey)) return;
       const key = e.key.toLowerCase();
       if (key === 'k') {
@@ -122,7 +134,7 @@ export function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [isViewingHistory]);
+  }, [isViewingHistory, agent.state, agent.abort]);
 
   // Load recent sessions when the palette opens, for quick jump-to-session.
   useEffect(() => {
@@ -196,6 +208,12 @@ export function App() {
         activeModel={configInfo?.activeModel ?? null}
         lastRunSuccess={!isViewingHistory ? (agent.activitySummary?.success ?? null) : null}
         onOpenPalette={() => setPaletteOpen(true)}
+        trailing={!isViewingHistory ? <WorkspaceChip /> : null}
+        workbenchOpen={workbenchOpen}
+        onToggleWorkbench={!isViewingHistory ? () => {
+          setWorkbenchDismissed(workbenchOpen);
+          setWorkbenchOpen(o => !o);
+        } : undefined}
       />
 
       {!agent.connected && (
@@ -403,16 +421,20 @@ export function App() {
             </div>
           )}
 
-          {/* Chat area + workbench */}
-          <div style={{
-            flex: 1,
-            overflow: 'hidden',
-            position: 'relative',
-            display: 'flex',
-            flexDirection: 'row',
-          }}>
-            <div style={{
+          {/* Chat area + workbench — the split MORPHS: the chat column
+              squeezes and the workbench slides in beside it. The composer and
+              bubbles never move (grid tracks animate, content stays put). */}
+          <div
+            className="chat-workbench-grid"
+            data-bench={!isViewingHistory && workbenchOpen ? 'open' : 'closed'}
+            style={{
               flex: 1,
+              overflow: 'hidden',
+              position: 'relative',
+              display: 'grid',
+            }}
+          >
+            <div style={{
               minWidth: 0,
               display: 'flex',
               flexDirection: 'column',
@@ -466,6 +488,16 @@ export function App() {
                 </button>
               )}
 
+              {/* First coding activity with no pinned workspace → ask in place.
+                  The picker self-hides once a folder is set. */}
+              {!isViewingHistory && agent.toolCalls.some(
+                tc => WORKSPACE_TOOLS.has(normalizeToolName(tc.toolName)),
+              ) && (
+                <div style={{ padding: '0 20px 8px' }}>
+                  <InlineWorkspacePicker />
+                </div>
+              )}
+
               {/* Input area */}
               {isViewingHistory ? (
                 <div style={{
@@ -498,15 +530,19 @@ export function App() {
               )}
             </div>
 
-            {!isViewingHistory && workbenchOpen && (
-              <WorkbenchPanel
-                toolCalls={agent.toolCalls}
-                isRunning={agent.state === 'running'}
-                activitySummary={agent.activitySummary}
-                connected={agent.connected}
-                onClose={() => { setWorkbenchOpen(false); setWorkbenchDismissed(true); }}
-              />
-            )}
+            {/* Workbench occupies the second grid track; always mounted so
+                the width can animate, but its body only renders when open. */}
+            <div style={{ minWidth: 0, overflow: 'hidden' }}>
+              {!isViewingHistory && workbenchOpen && (
+                <WorkbenchPanel
+                  toolCalls={agent.toolCalls}
+                  isRunning={agent.state === 'running'}
+                  activitySummary={agent.activitySummary}
+                  connected={agent.connected}
+                  onClose={() => { setWorkbenchOpen(false); setWorkbenchDismissed(true); }}
+                />
+              )}
+            </div>
           </div>
         </div>
       </div>
