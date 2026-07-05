@@ -58,7 +58,9 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
           if (res.ok && res.text) {
             const el = textareaRef.current;
             if (el) {
-              el.value = el.value ? `${el.value} ${res.text}` : res.text;
+              // Route through setValue so the box auto-grows and the caret lands
+              // at the end (a raw el.value write skips both).
+              setValue(el.value ? `${el.value} ${res.text}` : res.text);
               el.focus();
             }
           } else {
