@@ -264,6 +264,65 @@ def test_execute_with_session_threads_history(client, tmp_path):
     assert "heron" in str(FakeLoop.captured[1]["history"])
 
 
+def test_workspace_pin_flows_into_agent_run(client, tmp_path):
+    """A pinned workspace is stored, listed in recents, and validated."""
+    ws = tmp_path / "proj"
+    ws.mkdir()
+    r = client.post(
+        "/api/v1/rpc",
+        json={"method": "workspace.set",
+              "params": {"sessionId": "web_ws1", "path": str(ws)}},
+    )
+    assert r.json()["success"] is True
+    assert r.json()["data"]["path"] == str(ws.resolve())
+
+    r = client.post(
+        "/api/v1/rpc",
+        json={"method": "workspace.get", "params": {"sessionId": "web_ws1"}},
+    )
+    assert r.json()["data"]["path"] == str(ws.resolve())
+
+    r = client.post(
+        "/api/v1/rpc",
+        json={"method": "workspace.recents", "params": {}},
+    )
+    assert str(ws.resolve()) in r.json()["data"]["paths"]
+
+    r = client.post(
+        "/api/v1/rpc",
+        json={"method": "workspace.set",
+              "params": {"sessionId": "web_ws1", "path": "/nope/missing"}},
+    )
+    assert r.json()["success"] is False
+
+
+def test_files_read_jailed_to_workspace(client, tmp_path):
+    ws = tmp_path / "proj2"
+    ws.mkdir()
+    (ws / "hello.py").write_text("print('hi')\n")
+    (tmp_path / "secret.txt").write_text("outside\n")
+    client.post(
+        "/api/v1/rpc",
+        json={"method": "workspace.set",
+              "params": {"sessionId": "web_ws2", "path": str(ws)}},
+    )
+
+    r = client.post(
+        "/api/v1/rpc",
+        json={"method": "files.read",
+              "params": {"sessionId": "web_ws2", "path": "hello.py"}},
+    )
+    assert r.json()["success"] is True
+    assert "print" in r.json()["data"]["content"]
+
+    r = client.post(
+        "/api/v1/rpc",
+        json={"method": "files.read",
+              "params": {"sessionId": "web_ws2", "path": "../secret.txt"}},
+    )
+    assert r.json()["success"] is False
+
+
 def test_sessions_rpc_serves_canonical_store(client, tmp_path):
     """The sidebar RPC must share the id space of /load and live sessionIds."""
     r = client.post(
@@ -347,3 +406,74 @@ async def test_agent_run_generated_session_records_first_turn(
     assert len(_session_turns()) >= 2, (
         "first turn was not recorded under the server-generated sessionId"
     )
+
+
+async def test_tool_paths_anchor_to_workspace(tmp_path, monkeypatch):
+    """Relative file params and bash cwd resolve inside workspace_root, not
+    the daemon's process cwd."""
+    from rune.agent.tool_adapter import ToolAdapterOptions, build_tool_set
+
+    ws = tmp_path / "anchored"
+    ws.mkdir()
+    (ws / "inner.txt").write_text("anchored content\n")
+
+    opts = ToolAdapterOptions(
+        allowed_tools=["file_read", "bash_execute"],
+        workspace_root=str(ws),
+    )
+    tools = build_tool_set(opts)
+
+    out = await tools["file_read"].function(path="inner.txt")
+    assert "anchored content" in str(out)
+
+    out = await tools["bash_execute"].function(command="pwd")
+    assert str(ws) in str(out)
+
+
+def test_workspace_listdirs(client, tmp_path):
+    (tmp_path / "proj_a").mkdir()
+    (tmp_path / "proj_b").mkdir()
+    (tmp_path / "__pycache__").mkdir()
+    (tmp_path / ".hidden").mkdir()
+    (tmp_path / "file.txt").write_text("x")
+    r = client.post(
+        "/api/v1/rpc",
+        json={"method": "workspace.listdirs", "params": {"dir": str(tmp_path)}},
+    )
+    data = r.json()["data"]
+    assert data["entries"] == ["proj_a", "proj_b"]  # dirs only, noise filtered
+    assert data["dir"] == str(tmp_path.resolve())
+    assert data["parent"] == str(tmp_path.resolve().parent)
+
+
+def test_workspace_set_empty_session_errors_cleanly(client, tmp_path):
+    ws = tmp_path / "p"
+    ws.mkdir()
+    r = client.post(
+        "/api/v1/rpc",
+        json={"method": "workspace.set", "params": {"sessionId": "", "path": str(ws)}},
+    )
+    body = r.json()
+    assert body["success"] is False  # clean error, not a 500
+    assert r.status_code == 200
+
+
+def test_files_read_null_byte_clean_error(client, tmp_path):
+    ws = tmp_path / "nb"
+    ws.mkdir()
+    client.post("/api/v1/rpc", json={"method": "workspace.set",
+                "params": {"sessionId": "nb1", "path": str(ws)}})
+    r = client.post("/api/v1/rpc", json={"method": "files.read",
+                "params": {"sessionId": "nb1", "path": "a\x00b"}})
+    body = r.json()
+    assert body["success"] is False  # clean error, not a 500
+    assert r.status_code == 200
+
+
+def test_listdirs_bad_path_falls_back(client, tmp_path):
+    r = client.post("/api/v1/rpc", json={"method": "workspace.listdirs",
+                "params": {"dir": "/nonexistent/deeply/nested/xyz"}})
+    body = r.json()
+    # Non-existent path falls back to a listable dir (parent or home), no crash.
+    assert body["success"] is True
+    assert "entries" in body["data"]

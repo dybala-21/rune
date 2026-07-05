@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from rune.utils.logger import get_logger
@@ -156,6 +157,72 @@ async def list_web_conversations(limit: int = 20) -> list[Any]:
             log.debug("list_web_conversations_failed", error=str(exc)[:100])
     convs.sort(key=lambda c: c.updated_at, reverse=True)
     return convs[:limit]
+
+
+async def get_workspace(conversation_id: str) -> str | None:
+    """Workspace directory pinned to a conversation, if any."""
+    import json
+
+    manager = get_conv_manager()
+    if manager is None or not conversation_id:
+        return None
+    conv = manager._active.get(conversation_id)
+    if conv is None:
+        conv = await manager._store.load(conversation_id)
+    if conv is None or not conv.execution_context:
+        return None
+    try:
+        path = json.loads(conv.execution_context).get("cwd", "")
+    except (ValueError, AttributeError):
+        return None
+    return path if path and Path(path).is_dir() else None
+
+
+async def set_workspace(conversation_id: str, path: str) -> str:
+    """Pin a workspace directory to a conversation. Returns the resolved path.
+
+    Raises ValueError when the path is not an existing directory.
+    """
+    import json
+
+    if not conversation_id:
+        raise ValueError("No conversation to pin a workspace to")
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_dir():
+        raise ValueError(f"Not a directory: {path}")
+
+    manager = get_conv_manager()
+    if manager is None:
+        raise ValueError("Conversation store unavailable")
+    conv_id = await resolve_conversation(manager, conversation_id, sticky=False)
+    conv = manager._active[conv_id]
+    try:
+        ec = json.loads(conv.execution_context) if conv.execution_context else {}
+    except ValueError:
+        ec = {}
+    ec["cwd"] = str(resolved)
+    conv.execution_context = json.dumps(ec)
+    await manager._store.save(conv)
+    return str(resolved)
+
+
+async def recent_workspaces(limit: int = 8) -> list[str]:
+    """Distinct workspace dirs pinned on recent conversations, newest first."""
+    import json
+
+    seen: list[str] = []
+    for conv in await list_web_conversations(limit=40):
+        if not conv.execution_context:
+            continue
+        try:
+            cwd = json.loads(conv.execution_context).get("cwd", "")
+        except (ValueError, AttributeError):
+            continue
+        if cwd and cwd not in seen and Path(cwd).is_dir():
+            seen.append(cwd)
+        if len(seen) >= limit:
+            break
+    return seen
 
 
 def record_user_turn(conv_manager: Any, conversation_id: str, text: str) -> None:
