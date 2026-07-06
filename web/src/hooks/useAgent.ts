@@ -394,6 +394,20 @@ export function useAgent() {
           return prev;
         });
       }
+
+      // Trust verdict: show whether the run was actually verified, or — when
+      // it wasn't — the honest reason + escalation next step. Skip the card for
+      // plain chat turns that never ran a check (nothing to attest).
+      const trust = data.trust;
+      if (trust && (!trust.verified || trust.evidenceGate?.hasCheck)) {
+        setMessages(prev => appendWithLimit(prev, {
+          id: nextId(),
+          role: 'system' as const,
+          content: '',
+          timestamp: Date.now(),
+          trust,
+        }, MAX_MESSAGES));
+      }
     }));
 
     unsubs.push(sseOn('agent_error', (raw) => {
@@ -545,6 +559,11 @@ export function useAgent() {
           content: t.content,
           timestamp: Date.now(),
         })));
+        // Restore the pinned workspace so a resumed coding conversation keeps
+        // its project folder; refresh the chip.
+        if (data.data.workspace) {
+          window.dispatchEvent(new CustomEvent('rune:workspace-changed'));
+        }
       }
       if (data.output) {
         setMessages(prev => appendWithLimit(prev, {

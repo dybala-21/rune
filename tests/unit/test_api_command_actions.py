@@ -192,3 +192,19 @@ async def test_goal_disabled_message(ctx, monkeypatch):
 async def test_unknown_client_action_degrades_gracefully(ctx):
     out = await command_actions.execute_action("cycle_style", ctx)
     assert "not available here" in out
+
+
+async def test_load_restores_workspace(ctx, tmp_path):
+    """Resuming a coding conversation must carry back its pinned workspace."""
+    from rune.api import conversation_wiring
+    ws = tmp_path / "proj_resume"
+    ws.mkdir()
+    manager = conversation_wiring.get_conv_manager()
+    conv_id = await conversation_wiring.resolve_conversation(manager, "s3", sticky=False)
+    manager.add_turn(conv_id, "user", "fix the parser")
+    await conversation_wiring.set_workspace("s3", str(ws))
+
+    out = await command_actions.execute_action("load:s3", ctx)
+    assert out == ""
+    data = ctx.extra["broadcasts"][-1][1]["data"]
+    assert data["workspace"] == str(ws.resolve())

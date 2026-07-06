@@ -445,7 +445,15 @@ a:focus-visible,
    to ~40% and the workbench fills ~60%. Content never repositions. */
 .chat-workbench-grid {
   grid-template-columns: 1fr 0fr;
+  /* Pin the single row to the grid's own height (minmax(0,…) lets children
+     shrink) so the chat column's overflowY:auto actually scrolls instead of
+     the grid track growing to fit all messages. */
+  grid-template-rows: minmax(0, 1fr);
   transition: grid-template-columns 0.42s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.chat-workbench-grid > * {
+  min-height: 0;
+  min-width: 0;
 }
 .chat-workbench-grid[data-bench="open"] {
   grid-template-columns: 2fr 3fr;

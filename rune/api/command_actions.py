@@ -574,16 +574,30 @@ async def _action_load(conv_id: str, ctx: ActionContext) -> str:
         if conv is None:
             return f"Conversation not found: {conv_id}"
         turns = [
-            {"role": t.role, "content": t.content}
+            {"role": t.role, "content": t.content, "goalType": t.goal_type}
             for t in conv.turns
             if t.role in ("user", "assistant")
-        ][-40:]
+        ][-80:]
+        # Restore the workspace too, so resuming a coding conversation puts the
+        # agent back in that project's folder instead of the daemon's cwd.
+        workspace = ""
+        if conv.execution_context:
+            with contextlib.suppress(Exception):
+                import json
+
+                workspace = json.loads(conv.execution_context).get("cwd", "")
         await ctx.broadcast(
             "command_result",
             {
                 "command": "/load",
-                "output": f"Loaded conversation {conv_id} ({len(conv.turns)} turns).",
-                "data": {"action": "load_session", "sessionId": conv_id, "turns": turns},
+                "output": f"Resumed — {len(conv.turns)} messages"
+                + (f", workspace {workspace}" if workspace else ""),
+                "data": {
+                    "action": "load_session",
+                    "sessionId": conv_id,
+                    "turns": turns,
+                    "workspace": workspace,
+                },
             },
         )
         return ""  # broadcast already carries the structured result

@@ -477,3 +477,31 @@ def test_listdirs_bad_path_falls_back(client, tmp_path):
     # Non-existent path falls back to a listable dir (parent or home), no crash.
     assert body["success"] is True
     assert "entries" in body["data"]
+
+
+
+def test_build_trust_payload_verified():
+    from types import SimpleNamespace
+
+    from rune.api.server import build_trust_payload
+    trace = SimpleNamespace(reason="completed", evidence_gate={
+        "has_check": True, "last_verdict": "pass",
+        "verdict_counts": {"pass": 3}, "last_evidence": "12 passed",
+    })
+    p = build_trust_payload(trace)
+    assert p["verified"] is True
+    assert p["evidenceGate"]["hasCheck"] is True
+    assert p["evidenceGate"]["verdictCounts"] == {"pass": 3}
+
+
+def test_build_trust_payload_honest_failure():
+    from types import SimpleNamespace
+
+    from rune.api.server import build_trust_payload
+    # max_gate_blocked = the verify-or-fail case: solution failed its tests, so
+    # RUNE refuses to claim done. The honest note must say exactly that.
+    trace = SimpleNamespace(reason="max_gate_blocked", evidence_gate=None)
+    p = build_trust_payload(trace)
+    assert p["verified"] is False
+    assert p["reason"] == "max_gate_blocked"
+    assert "won't claim a result I can't verify" in p["honestNote"]

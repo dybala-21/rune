@@ -25,6 +25,37 @@ from rune.utils.logger import get_logger
 log = get_logger(__name__)
 
 
+def build_trust_payload(trace: Any) -> dict[str, Any]:
+    """The 'why did it say done' data for the app's trust card: whether the run
+    was verified, the Evidence Gate summary, and — when it did NOT complete —
+    the honest reason plus the escalation next step. RUNE's differentiator
+    (verify, or fail honestly), so it must reach the UI; agent_complete used to
+    drop it. Module-level so it's unit-testable outside create_app's closure."""
+    reason = getattr(trace, "reason", "") or ""
+    verified = reason == "completed"
+    out: dict[str, Any] = {"verified": verified, "reason": reason}
+    gate = getattr(trace, "evidence_gate", None)
+    if isinstance(gate, dict):
+        out["evidenceGate"] = {
+            "hasCheck": gate.get("has_check", False),
+            "lastVerdict": gate.get("last_verdict", ""),
+            "verdictCounts": gate.get("verdict_counts", {}),
+            "lastEvidence": gate.get("last_evidence", ""),
+        }
+    if not verified:
+        try:
+            from rune.agent.escalation import (
+                escalation_hint,
+                honest_failure_note,
+            )
+
+            out["honestNote"] = honest_failure_note(reason) or ""
+            out["escalationHint"] = escalation_hint(reason) or ""
+        except Exception as exc:
+            log.debug("trust_payload_hint_failed", error=str(exc)[:100])
+    return out
+
+
 # SSE Client Manager
 
 
@@ -277,6 +308,9 @@ def create_app() -> Any:
         """Broadcast to both SSE and WebSocket clients."""
         _sse_manager.broadcast(event, data)
         await _ws_manager.broadcast(event, data)
+
+    def _trust_payload(trace: Any) -> dict[str, Any]:
+        return build_trust_payload(trace)
 
     # Agent execution helpers (inside create_app for closure access)
 
@@ -554,6 +588,7 @@ def create_app() -> Any:
                     "success": trace.reason == "completed",
                     "answer": answer,
                     "durationMs": duration_ms,
+                    "trust": _trust_payload(trace),
                 },
             )
 
@@ -771,6 +806,7 @@ def create_app() -> Any:
                             "success": trace.reason == "completed",
                             "answer": answer,
                             "durationMs": duration_ms,
+                            "trust": _trust_payload(trace),
                         },
                     }
                 )
