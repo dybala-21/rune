@@ -186,6 +186,32 @@ function createWindow() {
   }
 
   mainWindow.on('closed', () => { mainWindow = null; });
+
+  watchForReload();
+}
+
+// Reload the window when the web build changes, so a `npm run build` is picked
+// up without restarting the app. Only active when the dist dir is watchable
+// (dev / unpackaged); in a packaged app the assets live in resources/asar and
+// this simply no-ops.
+function watchForReload() {
+  const distDir = path.join(__dirname, '..', 'web', 'dist');
+  if (!fs.existsSync(distDir)) return;
+  let timer = null;
+  try {
+    fs.watch(distDir, { recursive: true }, () => {
+      if (timer) clearTimeout(timer);
+      // Debounce: a build writes many files; reload once it settles.
+      timer = setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          console.log('[rune-desktop] web build changed — reloading');
+          mainWindow.webContents.reloadIgnoringCache();
+        }
+      }, 400);
+    });
+  } catch (err) {
+    console.error('[rune-desktop] dist watch unavailable:', err.message);
+  }
 }
 
 if (!app.requestSingleInstanceLock()) {
