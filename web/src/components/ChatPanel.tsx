@@ -10,6 +10,7 @@ import type {
   PendingApproval,
 } from '../types';
 import { MessageBubble } from './MessageBubble';
+import { TrustCard } from './TrustCard';
 import { ToolCallCard, getToolColor } from './ToolCallCard';
 import { ThinkingBlockView } from './ThinkingBlock';
 import { normalizeToolName, inferWorkPhase } from '../utils/tooling';
@@ -112,7 +113,7 @@ export function ChatPanel({
   // Rebuilt only when a source list changes, not on every streaming re-render.
   const timeline = useMemo<TimelineItem[]>(() => [
     ...messages
-      .filter(m => m.content?.trim())
+      .filter(m => m.content?.trim() || m.trust)
       .map(m => ({ type: 'message' as const, item: m, ts: m.timestamp })),
     ...toolCalls
       .filter(t => t.toolName?.trim())
@@ -180,6 +181,16 @@ export function ChatPanel({
           if (item.type === 'message') {
             const prevItem = idx > 0 ? grouped[idx - 1] : null;
             const needsGap = prevItem && (prevItem.type === 'group' || (prevItem.type === 'single' && prevItem.item.type !== 'message'));
+            if (item.item.trust) {
+              return (
+                <div key={item.item.id} style={{ marginTop: needsGap ? 12 : 0 }}>
+                  <TrustCard
+                    trust={item.item.trust}
+                    onEscalate={onSuggest ? () => onSuggest('/escalate') : undefined}
+                  />
+                </div>
+              );
+            }
             return (
               <div key={item.item.id} style={{ marginTop: needsGap ? 12 : 0 }}>
                 <MessageBubble

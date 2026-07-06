@@ -1,4 +1,4 @@
-import { useRef, useState, useCallback, useEffect } from 'react';
+import { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef } from 'react';
 import { CommandPalette } from './CommandPalette';
 import { transcribeAudio } from '../api';
 import type { PendingAttachment } from '../types';
@@ -9,6 +9,11 @@ const SUPPORTED_MIMES = new Set([
 
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024; // 20MB
 
+export interface InputAreaHandle {
+  /** Attach files dropped elsewhere (e.g. the chat area). */
+  addFiles: (files: FileList | File[]) => void;
+}
+
 interface InputAreaProps {
   onSend: (text: string, attachments?: PendingAttachment[]) => void;
   onAbort: () => void;
@@ -16,11 +21,17 @@ interface InputAreaProps {
   disabled: boolean;
 }
 
-export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaProps) {
+export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function InputArea(
+  { onSend, onAbort, isRunning, disabled }: InputAreaProps,
+  ref,
+) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
+  // dragenter/dragleave fire for every child too; count depth so the highlight
+  // only clears when the pointer actually leaves the drop zone.
+  const dragDepthRef = useRef(0);
   const [showCommands, setShowCommands] = useState(false);
   const [cmdFilter, setCmdFilter] = useState('');
   // Feedback for files that couldn't be attached (wrong type / too big / unreadable).
@@ -122,6 +133,8 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
     }
     setAttachNotice(rejected.join(' · '));
   }, []);
+
+  useImperativeHandle(ref, () => ({ addFiles: processFiles }), [processFiles]);
 
   const removeAttachment = useCallback((id: string) => {
     setAttachments(prev => {
@@ -238,22 +251,35 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
     }
   };
 
+  // Only react to file drags, not text selections or element drags.
+  const isFileDrag = (e: React.DragEvent) =>
+    Array.from(e.dataTransfer?.types ?? []).includes('Files');
+
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
+    dragDepthRef.current = 0;
     setIsDragOver(false);
     if (e.dataTransfer?.files.length) {
       processFiles(e.dataTransfer.files);
     }
   };
 
-  const handleDragOver = (e: React.DragEvent) => {
+  const handleDragEnter = (e: React.DragEvent) => {
+    if (!isFileDrag(e)) return;
     e.preventDefault();
+    dragDepthRef.current += 1;
     setIsDragOver(true);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault();  // required so the drop event fires
   };
 
   const handleDragLeave = (e: React.DragEvent) => {
     e.preventDefault();
-    setIsDragOver(false);
+    dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+    if (dragDepthRef.current === 0) setIsDragOver(false);
   };
 
   const formatSize = (bytes: number) => {
@@ -273,20 +299,23 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
         pointerEvents: 'none',
         zIndex: 10,
       }}
-      onDrop={handleDrop}
-      onDragOver={handleDragOver}
-      onDragLeave={handleDragLeave}
     >
-      <div className="glass composer-shell" style={{
-        maxWidth: 768,
-        margin: '0 auto',
-        borderRadius: 'var(--radius-xl)',
-        border: isDragOver ? '2px solid var(--accent)' : '1px solid var(--border)',
-        boxShadow: 'var(--shadow-lg)',
-        pointerEvents: 'auto',
-        overflow: showCommands ? 'visible' : 'hidden',
-        position: 'relative',
-      }}>
+      <div
+        className="glass composer-shell"
+        onDrop={handleDrop}
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        style={{
+          maxWidth: 768,
+          margin: '0 auto',
+          borderRadius: 'var(--radius-xl)',
+          border: isDragOver ? '2px solid var(--accent)' : '1px solid var(--border)',
+          boxShadow: 'var(--shadow-lg)',
+          pointerEvents: 'auto',
+          overflow: showCommands ? 'visible' : 'hidden',
+          position: 'relative',
+        }}>
         {/* Rejected-file feedback */}
         {attachNotice && (
           <div style={{
@@ -524,4 +553,4 @@ export function InputArea({ onSend, onAbort, isRunning, disabled }: InputAreaPro
       </div>
     </div>
   );
-}
+});

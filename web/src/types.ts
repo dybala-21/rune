@@ -32,7 +32,19 @@ export type SseEventType =
 
 export interface ConnectedData { clientId: string }
 export interface AgentStartData { goal: string }
-export interface AgentCompleteData { success: boolean; answer: string; durationMs: number; usage?: TokenUsage }
+export interface TrustInfo {
+  verified: boolean;
+  reason: string;
+  evidenceGate?: {
+    hasCheck: boolean;
+    lastVerdict: string;
+    verdictCounts: Record<string, number>;
+    lastEvidence: string;
+  };
+  honestNote?: string;
+  escalationHint?: string;
+}
+export interface AgentCompleteData { success: boolean; answer: string; durationMs: number; usage?: TokenUsage; trust?: TrustInfo }
 export interface AgentErrorData { error: string }
 export interface StepStartData { stepNumber: number; tokens: number }
 export interface ThinkingData { text: string }
@@ -54,7 +66,8 @@ export interface CommandResultData {
   data?: {
     action?: string;
     sessionId?: string;
-    turns?: { role: string; content: string }[];
+    turns?: { role: string; content: string; goalType?: string }[];
+    workspace?: string;
   };
 }
 export interface GoalIterationData {
@@ -98,6 +111,8 @@ export interface ChatMessage {
   timestamp: number;
   /** Severity for system messages; 'error' renders with a danger tone. */
   level?: 'info' | 'error';
+  /** Attached to a 'trust' message: the verify-or-fail-honestly verdict. */
+  trust?: TrustInfo;
 }
 
 /** 프로액티브 제안 (RUNE이 먼저 말을 걸 때) */

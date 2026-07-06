@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAgent } from './hooks/useAgent';
 import { useSessionHistory } from './hooks/useSessionHistory';
 import { ChatPanel } from './components/ChatPanel';
 import { SessionSidebar } from './components/SessionSidebar';
 import { SettingsSidebar } from './components/SettingsSidebar';
 import { StatusBar } from './components/StatusBar';
-import { InputArea } from './components/InputArea';
+import { InputArea, type InputAreaHandle } from './components/InputArea';
 import { SkillsPanel } from './components/SkillsPanel';
 import { EnvPanel } from './components/EnvPanel';
 import { CronPanel } from './components/CronPanel';
@@ -37,6 +37,9 @@ export function App() {
   const [markdownPanelOpen, setMarkdownPanelOpen] = useState(false);
   const [configInfo, setConfigInfo] = useState<ConfigInfo | null>(null);
   const [workbenchOpen, setWorkbenchOpen] = useState(false);
+  const inputAreaRef = useRef<InputAreaHandle>(null);
+  const [chatDragOver, setChatDragOver] = useState(false);
+  const chatDragDepth = useRef(0);
   const [workbenchDismissed, setWorkbenchDismissed] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteSessions, setPaletteSessions] = useState<SessionInfo[]>([]);
@@ -136,6 +139,19 @@ export function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, [isViewingHistory, agent.state, agent.abort]);
 
+  // Dropping a file anywhere outside the composer would otherwise make the
+  // browser navigate away to that file, losing the session. Swallow drops that
+  // don't land on a registered drop zone.
+  useEffect(() => {
+    const prevent = (e: DragEvent) => { e.preventDefault(); };
+    window.addEventListener('dragover', prevent);
+    window.addEventListener('drop', prevent);
+    return () => {
+      window.removeEventListener('dragover', prevent);
+      window.removeEventListener('drop', prevent);
+    };
+  }, []);
+
   // Load recent sessions when the palette opens, for quick jump-to-session.
   useEffect(() => {
     if (!paletteOpen) return;
@@ -153,6 +169,20 @@ export function App() {
   const handleNewChat = () => {
     history.loadSession(null);
     agent.resetLiveConversation();
+  };
+
+  // Typing in a past conversation resumes it: load it live (restoring turns +
+  // workspace), leave history view, then send. No separate "Continue" step.
+  const handleSendFromHistory = (text: string, attachments?: Parameters<typeof agent.sendMessage>[1]) => {
+    const id = history.viewingSessionId;
+    history.loadSession(null);
+    if (id) {
+      agent.sendMessage(`/load ${id}`);
+      // Give the load a beat to pin the session/workspace before the real turn.
+      setTimeout(() => agent.sendMessage(text, attachments), 120);
+    } else {
+      agent.sendMessage(text, attachments);
+    }
   };
 
   const handleOpenSkillPanel = (selectedName?: string) => {
@@ -434,12 +464,48 @@ export function App() {
               display: 'grid',
             }}
           >
-            <div style={{
-              minWidth: 0,
-              display: 'flex',
-              flexDirection: 'column',
-              position: 'relative',
-            }}>
+            <div
+              style={{
+                minWidth: 0,
+                display: 'flex',
+                flexDirection: 'column',
+                position: 'relative',
+              }}
+              onDragEnter={(e) => {
+                if (isViewingHistory) return;
+                if (!Array.from(e.dataTransfer?.types ?? []).includes('Files')) return;
+                e.preventDefault();
+                chatDragDepth.current += 1;
+                setChatDragOver(true);
+              }}
+              onDragOver={(e) => {
+                if (Array.from(e.dataTransfer?.types ?? []).includes('Files')) e.preventDefault();
+              }}
+              onDragLeave={(e) => {
+                e.preventDefault();
+                chatDragDepth.current = Math.max(0, chatDragDepth.current - 1);
+                if (chatDragDepth.current === 0) setChatDragOver(false);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                chatDragDepth.current = 0;
+                setChatDragOver(false);
+                if (!isViewingHistory && e.dataTransfer?.files.length) {
+                  inputAreaRef.current?.addFiles(e.dataTransfer.files);
+                }
+              }}
+            >
+              {chatDragOver && (
+                <div style={{
+                  position: 'absolute', inset: 12, zIndex: 30,
+                  border: '2px dashed var(--accent)', borderRadius: 'var(--radius-lg)',
+                  background: 'var(--accent-subtle, rgba(125,211,232,0.08))',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  pointerEvents: 'none', color: 'var(--accent)', fontSize: 15, fontWeight: 600,
+                }}>
+                  Drop files to attach
+                </div>
+              )}
               <ChatPanel
                 conversationKey={history.viewingSessionId ?? 'live'}
                 messages={displayMessages}
@@ -502,32 +568,32 @@ export function App() {
               {isViewingHistory ? (
                 <div style={{
                   position: 'absolute',
-                  bottom: 0,
+                  bottom: 92,
                   left: 0,
                   right: 0,
-                  padding: '12px 20px',
                   textAlign: 'center',
-                  zIndex: 10,
+                  zIndex: 11,
+                  pointerEvents: 'none',
                 }}>
                   <div className="glass" style={{
                     display: 'inline-block',
-                    padding: '8px 20px',
+                    padding: '5px 14px',
                     borderRadius: 'var(--radius-lg)',
-                    border: '1px solid var(--border)',
+                    border: '1px solid var(--accent-subtle, var(--border))',
                     color: 'var(--text-muted)',
-                    fontSize: 13,
+                    fontSize: 12,
                   }}>
-                    Read-only: viewing session history
+                    Past conversation — type to pick up where you left off
                   </div>
                 </div>
-              ) : (
-                <InputArea
-                  onSend={agent.sendMessage}
-                  onAbort={agent.abort}
-                  isRunning={agent.state !== 'idle'}
-                  disabled={!agent.connected}
-                />
-              )}
+              ) : null}
+              <InputArea
+                ref={inputAreaRef}
+                onSend={isViewingHistory ? handleSendFromHistory : agent.sendMessage}
+                onAbort={agent.abort}
+                isRunning={!isViewingHistory && agent.state !== 'idle'}
+                disabled={!agent.connected}
+              />
             </div>
 
             {/* Workbench occupies the second grid track; always mounted so
