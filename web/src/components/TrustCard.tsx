@@ -20,6 +20,9 @@ function testsPassed(counts: Record<string, number>): number {
 export function TrustCard({ trust, onEscalate }: TrustCardProps) {
   const [showEvidence, setShowEvidence] = useState(false);
   const [esc, setEsc] = useState<EscalationStatus | null>(null);
+  // Cloud retry asks for one confirm first — that click is the moment code
+  // leaves the machine, so it shouldn't fire on a single tap.
+  const [confirmCloud, setConfirmCloud] = useState(false);
   // Only the not-verified card needs the ladder; fetch lazily then.
   useEffect(() => {
     if (trust.verified) return;
@@ -82,26 +85,64 @@ export function TrustCard({ trust, onEscalate }: TrustCardProps) {
           {trust.honestNote || "I couldn't verify this result, so I won't claim it's done."}
           <div style={{ marginTop: 8 }}>
             {esc?.enabled ? (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                {onEscalate && (
-                  <button
-                    type="button"
-                    onClick={onEscalate}
-                    style={{
-                      background: 'var(--accent)', color: '#0A1319', border: 'none',
-                      borderRadius: 'var(--radius-sm)', padding: '5px 12px',
-                      fontSize: 12, fontWeight: 600, cursor: 'pointer',
-                    }}
-                  >
-                    Retry on {esc.model || esc.provider}
-                  </button>
-                )}
-                <span style={{ color: 'var(--text-muted)', fontSize: 11.5 }}>
-                  {esc.isCloud
-                    ? '↑ a stronger cloud model — this run’s code leaves your machine'
-                    : '↑ a stronger local model — stays on your machine'}
-                </span>
-              </div>
+              esc.isCloud && confirmCloud ? (
+                <div style={{
+                  display: 'flex', flexDirection: 'column', gap: 8,
+                  padding: '9px 11px', borderRadius: 'var(--radius-sm)',
+                  border: '1px solid var(--warning)', background: 'var(--warning-subtle, var(--bg-secondary))',
+                }}>
+                  <span style={{ color: 'var(--text-primary)', fontSize: 12 }}>
+                    Send this run’s code to <b>{esc.model || esc.provider}</b> in the cloud?
+                    It leaves your machine and the provider may retain it briefly
+                    (~30 days) for abuse monitoring.
+                  </span>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                      type="button"
+                      onClick={() => { setConfirmCloud(false); onEscalate?.(); }}
+                      style={{
+                        background: 'var(--warning)', color: '#0A1319', border: 'none',
+                        borderRadius: 'var(--radius-sm)', padding: '5px 12px',
+                        fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                      }}
+                    >
+                      Send and retry
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmCloud(false)}
+                      style={{
+                        background: 'none', color: 'var(--text-muted)',
+                        border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                        padding: '5px 12px', fontSize: 12, cursor: 'pointer',
+                      }}
+                    >
+                      Keep it local
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                  {onEscalate && (
+                    <button
+                      type="button"
+                      onClick={() => { if (esc.isCloud) setConfirmCloud(true); else onEscalate(); }}
+                      style={{
+                        background: 'var(--accent)', color: '#0A1319', border: 'none',
+                        borderRadius: 'var(--radius-sm)', padding: '5px 12px',
+                        fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                      }}
+                    >
+                      Retry on {esc.model || esc.provider}
+                    </button>
+                  )}
+                  <span style={{ color: 'var(--text-muted)', fontSize: 11.5 }}>
+                    {esc.isCloud
+                      ? '↑ a stronger cloud model — sends this run’s code off your machine'
+                      : '↑ a stronger local model — stays on your machine'}
+                  </span>
+                </div>
+              )
             ) : esc && !esc.enabled && esc.suggestion ? (
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
                 <button
