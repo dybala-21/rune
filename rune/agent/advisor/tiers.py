@@ -42,12 +42,19 @@ ADVISOR_TIER: dict[tuple[str, str], int] = {
     ("ollama", "qwen2.5:72b"):          70,
     ("ollama", "deepseek-r1:14b"):      65,
     ("ollama", "llama3.3:70b"):         65,
+    # Code-specialized qwen2.5-coder — its own entries (longest-prefix wins, so
+    # these override the generic qwen2.5 tiers below). Code-tuned, so a shade
+    # above the same-size general model on coding tasks.
+    ("ollama", "qwen2.5-coder:32b"):    62,
     ("ollama", "qwen2.5:32b"):          60,
     ("ollama", "gemma4:26b"):           55,
     ("ollama", "olmo-3:7b-think"):      50,
+    ("ollama", "qwen2.5-coder:14b"):    48,
     ("ollama", "qwen2.5:14b"):          45,
+    ("ollama", "qwen2.5-coder:7b"):     32,
     ("ollama", "llama3.1:8b"):          30,
     ("ollama", "qwen2.5:7b"):           28,
+    ("ollama", "qwen2.5-coder:3b"):     22,
     ("ollama", "gemma4:e2b"):           20,
 }
 
@@ -105,6 +112,48 @@ def resolve_tier(provider: str, model: str) -> int:
             best_tier = tier
             best_len = len(prefix)
     return best_tier
+
+
+async def suggest_local_escalation(
+    executor_provider: str,
+    executor_model: str,
+    *,
+    min_gap: int = MIN_TIER_GAP,
+) -> str | None:
+    """Largest installed LOCAL ollama model whose tier clears the current
+    executor by ``min_gap`` — a single-jump escalation candidate, no cloud, no
+    multi-rung ladder. Returns the bare model id, or None if none qualifies /
+    ollama is unreachable.
+
+    Research (escalation-ladder-research memory): a 2-tier single jump captures
+    ~all the benefit; a progressive ladder is worse. So pick the ONE strongest
+    local model, not a chain.
+    """
+    import httpx
+
+    exec_tier = resolve_tier(executor_provider, executor_model)
+    try:
+        async with httpx.AsyncClient(timeout=1.5) as client:
+            resp = await client.get("http://localhost:11434/api/tags")
+            if resp.status_code != 200:
+                return None
+            models = [m.get("name", "") for m in resp.json().get("models", [])]
+    except (httpx.HTTPError, OSError, ValueError):
+        return None
+
+    best_model: str | None = None
+    best_tier = -1
+    for name in models:
+        # local only — ollama cloud models look like "…:480b-cloud" or "…:cloud"
+        if not name or "cloud" in name.lower():
+            continue
+        if name == executor_model:
+            continue
+        tier = resolve_tier("ollama", name)
+        if tier >= exec_tier + min_gap and tier > best_tier:
+            best_tier = tier
+            best_model = name
+    return best_model
 
 
 def check_pairing(

@@ -1570,6 +1570,65 @@ def create_app() -> Any:
                 )
                 return _ok({"diff": text})
 
+            elif method == "escalation.status":
+                # Powers the trust card's "retry on a stronger model" ladder:
+                # is a stronger model configured, which one, and does using it
+                # send data off the machine (cloud) vs stay local.
+                from rune.config import get_config as _gc
+
+                _lcfg = _gc().llm
+                _prov = _lcfg.escalation_provider or ""
+                _model = _lcfg.escalation_model or ""
+                if _prov and not _model:
+                    with suppress(Exception):
+                        from rune.llm.client import get_llm_client
+                        from rune.types import ModelTier, Provider
+
+                        _model = get_llm_client().resolve_model(
+                            ModelTier.BEST, Provider(_prov),
+                        )
+                # When unconfigured, suggest the strongest INSTALLED local model
+                # that clears the current model's tier — a single-jump local
+                # candidate the user can accept in one click (no auto-run, no
+                # multi-rung ladder; see escalation-ladder-research).
+                _suggestion = ""
+                if not _prov:
+                    with suppress(Exception):
+                        from rune.agent.advisor.tiers import (
+                            suggest_local_escalation,
+                        )
+
+                        _suggestion = await suggest_local_escalation(
+                            _lcfg.active_provider or "ollama",
+                            _lcfg.active_model or "",
+                        ) or ""
+                return _ok({
+                    "enabled": bool(_prov),
+                    "provider": _prov,
+                    "model": _model,
+                    # ollama is the only local provider; everything else leaves
+                    # the machine.
+                    "isCloud": bool(_prov) and _prov != "ollama",
+                    # Local single-jump candidate when nothing is configured.
+                    "suggestion": _suggestion,
+                })
+
+            elif method == "escalation.set":
+                # Accept a suggested (or user-chosen) escalation model for this
+                # session — the "click to use this local model" path. Sets the
+                # in-memory config that resolve/escalate read; the user can
+                # still change it in Settings.
+                from rune.config import get_config as _gc
+
+                _prov = str(params.get("provider", "")).strip()
+                _model = str(params.get("model", "")).strip()
+                if not _prov:
+                    return _err("invalid", "provider required")
+                _lcfg = _gc().llm
+                _lcfg.escalation_provider = _prov
+                _lcfg.escalation_model = _model or None
+                return _ok({"provider": _prov, "model": _model})
+
             elif method == "terminal.status":
                 from rune.api import terminal as term
 

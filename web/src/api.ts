@@ -160,6 +160,22 @@ export async function mintTerminalToken(): Promise<{ token: string; workspace: s
   return rpc('terminal.token', { sessionId: liveSessionId() });
 }
 
+export interface EscalationStatus {
+  enabled: boolean;
+  provider: string;
+  model: string;
+  isCloud: boolean;
+  suggestion?: string;
+}
+
+export async function fetchEscalationStatus(): Promise<EscalationStatus> {
+  return rpc('escalation.status', {});
+}
+
+export async function setEscalation(provider: string, model: string): Promise<{ provider: string; model: string }> {
+  return rpc('escalation.set', { provider, model });
+}
+
 export function sendMessage(text: string, attachments?: MessageAttachment[]) {
   return post('/api/message', { text, attachments, sessionId: liveSessionId() });
 }

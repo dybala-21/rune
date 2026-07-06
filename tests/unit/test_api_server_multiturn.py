@@ -505,3 +505,83 @@ def test_build_trust_payload_honest_failure():
     assert p["verified"] is False
     assert p["reason"] == "max_gate_blocked"
     assert "won't claim a result I can't verify" in p["honestNote"]
+
+
+def test_escalation_status_reports_config(client, monkeypatch):
+    from rune.config import get_config
+    cfg = get_config().llm
+
+    monkeypatch.setattr(cfg, "escalation_provider", None)
+    monkeypatch.setattr(cfg, "escalation_model", None)
+    r = client.post("/api/v1/rpc", json={"method": "escalation.status", "params": {}})
+    d0 = r.json()["data"]
+    assert d0["enabled"] is False and d0["provider"] == "" and d0["isCloud"] is False
+
+    monkeypatch.setattr(cfg, "escalation_provider", "anthropic")
+    monkeypatch.setattr(cfg, "escalation_model", "claude-sonnet-4-5")
+    r = client.post("/api/v1/rpc", json={"method": "escalation.status", "params": {}})
+    d = r.json()["data"]
+    assert d["enabled"] is True and d["isCloud"] is True and d["model"] == "claude-sonnet-4-5"
+
+    monkeypatch.setattr(cfg, "escalation_provider", "ollama")
+    r = client.post("/api/v1/rpc", json={"method": "escalation.status", "params": {}})
+    assert r.json()["data"]["isCloud"] is False  # local model stays on-machine
+
+
+def test_escalation_suggests_local_model_when_unconfigured(client, monkeypatch):
+    import rune.agent.advisor.tiers as tiers
+    from rune.config import get_config
+    cfg = get_config().llm
+    monkeypatch.setattr(cfg, "escalation_provider", None)
+    monkeypatch.setattr(cfg, "escalation_model", None)
+    monkeypatch.setattr(cfg, "active_provider", "ollama")
+    monkeypatch.setattr(cfg, "active_model", "qwen2.5-coder:7b")
+
+    # Stub the ollama lister so the test doesn't need a running daemon.
+    async def _fake_suggest(prov, model, **kw):
+        return "qwen2.5-coder:32b" if "7b" in model else None
+    monkeypatch.setattr(tiers, "suggest_local_escalation", _fake_suggest)
+
+    r = client.post("/api/v1/rpc", json={"method": "escalation.status", "params": {}})
+    d = r.json()["data"]
+    assert d["enabled"] is False
+    assert d["suggestion"] == "qwen2.5-coder:32b"
+
+    # Accepting it via escalation.set flips to enabled/local.
+    r = client.post("/api/v1/rpc", json={"method": "escalation.set",
+                    "params": {"provider": "ollama", "model": "qwen2.5-coder:32b"}})
+    assert r.json()["data"]["model"] == "qwen2.5-coder:32b"
+    assert cfg.escalation_provider == "ollama"
+
+
+def test_suggest_local_escalation_single_jump():
+    """No multi-rung ladder and no cloud: pick the one strongest LOCAL model."""
+    import asyncio
+
+    import rune.agent.advisor.tiers as tiers
+
+    async def _fake_tags(*a, **k):
+        class R:
+            status_code = 200
+            def json(self):
+                return {"models": [
+                    {"name": "qwen2.5-coder:3b"},
+                    {"name": "qwen2.5-coder:7b"},
+                    {"name": "qwen2.5-coder:32b"},
+                    {"name": "qwen3-coder:480b-cloud"},  # cloud → excluded
+                ]}
+        return R()
+
+    import httpx
+    class _Client:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, url): return await _fake_tags()
+    orig = httpx.AsyncClient
+    httpx.AsyncClient = _Client
+    try:
+        got = asyncio.run(tiers.suggest_local_escalation("ollama", "qwen2.5-coder:7b"))
+    finally:
+        httpx.AsyncClient = orig
+    assert got == "qwen2.5-coder:32b"  # single largest local, cloud excluded

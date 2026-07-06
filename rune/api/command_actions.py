@@ -338,7 +338,7 @@ async def _action_escalate(task: str, ctx: ActionContext) -> str:
     if not model:
         try:
             from rune.llm.client import get_llm_client
-            from rune.llm.types import ModelTier, Provider
+            from rune.types import ModelTier, Provider
 
             model = get_llm_client().resolve_model(ModelTier.BEST, Provider(provider))
         except Exception:
