@@ -29,6 +29,7 @@ import type {
   DelegateEventData,
   CommandResultData,
   GoalIterationData,
+  TrustInfo,
 } from '../types';
 
 let idCounter = 0;
@@ -210,6 +211,7 @@ export function useAgent() {
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const [pendingQuestion, setPendingQuestion] = useState<PendingQuestion | null>(null);
   const [activitySummary, setActivitySummary] = useState<ActivitySummary | null>(initialLiveState.activitySummary);
+  const [lastTrust, setLastTrust] = useState<TrustInfo | null>(null);
   const [delegateEvents, setDelegateEvents] = useState<DelegateItem[]>(initialLiveState.delegateEvents);
   const [compactionEvents, setCompactionEvents] = useState<CompactionItem[]>(initialLiveState.compactionEvents);
   const [currentStepInfo, setCurrentStepInfo] = useState<StepInfo | null>(null);
@@ -335,6 +337,7 @@ export function useAgent() {
       pendingTextRef.current = '';
       assistantMsgIdRef.current = null;
       setActivitySummary(null);
+      setLastTrust(null);
       setCurrentStepInfo(null);
       setMessages(prev => appendWithLimit(prev, {
         id: nextId(),
@@ -399,6 +402,7 @@ export function useAgent() {
       // it wasn't — the honest reason + escalation next step. Skip the card for
       // plain chat turns that never ran a check (nothing to attest).
       const trust = data.trust;
+      if (trust) setLastTrust(trust);
       if (trust && (!trust.verified || trust.evidenceGate?.hasCheck)) {
         setMessages(prev => appendWithLimit(prev, {
           id: nextId(),
@@ -781,6 +785,7 @@ export function useAgent() {
     pendingApproval,
     pendingQuestion,
     activitySummary,
+    lastTrust,
     delegateEvents,
     compactionEvents,
     currentStepInfo,
