@@ -15,7 +15,7 @@ import { WorkbenchPanel } from './components/WorkbenchPanel';
 import { CommandK, type Command } from './components/CommandK';
 import { WorkspaceChip } from './components/WorkspaceChip';
 import { InlineWorkspacePicker } from './components/InlineWorkspacePicker';
-import { normalizeToolName, inferWorkPhase } from './utils/tooling';
+import { normalizeToolName, inferWorkPhase, computeRunVerdict } from './utils/tooling';
 import { fetchConfig, fetchSessions, type ConfigInfo, type SessionInfo } from './api';
 
 type SidebarTab = 'chats' | 'settings';
@@ -70,6 +70,13 @@ export function App() {
   const displayActivitySummary = isViewingHistory ? (history.historyState?.activitySummary ?? null) : agent.activitySummary;
   const displayDelegateEvents = isViewingHistory ? (history.historyState?.delegateEvents ?? []) : agent.delegateEvents;
   const displayCompactionEvents = isViewingHistory ? (history.historyState?.compactionEvents ?? []) : agent.compactionEvents;
+
+  // One verdict across every surface (status pip, workbench, chat card) via the
+  // shared rule, so the pip never claims success while the trust card says it
+  // couldn't verify.
+  const runVerdict = isViewingHistory
+    ? null
+    : computeRunVerdict(agent.lastTrust, agent.activitySummary);
 
   useEffect(() => {
     let cancelled = false;
@@ -236,7 +243,7 @@ export function App() {
         currentStepInfo={!isViewingHistory ? agent.currentStepInfo : undefined}
         currentActivity={currentActivity}
         activeModel={configInfo?.activeModel ?? null}
-        lastRunSuccess={!isViewingHistory ? (agent.activitySummary?.success ?? null) : null}
+        lastRunSuccess={runVerdict}
         onOpenPalette={() => setPaletteOpen(true)}
         trailing={!isViewingHistory ? <WorkspaceChip /> : null}
         workbenchOpen={workbenchOpen}
@@ -604,6 +611,7 @@ export function App() {
                   toolCalls={agent.toolCalls}
                   isRunning={agent.state === 'running'}
                   activitySummary={agent.activitySummary}
+                  trust={agent.lastTrust}
                   connected={agent.connected}
                   onClose={() => { setWorkbenchOpen(false); setWorkbenchDismissed(true); }}
                 />

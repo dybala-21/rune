@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react';
-import type { ActivitySummary, ToolCall } from '../types';
-import { normalizeToolName, inferWorkPhase, type WorkPhase } from '../utils/tooling';
+import type { ActivitySummary, ToolCall, TrustInfo } from '../types';
+import { normalizeToolName, inferWorkPhase, computeRunVerdict, type WorkPhase } from '../utils/tooling';
 import { PixelWolf, type WolfState } from './PixelWolf';
 import { fetchWorkspaceDiff, readWorkspaceFile } from '../api';
 import { TerminalPane } from './TerminalPane';
@@ -14,6 +14,9 @@ interface WorkbenchPanelProps {
   toolCalls: ToolCall[];
   isRunning: boolean;
   activitySummary: ActivitySummary | null;
+  /** The run's verify-or-fail verdict — the real Evidence Gate result, same
+      data the chat trust card uses. Preferred over the activity heuristic. */
+  trust?: TrustInfo | null;
   connected?: boolean;
   onClose: () => void;
 }
@@ -167,7 +170,10 @@ function formatElapsed(ms: number): string {
 
 type BenchTab = 'activity' | 'diff' | 'file' | 'terminal';
 
-export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, connected = true, onClose }: WorkbenchPanelProps) {
+export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, connected = true, onClose }: WorkbenchPanelProps) {
+  // Same run-verdict rule as the status pip and chat card (shared helper), so
+  // the surfaces never disagree. null → no verdict to show yet.
+  const verdictOk = computeRunVerdict(trust, activitySummary);
   const phase = inferWorkPhase(toolCalls);
   const coding = toolCalls.filter(tc => CODING_TOOLS.has(normalizeToolName(tc.toolName)));
 
@@ -228,17 +234,17 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, connecte
 
   let petState: WolfState = 'idle';
   if (isRunning) petState = phase === 'verifying' ? 'thinking' : 'working';
-  else if (activitySummary) petState = activitySummary.success ? 'passed' : 'failed';
+  else if (verdictOk !== null) petState = verdictOk ? 'passed' : 'failed';
 
   const footText = isRunning
     ? `${PHASE_LABEL[phase]}…`
-    : activitySummary
-      ? activitySummary.success ? 'verified' : 'not verified'
+    : verdictOk !== null
+      ? verdictOk ? 'verified' : 'not verified'
       : 'ready';
   const footColor = isRunning
     ? 'var(--warning)'
-    : activitySummary
-      ? activitySummary.success ? 'var(--success)' : 'var(--danger)'
+    : verdictOk !== null
+      ? verdictOk ? 'var(--success)' : 'var(--warning)'
       : 'var(--text-muted)';
 
   return (
@@ -436,22 +442,30 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, connecte
         fontSize: 12.5,
         lineHeight: 1.5,
       }}>
-        {/* Evidence Gate verdict — RUNE's honest-completion signal, shown
-            once the run settles. */}
-        {!isRunning && activitySummary && (
+        {/* Evidence Gate verdict — RUNE's honest-completion signal. Prefer the
+            real trust verdict (same as the chat card) over the tool-activity
+            heuristic, so the two surfaces never disagree; fall back to the
+            heuristic only when no trust payload arrived. */}
+        {!isRunning && (verdictOk !== null) && (
           <div style={{
             display: 'flex', alignItems: 'center', gap: 8,
             margin: '0 0 10px', padding: '8px 11px', borderRadius: 8,
-            border: `1px solid ${activitySummary.success ? 'var(--success)' : 'var(--danger)'}`,
-            background: activitySummary.success ? 'var(--success-subtle)' : 'var(--danger-subtle)',
+            border: `1px solid ${verdictOk ? 'var(--success)' : 'var(--warning)'}`,
+            background: verdictOk ? 'var(--success-subtle)' : 'var(--warning-subtle, var(--danger-subtle))',
             fontSize: 12,
           }}>
-            <span aria-hidden="true">{activitySummary.success ? '✓' : '⚠'}</span>
+            <span aria-hidden="true">{verdictOk ? '✓' : '⚠'}</span>
             <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>
-              Evidence Gate — {activitySummary.success ? 'verified' : 'not verified'}
+              {verdictOk ? 'Evidence Gate — verified' : 'Not marking this done'}
             </span>
             <span style={{ marginLeft: 'auto', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
-              {activitySummary.filesWritten > 0 ? `${activitySummary.filesWritten} edited` : ''}
+              {trust?.evidenceGate?.hasCheck
+                ? (trust.evidenceGate.verdictCounts?.pass ?? 0) > 0
+                  ? `${trust.evidenceGate.verdictCounts.pass} passed`
+                  : trust.evidenceGate.lastVerdict
+                : activitySummary && activitySummary.filesWritten > 0
+                  ? `${activitySummary.filesWritten} edited`
+                  : ''}
             </span>
           </div>
         )}
