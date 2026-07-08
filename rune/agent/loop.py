@@ -1265,6 +1265,8 @@ class NativeAgentLoop(EventEmitter):
             has_mcp_services=bool(_mcp_servers),
             mcp_server_names=_mcp_servers,
             skill_context=self._build_skill_context(goal, goal_category),
+            # Mark the static/dynamic seam so caching can reuse the prefix.
+            mark_cache_boundary=True,
         )
 
     async def _execute_loop(

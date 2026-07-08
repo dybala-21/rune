@@ -539,25 +539,33 @@ def _is_anthropic_model(model: str) -> bool:
 
 
 def _apply_anthropic_cache_control(model: str, messages: list[Any]) -> list[Any]:
-    """Add cache_control breakpoint to the system message for Anthropic models.
+    """Add cache_control breakpoint(s) to the system message for Anthropic.
 
     Anthropic prompt caching prices cached reads at 0.1x of input tokens.
-    By adding a cache_control breakpoint to the end of the system prompt,
-    the tools (~9.3K) + system (~7K) prefix gets cached across steps within
-    a run (TTL 5 min), reducing the ~16K fixed overhead to ~1.6K-equivalent
-    from step 2 onward.
+    A breakpoint at the end of the system prompt caches the tools (~9.3K) +
+    system (~7K) prefix across steps within a run (TTL 5 min), cutting the
+    ~16K fixed overhead to ~1.6K-equivalent from step 2 onward.
+
+    When the system prompt carries a SYSTEM_CACHE_BOUNDARY marker (built with
+    ``mark_cache_boundary=True``), the turn-stable instructional prefix is
+    split into its own cached block so it also survives ACROSS turns — the
+    per-turn dynamic tail (memory, goal, datetime) sits after this second
+    breakpoint and no longer invalidates the prefix cache.
 
     The cache hierarchy is: tools → system → messages. Message content changes
     do NOT invalidate the tools+system cache, so per-step history masking is
     fine. Only tool-set changes (step 6 reduction, wind-down, stall) cause
     cache rewrites — still net positive.
 
+    For non-Anthropic providers the marker is stripped so it never reaches the
+    model; those providers cache the (now stable) prefix automatically.
+
     References:
     - https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
     - LiteLLM passes cache_control through to Anthropic when system is a block list.
     """
-    if not _is_anthropic_model(model):
-        return messages
+    from rune.agent.prompts import SYSTEM_CACHE_BOUNDARY
+
     if not messages:
         return messages
 
@@ -570,8 +578,41 @@ def _apply_anthropic_cache_control(model: str, messages: list[Any]) -> list[Any]
     if not content:
         return messages
 
-    # Convert string content to block list with cache_control on the last block
+    is_anthropic = _is_anthropic_model(model)
+
     if isinstance(content, str):
+        has_boundary = SYSTEM_CACHE_BOUNDARY in content
+
+        # Non-Anthropic: never annotate, and strip the marker so it cannot leak
+        # into the model input. The reordered prefix still caches automatically.
+        if not is_anthropic:
+            if not has_boundary:
+                return messages
+            cleaned = content.replace(SYSTEM_CACHE_BOUNDARY, "").strip()
+            return [{"role": "system", "content": cleaned}, *messages[1:]]
+
+        if has_boundary:
+            static, _, dynamic = content.partition(SYSTEM_CACHE_BOUNDARY)
+            blocks: list[dict[str, Any]] = []
+            static_text = static.strip()
+            dynamic_text = dynamic.strip()
+            if static_text:
+                blocks.append({
+                    "type": "text",
+                    "text": static_text,
+                    "cache_control": {"type": "ephemeral"},
+                })
+            if dynamic_text:
+                blocks.append({
+                    "type": "text",
+                    "text": dynamic_text,
+                    "cache_control": {"type": "ephemeral"},
+                })
+            if not blocks:
+                return messages
+            return [{"role": "system", "content": blocks}, *messages[1:]]
+
+        # No boundary marker: single end-of-system breakpoint (within-run cache).
         new_system = {
             "role": "system",
             "content": [
@@ -584,8 +625,10 @@ def _apply_anthropic_cache_control(model: str, messages: list[Any]) -> list[Any]
         }
         return [new_system, *messages[1:]]
 
-    # Already a block list — add cache_control to the last text block
+    # Already a block list — add cache_control to the last text block.
     if isinstance(content, list) and content:
+        if not is_anthropic:
+            return messages
         new_content = list(content)
         # Find last text block and add cache_control
         for i in range(len(new_content) - 1, -1, -1):

@@ -519,6 +519,13 @@ steps, not explanations."""
 AGENT_SYSTEM_PROMPT = PROMPT_CORE
 
 
+# Marker separating the turn-stable instructional prefix from the per-turn
+# dynamic tail (memory, goal, datetime). The provider adapter converts it into
+# an Anthropic cache breakpoint and strips it for every other provider, so it
+# must never reach a model. See _apply_anthropic_cache_control.
+SYSTEM_CACHE_BOUNDARY = "␞␞RUNE_CACHE_BOUNDARY␞␞"
+
+
 # Prompt builders
 
 def build_system_prompt(
@@ -537,6 +544,7 @@ def build_system_prompt(
     defer_browser: bool = False,
     advisor_native_enabled: bool = False,  # Phase A: Claude native advisor
     skill_context: str | None = None,  # matched learned skill, if any
+    mark_cache_boundary: bool = False,  # insert SYSTEM_CACHE_BOUNDARY for caching
 ) -> str:
     """Build the full system prompt for an agent run.
 
@@ -606,7 +614,12 @@ def build_system_prompt(
                 server_lines.append(f"- **{server}**: {count} tools available (mcp.{server}.*)")
             parts.append("\n".join(server_lines))
 
-    # 9. Environment info
+    # Per-turn context (datetime, repo map, goal, memory, ...) goes here and is
+    # appended after the instructional sections, keeping the leading prefix
+    # byte-identical across turns for prompt caching. Only the position moves.
+    dynamic_parts: list[str] = []
+
+    # 9. Environment info (datetime changes every build -> dynamic tail)
     if environment:
         env_lines = ["\n## Environment"]
         now = datetime.now(UTC).astimezone()
@@ -618,11 +631,11 @@ def build_system_prompt(
             env_lines.append(f"Current working directory: {environment['cwd']}")
         if environment.get("home"):
             env_lines.append(f"Home directory: {environment['home']}")
-        parts.append("\n".join(env_lines))
+        dynamic_parts.append("\n".join(env_lines))
 
-    # 10. Repo map
+    # 10. Repo map (changes as the tree changes -> dynamic tail)
     if repo_map:
-        parts.append(f"\n## Repository Map\n{repo_map}")
+        dynamic_parts.append(f"\n## Repository Map\n{repo_map}")
 
     # 11. Channel-specific output rules
     if channel and channel not in ("tui", "cli", None):
@@ -684,12 +697,12 @@ def build_system_prompt(
         parts.append(PROMPT_ADVISOR_TIMING)
 
     # Goal context
-    parts.append(f"\n## Current Task\n\n{goal}")
+    dynamic_parts.append(f"\n## Current Task\n\n{goal}")
 
     # Classification hint
     if classification is not None:
         goal_type = getattr(classification, "goal_type", str(classification))
-        parts.append(f"## Task Classification\n\nType: {goal_type}")
+        dynamic_parts.append(f"## Task Classification\n\nType: {goal_type}")
 
     # Memory context. Producers pass this in three shapes and all must reach the
     # model: an AgentMemoryContext (``.formatted``), the raw run-context dict
@@ -706,21 +719,31 @@ def build_system_prompt(
                     or memory_context.get("formatted")
                 )
         if formatted:
-            parts.append(f"## Memory Context\n\n{formatted}")
+            dynamic_parts.append(f"## Memory Context\n\n{formatted}")
 
     # Learned skill: an approach distilled from a past verified run, matched to
     # this goal. Advisory; the model adapts it.
     if skill_context:
-        parts.append(
+        dynamic_parts.append(
             "## Learned Skill (from a past verified run; adapt as needed)\n\n"
             f"{skill_context}"
         )
 
     # Knowledge inventory
     if knowledge_inventory:
-        parts.append(f"## Knowledge Inventory\n\n{knowledge_inventory}")
+        dynamic_parts.append(f"## Knowledge Inventory\n\n{knowledge_inventory}")
 
-    return "\n\n".join(parts)
+    # Instructional prefix first, then the dynamic tail. When both sides exist,
+    # insert the boundary the adapter turns into an Anthropic breakpoint.
+    if mark_cache_boundary and parts and dynamic_parts:
+        return (
+            "\n\n".join(parts)
+            + "\n\n"
+            + SYSTEM_CACHE_BOUNDARY
+            + "\n\n"
+            + "\n\n".join(dynamic_parts)
+        )
+    return "\n\n".join(parts + dynamic_parts)
 
 
 def build_continuation_prompt(
