@@ -44,6 +44,9 @@ def estimate_cost(
     model: str,
     input_tokens: int,
     output_tokens: int,
+    *,
+    cached_input_tokens: int = 0,
+    cache_write_tokens: int = 0,
 ) -> float:
     """Estimate the dollar cost of an API call.
 
@@ -52,19 +55,45 @@ def estimate_cost(
     model:
         Model identifier (must be a key in COST_PER_1K).
     input_tokens:
-        Number of input (prompt) tokens.
+        Total input (prompt) tokens, including cached portions.
     output_tokens:
         Number of output (completion) tokens.
+    cached_input_tokens:
+        Tokens read from cache (charged at 0.1x input rate for Anthropic).
+    cache_write_tokens:
+        Tokens written to cache (charged at 1.25x input rate for Anthropic).
 
     Returns
     -------
     Estimated cost in USD. Returns 0.0 for unknown models.
+
+    Notes
+    -----
+    Anthropic prompt caching pricing:
+    - Cache write: 1.25x base input rate (25% surcharge)
+    - Cache read: 0.1x base input rate (90% discount)
+    - Uncached: 1.0x base input rate
+
+    References:
+    - https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
     """
     rates = COST_PER_1K.get(model)
     if rates is None:
         return 0.0
     input_rate, output_rate = rates
-    return (input_tokens / 1000) * input_rate + (output_tokens / 1000) * output_rate
+
+    # Without cache info, use simple calculation (backward compatible)
+    if cached_input_tokens == 0 and cache_write_tokens == 0:
+        return (input_tokens / 1000) * input_rate + (output_tokens / 1000) * output_rate
+
+    # With cache info, compute accurate cost
+    uncached_tokens = max(0, input_tokens - cached_input_tokens - cache_write_tokens)
+    input_cost = (uncached_tokens / 1000) * input_rate
+    cache_read_cost = (cached_input_tokens / 1000) * input_rate * 0.1
+    cache_write_cost = (cache_write_tokens / 1000) * input_rate * 1.25
+    output_cost = (output_tokens / 1000) * output_rate
+
+    return input_cost + cache_read_cost + cache_write_cost + output_cost
 
 
 def format_cost(cost: float) -> str:

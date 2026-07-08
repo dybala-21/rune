@@ -533,6 +533,72 @@ def _clamp_max_tokens(model: str, max_tokens: int) -> int:
     return min(max_tokens, cap)
 
 
+def _is_anthropic_model(model: str) -> bool:
+    """Check if the model is an Anthropic Claude model."""
+    return "claude" in model.lower() or "anthropic" in model.lower()
+
+
+def _apply_anthropic_cache_control(model: str, messages: list[Any]) -> list[Any]:
+    """Add cache_control breakpoint to the system message for Anthropic models.
+
+    Anthropic prompt caching prices cached reads at 0.1x of input tokens.
+    By adding a cache_control breakpoint to the end of the system prompt,
+    the tools (~9.3K) + system (~7K) prefix gets cached across steps within
+    a run (TTL 5 min), reducing the ~16K fixed overhead to ~1.6K-equivalent
+    from step 2 onward.
+
+    The cache hierarchy is: tools → system → messages. Message content changes
+    do NOT invalidate the tools+system cache, so per-step history masking is
+    fine. Only tool-set changes (step 6 reduction, wind-down, stall) cause
+    cache rewrites — still net positive.
+
+    References:
+    - https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
+    - LiteLLM passes cache_control through to Anthropic when system is a block list.
+    """
+    if not _is_anthropic_model(model):
+        return messages
+    if not messages:
+        return messages
+
+    # Find the system message (should be first)
+    first = messages[0]
+    if not isinstance(first, dict) or first.get("role") != "system":
+        return messages
+
+    content = first.get("content")
+    if not content:
+        return messages
+
+    # Convert string content to block list with cache_control on the last block
+    if isinstance(content, str):
+        new_system = {
+            "role": "system",
+            "content": [
+                {
+                    "type": "text",
+                    "text": content,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+        }
+        return [new_system, *messages[1:]]
+
+    # Already a block list — add cache_control to the last text block
+    if isinstance(content, list) and content:
+        new_content = list(content)
+        # Find last text block and add cache_control
+        for i in range(len(new_content) - 1, -1, -1):
+            block = new_content[i]
+            if isinstance(block, dict) and block.get("type") == "text":
+                new_content[i] = {**block, "cache_control": {"type": "ephemeral"}}
+                break
+        new_system = {"role": "system", "content": new_content}
+        return [new_system, *messages[1:]]
+
+    return messages
+
+
 def _ensure_anthropic_user_tail(model: str, messages: list[Any]) -> list[Any]:
     """Keep Anthropic requests valid when the wire history ends with an
     assistant turn. Anthropic rejects that ("does not support assistant message
@@ -540,7 +606,7 @@ def _ensure_anthropic_user_tail(model: str, messages: list[Any]) -> list[Any]:
     guidance was injected as a system message after a text-only assistant reply.
     A minimal user turn restores a valid sequence. Other providers are untouched.
     """
-    if "claude" not in model and "anthropic" not in model:
+    if not _is_anthropic_model(model):
         return messages
     if not messages:
         return messages
@@ -724,9 +790,14 @@ class StreamResult:
                 "model": self._model,
                 # Mask stale tool outputs for the wire only; self._messages
                 # stays full so history/rollover are unaffected.
+                # Apply Anthropic cache_control to system message for ~82% reduction
+                # in fixed overhead (tools+system cached at 0.1x from step 2).
                 "messages": _ensure_anthropic_user_tail(
                     self._model,
-                    mask_stale_tool_messages(validate_tool_pairs(self._messages)),
+                    _apply_anthropic_cache_control(
+                        self._model,
+                        mask_stale_tool_messages(validate_tool_pairs(self._messages)),
+                    ),
                 ),
                 "tools": _tools,
                 "stream": True,
