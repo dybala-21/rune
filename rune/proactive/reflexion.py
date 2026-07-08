@@ -295,14 +295,22 @@ class ReflexionLearner:
 
         try:
             from rune.llm.client import get_llm_client
+            from rune.types import ModelTier
 
             client = get_llm_client()
-            response = await client.generate(prompt)
+            response = await client.completion(
+                [{"role": "user", "content": prompt}],
+                tier=ModelTier.FAST,
+                max_tokens=256,
+            )
+            # Extract text from LiteLLM response
+            text = response.choices[0].message.content or ""
+
             import re
 
             from rune.utils.fast_serde import json_decode
 
-            json_match = re.search(r"\{[^{}]*\}", response)
+            json_match = re.search(r"\{[^{}]*\}", text)
             if json_match:
                 parsed = json_decode(json_match.group())
                 return {
