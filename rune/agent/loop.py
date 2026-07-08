@@ -1265,6 +1265,8 @@ class NativeAgentLoop(EventEmitter):
             has_mcp_services=bool(_mcp_servers),
             mcp_server_names=_mcp_servers,
             skill_context=self._build_skill_context(goal, goal_category),
+            # Mark the static/dynamic seam so caching can reuse the prefix.
+            mark_cache_boundary=True,
         )
 
     async def _execute_loop(
@@ -3555,12 +3557,21 @@ class NativeAgentLoop(EventEmitter):
 
     @staticmethod
     def _inject_system_message(messages: list[Any], text: str) -> list[Any]:
-        """Append a system-level nudge message to the message list."""
-        # PydanticAI messages are typed objects; we create a dict-based
-        # system message that PydanticAI will accept as part of history.
-        # Using a simple dict format that maps to a system prompt part.
+        """Append a system-level nudge as a user message.
+
+        Previously used role="system", but litellm_adapter skips system messages
+        from history (to avoid duplicating the main system prompt). Using a user
+        message with <system-reminder> tags ensures the nudge actually reaches
+        the model while being recognized as system-level guidance.
+
+        Nudges include: wind-down budget warnings, stall guidance, workspace
+        warnings, knowledge inventory, failed-tool hints.
+        """
         messages = list(messages)  # shallow copy
-        messages.append({"role": "system", "content": text})
+        messages.append({
+            "role": "user",
+            "content": f"<system-reminder>\n{text}\n</system-reminder>",
+        })
         return messages
 
     # Cognitive cache knowledge inventory (#5)

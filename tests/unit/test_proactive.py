@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from rune.proactive.engagement_tracker import EngagementTracker
@@ -98,3 +99,51 @@ class TestReflexionLearner:
         lessons = learner.get_domain_lessons("file")
         assert len(lessons) == 1
         assert "Efficiently" in lessons[0]
+
+    async def test_analyze_with_llm_uses_llm_path(self):
+        """The LLM path must actually run and its parsed result be returned.
+
+        Regression guard: a wrong ModelTier import once made this silently fall
+        through to the rule-based path. The mocked reply carries values the
+        rule-based analyzer never produces (confidence 0.9, reason user_busy),
+        and the rejection text triggers no rule-based keyword, so a fall-through
+        would return unknown/0.4 and fail this assertion.
+        """
+        message = SimpleNamespace(
+            content='{"reason": "user_busy", "lesson": "Wait for a lull.", '
+            '"confidence": 0.9}'
+        )
+        fake_response = SimpleNamespace(
+            choices=[SimpleNamespace(message=message)]
+        )
+
+        async def fake_completion(*args, **kwargs):
+            return fake_response
+
+        fake_client = SimpleNamespace(completion=fake_completion)
+
+        learner = ReflexionLearner()
+        with patch("rune.llm.client.get_llm_client", return_value=fake_client):
+            result = await learner.analyze_with_llm(
+                "the phrasing here matches no rule keyword",
+                {"domain": "calendar", "event_type": "suggestion", "score": -1.0},
+            )
+
+        assert result["reason"] == "user_busy"
+        assert result["lesson"] == "Wait for a lull."
+        assert result["confidence"] == 0.9
+
+    async def test_analyze_with_llm_falls_back_on_error(self):
+        """A broken client falls back to rule-based analysis, not an exception."""
+        learner = ReflexionLearner()
+        with patch(
+            "rune.llm.client.get_llm_client", side_effect=RuntimeError("no client")
+        ):
+            result = await learner.analyze_with_llm(
+                "I am busy right now, later",
+                {"domain": "general", "event_type": "suggestion"},
+            )
+
+        # Rule-based branch for "busy"/"later" text.
+        assert result["reason"] == "bad_timing"
+        assert result["confidence"] == 0.4

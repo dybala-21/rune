@@ -533,6 +533,115 @@ def _clamp_max_tokens(model: str, max_tokens: int) -> int:
     return min(max_tokens, cap)
 
 
+def _is_anthropic_model(model: str) -> bool:
+    """Check if the model is an Anthropic Claude model."""
+    return "claude" in model.lower() or "anthropic" in model.lower()
+
+
+def _apply_anthropic_cache_control(model: str, messages: list[Any]) -> list[Any]:
+    """Add cache_control breakpoint(s) to the system message for Anthropic.
+
+    Anthropic prompt caching prices cached reads at 0.1x of input tokens.
+    A breakpoint at the end of the system prompt caches the tools (~9.3K) +
+    system (~7K) prefix across steps within a run (TTL 5 min), cutting the
+    ~16K fixed overhead to ~1.6K-equivalent from step 2 onward.
+
+    When the system prompt carries a SYSTEM_CACHE_BOUNDARY marker (built with
+    ``mark_cache_boundary=True``), the turn-stable instructional prefix is
+    split into its own cached block so it also survives ACROSS turns — the
+    per-turn dynamic tail (memory, goal, datetime) sits after this second
+    breakpoint and no longer invalidates the prefix cache.
+
+    The cache hierarchy is: tools → system → messages. Message content changes
+    do NOT invalidate the tools+system cache, so per-step history masking is
+    fine. Only tool-set changes (step 6 reduction, wind-down, stall) cause
+    cache rewrites — still net positive.
+
+    For non-Anthropic providers the marker is stripped so it never reaches the
+    model; those providers cache the (now stable) prefix automatically.
+
+    References:
+    - https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
+    - LiteLLM passes cache_control through to Anthropic when system is a block list.
+    """
+    from rune.agent.prompts import SYSTEM_CACHE_BOUNDARY
+
+    if not messages:
+        return messages
+
+    # Find the system message (should be first)
+    first = messages[0]
+    if not isinstance(first, dict) or first.get("role") != "system":
+        return messages
+
+    content = first.get("content")
+    if not content:
+        return messages
+
+    is_anthropic = _is_anthropic_model(model)
+
+    if isinstance(content, str):
+        has_boundary = SYSTEM_CACHE_BOUNDARY in content
+
+        # Non-Anthropic: never annotate, and strip the marker so it cannot leak
+        # into the model input. The reordered prefix still caches automatically.
+        if not is_anthropic:
+            if not has_boundary:
+                return messages
+            cleaned = content.replace(SYSTEM_CACHE_BOUNDARY, "").strip()
+            return [{"role": "system", "content": cleaned}, *messages[1:]]
+
+        if has_boundary:
+            static, _, dynamic = content.partition(SYSTEM_CACHE_BOUNDARY)
+            blocks: list[dict[str, Any]] = []
+            static_text = static.strip()
+            dynamic_text = dynamic.strip()
+            if static_text:
+                blocks.append({
+                    "type": "text",
+                    "text": static_text,
+                    "cache_control": {"type": "ephemeral"},
+                })
+            if dynamic_text:
+                blocks.append({
+                    "type": "text",
+                    "text": dynamic_text,
+                    "cache_control": {"type": "ephemeral"},
+                })
+            if not blocks:
+                return messages
+            return [{"role": "system", "content": blocks}, *messages[1:]]
+
+        # No boundary marker: single end-of-system breakpoint (within-run cache).
+        new_system = {
+            "role": "system",
+            "content": [
+                {
+                    "type": "text",
+                    "text": content,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+        }
+        return [new_system, *messages[1:]]
+
+    # Already a block list — add cache_control to the last text block.
+    if isinstance(content, list) and content:
+        if not is_anthropic:
+            return messages
+        new_content = list(content)
+        # Find last text block and add cache_control
+        for i in range(len(new_content) - 1, -1, -1):
+            block = new_content[i]
+            if isinstance(block, dict) and block.get("type") == "text":
+                new_content[i] = {**block, "cache_control": {"type": "ephemeral"}}
+                break
+        new_system = {"role": "system", "content": new_content}
+        return [new_system, *messages[1:]]
+
+    return messages
+
+
 def _ensure_anthropic_user_tail(model: str, messages: list[Any]) -> list[Any]:
     """Keep Anthropic requests valid when the wire history ends with an
     assistant turn. Anthropic rejects that ("does not support assistant message
@@ -540,7 +649,7 @@ def _ensure_anthropic_user_tail(model: str, messages: list[Any]) -> list[Any]:
     guidance was injected as a system message after a text-only assistant reply.
     A minimal user turn restores a valid sequence. Other providers are untouched.
     """
-    if "claude" not in model and "anthropic" not in model:
+    if not _is_anthropic_model(model):
         return messages
     if not messages:
         return messages
@@ -724,9 +833,14 @@ class StreamResult:
                 "model": self._model,
                 # Mask stale tool outputs for the wire only; self._messages
                 # stays full so history/rollover are unaffected.
+                # Apply Anthropic cache_control to system message for ~82% reduction
+                # in fixed overhead (tools+system cached at 0.1x from step 2).
                 "messages": _ensure_anthropic_user_tail(
                     self._model,
-                    mask_stale_tool_messages(validate_tool_pairs(self._messages)),
+                    _apply_anthropic_cache_control(
+                        self._model,
+                        mask_stale_tool_messages(validate_tool_pairs(self._messages)),
+                    ),
                 ),
                 "tools": _tools,
                 "stream": True,
