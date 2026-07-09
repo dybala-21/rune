@@ -420,6 +420,11 @@ def _handle_non_interactive(
             ctx.goal,
             context=run_context,
             message_history=ctx.messages if ctx.messages else None,
+            # Reuse the classification already computed above, but only when the
+            # goal passed to the loop is byte-identical to what we classified
+            # (sanitize/@-expansion can change it). loop.run further restricts
+            # reuse to the single-turn case.
+            classification=classification if ctx.goal == message else None,
         )
 
         if conv_manager is not None and conv_id:

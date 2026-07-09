@@ -783,6 +783,7 @@ class NativeAgentLoop(EventEmitter):
         resume_session_id: str | None = None,
         message_history: list[dict[str, str]] | None = None,
         extra_system_context: str | None = None,
+        classification: ClassificationResult | None = None,
     ) -> CompletionTrace:
         """Execute the agent loop for a given goal.
 
@@ -798,6 +799,11 @@ class NativeAgentLoop(EventEmitter):
         If *message_history* is provided (list of {role, content} dicts),
         the conversation history is prepended to messages so the LLM has
         multi-turn context from prior turns.
+
+        If *classification* is provided, it is reused instead of re-running
+        goal classification — but only when there is no *message_history*
+        (a single turn), where it is identical to what would be computed here.
+        Callers must only pass a classification computed for the same *goal*.
         """
         if self._running:
             raise RuntimeError("Agent loop is already running")
@@ -855,24 +861,30 @@ class NativeAgentLoop(EventEmitter):
 
             from rune.config.defaults import TOKEN_OPTIMIZATION_ENABLED
 
-            # Extract previous goal info from message_history for domain change detection
-            _prev_goal = ""
-            _prev_goal_type = ""
-            if message_history:
-                # goal_type is stored on assistant turns (set via add_turn in cli/api/ui)
-                for msg in reversed(message_history):
-                    if msg.get("goal_type"):
-                        _prev_goal_type = msg["goal_type"]
-                        break
-                for msg in reversed(message_history):
-                    if msg.get("role") == "user" and msg.get("content"):
-                        _prev_goal = msg["content"]
-                        break
-            classification = await classify_goal(
-                goal,
-                previous_goal=_prev_goal,
-                previous_goal_type=_prev_goal_type,
-            )
+            # Reuse a caller-supplied classification only for the single-turn
+            # case. With no prior turn, classify_goal(goal) here produces the same
+            # result (no previous-goal context to fold in), so reusing it is
+            # behaviourally identical and saves a redundant FAST round-trip.
+            # With history present we must re-classify to detect a domain change.
+            if classification is None or message_history:
+                # Extract previous goal info from message_history for domain change
+                _prev_goal = ""
+                _prev_goal_type = ""
+                if message_history:
+                    # goal_type is stored on assistant turns (set via add_turn)
+                    for msg in reversed(message_history):
+                        if msg.get("goal_type"):
+                            _prev_goal_type = msg["goal_type"]
+                            break
+                    for msg in reversed(message_history):
+                        if msg.get("role") == "user" and msg.get("content"):
+                            _prev_goal = msg["content"]
+                            break
+                classification = await classify_goal(
+                    goal,
+                    previous_goal=_prev_goal,
+                    previous_goal_type=_prev_goal_type,
+                )
 
             # Evidence Gate: re-verify the artifact against the task's own
             # success criteria before finalizing (benchmark-only, opt-in). Built
@@ -895,31 +907,6 @@ class NativeAgentLoop(EventEmitter):
                     )
                 else:
                     classification.is_continuation = True
-
-            # Tier 2 LLM fallback for low-confidence regex results (#17)
-            if classification.confidence < 0.7 and classification.tier == 1:
-                llm_intent = await self._classify_intent_llm(goal)
-                if llm_intent is not None:
-                    # Map LLM intent names to GoalType
-                    _intent_to_goal: dict[str, str] = {
-                        "chat": "chat",
-                        "quick_fix": "code_modify",
-                        "code_modify": "code_modify",
-                        "research": "research",
-                        "deep_research": "research",
-                    }
-                    mapped = _intent_to_goal.get(llm_intent, "full")
-                    classification = ClassificationResult(
-                        goal_type=mapped,  # type: ignore[arg-type]
-                        confidence=0.75,
-                        tier=2,
-                        reason=f"LLM intent fallback: {llm_intent}",
-                        # Tier-2 LLM intent classifier doesn't surface
-                        # email/document detection; default to including
-                        # both prompt sections so multilingual users
-                        # don't lose guidance on this fallback path.
-                        intent_categories=frozenset({"email", "document"}),
-                    )
 
             log.info(
                 "goal_classified",
@@ -969,7 +956,7 @@ class NativeAgentLoop(EventEmitter):
             tools = self._select_tools(classification)
 
             # Step 3: Build system prompt + provider supplement
-            system_prompt = self._build_system_prompt(goal, classification, context)
+            system_prompt = await self._build_system_prompt(goal, classification, context)
             # Caller-supplied supplement (used by paired skill replay to inject a
             # specific skill into the "with" arm deterministically). Neutral when
             # unset.
@@ -1193,7 +1180,7 @@ class NativeAgentLoop(EventEmitter):
         except Exception:
             return None
 
-    def _build_system_prompt(
+    async def _build_system_prompt(
         self,
         goal: str,
         classification: ClassificationResult,
@@ -1236,7 +1223,12 @@ class NativeAgentLoop(EventEmitter):
             try:
                 from rune.intelligence.repo_map import build_repo_map_sync
 
-                repo_map_text = build_repo_map_sync(os.getcwd(), max_tokens=2048)
+                # Offload the os.walk + tree-sitter scan to a thread so it does
+                # not block the event loop (streaming, MCP, UI) before the first
+                # token. Behaviour and result are unchanged.
+                repo_map_text = await asyncio.to_thread(
+                    build_repo_map_sync, os.getcwd(), max_tokens=2048
+                )
             except Exception:
                 pass
 
@@ -3763,46 +3755,6 @@ class NativeAgentLoop(EventEmitter):
                 raise
 
     # LLM intent classification Tier 2 fallback (#17)
-
-    async def _classify_intent_llm(self, goal: str) -> str | None:
-        """Tier 2: LLM-based intent classification fallback."""
-        try:
-            from rune.llm.client import get_llm_client
-
-            client = get_llm_client()
-            response = await client.completion(
-                messages=[
-                    {
-                        "role": "user",
-                        "content": (
-                            "Classify this task intent into one of: "
-                            "chat, quick_fix, code_modify, research, deep_research\n\n"
-                            f"Task: {goal}\n\nIntent:"
-                        ),
-                    }
-                ],
-                max_tokens=20,
-                timeout=5.0,
-            )
-            # Parse response
-            text = ""
-            if isinstance(response, dict):
-                choices = response.get("choices", [])
-                if choices:
-                    text = choices[0].get("message", {}).get("content", "")
-            else:
-                try:
-                    text = response.choices[0].message.content  # type: ignore[union-attr]
-                except (AttributeError, IndexError):
-                    pass
-
-            text = text.strip().lower()
-            for intent in ("chat", "quick_fix", "code_modify", "research", "deep_research"):
-                if intent in text:
-                    return intent
-        except Exception:
-            pass
-        return None
 
     # Fallback execution loop (no PydanticAI) (#Task1)
 

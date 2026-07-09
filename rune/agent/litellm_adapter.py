@@ -744,6 +744,17 @@ class StreamResult:
         # Turns we've forced a tool-only schema (no {final}) while waiting for the
         # first real artifact. Capped so a genuinely no-op task still terminates.
         self._forced_action_turns = 0
+        # Live streaming: emit prose content deltas as they arrive so the answer
+        # types out instead of appearing all at once at turn end. Restricted to
+        # native-tool-call cloud models — local/ollama models emit tool calls AS
+        # content JSON (recovered downstream) and guided mode streams schema
+        # JSON, neither of which may be shown raw, so those stay fully buffered.
+        _api_base = str(self._provider_extra.get("api_base", ""))
+        self._live_stream = (
+            not self._guided
+            and "11434" not in _api_base
+            and not self._model.startswith("ollama/")
+        )
         if self._guided:
             self._messages.append({
                 "role": "system",
@@ -900,6 +911,11 @@ class StreamResult:
             text_this_turn = ""
             tool_calls_by_index: dict[int, dict[str, Any]] = {}
             _finish_reason: str | None = None
+            # Live-streaming state for this turn.
+            _tool_seen = False
+            _streamed_live = False
+            _collected_len_before = len(self._collected_text)
+            _live_ok = self._live_stream and delta and not _suppress_yield
 
             async for chunk in self._stream:
                 if not chunk.choices:
@@ -914,13 +930,23 @@ class StreamResult:
                 if choice.finish_reason:
                     _finish_reason = choice.finish_reason
 
-                # Text delta — buffer only, do NOT yield yet.
-                # We must wait until the stream ends to know whether
-                # tool_calls are present.  Yielding text before that
-                # check causes hallucinated text to reach the UI when
-                # the LLM generates text + tool_calls in the same turn.
+                # A tool call this turn makes any prose speculative — stop
+                # streaming live from the moment one appears (checked before the
+                # content block so a same-chunk mix is handled correctly).
+                if choice.delta and choice.delta.tool_calls:
+                    _tool_seen = True
+
+                # Text delta. Stream prose live until a tool call shows up this
+                # turn; if one does, the streamed text is rolled back below and
+                # withheld from history exactly as before. When live streaming is
+                # off (local/guided) or unsafe, buffer as before and decide at
+                # end of stream.
                 if choice.delta and choice.delta.content:
                     text_this_turn += choice.delta.content
+                    if _live_ok and not _tool_seen:
+                        self._collected_text += choice.delta.content
+                        _streamed_live = True
+                        yield choice.delta.content
 
                 # Tool call deltas - accumulate across chunks
                 if choice.delta and choice.delta.tool_calls:
@@ -998,10 +1024,18 @@ class StreamResult:
             _discard = _has_tools and bool(text_this_turn)
 
             if _discard:
+                _rolled_back = _streamed_live
+                if _streamed_live:
+                    # Prose we optimistically streamed turned out to precede a
+                    # tool call. Roll back the accounting so collected_text and
+                    # get_output stay correct (the terminal cannot un-draw it).
+                    self._collected_text = self._collected_text[:_collected_len_before]
+                    _streamed_live = False
                 log.info(
                     "speculative_text_discarded",
                     text_len=len(text_this_turn),
                     tool_count=len(tool_calls_by_index),
+                    rolled_back=_rolled_back,
                 )
 
             # Tool-call truncation recovery: the turn hit the output limit
@@ -1101,8 +1135,10 @@ class StreamResult:
                     self._collected_text = ""
                     continue  # retry with higher limit
 
-            # Yield (only reached if no continuation path triggered)
-            if not _discard and text_this_turn:
+            # Yield (only reached if no continuation path triggered). If the text
+            # was already streamed live it is on screen and in collected_text, so
+            # don't emit it a second time.
+            if not _discard and text_this_turn and not _streamed_live:
                 if delta and not _suppress_yield:
                     yield text_this_turn
                     self._collected_text += text_this_turn
