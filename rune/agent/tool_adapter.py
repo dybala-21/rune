@@ -803,6 +803,18 @@ def _format_tool_output(
             command = params.get("command", "")
             if isinstance(command, str):
                 parts.append(f"{BASH_CMD_PREFIX}{command}{BASH_EXIT_PREFIX}0]")
+        # web_fetch: only when the opt-in citation-support check is enabled, prepend
+        # the fetched URL so that check can match this full page (not just the search
+        # snippet) to the citation. Gated so the default path is never altered.
+        if cap_name == "web_fetch" and _env_flag("RUNE_CITATION_SUPPORT"):
+            _src = ""
+            if result.metadata and isinstance(result.metadata, dict):
+                _src = str(result.metadata.get("final_url")
+                           or result.metadata.get("url") or "")
+            if not _src:
+                _src = str(params.get("url", ""))
+            if _src.strip():
+                parts.append(f"[SOURCE_URL: {_src}]")
         parts.append(result.output or "(success, no output)")
         # file_read: end anchor to prevent lost-in-the-middle
         if cap_name == "file_read":

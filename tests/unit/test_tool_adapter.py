@@ -181,8 +181,20 @@ class TestFormatToolOutput:
 
     def test_generic_success(self):
         result = CapabilityResult(success=True, output="done")
-        output = _format_tool_output("web_fetch", {"url": "http://x"}, result)
+        output = _format_tool_output("web_search", {}, result)
         assert output == "done"
+
+    def test_web_fetch_source_url_gated_on_opt_in_flag(self, monkeypatch):
+        # The [SOURCE_URL] prefix (for the opt-in citation-support check) must NOT
+        # alter the default path — it is prepended only when RUNE_CITATION_SUPPORT is
+        # enabled, so a normal web_fetch is unchanged.
+        result = CapabilityResult(success=True, output="page body")
+        monkeypatch.delenv("RUNE_CITATION_SUPPORT", raising=False)
+        assert _format_tool_output("web_fetch", {"url": "http://x"}, result) == "page body"
+        monkeypatch.setenv("RUNE_CITATION_SUPPORT", "1")
+        assert _format_tool_output("web_fetch", {"url": "http://x"}, result) == (
+            "[SOURCE_URL: http://x]\npage body"
+        )
 
     def test_generic_error_with_suggestions(self):
         result = CapabilityResult(
