@@ -14,6 +14,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from rune.agent.isolation import enforce as _enforce_isolation
 from rune.capabilities.registry import CapabilityRegistry
 from rune.capabilities.types import CapabilityDefinition
 from rune.safety.guardian import get_guardian
@@ -274,6 +275,13 @@ async def document_create(params: DocumentCreateParams) -> CapabilityResult:
     validation = guardian.validate_file_path(params.path)
     if not validation.allowed:
         return CapabilityResult(success=False, error=validation.reason)
+
+    # Confine to an isolated worker's workspace, same as file_write/edit/delete
+    # (no-op unless RUNE_ISOLATION_ROOT is set). Without this, document_create is a
+    # second way an isolated best-of attempt could write outside its tempdir.
+    iso_err = _enforce_isolation(params.path)
+    if iso_err:
+        return CapabilityResult(success=False, error=iso_err)
 
     file_path = Path(os.path.expanduser(params.path)).resolve()
     home = os.environ.get("HOME", str(Path.home()))

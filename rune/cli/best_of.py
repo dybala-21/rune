@@ -24,6 +24,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from rune.agent.isolation import ISOLATION_ENV
 from rune.agent.rejection_sampler import (
     make_verifier,
     sample_parallel,
@@ -97,6 +98,11 @@ async def _run_attempt_subprocess(
 
     env = dict(os.environ)
     env[RECURSION_GUARD_ENV] = "1"  # recursion guard
+    # Confine file writes to this attempt's dir via enforce() (same as the
+    # parallel-isolated path). enforce() covers the file_write/edit/delete and
+    # document_create capabilities; shell/exec and the browser capability are not
+    # contained without an OS sandbox.
+    env[ISOLATION_ENV] = workdir
 
     cmd = [sys.executable, "-m", "rune.cli.main", "--message", message]
     if model:
