@@ -99,7 +99,7 @@ jobs:
           PY
       - name: Run tests
         # Browser action regressions use Chromium, including its actionability checks.
-        run: uv run pytest tests/ -q --tb=short -n auto --dist worksteal
+        run: uv run pytest tests/ -q --tb=short -n auto --dist worksteal --cov=rune --cov-report=term-missing:skip-covered
       - name: Run web regression tests
         env:
           RUNE_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
@@ -108,6 +108,25 @@ jobs:
   # Fresh install with no dev extras, then import. lint and test both run
   # on `uv sync --extra dev`, so a runtime dependency missing from the base
   # install — the break a user hits first — would pass CI unseen.
+  types:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: uv sync --extra dev
+      # mypy is not run in CI yet and the strict config has a large existing
+      # backlog, so report type errors on every PR without blocking the build.
+      # Make it blocking once the backlog is worked down.
+      - name: Type check (non-blocking baseline)
+        continue-on-error: true
+        run: uv run mypy rune
+
   smoke:
     runs-on: ubuntu-latest
     steps:
