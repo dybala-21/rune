@@ -17,7 +17,7 @@
 <p align="center">
   <img alt="Python 3.13+" src="https://img.shields.io/badge/python-3.13%2B-blue?logo=python&logoColor=white" />
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green" />
-  <img alt="Tests" src="https://img.shields.io/badge/tests-2601%20passing-brightgreen" />
+  <img alt="Tests" src="https://img.shields.io/badge/tests-2894%20passing-brightgreen" />
   <img alt="LOC" src="https://img.shields.io/badge/Python-94K%20LOC-blue" />
 </p>
 
