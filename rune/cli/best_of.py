@@ -23,6 +23,7 @@ import sys
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from rune.agent.isolation import ISOLATION_ENV
 from rune.agent.rejection_sampler import (
@@ -456,6 +457,48 @@ async def _record_winner(
 _MAX_FAILURE_RULES = 3
 
 
+def _read_produced(workdir: str, produced: list[str], cap: int = 2) -> str:
+    """Concatenate up to ``cap`` produced files from an attempt's workdir."""
+    parts: list[str] = []
+    for name in produced[:cap]:
+        try:
+            parts.append(Path(workdir, name).read_text()[:2500])
+        except OSError:
+            continue
+    return "\n\n".join(parts)
+
+
+async def _learn_from_contrast(
+    winner: AttemptArtifact,
+    losers: list[AttemptArtifact],
+    ev_map: dict[str, str],
+) -> str | None:
+    """Distill a correctness rule from the winner-vs-losers contrast.
+
+    ``_learn_from_failures`` covers the loser evidence on its own; this adds
+    the piece it structurally misses — what the passing solution did
+    differently. Best-effort; never breaks the run.
+    """
+    try:
+        winner_code = _read_produced(winner.workdir, winner.produced)
+        loser_pairs = [
+            (_read_produced(lo.workdir, lo.produced), ev_map.get(lo.workdir, ""))
+            for lo in losers
+        ]
+        loser_pairs = [(c, e) for c, e in loser_pairs if c.strip()]
+        if not winner_code.strip() or not loser_pairs:
+            return None
+        from rune.memory.rule_learner import learn_from_contrast
+
+        key = await learn_from_contrast(winner_code, loser_pairs)
+        if key:
+            log.info("bestof_contrast_learned", key=key)
+        return key
+    except Exception as exc:
+        log.warning("bestof_contrast_failed", error=str(exc)[:120])
+        return None
+
+
 async def _learn_from_failures(message: str, evidence: list[str]) -> list[str]:
     """Learn correctness rules from the failed attempts' verifier evidence.
 
@@ -593,6 +636,14 @@ async def _best_of_async(
                 backup_dir = None
             # Learn from the verifier-confirmed winner (1 episode).
             await _record_winner(message, selected.stdout, selected.produced)
+            # With a verified winner in hand, distill what separated it from
+            # the failed attempts into a learned rule (failure evidence alone
+            # only ever yields process advice). RUNE_CONTRASTIVE_DISTILL=0
+            # opts out.
+            if os.environ.get("RUNE_CONTRASTIVE_DISTILL", "1") != "0":
+                await _learn_from_contrast(
+                    selected, [a.candidate for a in res.attempts if not a.passed], ev_map
+                )
             method_map = getattr(verify_cwd, "method_by_cwd", {}) or {}
             report(
                 selected.stdout,

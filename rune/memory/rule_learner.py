@@ -384,6 +384,129 @@ def is_crisp_loop_reason(reason: str) -> bool:
     return is_crisp_failure(reason)
 
 
+# Failure evidence on its own keeps producing process advice ("check that
+# the files exist") — the diff against a passing solution is what surfaces
+# the actual convention the losers got wrong. The four numbered demands
+# below are load-bearing: without them the rule comes back scoped to the
+# training task, or missing the trap/fix, and stops transferring
+# (scripts/contrastive_distill_bench.py measures exactly this).
+_CONTRAST_PROMPT = (
+    "Several attempts at the same coding task were graded by the task's own "
+    "tests. One PASSED all tests; the others FAILED.\n\n"
+    "PASSING solution:\n```\n{winner}\n```\n\n"
+    "{losers}"
+    "Compare the passing solution with the failing ones. Identify the SPECIFIC "
+    "behavioral convention (an exact semantic choice, e.g. a rounding "
+    "direction, an operator associativity, an ordering) that the passing "
+    "solution implements and at least one failing attempt got wrong.\n"
+    "Write ONE rule (under 40 words) that:\n"
+    "1. states the convention GENERALLY — do NOT mention this task, its "
+    "function names, or its input format (it must apply to any future task "
+    "touching the same semantics);\n"
+    "2. names the natural-but-WRONG implementation choice the failing "
+    "attempts made;\n"
+    "3. names the correct implementation;\n"
+    "4. includes ONE minimal concrete example: an input, the wrong result "
+    "the natural choice gives, and the correct result.\n"
+    "If the failures are only structural (missing file, syntax, unsupported "
+    "input) and no semantic convention separates them, reply NONE.\n"
+    "Format: key_name: rule description\nRule:"
+)
+
+
+async def learn_from_contrast(
+    winner_code: str,
+    losers: list[tuple[str, str]],
+    domain: str = "code_modify",
+) -> str | None:
+    """Distill a correctness rule by contrasting a verified winner against
+    failing attempts (code + verifier evidence pairs).
+
+    Extraction runs on the BEST tier — small models misread the diff and
+    state the wrong convention, so the same strong oracle that builds
+    Evidence Gate checks does the distilling. Saved rules share the
+    crisp-rule lifecycle (0.60 confidence -> injectable immediately, demoted
+    on bad outcomes, soft-capped, suppressible). Returns the rule key or None.
+    """
+    if not winner_code.strip() or not losers:
+        return None
+    try:
+        loser_blocks = "".join(
+            f"FAILING attempt {i + 1} (failures: {ev[:300]}):\n```\n{code[:2500]}\n```\n\n"
+            for i, (code, ev) in enumerate(losers[:2])
+        )
+        prompt = _CONTRAST_PROMPT.format(
+            winner=winner_code[:2500], losers=loser_blocks
+        )
+
+        from rune.llm.client import get_llm_client
+        from rune.types import ModelTier
+
+        response = await get_llm_client().completion(
+            messages=[{"role": "user", "content": prompt}],
+            tier=ModelTier.BEST,
+            max_tokens=_RULE_GEN_MAX_TOKENS,
+        )
+        text = ""
+        if isinstance(response, dict):
+            choices = response.get("choices", [])
+            if choices:
+                text = choices[0].get("message", {}).get("content", "")
+        else:
+            try:
+                text = response.choices[0].message.content
+            except (AttributeError, IndexError):
+                pass
+        rule_text = (text or "").strip().lstrip("- •").strip()
+        if rule_text.lower().startswith("rule:"):
+            rule_text = rule_text[5:].strip()
+        if not rule_text or len(rule_text) < 5 or rule_text.upper().startswith("NONE"):
+            return None
+
+        meta = load_fact_meta()
+        sig = _error_signature("contrastive_distill", rule_text)
+        rule_key = f"{_RULE_CATEGORY_PREFIX}{domain}:{sig}"
+        if rule_key in meta or rule_key in load_suppressed():
+            return None
+        if not _ensure_rule_capacity(meta, _CRISP_INITIAL_CONFIDENCE):
+            log.debug("contrast_rule_cap_reached", count=len(_rule_keys(meta)))
+            return None
+
+        if ":" in rule_text:
+            key_part, value_part = rule_text.split(":", 1)
+            key_part = key_part.strip().replace(" ", "_")[:40]
+            value_part = value_part.strip()
+        else:
+            key_part = sig
+            value_part = rule_text
+
+        save_learned_fact(
+            category=f"rule:{domain}",
+            key=key_part,
+            value=value_part,
+            confidence=_CRISP_INITIAL_CONFIDENCE,
+        )
+        update_fact_meta(
+            rule_key,
+            {
+                "confidence": _CRISP_INITIAL_CONFIDENCE,
+                "hit_count": 0,
+                "eval_count": 0,
+                "source": "contrastive_distill",
+                "created_at": datetime.now(UTC).isoformat(),
+                "failure_signature": sig,
+                "failure_count": 1,
+                "human_key": key_part,
+                "category": f"rule:{domain}",
+            },
+        )
+        log.info("contrast_rule_learned", domain=domain, key=key_part, value=value_part[:80])
+        return key_part
+    except Exception as exc:  # best-effort: never fail the caller over learning
+        log.warning("contrast_learn_failed", error=str(exc)[:120])
+        return None
+
+
 async def learn_from_crisp_failure(
     tool_name: str,
     error_message: str,
@@ -620,7 +743,7 @@ def update_rules_from_outcome(
             continue
         # Demote rules from both learners on negative outcomes. This is what
         # lets a wrongly-learned one-shot rule fall back out of injection.
-        if entry.get("source") not in ("rule_learner", "crisp_failure"):
+        if entry.get("source") not in ("rule_learner", "crisp_failure", "contrastive_distill"):
             continue
 
         # Relevance check: rule keywords vs task context.
@@ -674,7 +797,7 @@ def decay_unused_rules() -> int:
     for key, entry in list(meta.items()):
         if not key.startswith(_RULE_CATEGORY_PREFIX):
             continue
-        if entry.get("source") not in ("rule_learner", "crisp_failure"):
+        if entry.get("source") not in ("rule_learner", "crisp_failure", "contrastive_distill"):
             continue
         if entry.get("eval_count", 0) > 0:
             continue
