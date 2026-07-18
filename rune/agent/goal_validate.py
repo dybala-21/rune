@@ -118,12 +118,23 @@ def make_validate_fn(
     """
     run = exec_fn or _default_exec
 
+    # Freeze pre-existing test files at goal start: validation must judge the
+    # user's own checks, not agent-edited ones (see validation_guard).
+    from rune.agent.validation_guard import restoration_note, snapshot_tests
+
+    test_snapshot = snapshot_tests(cwd or ".")
+
     async def _validate(commands: list[str]) -> tuple[bool, str]:
         if not commands:
             return True, "no validation commands"
+        from rune.agent.validation_guard import restore_tests
+
+        restored_note = restoration_note(restore_tests(test_snapshot))
         target = _resolve_root(cwd) if auto_root else cwd
         # Surface a redirect so the reviewer/feedback shows where it ran.
         header = f"# validation cwd: {target}\n" if target != cwd else ""
+        if restored_note:
+            header = f"# {restored_note}\n{header}"
         transcript: list[str] = []
         for cmd in commands:
             try:
