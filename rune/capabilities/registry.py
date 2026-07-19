@@ -103,7 +103,33 @@ def get_capability_registry() -> CapabilityRegistry:
     if _registry is None:
         _registry = CapabilityRegistry()
         _register_all_capabilities(_registry)
+        _apply_disabled_capabilities(_registry)
     return _registry
+
+
+def _apply_disabled_capabilities(registry: CapabilityRegistry) -> None:
+    """Drop capabilities named in ``RUNE_DISABLED_CAPABILITIES``.
+
+    Comma-separated exact names or ``prefix*`` patterns (e.g.
+    ``browser_*,web_*``). Lets headless contexts — benches, CI, servers —
+    run the agent without side-effecting tools like the browser.
+    """
+    import os
+
+    raw = os.environ.get("RUNE_DISABLED_CAPABILITIES", "").strip()
+    if not raw:
+        return
+    patterns = [p.strip() for p in raw.split(",") if p.strip()]
+    removed = []
+    for name in registry.list_names():
+        for pat in patterns:
+            matched = name.startswith(pat[:-1]) if pat.endswith("*") else name == pat
+            if matched:
+                registry._capabilities.pop(name, None)
+                removed.append(name)
+                break
+    if removed:
+        log.info("capabilities_disabled_by_env", names=removed)
 
 
 def _register_all_capabilities(registry: CapabilityRegistry) -> None:
