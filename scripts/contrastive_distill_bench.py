@@ -257,7 +257,7 @@ async def supplement_winner(fam: str, entry: dict) -> dict:
     llm.active_model = winner_model
     llm.active_provider = os.environ.get("CD_WINNER_PROVIDER", prev_p)
     try:
-        for k in range(int(os.environ.get("CD_WINNER_K", "3"))):
+        for _ in range(int(os.environ.get("CD_WINNER_K", "3"))):
             rec = await _one_attempt(fam, len(entry["pool"]), winner_model=winner_model)
             entry["pool"].append(rec)
             if rec["passed"]:

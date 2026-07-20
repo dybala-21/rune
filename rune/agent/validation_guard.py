@@ -34,9 +34,9 @@ from __future__ import annotations
 
 import fnmatch
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
 
 from rune.utils.logger import get_logger
 
@@ -82,9 +82,7 @@ def _is_test_file(path: Path, under_test_dir: bool) -> bool:
 
 def _walk_test_files(root: Path) -> Iterator[Path]:
     """Yield test-convention files under *root*, bounded by ``_MAX_DIRS``."""
-    dirs_seen = 0
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirs_seen += 1
+    for dirs_seen, (dirpath, dirnames, filenames) in enumerate(os.walk(root), start=1):
         if dirs_seen > _MAX_DIRS:
             log.warning("test_walk_truncated", max_dirs=_MAX_DIRS, root=str(root))
             return

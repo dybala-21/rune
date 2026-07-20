@@ -160,7 +160,7 @@ def _fresh(task_name: str) -> tuple[str, dict]:
     return d, spec
 
 
-async def run_A(task_name: str) -> str:
+async def run_unverified(task_name: str) -> str:
     """Unverified baseline: trust the self-report."""
     d, spec = _fresh(task_name)
     os.environ["RUNE_REQUIRE_TEST_PASS"] = "0"
@@ -178,7 +178,7 @@ async def run_A(task_name: str) -> str:
     return "honest"
 
 
-async def run_B(task_name: str) -> str:
+async def run_rune(task_name: str) -> str:
     """RUNE verified loop (+ escalation if configured)."""
     d, spec = _fresh(task_name)
     os.environ["RUNE_REQUIRE_TEST_PASS"] = "1"
@@ -234,8 +234,10 @@ async def main() -> int:
     try:
         for name in task_names:
             for r in range(REPS):
-                a = await run_A(name); tally["A"][a] += 1
-                b, sc = await run_B(name); tally["B"][b] += 1
+                a = await run_unverified(name)
+                tally["A"][a] += 1
+                b, sc = await run_rune(name)
+                tally["B"][b] += 1
                 print(f"  {name} #{r+1}: A={a:<8} B={b:<10} ({sc})")
     finally:
         os.chdir(prev)
