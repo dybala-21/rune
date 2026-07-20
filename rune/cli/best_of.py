@@ -23,7 +23,9 @@ import sys
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
+from rune.agent.isolation import ISOLATION_ENV
 from rune.agent.rejection_sampler import (
     make_verifier,
     sample_parallel,
@@ -97,6 +99,11 @@ async def _run_attempt_subprocess(
 
     env = dict(os.environ)
     env[RECURSION_GUARD_ENV] = "1"  # recursion guard
+    # Confine file writes to this attempt's dir via enforce() (same as the
+    # parallel-isolated path). enforce() covers the file_write/edit/delete and
+    # document_create capabilities; shell/exec and the browser capability are not
+    # contained without an OS sandbox.
+    env[ISOLATION_ENV] = workdir
 
     cmd = [sys.executable, "-m", "rune.cli.main", "--message", message]
     if model:
@@ -177,12 +184,43 @@ def _snapshot_produced(workdir: str) -> list[str]:
 # --- seeded mode (--include-cwd): copy the working tree into each attempt so the
 # agent can EDIT existing files, then restore only what it changed (diff vs seed).
 
+# Fallback exclusions, used only outside a git work tree. Inside one,
+# _seed_file_list asks git what the project's source is, which covers every
+# ecosystem's build dirs without this list needing an entry per toolchain.
 _SEED_IGNORE_PATTERNS = (
     ".git", ".hg", ".svn", ".venv", "venv", "node_modules", "__pycache__",
     "*.pyc", ".mypy_cache", ".pytest_cache", ".ruff_cache", "dist", "build",
+    "target",  # cargo/maven build output — hundreds of MB after one build
     ".rune-bestof-*",
 )
 _SEED_IGNORE = shutil.ignore_patterns(*_SEED_IGNORE_PATTERNS)
+
+
+def _seed_file_list(src: str) -> list[str] | None:
+    """The project's own view of its source files, or None outside a git tree.
+
+    ``git ls-files -co --exclude-standard`` = tracked + untracked-but-not-
+    ignored, honoring the project's .gitignore chain. Deleted-but-tracked
+    entries and best-of runtime dirs are dropped; paths are relative to src.
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["git", "-C", src, "ls-files", "-z", "-co", "--exclude-standard"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    out: list[str] = []
+    for rel in proc.stdout.split("\0"):
+        if not rel or rel.startswith(".rune-bestof-"):
+            continue
+        if os.path.isfile(os.path.join(src, rel)):
+            out.append(rel)
+    return out
 
 # Refuse to seed a cwd larger than this (× K copies would otherwise exhaust
 # disk). Overridable for genuinely large repos.
@@ -192,7 +230,17 @@ _SEED_MAX_FILES = 20_000
 
 
 def _seed_footprint(src: str) -> tuple[int, int]:
-    """Count (files, total_bytes) that seeding would copy (ignores applied)."""
+    """Count (files, total_bytes) that seeding would copy."""
+    listed = _seed_file_list(src)
+    if listed is not None:
+        total = 0
+        for rel in listed:
+            try:
+                total += os.path.getsize(os.path.join(src, rel))
+            except OSError:
+                pass
+        return len(listed), total
+
     import fnmatch
 
     def ignored(name: str) -> bool:
@@ -228,7 +276,22 @@ def _check_seed_size(src: str) -> str | None:
 
 
 def _seed_workdir(src: str, workdir: str) -> None:
-    """Copy the cwd tree into an attempt's workdir (minus VCS/build/cache cruft)."""
+    """Copy the project's source files into an attempt's workdir.
+
+    In a git work tree, "source" is what the project itself declares
+    (tracked + untracked-unignored — see _seed_file_list); elsewhere the
+    static pattern fallback applies.
+    """
+    listed = _seed_file_list(src)
+    if listed is not None:
+        for rel in listed:
+            dst = os.path.join(workdir, rel)
+            os.makedirs(os.path.dirname(dst) or workdir, exist_ok=True)
+            try:
+                shutil.copy2(os.path.join(src, rel), dst)
+            except OSError:
+                continue
+        return
     shutil.copytree(src, workdir, ignore=_SEED_IGNORE, dirs_exist_ok=True, symlinks=False)
 
 
@@ -450,6 +513,48 @@ async def _record_winner(
 _MAX_FAILURE_RULES = 3
 
 
+def _read_produced(workdir: str, produced: list[str], cap: int = 2) -> str:
+    """Concatenate up to ``cap`` produced files from an attempt's workdir."""
+    parts: list[str] = []
+    for name in produced[:cap]:
+        try:
+            parts.append(Path(workdir, name).read_text()[:2500])
+        except OSError:
+            continue
+    return "\n\n".join(parts)
+
+
+async def _learn_from_contrast(
+    winner: AttemptArtifact,
+    losers: list[AttemptArtifact],
+    ev_map: dict[str, str],
+) -> str | None:
+    """Distill a correctness rule from the winner-vs-losers contrast.
+
+    ``_learn_from_failures`` covers the loser evidence on its own; this adds
+    the piece it structurally misses — what the passing solution did
+    differently. Best-effort; never breaks the run.
+    """
+    try:
+        winner_code = _read_produced(winner.workdir, winner.produced)
+        loser_pairs = [
+            (_read_produced(lo.workdir, lo.produced), ev_map.get(lo.workdir, ""))
+            for lo in losers
+        ]
+        loser_pairs = [(c, e) for c, e in loser_pairs if c.strip()]
+        if not winner_code.strip() or not loser_pairs:
+            return None
+        from rune.memory.rule_learner import learn_from_contrast
+
+        key = await learn_from_contrast(winner_code, loser_pairs)
+        if key:
+            log.info("bestof_contrast_learned", key=key)
+        return key
+    except Exception as exc:
+        log.warning("bestof_contrast_failed", error=str(exc)[:120])
+        return None
+
+
 async def _learn_from_failures(message: str, evidence: list[str]) -> list[str]:
     """Learn correctness rules from the failed attempts' verifier evidence.
 
@@ -587,6 +692,14 @@ async def _best_of_async(
                 backup_dir = None
             # Learn from the verifier-confirmed winner (1 episode).
             await _record_winner(message, selected.stdout, selected.produced)
+            # With a verified winner in hand, distill what separated it from
+            # the failed attempts into a learned rule (failure evidence alone
+            # only ever yields process advice). RUNE_CONTRASTIVE_DISTILL=0
+            # opts out.
+            if os.environ.get("RUNE_CONTRASTIVE_DISTILL", "1") != "0":
+                await _learn_from_contrast(
+                    selected, [a.candidate for a in res.attempts if not a.passed], ev_map
+                )
             method_map = getattr(verify_cwd, "method_by_cwd", {}) or {}
             report(
                 selected.stdout,

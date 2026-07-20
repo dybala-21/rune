@@ -218,14 +218,24 @@ class EvidenceGate:
         "_extracted",
         "_spec",
         "_spec_extracted",
+        "_test_snapshot",
+        "_guard_note",
         "verdict_counts",
         "last_verdict",
         "last_evidence",
+        "last_tests_restored",
     )
 
     def __init__(self, instruction: str, cwd: str) -> None:
         self._instruction = instruction
         self._cwd = cwd
+        # Freeze pre-existing test files: the gate must never judge against
+        # checks the agent rewrote mid-run (see validation_guard).
+        from rune.agent.validation_guard import snapshot_tests
+
+        self._test_snapshot = snapshot_tests(cwd)
+        self.last_tests_restored: list[str] = []
+        self._guard_note = ""
         self._script: str | None = None
         self._extracted = False
         # Spec-driven path (preferred): code controls sampling/run/compare; the
@@ -253,6 +263,14 @@ class EvidenceGate:
         - ``"skip"``: no mechanical check could be produced/run; the gate is
           neutral and must NOT influence the decision either way.
         """
+        # Any verification below must run against the user's own checks, not
+        # agent-edited ones — restore tampered test files first and disclose.
+        from rune.agent.validation_guard import restoration_note, restore_tests
+
+        report = restore_tests(self._test_snapshot)
+        self.last_tests_restored = report.restored + report.quarantined
+        self._guard_note = restoration_note(report)
+
         # Preferred: spec-driven verification (deterministic sampling/run/compare).
         if not self._spec_extracted:
             from rune.agent.evidence_spec import extract_spec
@@ -300,6 +318,11 @@ class EvidenceGate:
     def _record(
         self, state: str, message: str | None, evidence: str
     ) -> tuple[str, str | None]:
+        note = self._guard_note
+        if note:
+            evidence = f"{note}\n{evidence}" if evidence else note
+            if message:
+                message = f"{note}\n{message}"
         self.verdict_counts[state] = self.verdict_counts.get(state, 0) + 1
         self.last_verdict = state
         self.last_evidence = evidence[:500]
@@ -314,6 +337,7 @@ class EvidenceGate:
             "verdict_counts": dict(self.verdict_counts),
             "last_verdict": self.last_verdict,
             "last_evidence": self.last_evidence[:200],
+            "tests_restored": list(self.last_tests_restored),
         }
 
     async def check(self) -> str | None:

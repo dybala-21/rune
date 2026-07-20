@@ -1717,7 +1717,12 @@ class NativeAgentLoop(EventEmitter):
             _require_test_pass = _require_test_pass and resolve_intent_contract(
                 classification, classification.confidence
             ).requires_code_verification
-        except Exception:
+        except Exception as exc:
+            # Don't silently drop the guard: a classify failure here would
+            # otherwise turn off the only default-on completion check without a
+            # trace. We can't force-require a test on a task we couldn't classify
+            # (that would block plain Q&A), so keep the safe default but log it.
+            log.warning("require_test_pass_classify_error", error=str(exc)[:160])
             _require_test_pass = False
 
         def _unverified_code() -> bool:

@@ -22,7 +22,7 @@ type SidebarTab = 'chats' | 'settings';
 
 // Tools that mean the agent is working in a folder — the signal to ask for a
 // workspace if none is pinned (zero false positives, unlike text guessing).
-const WORKSPACE_TOOLS = new Set(['file.read', 'file.write', 'file.edit', 'file.delete', 'bash']);
+const WORKSPACE_TOOLS = new Set(['file.read', 'file.write', 'file.edit', 'file.delete', 'bash', 'code.analyze']);
 
 export function App() {
   const agent = useAgent();

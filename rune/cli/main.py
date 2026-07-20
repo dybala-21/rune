@@ -159,7 +159,8 @@ def main(
 
     if version:
         from rune import __codename__
-        console.print(f"rune v{__version__} ({__codename__})")
+        # stdout, not the stderr console — scripts (and install.sh) parse this.
+        typer.echo(f"rune v{__version__} ({__codename__})")
         raise typer.Exit()
 
     if ctx.invoked_subcommand is None:

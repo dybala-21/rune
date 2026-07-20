@@ -17,11 +17,32 @@
 <p align="center">
   <img alt="Python 3.13+" src="https://img.shields.io/badge/python-3.13%2B-blue?logo=python&logoColor=white" />
   <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green" />
-  <img alt="Tests" src="https://img.shields.io/badge/tests-2601%20passing-brightgreen" />
+  <img alt="Tests" src="https://img.shields.io/badge/tests-2894%20passing-brightgreen" />
   <img alt="LOC" src="https://img.shields.io/badge/Python-94K%20LOC-blue" />
 </p>
 
 ---
+
+<p align="center">
+  <img src="docs/assets/app-demo-verified.png" alt="RUNE desktop app — a local qwen2.5-coder:32b fixes a failing test; the Workbench shows the Evidence Gate verdict (verified) and the exact diff it shipped" width="900" />
+</p>
+
+> The RUNE app, running a **local** model end-to-end: it reads the failing
+> project, edits `discount.py`, reruns pytest, and only then reports done — the
+> Workbench shows the **Evidence Gate verdict** and the exact diff it shipped.
+> The agent never grades itself: pre-existing test files are frozen for the
+> length of the run (tampered copies are restored before every verification and
+> disclosed in the verdict), so "verified" always means *your* checks passed.
+
+<p align="center">
+  <img src="docs/assets/honest-agent-demo.png" alt="RUNE honest-agent demo — same local 7B, one hard task: the naive agent presents 0/8-passing code as DONE; RUNE ships a verified 8/8 via one escalated attempt" width="840" />
+</p>
+
+> Real output from `scripts/demo_honest_agent.py`: the same local 7B, one hard
+> task, two ways. The naive loop presented code failing **all 8 tests** as done.
+> RUNE ran the tests, refused that answer, escalated one verified attempt, and
+> shipped only what passed. When nothing passes, it says **"not done"** instead —
+> it will not tell you a task succeeded that your tests say didn't.
 
 ```
 ─── rune ──────────────────────────────────────────
@@ -35,10 +56,6 @@
 
 ✓ shipped attempt #2, the only one that passed your test
 ```
-
-> Two attempts said "done" on code that fails your test. RUNE ran the test,
-> threw them out, and shipped the one that actually passed. Most agents would
-> have handed you attempt #1.
 
 ## Why RUNE
 
