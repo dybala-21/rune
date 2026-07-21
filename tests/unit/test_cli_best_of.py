@@ -109,6 +109,43 @@ def test_preserve_skipped_none_when_no_collision(tmp_path):
     assert _preserve_skipped(str(work), str(dest), []) is None
 
 
+def test_preserve_unverified_keeps_work_when_nothing_verified(tmp_path):
+    """"Could not verify" must not mean "deleted": park it for the user."""
+    from rune.cli.best_of import _preserve_unverified
+
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "solution.py").write_text("MAYBE RIGHT")
+    (work / "pkg").mkdir()
+    (work / "pkg" / "mod.py").write_text("X")
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "solution.py").write_text("USER FILE")
+
+    kept = _preserve_unverified(str(work), str(dest), ["solution.py", "pkg"])
+
+    assert kept is not None
+    assert os.path.basename(kept).startswith(".rune-bestof-unverified-")
+    # Parked beside the project, never over the user's own file.
+    assert open(os.path.join(kept, "solution.py")).read() == "MAYBE RIGHT"
+    assert open(os.path.join(kept, "pkg", "mod.py")).read() == "X"
+    assert (dest / "solution.py").read_text() == "USER FILE"
+
+
+def test_preserve_unverified_none_when_attempt_produced_nothing(tmp_path):
+    from rune.cli.best_of import _preserve_unverified
+
+    work = tmp_path / "work"
+    work.mkdir()
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    assert _preserve_unverified(str(work), str(dest), []) is None
+    # A named-but-missing artifact must not leave an empty dir behind.
+    assert _preserve_unverified(str(work), str(dest), ["gone.py"]) is None
+    assert list(dest.iterdir()) == []
+
+
 def test_restore_artifacts_only_restores_snapshot(tmp_path):
     # A verifier byproduct (__pycache__) appears in the workdir AFTER the
     # snapshot was taken — it must NOT be restored.
