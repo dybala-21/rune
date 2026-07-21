@@ -454,6 +454,41 @@ def _preserve_skipped(workdir: str, dest: str, skipped: list[str]) -> str | None
     return preserve
 
 
+def _preserve_unverified(workdir: str, dest: str, produced: list[str]) -> str | None:
+    """Park an unverified attempt's files beside the project instead of deleting.
+
+    When no attempt passes the verifier we deliberately do not restore anything
+    into the working tree — unverified edits must not overwrite the user's
+    files. But "we could not verify this" is not "this is wrong", and the
+    attempt is about to be wiped by :func:`_cleanup`. Copy it into a fresh
+    ``.rune-bestof-unverified-*`` dir inside ``dest`` (dotfile → ignored by the
+    non-empty-cwd warning) so the user can diff and adopt it deliberately.
+
+    Returns the path, or ``None`` when there was nothing to save.
+    """
+    if not produced:
+        return None
+    preserve = tempfile.mkdtemp(prefix=".rune-bestof-unverified-", dir=dest)
+    saved = False
+    for name in produced:
+        src = os.path.join(workdir, name)
+        if not os.path.exists(src):
+            continue
+        dst = os.path.join(preserve, name)
+        try:
+            if os.path.isdir(src):
+                shutil.copytree(src, dst)
+            else:
+                shutil.copy2(src, dst)
+        except OSError:
+            continue
+        saved = True
+    if not saved:
+        shutil.rmtree(preserve, ignore_errors=True)
+        return None
+    return preserve
+
+
 def _cleanup(artifacts: list[AttemptArtifact]) -> None:
     for a in artifacts:
         shutil.rmtree(a.workdir, ignore_errors=True)
@@ -725,6 +760,14 @@ async def _best_of_async(
         # (unverified); never silently drop the K-1 candidates.
         best = artifacts[0] if artifacts else None
         no_artifact = sum(1 for a in artifacts if not a.produced)
+        # Not restoring is right; deleting is not. `_cleanup` wipes every
+        # workdir below, and we only established that we couldn't verify this
+        # work — not that it's wrong. Park it where the user can inspect it.
+        unverified_dir = (
+            _preserve_unverified(best.workdir, dest, best.produced)
+            if best and best.produced
+            else None
+        )
         report(
             best.stdout if best else "",
             solved=False,
@@ -735,6 +778,7 @@ async def _best_of_async(
             skipped=[],
             has_check=has_check,
             no_artifact=no_artifact,
+            unverified_dir=unverified_dir,
         )
         return 1
     finally:
@@ -802,7 +846,21 @@ def run_best_of(
         has_check: bool = True,
         no_artifact: int = 0,
         verify_method: str | None = None,
+        unverified_dir: str | None = None,
     ) -> None:
+        def _kept(path: str | None) -> str:
+            """Tell the user where an unverified attempt was parked, if anywhere."""
+            if not path:
+                return ""
+            try:
+                shown = os.path.relpath(path)
+            except ValueError:  # different drive/root
+                shown = path
+            return (
+                f" Attempt #0's files kept in {shown}/ (UNVERIFIED — review "
+                f"before adopting)."
+            )
+
         if stdout:
             print(stdout, end="" if stdout.endswith("\n") else "\n", flush=True)
         if solved:
@@ -836,7 +894,7 @@ def run_best_of(
                 f"[yellow]best-of-{k}: no mechanical success check could be built "
                 f"for this task, so the verifier cannot select a candidate "
                 f"(best-of-K only helps verifiable tasks). Showing attempt #0 "
-                f"unverified, nothing restored.[/yellow]"
+                f"unverified, nothing restored.{_kept(unverified_dir)}[/yellow]"
             )
         else:
             wrote = k - no_artifact
@@ -844,7 +902,8 @@ def run_best_of(
                 f"[yellow]best-of-{k}: no attempt passed the verifier (0/{k}); "
                 f"{no_artifact}/{k} produced no files (generator didn't write "
                 f"artifacts), {wrote}/{k} wrote files but failed the check. "
-                f"Showing attempt #0 unverified, nothing restored.[/yellow]"
+                f"Showing attempt #0 unverified, nothing restored."
+                f"{_kept(unverified_dir)}[/yellow]"
             )
 
     exit_code = asyncio.run(
