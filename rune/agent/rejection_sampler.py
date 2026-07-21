@@ -22,9 +22,16 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
+from rune.utils.env import env_flag
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
+
+# Verify with a test written in the project's own framework before falling back
+# to the Evidence Gate. Default OFF: a generated test that is too weak would
+# PASS a wrong candidate, which is worse than the missed selection it replaces,
+# so it stays opt-in until an A/B measures its false-positive rate.
+_GENERATED_TEST_ENV = "RUNE_GENERATED_TEST_VERIFY"
 
 
 @dataclass
@@ -206,6 +213,48 @@ async def make_verifier(
     # can report what the winner passed (test command vs Evidence Gate).
     method_by_cwd: dict[str, str] = {}
 
+    # Contract-derived test, built at most once per task and reused unchanged so
+    # every candidate faces the same bar. The "done" key separates "not built
+    # yet" from "built, unusable".
+    _gen_cache: dict[str, object] = {}
+    _gen_lock = asyncio.Lock()
+
+    async def _generated_test_verdict(cwd: str) -> tuple[str, str]:
+        """Run the contract-derived test against *cwd*: (state, evidence)."""
+        if not env_flag(_GENERATED_TEST_ENV):
+            return "skip", ""
+        from rune.agent.generated_test import (
+            detect_framework,
+            discriminates,
+            extract_public_api,
+            generate_verification_test,
+            run_generated_test,
+        )
+
+        async with _gen_lock:
+            if "done" not in _gen_cache:
+                _gen_cache["done"] = True
+                # The pre-edit tree: safe to read API signatures from, and the
+                # yardstick the test must not be able to pass.
+                baseline = seed_cwd
+                fw = detect_framework(baseline or cwd)
+                if fw:
+                    api = extract_public_api(baseline or cwd, fw)
+                    body = await generate_verification_test(instruction, fw, api)
+                    if body and baseline and not await discriminates(
+                        body, fw, baseline
+                    ):
+                        body = None
+                    if body:
+                        _gen_cache["fw"] = fw
+                        _gen_cache["body"] = body
+                        log.info("generated_test_ready", framework=fw.name)
+        fw = _gen_cache.get("fw")
+        body = _gen_cache.get("body")
+        if not fw or not body:
+            return "skip", ""
+        return await run_generated_test(body, fw, cwd)  # type: ignore[arg-type]
+
     async def verify(cwd: str) -> bool:
         cmd = detect_test_command(cwd)
         if cmd:
@@ -215,18 +264,40 @@ async def make_verifier(
             if state == "pass":
                 # Report the test count: passing the provided tests is not proof
                 # of correctness, so the count lets the user gauge the check.
-                from rune.agent.auto_verify import passed_test_count
+                from rune.agent.auto_verify import assertions_ran, passed_test_count
                 n = passed_test_count(evidence)
                 if n is not None:
                     method_by_cwd[cwd] = (
                         f"`{' '.join(cmd)}`, {n} test{'s' if n != 1 else ''}"
                     )
-                return True
-            if state == "fail":
+                # An exit-0 run that asserted nothing is not evidence: it passes
+                # every candidate, so best-of-K collapses to "pick #0" while
+                # reporting it verified. Fall through to a real check instead.
+                # Unparseable summaries stay trusted — never block work over a
+                # runner we don't recognize.
+                if assertions_ran(evidence) is not False:
+                    return True
+                log.info("verify_suite_vacuous", cmd=" ".join(cmd))
+            elif state == "fail":
                 if evidence:
                     evidence_by_cwd[cwd] = evidence
                 return False
-            # "skip" (could not run): fall through to the Evidence Gate.
+            # "skip" (could not run): fall through too.
+
+        # Tried before the Evidence Gate: a test in the project's own framework
+        # runs in-process, which the Gate's generated shell script cannot do —
+        # it can only reach a service through a real port, and those collide
+        # across candidates.
+        gen_state, gen_evidence = await _generated_test_verdict(cwd)
+        if gen_state == "pass":
+            method_by_cwd[cwd] = "generated contract test"
+            return True
+        if gen_state == "fail":
+            method_by_cwd[cwd] = "generated contract test"
+            if gen_evidence:
+                evidence_by_cwd[cwd] = gen_evidence
+            return False
+
         method_by_cwd[cwd] = "Evidence Gate"
         return await eg(cwd)
 
