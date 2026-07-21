@@ -141,3 +141,48 @@ def passed_test_count(summary: str) -> int | None:
     import re
     m = re.search(r"(\d+)\s+passed", summary)
     return int(m.group(1)) if m else None
+
+
+# Structured runner summaries (a documented-format parse, not NL matching).
+# ``passed_test_count`` can't serve here: it returns None both for "no tests
+# ran" and for summaries it can't parse — opposite meanings, hence three states.
+_VACUOUS_SUMMARY_PATTERNS: tuple[str, ...] = (
+    r"\bno tests ran\b",            # pytest
+    r"\bcollected 0 items\b",       # pytest
+    r"\b0\s+passed\b",              # pytest / cargo / jest ("0 passed")
+    r"\bran 0 tests\b",             # unittest
+    r"\b0\s+tests?\b(?!.*\b[1-9]\d*\s+passed)",  # generic "0 tests"
+    r"\bno tests to run\b",         # misc runners
+    r"\btests?:\s*0\b",             # jest-style "Tests: 0"
+)
+_ASSERTED_SUMMARY_PATTERNS: tuple[str, ...] = (
+    r"\b[1-9]\d*\s+passed\b",       # pytest / cargo / jest
+    r"\bran\s+[1-9]\d*\s+tests?\b",  # unittest
+    r"\bok\b.*\bcoverage:",          # go test with coverage
+    r"^ok\s+\S+",                    # go test ("ok  pkg  0.02s")
+)
+
+
+def assertions_ran(summary: str) -> bool | None:
+    """Did this verification actually assert anything?
+
+    ``True``  — at least one test executed.
+    ``False`` — an empty/zero-test run: exit 0 but nothing was checked, so it is
+                not evidence of correctness.
+    ``None``  — unrecognized summary. Callers must keep their previous behaviour
+                here; many runners print nothing parseable, and reading
+                "unknown" as "vacuous" would block correct work — a worse
+                failure than the leak this closes.
+    """
+    import re
+
+    text = (summary or "").strip()
+    if not text:
+        return None
+    for pat in _ASSERTED_SUMMARY_PATTERNS:
+        if re.search(pat, text, re.IGNORECASE | re.MULTILINE):
+            return True
+    for pat in _VACUOUS_SUMMARY_PATTERNS:
+        if re.search(pat, text, re.IGNORECASE | re.MULTILINE):
+            return False
+    return None

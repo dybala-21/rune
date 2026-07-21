@@ -1500,7 +1500,18 @@ class NativeAgentLoop(EventEmitter):
                     # R06: count formal verification commands separately
                     if _bash_cmd and is_verification_command(_bash_cmd):
                         evidence.verifications += 1
-                        self._last_verify_failed = False  # tests just passed
+                        # An empty suite exits 0 having checked nothing, so it
+                        # must not clear the unverified flag — otherwise the
+                        # task finishes as done on code no test ever touched.
+                        from rune.agent.auto_verify import assertions_ran
+
+                        if assertions_ran(result.output or "") is not False:
+                            self._last_verify_failed = False  # tests just passed
+                        else:
+                            log.info(
+                                "verification_asserted_nothing",
+                                command=_bash_cmd[:120],
+                            )
                 elif _bash_cmd and is_verification_command(_bash_cmd):
                     self._last_verify_failed = True  # tests just failed
             elif cap_name == "web_search":
