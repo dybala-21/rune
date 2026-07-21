@@ -25,6 +25,8 @@ verdict: our test being wrong must not condemn a correct candidate.
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 from dataclasses import dataclass
 
 from rune.utils.logger import get_logger
@@ -33,6 +35,12 @@ log = get_logger(__name__)
 
 _GEN_TIMEOUT_S = 60.0
 _EVIDENCE_TAIL_CHARS = 600
+# Build output and VCS metadata: copying them would dominate the cost of the
+# baseline probe and none of it is needed to compile a test.
+_COPY_IGNORE = shutil.ignore_patterns(
+    "target", "node_modules", ".git", "__pycache__", ".venv", "venv",
+    ".mypy_cache", ".pytest_cache", "dist", "build",
+)
 
 
 @dataclass(frozen=True)
@@ -285,6 +293,12 @@ async def run_generated_test(
     import asyncio
 
     path = os.path.join(cwd, framework.test_path)
+    # We delete this file again below, so writing over an existing one would
+    # destroy it. Refuse rather than clobber; the caller falls back to the
+    # Evidence Gate, which costs a selection, not the user's work.
+    if os.path.exists(path):
+        log.info("generated_test_path_taken", path=framework.test_path)
+        return "skip", ""
     created_dir = None
     parent = os.path.dirname(path)
     try:
@@ -366,8 +380,23 @@ async def discriminates(
 
     A merely broken test is not a risk — it fails to build against the candidate
     too, yielding ``skip``, which decides nothing.
+
+    In ``--include-cwd`` mode the baseline IS the user's project, so the check
+    runs against a throwaway copy: it writes a test file and invokes a build,
+    and neither belongs in a tree we were only asked to read.
     """
-    state, _ = await run_generated_test(test_body, framework, baseline_cwd)
+    scratch = tempfile.mkdtemp(prefix="rune-discriminate-")
+    try:
+        probe = os.path.join(scratch, "baseline")
+        try:
+            shutil.copytree(baseline_cwd, probe, ignore=_COPY_IGNORE, symlinks=False)
+        except OSError as exc:
+            log.warning("generated_test_baseline_copy_failed", error=str(exc)[:120])
+            return False
+        state, _ = await run_generated_test(test_body, framework, probe)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
     if state == "pass":
         log.info("generated_test_not_discriminating", baseline_state=state)
         return False
