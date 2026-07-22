@@ -454,7 +454,9 @@ def _preserve_skipped(workdir: str, dest: str, skipped: list[str]) -> str | None
     return preserve
 
 
-def _preserve_unverified(workdir: str, dest: str, produced: list[str]) -> str | None:
+def _preserve_unverified(
+    workdir: str, dest: str, produced: list[str]
+) -> tuple[str | None, list[str]]:
     """Park an unverified attempt's files beside the project instead of deleting.
 
     When no attempt passes the verifier we deliberately do not restore anything
@@ -464,29 +466,38 @@ def _preserve_unverified(workdir: str, dest: str, produced: list[str]) -> str | 
     ``.rune-bestof-unverified-*`` dir inside ``dest`` (dotfile → ignored by the
     non-empty-cwd warning) so the user can diff and adopt it deliberately.
 
-    Returns the path, or ``None`` when there was nothing to save.
+    Returns ``(path, saved_relpaths)``, or ``(None, [])`` when nothing was saved.
     """
     if not produced:
-        return None
+        return None, []
     preserve = tempfile.mkdtemp(prefix=".rune-bestof-unverified-", dir=dest)
-    saved = False
+    saved: list[str] = []
     for name in produced:
         src = os.path.join(workdir, name)
         if not os.path.exists(src):
             continue
         dst = os.path.join(preserve, name)
         try:
+            # In seeded mode `produced` holds CHANGED relpaths like
+            # "src/lib.rs", so the parent has to exist first. Without this the
+            # copy raised and was swallowed, and the parked dir ended up with
+            # only the top-level files — the actual edit was dropped while we
+            # told the user their work had been kept.
+            parent = os.path.dirname(dst)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
             if os.path.isdir(src):
-                shutil.copytree(src, dst)
+                shutil.copytree(src, dst, dirs_exist_ok=True)
             else:
                 shutil.copy2(src, dst)
-        except OSError:
+        except OSError as exc:
+            log.warning("bestof_preserve_failed", name=name, error=str(exc)[:120])
             continue
-        saved = True
+        saved.append(name)
     if not saved:
         shutil.rmtree(preserve, ignore_errors=True)
-        return None
-    return preserve
+        return None, []
+    return preserve, saved
 
 
 def _cleanup(artifacts: list[AttemptArtifact]) -> None:
@@ -763,10 +774,10 @@ async def _best_of_async(
         # Not restoring is right; deleting is not. `_cleanup` wipes every
         # workdir below, and we only established that we couldn't verify this
         # work — not that it's wrong. Park it where the user can inspect it.
-        unverified_dir = (
+        unverified_dir, unverified_files = (
             _preserve_unverified(best.workdir, dest, best.produced)
             if best and best.produced
-            else None
+            else (None, [])
         )
         report(
             best.stdout if best else "",
@@ -779,6 +790,7 @@ async def _best_of_async(
             has_check=has_check,
             no_artifact=no_artifact,
             unverified_dir=unverified_dir,
+            unverified_files=unverified_files,
         )
         return 1
     finally:
@@ -847,18 +859,32 @@ def run_best_of(
         no_artifact: int = 0,
         verify_method: str | None = None,
         unverified_dir: str | None = None,
+        unverified_files: list[str] | None = None,
     ) -> None:
         def _kept(path: str | None) -> str:
-            """Tell the user where an unverified attempt was parked, if anywhere."""
+            """Hand the unverified work over: what it is, and how to take it.
+
+            Deliberately NOT a bare "UNVERIFIED" banner. A blanket
+            low-confidence label was measured to cut trust and drive
+            under-reliance without improving decisions (arXiv:2402.07632 Exp2),
+            so name the files and give the exact apply command — the reader can
+            then size the review against the actual change instead of against a
+            warning.
+            """
             if not path:
                 return ""
             try:
                 shown = os.path.relpath(path)
             except ValueError:  # different drive/root
                 shown = path
+            files = unverified_files or []
+            listed = ", ".join(files[:5]) + ("…" if len(files) > 5 else "")
+            what = f" {len(files)} file(s): {listed}." if files else ""
             return (
-                f" Attempt #0's files kept in {shown}/ (UNVERIFIED — review "
-                f"before adopting)."
+                f"\nUnverified result kept — nothing was written to your files."
+                f"{what}"
+                f"\n  see:   diff -ru . {shown} | head"
+                f"\n  apply: cp -R {shown}/. ."
             )
 
         if stdout:

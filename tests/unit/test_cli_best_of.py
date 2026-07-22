@@ -123,14 +123,40 @@ def test_preserve_unverified_keeps_work_when_nothing_verified(tmp_path):
     dest.mkdir()
     (dest / "solution.py").write_text("USER FILE")
 
-    kept = _preserve_unverified(str(work), str(dest), ["solution.py", "pkg"])
+    kept, saved = _preserve_unverified(str(work), str(dest), ["solution.py", "pkg"])
 
     assert kept is not None
     assert os.path.basename(kept).startswith(".rune-bestof-unverified-")
+    assert sorted(saved) == ["pkg", "solution.py"]
     # Parked beside the project, never over the user's own file.
     assert open(os.path.join(kept, "solution.py")).read() == "MAYBE RIGHT"
     assert open(os.path.join(kept, "pkg", "mod.py")).read() == "X"
     assert (dest / "solution.py").read_text() == "USER FILE"
+
+
+def test_preserve_unverified_keeps_nested_edits(tmp_path):
+    """Seeded mode reports CHANGED relpaths; the parent dirs won't exist yet.
+
+    This is the case that silently dropped the real edit: only the top-level
+    file survived while the user was told their work had been kept.
+    """
+    from rune.cli.best_of import _preserve_unverified
+
+    work = tmp_path / "work"
+    (work / "src").mkdir(parents=True)
+    (work / "src" / "lib.rs").write_text("THE ACTUAL WORK")
+    (work / "Cargo.lock").write_text("lockfile")
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+
+    kept, saved = _preserve_unverified(
+        str(work), str(dest), ["src/lib.rs", "Cargo.lock"]
+    )
+
+    assert kept is not None
+    assert sorted(saved) == ["Cargo.lock", "src/lib.rs"]
+    assert open(os.path.join(kept, "src", "lib.rs")).read() == "THE ACTUAL WORK"
 
 
 def test_preserve_unverified_none_when_attempt_produced_nothing(tmp_path):
@@ -140,9 +166,9 @@ def test_preserve_unverified_none_when_attempt_produced_nothing(tmp_path):
     work.mkdir()
     dest = tmp_path / "dest"
     dest.mkdir()
-    assert _preserve_unverified(str(work), str(dest), []) is None
+    assert _preserve_unverified(str(work), str(dest), []) == (None, [])
     # A named-but-missing artifact must not leave an empty dir behind.
-    assert _preserve_unverified(str(work), str(dest), ["gone.py"]) is None
+    assert _preserve_unverified(str(work), str(dest), ["gone.py"]) == (None, [])
     assert list(dest.iterdir()) == []
 
 
