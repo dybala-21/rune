@@ -454,6 +454,43 @@ def _preserve_skipped(workdir: str, dest: str, skipped: list[str]) -> str | None
     return preserve
 
 
+# Verifier output markers, cheapest first, that a candidate got FURTHER: a suite
+# that ran and failed an assertion is closer to correct than one that never
+# compiled/collected. Structured runner strings only — not NL matching.
+_PROGRESS_MARKERS = ("failed", "assertionerror", "assert", " passed")
+_INCONCLUSIVE_MARKERS = (
+    "error[e", "could not compile", "cannot find", "unresolved import",
+    "modulenotfounderror", "importerror", "collection error", "syntaxerror",
+)
+
+
+def _best_effort_score(a: AttemptArtifact, evidence: str) -> tuple:
+    """Rank a FAILED candidate for hand-off. Higher is better.
+
+    Purely a delivery choice — never promotes anything to "verified". Signals,
+    cheap and in priority order: produced files at all; the verifier ran far
+    enough to fail an assertion (vs never compiling); fewer inconclusive errors;
+    then lowest index for determinism.
+    """
+    ev = (evidence or "").lower()
+    produced = 1 if a.produced else 0
+    ran = 1 if any(m in ev for m in _PROGRESS_MARKERS) else 0
+    inconclusive = sum(ev.count(m) for m in _INCONCLUSIVE_MARKERS)
+    return (produced, ran, -inconclusive, -a.index)
+
+
+def _rank_best_effort(
+    artifacts: list[AttemptArtifact], evidence_by_cwd: dict[str, str]
+) -> AttemptArtifact | None:
+    """Pick the furthest-along failed candidate to hand off, or None."""
+    if not artifacts:
+        return None
+    return max(
+        artifacts,
+        key=lambda a: _best_effort_score(a, evidence_by_cwd.get(a.workdir, "")),
+    )
+
+
 def _preserve_unverified(
     workdir: str, dest: str, produced: list[str]
 ) -> tuple[str | None, list[str]]:
@@ -498,6 +535,34 @@ def _preserve_unverified(
         shutil.rmtree(preserve, ignore_errors=True)
         return None, []
     return preserve, saved
+
+
+async def _verifier_discriminates(verify_cwd, seed_from: str) -> bool:
+    """Can this verifier fail the untouched baseline?
+
+    Runs the check against a throwaway COPY of the pre-edit tree (never the
+    user's own — the check may write files / run a build). Returns:
+      True  — baseline FAILS the check (or the check is inconclusive there), so
+              the check discriminates and best-of-K can select on it.
+      False — baseline PASSES, so the check accepts anything and cannot select.
+    On any error, default True: never suppress best-of on a probe failure.
+    """
+    scratch = None
+    try:
+        scratch = tempfile.mkdtemp(prefix="rune-probe-")
+        probe = os.path.join(scratch, "baseline")
+        shutil.copytree(
+            seed_from, probe, symlinks=False,
+            ignore=shutil.ignore_patterns(*_SEED_IGNORE_PATTERNS),
+        )
+        passed = await verify_cwd(probe)
+        return not passed
+    except Exception as exc:  # never let the probe break the run
+        log.warning("bestof_probe_failed", error=str(exc)[:120])
+        return True
+    finally:
+        if scratch:
+            shutil.rmtree(scratch, ignore_errors=True)
 
 
 def _cleanup(artifacts: list[AttemptArtifact]) -> None:
@@ -680,6 +745,20 @@ async def _best_of_async(
     verify_cwd = await make_verifier(message, seed_cwd=seed_from)
     has_check = bool(getattr(verify_cwd, "has_check", True))
 
+    # best-of-K only pays when the verifier can tell a good candidate from a bad
+    # one. A check that PASSES the untouched baseline (the code before any edit)
+    # accepts anything, so it cannot select — every candidate "passes" and the
+    # K-1 extra attempts are pure cost (measured: K=3 costs 3.23x wall). Probe
+    # the baseline once; if the check can't even fail on unsolved code, collapse
+    # to a single attempt. `has_check` does NOT catch this: a check can exist and
+    # still be non-discriminating. Honesty is unaffected — this only changes how
+    # many candidates we sample, never what counts as verified.
+    if k > 1 and seed_from and await _verifier_discriminates(verify_cwd, seed_from):
+        pass  # discriminating → keep K
+    elif k > 1 and seed_from:
+        log.info("bestof_verifier_nondiscriminating_k1", original_k=k)
+        k = 1
+
     # Cap concurrent attempt subprocesses: each is a full agent run, so a large
     # K must not spawn K heavyweight processes at once. Mirrors the workflow
     # engine's min(cores-2, ...) policy.
@@ -767,10 +846,14 @@ async def _best_of_async(
         #  - no mechanical check could be built  → best-of-K cannot select at all
         #  - attempts produced no files          → generator didn't write artifacts
         #  - attempts wrote files but failed      → generator produced wrong output
-        # Surface attempt #0's output as a best-effort but DO NOT restore it
-        # (unverified); never silently drop the K-1 candidates.
-        best = artifacts[0] if artifacts else None
+        # When nothing verifies, hand off the BEST-EFFORT candidate rather than
+        # always attempt #0: #0 may have produced nothing while a sibling wrote a
+        # real (if unverified) patch, which is how a would-be delivery became an
+        # empty one. Ranking picks the furthest-along candidate; it only chooses
+        # what to hand off — a passing verification is still the ONLY thing that
+        # flips "done", so this cannot manufacture a fake success.
         no_artifact = sum(1 for a in artifacts if not a.produced)
+        best = _rank_best_effort(artifacts, ev_map) if artifacts else None
         # Not restoring is right; deleting is not. `_cleanup` wipes every
         # workdir below, and we only established that we couldn't verify this
         # work — not that it's wrong. Park it where the user can inspect it.

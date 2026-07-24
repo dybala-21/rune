@@ -1100,3 +1100,74 @@ def test_attempt_work_root_is_guardian_safe():
     assert str(rune_data()) in root
     import os
     assert os.path.isdir(root)
+
+
+def _art(i, produced):
+    from rune.cli.best_of import AttemptArtifact
+    return AttemptArtifact(index=i, workdir=f"/w{i}", stdout="", returncode=1,
+                           produced=produced)
+
+
+def test_rank_best_effort_prefers_candidate_that_produced_files():
+    """When nothing verifies, don't blindly hand off #0 — #0 may be empty while a
+    sibling wrote a real patch. That empty-vs-real gap was RUNE's empty patches."""
+    from rune.cli.best_of import _rank_best_effort
+    best = _rank_best_effort([_art(0, []), _art(1, []), _art(2, ["src/fix.py"])], {})
+    assert best.index == 2
+
+
+def test_rank_best_effort_prefers_ran_over_did_not_compile():
+    from rune.cli.best_of import _rank_best_effort
+    ev = {"/w0": "error[E0433]: could not compile `x`",
+          "/w1": "1 failed, 0 passed in 0.1s"}
+    best = _rank_best_effort([_art(0, ["a.py"]), _art(1, ["a.py"])], ev)
+    assert best.index == 1
+
+
+def test_rank_best_effort_deterministic_and_empty():
+    from rune.cli.best_of import _rank_best_effort
+    assert _rank_best_effort([_art(0, []), _art(1, [])], {}).index == 0
+    assert _rank_best_effort([], {}) is None
+
+
+def test_verifier_discriminates_detects_nondiscriminating_check(tmp_path):
+    """A check that passes the untouched baseline can't select — collapse to K=1.
+
+    This is the measured 3.23x waste: best-of-K with a verifier that accepts
+    anything spends K times the cost for one-shot quality.
+    """
+    import asyncio
+
+    from rune.cli.best_of import _verifier_discriminates
+
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    (seed / "a.py").write_text("x = 1\n")
+
+    async def passes_anything(cwd):
+        return True
+
+    async def fails_baseline(cwd):
+        return False
+
+    # non-discriminating -> discriminates() is False -> caller drops to K=1
+    assert asyncio.run(_verifier_discriminates(passes_anything, str(seed))) is False
+    # discriminating -> True -> caller keeps K
+    assert asyncio.run(_verifier_discriminates(fails_baseline, str(seed))) is True
+    # the user's baseline tree is never mutated by the probe
+    assert [p.name for p in seed.iterdir()] == ["a.py"]
+
+
+def test_verifier_discriminates_defaults_true_on_error(tmp_path):
+    """A probe failure must never suppress best-of."""
+    import asyncio
+
+    from rune.cli.best_of import _verifier_discriminates
+
+    async def boom(cwd):
+        raise RuntimeError("probe blew up")
+
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    (seed / "a.py").write_text("x = 1\n")
+    assert asyncio.run(_verifier_discriminates(boom, str(seed))) is True
