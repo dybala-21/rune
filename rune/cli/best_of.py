@@ -27,6 +27,8 @@ from pathlib import Path
 
 from rune.agent.isolation import ISOLATION_ENV
 from rune.agent.rejection_sampler import (
+    Attempt,
+    RejectionResult,
     make_verifier,
     sample_parallel,
 )
@@ -55,6 +57,33 @@ _TIMEOUT_RETURNCODE = 124  # mirror coreutils `timeout`
 # The run still exits non-zero and the change is reported as UNVERIFIED — this
 # changes delivery, never what counts as done. Set to "0" to park instead.
 _APPLY_UNVERIFIED_ENV = "RUNE_BESTOF_APPLY_UNVERIFIED"
+
+# Sampling strategy. With a trustworthy verifier the optimal stop is "first
+# verified pass" (sequential expected samples (1-(1-p)^K)/p ≈ 1.4-2.2 vs a
+# flat K=3 — 27-54% cost cut at identical solve rate). Above the ~17B repair
+# crossover (arXiv 2604.10508) a follow-up attempt that SEES the previous
+# failure output beats an independent resample; at/below it (small local
+# models) fresh sampling wins — matching RUNE's own 7B advisor data.
+#   auto       — ollama → sequential (serial server, max token saving);
+#                otherwise race2 (2 parallel attempts, early-exit verify,
+#                then ONE repair attempt if both fail — wall ≈ parallel).
+#   sequential — sample→verify→exit-on-pass; attempt 2 repairs w/ failure.
+#   race2      — as above.
+#   parallel   — the old flat-K behavior.
+_STRATEGY_ENV = "RUNE_BESTOF_STRATEGY"
+_REPAIR_ENV = "RUNE_BESTOF_REPAIR"  # "0" disables failure-fed repair attempts
+_REPAIR_EVIDENCE_CAP = 1500
+
+
+def _repair_suffix(evidence: str) -> str:
+    return (
+        "\n\nNOTE: a previous independent attempt at this task FAILED "
+        "verification with this output:\n```\n"
+        + evidence[-_REPAIR_EVIDENCE_CAP:]
+        + "\n```\nDiagnose what that attempt likely got wrong, then implement "
+        "a correct fix for the root cause. Do not repeat an approach the "
+        "failure output already refutes."
+    )
 
 
 @dataclass
@@ -866,7 +895,84 @@ async def _best_of_async(
         async with sem:
             return await verify_cwd(artifact.workdir)
 
-    res = await sample_parallel(run_attempt, verify, k)
+    strategy = os.environ.get(_STRATEGY_ENV, "auto").strip().lower()
+    if strategy == "auto":
+        strategy = "sequential" if (provider or "").lower() == "ollama" else "race2"
+    repair_ok = (
+        os.environ.get(_REPAIR_ENV, "1") != "0"
+        and (provider or "").lower() != "ollama"  # ≥17B repair crossover
+    )
+
+    async def run_with(i: int, msg: str) -> AttemptArtifact:
+        async with sem:
+            return await _run_attempt_subprocess(
+                i, msg, model, provider, seed_from=seed_from
+            )
+
+    def _last_evidence(arts: list[AttemptArtifact]) -> str:
+        for a in reversed(arts):
+            ev = ev_map_ref.get(a.workdir, "")
+            if ev:
+                return ev
+        return ""
+
+    # NOTE: must alias the live dict, not `or {}` it — it is still EMPTY here
+    # (falsy), and evidence written during verification has to be visible.
+    ev_map_ref = getattr(verify_cwd, "evidence_by_cwd", None)
+    if ev_map_ref is None:
+        ev_map_ref = {}
+
+    if k <= 1 or strategy == "parallel":
+        res = await sample_parallel(run_attempt, verify, k)
+    elif strategy == "sequential":
+        # Sample → verify → exit on first pass; attempt 2 sees the failure.
+        attempts: list[Attempt] = []
+        selected = selected_index = None
+        for i in range(k):
+            msg = message
+            if i == 1 and repair_ok:
+                ev = _last_evidence([a.candidate for a in attempts])
+                if ev:
+                    msg = message + _repair_suffix(ev)
+        # (attempt 3+ goes back to fresh independent samples for diversity)
+            art = await run_with(i, msg)
+            passed = await verify(art)
+            attempts.append(Attempt(index=i, candidate=art, passed=passed))
+            if passed:
+                selected, selected_index = art, i
+                log.info("bestof_sequential_early_exit", attempts=i + 1)
+                break
+        res = RejectionResult(
+            selected=selected, selected_index=selected_index, attempts=attempts
+        )
+    else:  # race2: two parallel attempts, early-exit verify, one repair shot
+        first_two = await asyncio.gather(
+            run_with(0, message), run_with(1, message)
+        )
+        attempts = []
+        selected = selected_index = None
+        for i, art in enumerate(first_two):
+            passed = False
+            if selected is None:  # early-exit: skip verifying after a pass
+                passed = await verify(art)
+            attempts.append(Attempt(index=i, candidate=art, passed=passed))
+            if passed and selected is None:
+                selected, selected_index = art, i
+        if selected is None and k > 2:
+            msg = message
+            if repair_ok:
+                ev = _last_evidence(first_two)
+                if ev:
+                    msg = message + _repair_suffix(ev)
+                    log.info("bestof_repair_attempt")
+            art = await run_with(2, msg)
+            passed = await verify(art)
+            attempts.append(Attempt(index=2, candidate=art, passed=passed))
+            if passed:
+                selected, selected_index = art, 2
+        res = RejectionResult(
+            selected=selected, selected_index=selected_index, attempts=attempts
+        )
     artifacts: list[AttemptArtifact] = [a.candidate for a in res.attempts]
 
     # Learn a correctness rule from any failed attempts' verifier evidence

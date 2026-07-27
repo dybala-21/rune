@@ -1467,3 +1467,115 @@ def test_verifier_discriminates_defaults_true_on_error(tmp_path):
     seed.mkdir()
     (seed / "a.py").write_text("x = 1\n")
     assert asyncio.run(_verifier_discriminates(boom, str(seed))) is True
+
+
+# --- sampling strategies (sequential / race2 / repair) ----------------------
+
+
+def _mk_verifier(pass_indices=frozenset(), evidence="1 failed: expected 3 got 2"):
+    async def fake_make_verifier(instruction, seed_cwd=None):
+        async def verify(cwd):
+            i = int(cwd.rsplit("_w", 1)[-1])
+            ok = i in pass_indices
+            if not ok:
+                verify.evidence_by_cwd[cwd] = evidence
+            return ok
+
+        verify.has_check = True
+        verify.evidence_by_cwd = {}
+        return verify
+
+    return fake_make_verifier
+
+
+def _mk_attempts(tmp_path, spawned):
+    async def fake_attempt(index, message, model, provider, seed_from=None):
+        w = tmp_path / f"strat_w{index}"
+        w.mkdir(exist_ok=True)
+        (w / "fix.py").write_text(f"attempt {index}")
+        spawned.append((index, message))
+        return AttemptArtifact(
+            index=index, workdir=str(w), stdout=f"out{index}", returncode=0,
+            produced=["fix.py"],
+        )
+
+    return fake_attempt
+
+
+@pytest.mark.asyncio
+async def test_sequential_stops_at_first_verified(monkeypatch, tmp_path):
+    monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "sequential")
+    spawned: list = []
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", _mk_attempts(tmp_path, spawned))
+    monkeypatch.setattr(best_of, "make_verifier", _mk_verifier(pass_indices={0}))
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    dest = tmp_path / "d1"; dest.mkdir(); monkeypatch.chdir(dest)
+
+    reports: list = []
+    code = await _best_of_async(
+        "task", 3, None, None, report=lambda s, **kw: reports.append(kw),
+        seed_cwd=True,
+    )
+    assert code == 0
+    assert len(spawned) == 1  # early exit: attempts 2-3 never sampled
+    assert reports[0]["selected_index"] == 0
+
+
+@pytest.mark.asyncio
+async def test_sequential_repair_feeds_failure_output(monkeypatch, tmp_path):
+    monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "sequential")
+    monkeypatch.delenv("RUNE_BESTOF_REPAIR", raising=False)
+    spawned: list = []
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", _mk_attempts(tmp_path, spawned))
+    monkeypatch.setattr(best_of, "make_verifier", _mk_verifier(pass_indices=set()))
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    dest = tmp_path / "d2"; dest.mkdir(); monkeypatch.chdir(dest)
+
+    await _best_of_async(
+        "task", 3, None, "anthropic", report=lambda s, **kw: None, seed_cwd=True,
+    )
+    assert len(spawned) == 3
+    assert "FAILED" not in spawned[0][1]
+    assert "expected 3 got 2" in spawned[1][1]  # attempt 2 = repair w/ failure
+    assert "expected 3 got 2" not in spawned[2][1]  # attempt 3 = fresh sample
+
+
+@pytest.mark.asyncio
+async def test_race2_runs_two_then_repairs(monkeypatch, tmp_path):
+    monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "race2")
+    monkeypatch.delenv("RUNE_BESTOF_REPAIR", raising=False)
+    spawned: list = []
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", _mk_attempts(tmp_path, spawned))
+    monkeypatch.setattr(best_of, "make_verifier", _mk_verifier(pass_indices={2}))
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    dest = tmp_path / "d3"; dest.mkdir(); monkeypatch.chdir(dest)
+
+    reports: list = []
+    code = await _best_of_async(
+        "task", 3, None, "anthropic", report=lambda s, **kw: reports.append(kw),
+        seed_cwd=True,
+    )
+    assert code == 0
+    assert len(spawned) == 3
+    assert "expected 3 got 2" in spawned[2][1]  # 3rd attempt got repair info
+    assert reports[0]["selected_index"] == 2
+
+
+@pytest.mark.asyncio
+async def test_repair_env_opt_out(monkeypatch, tmp_path):
+    monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "sequential")
+    monkeypatch.setenv("RUNE_BESTOF_REPAIR", "0")
+    spawned: list = []
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", _mk_attempts(tmp_path, spawned))
+    monkeypatch.setattr(best_of, "make_verifier", _mk_verifier(pass_indices=set()))
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    dest = tmp_path / "d4"; dest.mkdir(); monkeypatch.chdir(dest)
+
+    await _best_of_async(
+        "task", 3, None, "anthropic", report=lambda s, **kw: None, seed_cwd=True,
+    )
+    assert all("expected 3 got 2" not in m for _, m in spawned)

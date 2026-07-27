@@ -465,3 +465,109 @@ async def test_targeted_tests_use_project_interpreter(monkeypatch, tmp_path):
     cmd = calls[0]
     assert str(proj_py) in cmd          # project venv interpreter used
     assert any(c.startswith("PYTHONPATH=") and cand in c for c in cmd)
+
+
+# --- layered test mapper -----------------------------------------------------
+
+
+def _mk(root, rel, text=""):
+    import os
+    p = root / rel
+    os.makedirs(p.parent, exist_ok=True)
+    p.write_text(text)
+
+
+def test_mapper_sphinx_path_join_layout(tmp_path):
+    # sphinx/ext/autodoc/importer.py must map to tests/test_ext_autodoc.py
+    from rune.agent.rejection_sampler import _targeted_test_files
+
+    seed = tmp_path / "seed"
+    _mk(seed, "sphinx/ext/autodoc/importer.py", "x=1\n")
+    _mk(seed, "tests/test_ext_autodoc.py", "def test_a(): pass\n")
+    cand = tmp_path / "cand"
+    import shutil
+    shutil.copytree(seed, cand, copy_function=shutil.copy2)
+    p = cand / "sphinx/ext/autodoc/importer.py"
+    p.write_text("x=2\n")
+    import os, time
+    os.utime(p, (time.time() + 5, time.time() + 5))
+
+    assert "tests/test_ext_autodoc.py" in _targeted_test_files(str(cand), str(seed))
+
+
+def test_mapper_import_grep_finds_unrelated_name(tmp_path):
+    # Test file with an unconventional name that IMPORTS the changed module.
+    from rune.agent.rejection_sampler import _targeted_test_files
+
+    seed = tmp_path / "seed"
+    _mk(seed, "pkg/core/engine.py", "x=1\n")
+    _mk(seed, "tests/test_smoke_suite.py",
+        "from pkg.core.engine import run\ndef test_r(): pass\n")
+    cand = tmp_path / "cand"
+    import shutil
+    shutil.copytree(seed, cand, copy_function=shutil.copy2)
+    p = cand / "pkg/core/engine.py"
+    p.write_text("x=2\n")
+    import os, time
+    os.utime(p, (time.time() + 5, time.time() + 5))
+
+    out = _targeted_test_files(str(cand), str(seed))
+    assert out and out[0] == "tests/test_smoke_suite.py"  # L1 ranks first
+
+
+def test_mapper_django_dir_token_layout(tmp_path):
+    # django/db/models/query.py → tests/queries/tests.py via token match.
+    from rune.agent.rejection_sampler import _targeted_test_files
+
+    seed = tmp_path / "seed"
+    _mk(seed, "django/db/models/query.py", "x=1\n")
+    _mk(seed, "tests/queries/tests.py", "def test_q(): pass\n")
+    _mk(seed, "tests/migrations/tests.py", "def test_m(): pass\n")
+    cand = tmp_path / "cand"
+    import shutil
+    shutil.copytree(seed, cand, copy_function=shutil.copy2)
+    p = cand / "django/db/models/query.py"
+    p.write_text("x=2\n")
+    import os, time
+    os.utime(p, (time.time() + 5, time.time() + 5))
+
+    out = _targeted_test_files(str(cand), str(seed))
+    assert "tests/queries/tests.py" in out
+    assert "tests/migrations/tests.py" not in out
+
+
+@pytest.mark.asyncio
+async def test_suite_collection_error_falls_through_to_targeted(monkeypatch, tmp_path):
+    # Top-level tests/ triggers the full-suite path; a collection error there
+    # (no "N failed") must fall through to targeted tests, not reject.
+    import rune.agent.auto_verify as av
+    import rune.agent.rejection_sampler as rs
+
+    seed, cand = _seed_and_candidate(tmp_path)
+    monkeypatch.setattr(
+        av, "detect_test_command", lambda cwd: ["python", "-m", "pytest", "-q"]
+    )
+
+    calls: list[list[str]] = []
+
+    async def fake_run(cmd, cwd, timeout=60.0):
+        calls.append(cmd)
+        if len(calls) == 1:  # full-suite attempt: import explosion, no "failed"
+            return "fail", "ImportError: cannot import name 'x'\nexit 2"
+        return "pass", "4 passed in 0.2s"  # targeted run
+
+    monkeypatch.setattr(av, "run_verify", fake_run)
+
+    async def fake_eg(instruction):
+        async def v(cwd):
+            return False
+
+        v.has_check = True
+        v.evidence_by_cwd = {}
+        return v
+
+    monkeypatch.setattr(rs, "make_evidence_gate_verifier", fake_eg)
+
+    verify = await make_verifier("task", seed_cwd=seed)
+    assert await verify(cand) is True  # verified via targeted, not rejected
+    assert "targeted tests" in verify.method_by_cwd[cand]

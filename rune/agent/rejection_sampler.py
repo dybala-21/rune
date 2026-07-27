@@ -77,34 +77,160 @@ def _changed_source_files(cwd: str, seed_cwd: str) -> list[str]:
     return sorted(changed)
 
 
+_TEST_ENUM_CAP = 3000  # test files scanned per repo
+_TEST_READ_CAP = 200_000  # bytes read per test file for import grep
+
+
+def _enumerate_test_files(root: str) -> list[str]:
+    """Conventional test files: test_*.py, *_test.py, tests.py, under tests/."""
+    import os
+
+    out: list[str] = []
+    skip = {".git", "node_modules", ".venv", "venv", "__pycache__", ".tox",
+            "build", "dist", ".mypy_cache", ".pytest_cache"}
+    for dirpath, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in skip]
+        rel_dir = os.path.relpath(dirpath, root)
+        in_tests = "tests" in rel_dir.replace("\\", "/").split("/")
+        for fn in files:
+            if not fn.endswith(".py") or fn in ("__init__.py", "conftest.py"):
+                continue
+            if (fn.startswith("test_") or fn.endswith("_test.py")
+                    or fn == "tests.py" or in_tests):
+                out.append(os.path.normpath(os.path.join(rel_dir, fn)))
+                if len(out) >= _TEST_ENUM_CAP:
+                    return out
+    return out
+
+
+def _module_dotted(rel: str) -> tuple[str, str]:
+    """('a.b.mod', 'mod') for a/b/mod.py; packages use their dir path."""
+    parts = rel[:-3].replace("\\", "/").split("/")
+    if parts and parts[0] == "src":  # src layout
+        parts = parts[1:]
+    if parts and parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join(parts), (parts[-1] if parts else "")
+
+
+def _stem_token(t: str) -> str:
+    """Light plural stemming: queries->query, indexes->index, models->model."""
+    t = t.lower()
+    if t.endswith("ies") and len(t) > 4:
+        return t[:-3] + "y"
+    if t.endswith("es") and len(t) > 3:
+        return t[:-2]
+    if t.endswith("s") and len(t) > 2:
+        return t[:-1]
+    return t
+
+
+def _tokens_similar(a: str, b: str) -> bool:
+    """query ~ queries etc. — plural stemming + close similarity."""
+    import difflib
+
+    a, b = _stem_token(a), _stem_token(b)
+    if a == b or a.startswith(b) or b.startswith(a):
+        return True
+    return difflib.SequenceMatcher(a=a, b=b).ratio() >= 0.85
+
+
 def _targeted_test_files(cwd: str, seed_cwd: str) -> list[str]:
     """Seed-canonical test files covering the candidate's changed sources.
 
-    For each changed ``pkg/mod.py``, look for ``test_mod.py`` in the same dir,
-    a sibling ``tests/`` dir, or a repo-root ``tests/`` dir — the dominant
-    layouts (sympy/django-style ``pkg/tests/test_mod.py`` included). Only files
-    present in the SEED are returned: a test the agent wrote itself is not
-    independent evidence.
+    Layered static mapper (no LLM, seconds — design per FSE'16 static-RTS and
+    TCTracer traceability results):
+      L1 reverse import grep — test files importing the changed module (or
+         importing its stem from the parent package); precision anchor.
+      L2 name/path conventions — test_<stem>.py near the module;
+         path-component join (sphinx/ext/autodoc -> test_ext_autodoc.py);
+         django-style tests/<topic>/ directory-token match.
+    Only files present in the SEED count (agent-written tests are not
+    independent evidence). Ranked L1 before L2, capped.
     """
     import os
+    import re
 
-    found: list[str] = []
-    for rel in _changed_source_files(cwd, seed_cwd):
-        if not rel.endswith(".py") or os.path.basename(rel).startswith("test"):
+    changed = [
+        rel for rel in _changed_source_files(cwd, seed_cwd)
+        if rel.endswith(".py")
+        and not os.path.basename(rel).startswith("test")
+    ]
+    if not changed:
+        return []
+    test_files = _enumerate_test_files(seed_cwd)
+    if not test_files:
+        return []
+
+    l1: list[str] = []
+    l2: list[str] = []
+
+    for rel in changed:
+        dotted, stem = _module_dotted(rel)
+        if not stem:
             continue
-        d, base = os.path.split(rel)
-        stem = base[:-3]
+        parts = dotted.split(".")
+        parent = ".".join(parts[:-1])
+
+        # --- L1: reverse import grep over the seed's test files
+        pats = [
+            re.compile(rf"^\s*from\s+{re.escape(dotted)}\s+import", re.M),
+            re.compile(rf"^\s*import\s+{re.escape(dotted)}\b", re.M),
+        ]
+        if parent:
+            pats.append(re.compile(
+                rf"^\s*from\s+{re.escape(parent)}\s+import\s+[^\n]*"
+                rf"\b{re.escape(stem)}\b", re.M,
+            ))
+        for tf in test_files:
+            if tf in l1:
+                continue
+            try:
+                with open(os.path.join(seed_cwd, tf), "rb") as fh:
+                    src = fh.read(_TEST_READ_CAP).decode("utf-8", "replace")
+            except OSError:
+                continue
+            if any(p.search(src) for p in pats):
+                l1.append(tf)
+
+        # --- L2a: stem convention near the module
+        d = os.path.dirname(rel)
         for cand in (
             os.path.join(d, f"test_{stem}.py"),
             os.path.join(d, "tests", f"test_{stem}.py"),
             os.path.join("tests", f"test_{stem}.py"),
         ):
-            if (
-                cand not in found
-                and os.path.isfile(os.path.join(seed_cwd, cand))
+            cand = os.path.normpath(cand)
+            if cand not in l2 and os.path.isfile(os.path.join(seed_cwd, cand)):
+                l2.append(cand)
+        # --- L2b: path-component join (test_ext_autodoc.py style) — both
+        # with the module stem and package-only (a module inside a package
+        # frequently maps to a package-level test file).
+        joins = set()
+        comps = parts[1:] if len(parts) > 1 else parts
+        pkg_comps = comps[:-1]  # without the module stem
+        for seq in (comps, pkg_comps):
+            for i in range(len(seq)):
+                joins.add("test_" + "_".join(seq[i:]) + ".py")
+        for tf in test_files:
+            if tf not in l2 and os.path.basename(tf) in joins:
+                l2.append(tf)
+        # --- L2c: directory-token match (django tests/<topic>/tests.py)
+        mod_tokens = {t for t in parts if t not in ("src",)}
+        for tf in test_files:
+            if tf in l2 or tf in l1:
+                continue
+            tf_dirs = os.path.dirname(tf).replace("\\", "/").split("/")
+            topic = [t for t in tf_dirs if t not in ("tests", "test", "")]
+            if topic and any(
+                _tokens_similar(t, m) for t in topic for m in mod_tokens
             ):
-                found.append(cand)
-    return found[:_TARGETED_TEST_MAX_FILES]
+                l2.append(tf)
+
+    # L1 outranks L2. If L1 exploded (django: hundreds import the package),
+    # keep the ones whose grep hit the FULL dotted path first via order and cap.
+    ordered = l1 + [t for t in l2 if t not in l1]
+    return ordered[:_TARGETED_TEST_MAX_FILES]
 
 
 def _project_python(seed_cwd: str) -> str:
@@ -370,7 +496,24 @@ async def make_verifier(
     async def verify(cwd: str) -> bool:
         cmd = detect_test_command(cwd)
         if cmd:
+            # Same interpreter + candidate-shadowing treatment as targeted
+            # tests: RUNE's own python often cannot even import old repos, and
+            # the resulting collection error must not read as a test failure.
+            import re as _re
+            import sys as _sys
+            if seed_cwd and cmd[0] == _sys.executable:
+                cmd = [
+                    "/usr/bin/env", f"PYTHONPATH={cwd}:{cwd}/src",
+                    _project_python(seed_cwd), *cmd[1:],
+                ]
             state, evidence = await run_verify(cmd, cwd)
+            if state == "fail" and not _re.search(r"\b\d+ failed\b", evidence):
+                # Non-zero exit without failed tests = collection/usage error
+                # (e.g. interpreter mismatch, missing plugin) — inconclusive.
+                # Blocked repos previously died here and never reached the
+                # targeted-test fallback (observed: sphinx, top-level tests/).
+                log.info("verify_suite_inconclusive", cmd=" ".join(cmd[:4]))
+                state, evidence = "skip", ""
             if state in ("pass", "fail"):
                 method_by_cwd[cwd] = f"`{' '.join(cmd)}`"
             if state == "pass":
