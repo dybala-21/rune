@@ -9,6 +9,7 @@ This removes the PydanticAI dependency and enables all LiteLLM providers
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -50,6 +51,81 @@ _STOP_BATCH_FAILURE_TOOLS = frozenset({
 # Tools subject to the per-turn cap — same mutating/executing set as the
 # failure-stop list.
 _WRITE_EXEC_TOOLS = _STOP_BATCH_FAILURE_TOOLS
+
+# --- Exploration-round budget -------------------------------------------------
+# Observed failure mode on code-edit tasks (SWE-bench traces): a weak model
+# burns its entire tool-round budget on read-only spelunking (grep/find/read),
+# hits the round cap, and the run ends with NO edit — an empty patch. The
+# budget counts consecutive tool rounds in which no file-mutating tool was
+# called; at the budget a steering message is injected ("stop exploring, make
+# the edit"), and a few rounds later — if the model is still exploring — the
+# next call is forced to be file_edit via tool_choice (aider-style narrow edit
+# path: weak models perform better when the action space is constrained).
+_EDIT_TOOLS: frozenset[str] = frozenset({"file_write", "file_edit", "file_delete"})
+_EXPLORE_BUDGET_ENV = "RUNE_EXPLORE_BUDGET"  # rounds; 0 disables
+_EXPLORE_FORCE_EDIT_ENV = "RUNE_EXPLORE_FORCE_EDIT"  # "0" disables the forced call
+
+# Escalation timing is computed relative to the round cap in stream_text:
+# the nudge fires at the configured budget (but no later than cap-6) and the
+# forced edit only near cap exhaustion (cap-3). The earlier fixed-grace
+# schedule (nudge+4) was measured to force edits MID-diagnosis on repo-fix
+# tasks — the model capitulated and patched whatever class was in context,
+# converting empty-patch failures into confident wrong patches.
+
+_EXPLORE_NUDGE = (
+    "You have spent several tool rounds exploring without editing any file. "
+    "Converge now: finish tracing the ONE code path that produces the "
+    "reported behavior, check what the existing tests expect from it, then "
+    "implement the complete root-cause fix — cover sibling paths with the "
+    "same flaw. Do not open new lines of investigation, and no drive-by "
+    "refactors."
+)
+_EXPLORE_FORCE_MSG = (
+    "Only a few tool rounds remain. Apply your best current fix with "
+    "file_edit NOW — the complete fix for the root cause as you understand "
+    "it. An applied fix beats an unfinished investigation."
+)
+
+# --- Verify-on-stop ----------------------------------------------------------
+# When the model tries to finish with a prose answer after editing code
+# without having run any test command since the last edit, inject ONE bounded
+# reminder to run the relevant tests first (then it may finish regardless).
+# This converts "declares done" into one cheap test→repair round with the real
+# failure output in context. RUNE_VERIFY_ON_STOP=0 disables.
+_VERIFY_ON_STOP_ENV = "RUNE_VERIFY_ON_STOP"
+# Structured match on the bash command string (documented runner invocations,
+# not NL). Matching is per shell segment and anchored at the command head, so
+# "grep -r pytest" or "pip install pytest" never count as running tests.
+_TEST_HEAD_RE = None  # compiled lazily
+
+
+def _is_test_command(command: str) -> bool:
+    import re
+    global _TEST_HEAD_RE
+    if _TEST_HEAD_RE is None:
+        _TEST_HEAD_RE = re.compile(
+            r"^(pytest|py\.test|tox"
+            r"|make\s+test|go\s+test|cargo\s+test|yarn\s+test"
+            r"|npm\s+(run\s+)?test"
+            r"|python3?\s+-m\s+(pytest|unittest)"
+            r"|python3?\s+\S*runtests?\.py"
+            r"|\S*bin/test)\b"
+        )
+    for seg in re.split(r"[;&|]+", command or ""):
+        words = seg.strip().split()
+        while words and "=" in words[0]:  # skip leading env assignments
+            words = words[1:]
+        if words and _TEST_HEAD_RE.match(" ".join(words[:4])):
+            return True
+    return False
+
+
+_VERIFY_ON_STOP_MSG = (
+    "You edited code this run but have not run any test since the last edit. "
+    "Before finishing: run the tests that cover the files you changed "
+    "(bash_execute), read any failure, repair the code if needed, then give "
+    "the final summary stating what passed."
+)
 
 
 def _looks_like_tool_failure(result: str) -> bool:
@@ -717,6 +793,7 @@ class StreamResult:
         tool_call_policy: Any = None,
         provider_extra: dict[str, str] | None = None,
         extra_headers: dict[str, str] | None = None,
+        explore_budget: int = 0,
     ) -> None:
         self._model = model
         self._messages = list(messages)
@@ -729,6 +806,21 @@ class StreamResult:
         self._provider_extra = provider_extra or {}
         self._extra_headers = extra_headers or {}
         self._max_tool_rounds = max_tool_rounds
+        # Consecutive no-edit tool rounds allowed before steering intervenes
+        # (0 = off). Env override wins — including "0" to disable — so A/B
+        # runs can set it per-process (env_int drops 0, so parse raw here).
+        # The wired default is clamped to ~1/3 of the round cap so the two
+        # escalation stages still leave rounds to edit and verify on short-cap
+        # runs; an explicit env value is taken as-is.
+        _env_budget_raw = os.environ.get(_EXPLORE_BUDGET_ENV, "").strip()
+        try:
+            self._explore_budget = int(_env_budget_raw)
+        except ValueError:
+            self._explore_budget = (
+                min(explore_budget, max(3, max_tool_rounds // 3))
+                if explore_budget > 0
+                else 0
+            )
         # Guided decoding: schema-constrain tool calls for local (ollama) models,
         # detected via the ollama api_base. When on, the model must emit a tool
         # call or a final answer as schema-valid JSON each turn.
@@ -806,6 +898,15 @@ class StreamResult:
         _force_tool = False  # tool_choice="required" flag for retry
         _output_recovery_count = 0  # max output tokens recovery attempts
         _MAX_OUTPUT_RECOVERY = 2
+        # Exploration-budget state: consecutive tool rounds without an edit
+        # tool, the escalation stage reached (0 none, 1 nudged, 2 forced), and
+        # the one-shot "force file_edit via tool_choice" flag for the next call.
+        _explore_rounds = 0
+        _explore_stage = 0
+        _force_edit_tool = False
+        # Verify-on-stop state (per stream_text call).
+        self._vos_edited = False
+        self._vos_nudges = 0
         self._policy.reset()
 
         while True:
@@ -833,6 +934,14 @@ class StreamResult:
             if _force_tool:
                 extra["tool_choice"] = "required"
                 _force_tool = False  # one-shot
+            if _force_edit_tool:
+                # Narrow edit path: constrain the next action to file_edit.
+                # One-shot; guided mode strips tool_choice below, so this is
+                # a no-op there (guided models get the nudge text only).
+                extra["tool_choice"] = {
+                    "type": "function", "function": {"name": "file_edit"},
+                }
+                _force_edit_tool = False
 
             _tools = self._tool_schemas or None
 
@@ -1145,8 +1254,32 @@ class StreamResult:
                 elif not _suppress_yield:
                     self._collected_text += text_this_turn
 
-            # Pure text, no continuations — done
+            # Pure text, no continuations — done (unless code was edited and
+            # never tested: inject ONE verify-on-stop reminder, then finish
+            # regardless of what the model does next time).
             if not tool_calls_by_index:
+                if (
+                    getattr(self, "_vos_edited", False)
+                    and getattr(self, "_vos_nudges", 0) == 0
+                    and not self._guided
+                    and _tool_round < _max_tool_rounds - 1
+                    and "bash_execute" in self._tool_lookup
+                    and os.environ.get(_VERIFY_ON_STOP_ENV, "1") != "0"
+                ):
+                    self._vos_nudges = 1
+                    if text_this_turn:
+                        self._messages.append({
+                            "role": "assistant",
+                            "content": text_this_turn,
+                        })
+                    self._messages.append({
+                        "role": "user", "content": _VERIFY_ON_STOP_MSG,
+                    })
+                    # The pre-verification answer is superseded; without this
+                    # reset the early-stop guard would kill the next round.
+                    self._collected_text = ""
+                    log.info("verify_on_stop_nudge", round=_tool_round)
+                    continue
                 if text_this_turn:
                     self._messages.append({
                         "role": "assistant",
@@ -1187,6 +1320,56 @@ class StreamResult:
             # write/execute tools run serially.
             tc_list = list(tool_calls_by_index.values())
             await self._execute_tool_batch(tc_list)
+
+            # Exploration-round budget: steer a wandering model toward the
+            # edit. Appended AFTER the batch so every tool_call_id already has
+            # its tool result (message-history validity, same as the deferred
+            # nudges in _execute_tool_batch).
+            if self._explore_budget > 0:
+                # Cap-relative schedule: nudge early enough to matter but
+                # never later than cap-6; force only when the run is about to
+                # die anyway (cap-3) — landing SOMETHING beats an empty diff,
+                # but forcing mid-diagnosis produces confident wrong patches.
+                _nudge_at = min(
+                    self._explore_budget, max(2, _max_tool_rounds - 6)
+                )
+                _force_at = max(_nudge_at + 2, _max_tool_rounds - 3)
+                _round_names = {tc["function"]["name"] for tc in tc_list}
+                if _round_names & _EDIT_TOOLS:
+                    _explore_rounds = 0
+                    _explore_stage = 0
+                else:
+                    _explore_rounds += 1
+                    _has_file_edit = any(
+                        (s.get("function") or {}).get("name") == "file_edit"
+                        for s in (self._tool_schemas or [])
+                    )
+                    if _explore_stage == 0 and _explore_rounds >= _nudge_at:
+                        _explore_stage = 1
+                        self._messages.append(
+                            {"role": "user", "content": _EXPLORE_NUDGE}
+                        )
+                        log.info(
+                            "explore_budget_nudge",
+                            rounds=_explore_rounds,
+                            budget=self._explore_budget,
+                        )
+                    elif (
+                        _explore_stage == 1
+                        # _tool_round (not the no-edit streak) drives the
+                        # force: it must key off remaining cap headroom.
+                        and _tool_round >= _force_at
+                        and _has_file_edit
+                        and os.environ.get(_EXPLORE_FORCE_EDIT_ENV, "1") != "0"
+                    ):
+                        _explore_stage = 2
+                        self._messages.append(
+                            {"role": "user", "content": _EXPLORE_FORCE_MSG}
+                        )
+                        _force_edit_tool = True
+                        log.info(
+                            "explore_budget_force_edit", rounds=_explore_rounds
+                        )
 
             # Replace previous browser_observe results with 1-line
             # summary.  Only the latest snapshot is useful; older ones
@@ -1343,6 +1526,14 @@ class StreamResult:
                     })
                     if is_write_exec and not _looks_like_tool_failure(res):
                         self._action_ok = True  # a real action succeeded
+                        # Verify-on-stop bookkeeping: edits arm the reminder,
+                        # a test-runner bash command satisfies it.
+                        if fn in _EDIT_TOOLS:
+                            self._vos_edited = True
+                        elif fn == "bash_execute" and _is_test_command(
+                            str(args.get("command", ""))
+                        ):
+                            self._vos_edited = False
                     nudge = self._policy.record_tool_call(fn)
                     if nudge:
                         deferred_nudges.append(nudge)
@@ -1528,6 +1719,7 @@ class LiteLLMAgent:
         max_tool_rounds: int = 10,
         tool_call_policy: Any = None,
         extra_headers: dict[str, str] | None = None,
+        explore_budget: int = 0,
     ) -> None:
         self._model, self._provider_extra = _resolve_litellm_model(model)
         self._system_prompt = system_prompt
@@ -1538,6 +1730,7 @@ class LiteLLMAgent:
         self._max_tokens = _clamp_max_tokens(self._model, max_tokens)
         self._temperature = temperature
         self._max_tool_rounds = max_tool_rounds
+        self._explore_budget = explore_budget
         self._extra_headers: dict[str, str] = dict(extra_headers or {})
         self._last_stream_result: StreamResult | None = None
         if tool_call_policy is None:
@@ -1613,6 +1806,7 @@ class LiteLLMAgent:
             tool_call_policy=self._policy,
             provider_extra=self._provider_extra,
             extra_headers=self._extra_headers,
+            explore_budget=self._explore_budget,
         )
         self._last_stream_result = stream_result
 
