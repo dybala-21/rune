@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from rune.agent.rejection_sampler import (
@@ -263,3 +265,203 @@ async def _no_eg(instruction):
     v.has_check = False
     v.evidence_by_cwd = {}
     return v
+
+
+# --- targeted-test verification + eg_disabled -------------------------------
+
+
+def _seed_and_candidate(tmp_path, *, edit=True, agent_test=False):
+    """A seed tree (pkg/mod.py + pkg/tests/test_mod.py) and a candidate copy
+    whose pkg/mod.py was edited (content + mtime differ)."""
+    import os
+    import shutil
+    import time
+
+    seed = tmp_path / "seed"
+    (seed / "pkg" / "tests").mkdir(parents=True)
+    (seed / "pkg" / "mod.py").write_text("x = 1\n")
+    (seed / "pkg" / "tests" / "test_mod.py").write_text("def test_x():\n    pass\n")
+    cand = tmp_path / "cand"
+    shutil.copytree(seed, cand, copy_function=shutil.copy2)
+    if edit:
+        p = cand / "pkg" / "mod.py"
+        p.write_text("x = 2\n")
+        os.utime(p, (time.time() + 5, time.time() + 5))
+    if agent_test:
+        (cand / "pkg" / "test_agent_written.py").write_text("def test_a(): pass\n")
+    return str(seed), str(cand)
+
+
+def test_targeted_test_files_maps_changed_source(tmp_path):
+    from rune.agent.rejection_sampler import _targeted_test_files
+
+    seed, cand = _seed_and_candidate(tmp_path)
+    assert _targeted_test_files(cand, seed) == [
+        os.path.join("pkg", "tests", "test_mod.py")
+    ]
+
+
+def test_targeted_test_files_ignores_agent_written_tests(tmp_path):
+    from rune.agent.rejection_sampler import _targeted_test_files
+
+    # Candidate adds its own test file; it does not exist in the seed, so it
+    # must never be used as evidence.
+    seed, cand = _seed_and_candidate(tmp_path, edit=False, agent_test=True)
+    assert _targeted_test_files(cand, seed) == []
+
+
+def test_restore_canonical_tests_overwrites_tampered_copy(tmp_path):
+    from rune.agent.rejection_sampler import _restore_canonical_tests
+
+    seed, cand = _seed_and_candidate(tmp_path)
+    tampered = os.path.join(cand, "pkg", "tests", "test_mod.py")
+    open(tampered, "w").write("def test_x():\n    assert True  # gutted\n")
+    _restore_canonical_tests(cand, seed, [os.path.join("pkg", "tests", "test_mod.py")])
+    assert open(tampered).read() == "def test_x():\n    pass\n"
+
+
+@pytest.mark.asyncio
+async def test_targeted_tests_reject_and_pass(monkeypatch, tmp_path):
+    import rune.agent.auto_verify as av
+    import rune.agent.rejection_sampler as rs
+
+    seed, cand = _seed_and_candidate(tmp_path)
+    monkeypatch.setattr(av, "detect_test_command", lambda cwd: None)
+
+    calls: list[list[str]] = []
+    verdict = {"state": "fail", "evidence": "1 failed, 2 passed in 0.1s"}
+
+    async def fake_run(cmd, cwd, timeout=60.0):
+        calls.append(cmd)
+        return verdict["state"], verdict["evidence"]
+
+    monkeypatch.setattr(av, "run_verify", fake_run)
+
+    async def fake_eg(instruction):
+        async def v(cwd):
+            return True  # EG would vacuously pass — must not be reached
+
+        v.has_check = True
+        v.evidence_by_cwd = {}
+        return v
+
+    monkeypatch.setattr(rs, "make_evidence_gate_verifier", fake_eg)
+
+    verify = await make_verifier("task", seed_cwd=seed)
+    # Real failed tests reject the candidate (EG never consulted).
+    assert await verify(cand) is False
+    assert verify.evidence_by_cwd[cand] == "1 failed, 2 passed in 0.1s"
+    assert any("test_mod.py" in " ".join(c) for c in calls)
+
+    # A passing run with real assertions verifies.
+    verdict.update(state="pass", evidence="3 passed in 0.2s")
+    verify2 = await make_verifier("task", seed_cwd=seed)
+    assert await verify2(cand) is True
+    assert "targeted tests" in verify2.method_by_cwd[cand]
+
+
+@pytest.mark.asyncio
+async def test_targeted_collection_error_is_inconclusive(monkeypatch, tmp_path):
+    # pytest exiting non-zero WITHOUT "N failed" (import/collection error, e.g.
+    # interpreter mismatch) must not count as a rejection; flow falls through
+    # to the Evidence Gate.
+    import rune.agent.auto_verify as av
+    import rune.agent.rejection_sampler as rs
+
+    seed, cand = _seed_and_candidate(tmp_path)
+    monkeypatch.setattr(av, "detect_test_command", lambda cwd: None)
+
+    async def fake_run(cmd, cwd, timeout=60.0):
+        return "fail", "ImportError: No module named 'distutils'"
+
+    monkeypatch.setattr(av, "run_verify", fake_run)
+
+    async def fake_eg(instruction):
+        async def v(cwd):
+            return True
+
+        v.has_check = True
+        v.evidence_by_cwd = {}
+        return v
+
+    monkeypatch.setattr(rs, "make_evidence_gate_verifier", fake_eg)
+
+    verify = await make_verifier("task", seed_cwd=seed)
+    assert await verify(cand) is True  # fell through to EG
+    assert verify.method_by_cwd[cand] == "Evidence Gate"
+
+
+@pytest.mark.asyncio
+async def test_eg_disabled_blocks_vacuous_eg_pass(monkeypatch, tmp_path):
+    import rune.agent.auto_verify as av
+    import rune.agent.rejection_sampler as rs
+
+    monkeypatch.setattr(av, "detect_test_command", lambda cwd: None)
+
+    async def fake_eg(instruction):
+        async def v(cwd):
+            return True  # vacuous pass
+
+        v.has_check = True
+        v.evidence_by_cwd = {}
+        return v
+
+    monkeypatch.setattr(rs, "make_evidence_gate_verifier", fake_eg)
+
+    verify = await make_verifier("task")
+    assert await verify(str(tmp_path)) is True  # EG allowed by default
+    verify.eg_disabled = True
+    assert await verify(str(tmp_path)) is False  # vacuous pass suppressed
+
+
+def test_project_python_prefers_repo_venv(tmp_path):
+    from rune.agent.rejection_sampler import _project_python
+
+    import sys
+    # No venv → RUNE's own interpreter.
+    assert _project_python(str(tmp_path)) == sys.executable
+    # Project venv present → its python wins.
+    vbin = tmp_path / ".venv" / "bin"
+    vbin.mkdir(parents=True)
+    py = vbin / "python"
+    py.write_text("#!/bin/sh\n")
+    py.chmod(0o755)
+    assert _project_python(str(tmp_path)) == str(py)
+
+
+@pytest.mark.asyncio
+async def test_targeted_tests_use_project_interpreter(monkeypatch, tmp_path):
+    import rune.agent.auto_verify as av
+    import rune.agent.rejection_sampler as rs
+
+    seed, cand = _seed_and_candidate(tmp_path)
+    vbin = tmp_path / "seed" / ".venv" / "bin"
+    vbin.mkdir(parents=True)
+    proj_py = vbin / "python"
+    proj_py.write_text("#!/bin/sh\n")
+    proj_py.chmod(0o755)
+
+    monkeypatch.setattr(av, "detect_test_command", lambda cwd: None)
+    calls: list[list[str]] = []
+
+    async def fake_run(cmd, cwd, timeout=60.0):
+        calls.append(cmd)
+        return "pass", "3 passed in 0.1s"
+
+    monkeypatch.setattr(av, "run_verify", fake_run)
+
+    async def fake_eg(instruction):
+        async def v(cwd):
+            return False
+
+        v.has_check = True
+        v.evidence_by_cwd = {}
+        return v
+
+    monkeypatch.setattr(rs, "make_evidence_gate_verifier", fake_eg)
+
+    verify = await make_verifier("task", seed_cwd=seed)
+    assert await verify(cand) is True
+    cmd = calls[0]
+    assert str(proj_py) in cmd          # project venv interpreter used
+    assert any(c.startswith("PYTHONPATH=") and cand in c for c in cmd)

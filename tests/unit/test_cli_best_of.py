@@ -576,6 +576,302 @@ async def test_best_of_none_pass_no_restore(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_best_of_seeded_unsolved_applies_best_effort(monkeypatch, tmp_path):
+    # Seeded mode, nothing verifies: the best-effort attempt's edits are APPLIED
+    # to the working tree (with backup for undo), the run still exits 1, and the
+    # report carries the applied files. Parking is skipped (redundant).
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "app.py").write_text("ORIGINAL")
+
+    async def fake_attempt(index, message, model, provider, seed_from=None):
+        w = tmp_path / "w0"
+        w.mkdir()
+        (w / "app.py").write_text("UNVERIFIED FIX")
+        return AttemptArtifact(
+            index=0, workdir=str(w), stdout="out", returncode=0, produced=["app.py"]
+        )
+
+    async def fake_make_verifier(instruction, seed_cwd=None):
+        async def verify(cwd):
+            return False  # nothing passes
+
+        return verify
+
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
+    monkeypatch.setattr(best_of, "make_verifier", fake_make_verifier)
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    monkeypatch.delenv("RUNE_BESTOF_APPLY_UNVERIFIED", raising=False)
+    monkeypatch.chdir(dest)
+
+    reports: list = []
+    code = await _best_of_async(
+        "fix app", 1, None, None,
+        report=lambda s, **kw: reports.append(kw), seed_cwd=True,
+    )
+
+    assert code == 1  # still not a success claim
+    kw = reports[0]
+    assert kw["solved"] is False
+    assert kw["applied"] == ["app.py"]
+    assert (dest / "app.py").read_text() == "UNVERIFIED FIX"
+    # original backed up for undo
+    assert kw["apply_backup"] is not None
+    assert open(os.path.join(kw["apply_backup"], "app.py")).read() == "ORIGINAL"
+    # no redundant parked copy
+    assert kw["unverified_dir"] is None
+
+
+@pytest.mark.asyncio
+async def test_best_of_seeded_unsolved_parks_when_opted_out(monkeypatch, tmp_path):
+    # RUNE_BESTOF_APPLY_UNVERIFIED=0 restores the previous parking behavior:
+    # nothing written to the tree, work kept in a side dir.
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "app.py").write_text("ORIGINAL")
+
+    async def fake_attempt(index, message, model, provider, seed_from=None):
+        w = tmp_path / "w0"
+        w.mkdir()
+        (w / "app.py").write_text("UNVERIFIED FIX")
+        return AttemptArtifact(
+            index=0, workdir=str(w), stdout="out", returncode=0, produced=["app.py"]
+        )
+
+    async def fake_make_verifier(instruction, seed_cwd=None):
+        async def verify(cwd):
+            return False
+
+        return verify
+
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
+    monkeypatch.setattr(best_of, "make_verifier", fake_make_verifier)
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    monkeypatch.setenv("RUNE_BESTOF_APPLY_UNVERIFIED", "0")
+    monkeypatch.chdir(dest)
+
+    reports: list = []
+    code = await _best_of_async(
+        "fix app", 1, None, None,
+        report=lambda s, **kw: reports.append(kw), seed_cwd=True,
+    )
+
+    assert code == 1
+    kw = reports[0]
+    assert kw["applied"] == []
+    assert (dest / "app.py").read_text() == "ORIGINAL"  # tree untouched
+    assert kw["unverified_dir"] is not None
+    parked = os.path.join(kw["unverified_dir"], "app.py")
+    assert open(parked).read() == "UNVERIFIED FIX"
+
+
+@pytest.mark.asyncio
+async def test_nondiscriminating_check_never_claims_verified(monkeypatch, tmp_path):
+    # The probe finds the check PASSES the unfixed baseline (vacuous). The run
+    # must collapse to K=1, disable the EG component, and end UNVERIFIED even
+    # though the vacuous check would have "passed" the candidate — with the
+    # best-effort edits still applied (delivery, not a success claim).
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "app.py").write_text("ORIGINAL")
+
+    async def fake_attempt(index, message, model, provider, seed_from=None):
+        w = tmp_path / f"w{index}"
+        w.mkdir()
+        (w / "app.py").write_text("UNVERIFIED FIX")
+        return AttemptArtifact(
+            index=index, workdir=str(w), stdout="out", returncode=0,
+            produced=["app.py"],
+        )
+
+    async def fake_make_verifier(instruction, seed_cwd=None):
+        async def verify(cwd):
+            # Mirrors the real make_verifier contract: the EG component
+            # passes anything unless eg_disabled was set by the probe.
+            return not getattr(verify, "eg_disabled", False)
+
+        verify.has_check = True
+        verify.eg_disabled = False
+        verify.evidence_by_cwd = {}
+        return verify
+
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
+    monkeypatch.setattr(best_of, "make_verifier", fake_make_verifier)
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    monkeypatch.delenv("RUNE_BESTOF_APPLY_UNVERIFIED", raising=False)
+    monkeypatch.chdir(dest)
+
+    reports: list = []
+    code = await _best_of_async(
+        "fix app", 3, None, None,
+        report=lambda s, **kw: reports.append(kw), seed_cwd=True,
+    )
+
+    assert code == 1  # NOT a verified success
+    kw = reports[0]
+    assert kw["solved"] is False
+    assert kw["k"] == 1  # collapsed — vacuous check can't select
+    assert kw["check_discriminates"] is False
+    # delivery still happened, honestly labeled
+    assert kw["applied"] == ["app.py"]
+    assert (dest / "app.py").read_text() == "UNVERIFIED FIX"
+
+
+@pytest.mark.asyncio
+async def test_seeded_no_change_candidate_never_verifies(monkeypatch, tmp_path):
+    # A candidate that changed NOTHING must not be selectable as "verified"
+    # even when the check passes it (observed: 0-byte-diff EG "win").
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    (dest / "app.py").write_text("ORIGINAL")
+
+    async def fake_attempt(index, message, model, provider, seed_from=None):
+        w = tmp_path / "w0"
+        w.mkdir()
+        return AttemptArtifact(
+            index=0, workdir=str(w), stdout="out", returncode=0, produced=[]
+        )
+
+    async def fake_make_verifier(instruction, seed_cwd=None):
+        async def verify(cwd):
+            return False  # baseline probe fails → check discriminates
+
+        verify.has_check = True
+        verify.evidence_by_cwd = {}
+        return verify
+
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
+
+    # Baseline fails, but every candidate "passes": only the no-change guard
+    # stands between this and a fake verified claim.
+    probe_done = {"v": False}
+
+    async def fake_make_verifier2(instruction, seed_cwd=None):
+        async def verify(cwd):
+            if not probe_done["v"]:
+                probe_done["v"] = True
+                return False  # discriminating probe
+            return True
+
+        verify.has_check = True
+        verify.evidence_by_cwd = {}
+        return verify
+
+    monkeypatch.setattr(best_of, "make_verifier", fake_make_verifier2)
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    monkeypatch.chdir(dest)
+
+    reports: list = []
+    code = await _best_of_async(
+        "fix app", 1, None, None,
+        report=lambda s, **kw: reports.append(kw), seed_cwd=True,
+    )
+
+    assert code == 1
+    assert reports[0]["solved"] is False
+    assert (dest / "app.py").read_text() == "ORIGINAL"
+
+
+def test_drop_seed_identical_filters_reverted_edits(tmp_path):
+    from rune.cli.best_of import _drop_seed_identical
+
+    seed = tmp_path / "seed"; seed.mkdir()
+    work = tmp_path / "work"; work.mkdir()
+    (seed / "same.py").write_text("x = 1\n")
+    (work / "same.py").write_text("x = 1\n")   # edit-then-revert: mtime differs
+    (seed / "diff.py").write_text("x = 1\n")
+    (work / "diff.py").write_text("x = 2\n")
+    (work / "new.py").write_text("fresh\n")     # no seed counterpart
+
+    out = _drop_seed_identical(str(work), str(seed), ["same.py", "diff.py", "new.py"])
+    assert out == ["diff.py", "new.py"]
+
+
+def test_best_effort_prefers_source_edit_over_test_only(tmp_path):
+    from rune.cli.best_of import AttemptArtifact, _rank_best_effort
+
+    # Attempt 0 wrote only a scratch test; attempt 1 edited real source.
+    # The source-editing sibling must win the hand-off (observed failure:
+    # a wrong-file/scratch attempt was handed off over the right-file one).
+    a0 = AttemptArtifact(index=0, workdir="w0", stdout="", returncode=0,
+                         produced=["test_scratch.py"])
+    a1 = AttemptArtifact(index=1, workdir="w1", stdout="", returncode=0,
+                         produced=["pkg/core.py"])
+    best = _rank_best_effort([a0, a1], {})
+    assert best is a1
+
+
+@pytest.mark.asyncio
+async def test_seeded_attempt_message_carries_test_hint(monkeypatch, tmp_path):
+    import rune.agent.auto_verify as av
+
+    captured: dict = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"ok\n", b"")
+
+    async def fake_exec(*cmd, cwd=None, env=None, **kwargs):
+        captured["cmd"] = list(cmd)
+        return _FakeProc()
+
+    monkeypatch.setattr(best_of.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(av, "detect_test_command", lambda cwd: ["pytest", "-q"])
+
+    seed = tmp_path / "seed"; seed.mkdir()
+    (seed / "app.py").write_text("x")
+
+    await _run_attempt_subprocess(0, "fix it", None, None, seed_from=str(seed))
+
+    msg = captured["cmd"][captured["cmd"].index("--message") + 1]
+    assert "pytest -q" in msg  # verify loop handed to the attempt
+    assert "fix failures before finishing" in msg
+
+
+@pytest.mark.asyncio
+async def test_best_of_greenfield_unsolved_still_parks(monkeypatch, tmp_path):
+    # Non-seeded (greenfield) mode keeps the parking contract: apply-unverified
+    # is a seeded-mode delivery change only.
+    w = tmp_path / "w0"
+    w.mkdir()
+    (w / "solution.py").write_text("UNVERIFIED")
+
+    async def fake_attempt(index, message, model, provider, seed_from=None):
+        return AttemptArtifact(
+            index=0, workdir=str(w), stdout="out", returncode=0,
+            produced=["solution.py"],
+        )
+
+    async def fake_make_verifier(instruction, seed_cwd=None):
+        async def verify(cwd):
+            return False
+
+        return verify
+
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
+    monkeypatch.setattr(best_of, "make_verifier", fake_make_verifier)
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    monkeypatch.delenv("RUNE_BESTOF_APPLY_UNVERIFIED", raising=False)
+
+    dest = tmp_path / "dest"
+    dest.mkdir()
+    monkeypatch.chdir(dest)
+
+    reports: list = []
+    code = await _best_of_async(
+        "task", 1, None, None, report=lambda s, **kw: reports.append(kw)
+    )
+
+    assert code == 1
+    kw = reports[0]
+    assert kw["applied"] == []
+    assert not (dest / "solution.py").exists()
+    assert kw["unverified_dir"] is not None
+
+
+@pytest.mark.asyncio
 async def test_best_of_preserves_winner_on_collision(monkeypatch, tmp_path):
     # Winner produces solution.py, but cwd already has one → restore skips it and
     # the winner is preserved (not discarded) so the K runs aren't wasted.
