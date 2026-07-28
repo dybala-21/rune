@@ -536,7 +536,7 @@ async def make_verifier(
                 evidence_by_cwd[cwd] = out[-1500:]
                 log.info("repro_verify_fail")
                 return False
-            # rc 125: couldn't run — fall through to the normal chain.
+            log.info("repro_verify_inconclusive")  # couldn't run; fall through
 
         cmd = None if _suite_unusable else detect_test_command(cwd)
         if cmd:
