@@ -48,26 +48,17 @@ _ATTEMPT_TIMEOUT_MS_ENV = "RUNE_BESTOF_ATTEMPT_TIMEOUT_MS"
 _DEFAULT_ATTEMPT_TIMEOUT_MS = 600_000  # 10 min
 _TIMEOUT_RETURNCODE = 124  # mirror coreutils `timeout`
 
-# Seeded mode only: when no attempt verifies, write the best-effort candidate's
-# edits into the working tree (with the same backup/undo as a verified winner)
-# instead of parking them in a side directory. On large repos the execution
-# verifier can time out, so even a correct fix may never verify — withholding
-# in that case throws away real work. The run still exits non-zero and the
-# change is reported as UNVERIFIED — this changes delivery, never what counts
-# as done. Set to "0" to park instead.
+# Seeded mode: when nothing verifies, apply the best-effort edits (with
+# backup/undo) instead of parking them — a correct fix can fail to verify,
+# and withholding it throws away real work. Still exits non-zero, reported
+# UNVERIFIED. "0" parks instead.
 _APPLY_UNVERIFIED_ENV = "RUNE_BESTOF_APPLY_UNVERIFIED"
 
-# Sampling strategy. With a trustworthy verifier, stopping at the first
-# verified pass keeps the solve rate of flat-K sampling at a fraction of the
-# cost. Mid-size and larger models make better use of a follow-up attempt
-# that sees the previous failure output; small local models do better with a
-# fresh independent sample.
-#   auto       — ollama → sequential (serial server, max token saving);
-#                otherwise race2 (2 parallel attempts, early-exit verify,
-#                then ONE repair attempt if both fail — wall ≈ parallel).
-#   sequential — sample→verify→exit-on-pass; attempt 2 repairs w/ failure.
-#   race2      — as above.
-#   parallel   — the old flat-K behavior.
+# Sampling strategy: stop at the first verified pass instead of always
+# paying flat K. auto = sequential for ollama (serial server), race2
+# otherwise (2 parallel attempts, then one failure-fed repair attempt);
+# "parallel" restores flat K. Larger models profit from seeing the previous
+# failure; small local ones resample fresh.
 _STRATEGY_ENV = "RUNE_BESTOF_STRATEGY"
 _REPAIR_ENV = "RUNE_BESTOF_REPAIR"  # "0" disables failure-fed repair attempts
 _REPAIR_EVIDENCE_CAP = 1500
@@ -860,22 +851,17 @@ async def _best_of_async(
     verify_cwd = await make_verifier(message, seed_cwd=seed_from)
     has_check = bool(getattr(verify_cwd, "has_check", True))
 
-    # best-of-K only pays when the verifier can tell a good candidate from a bad
-    # one. A check that PASSES the untouched baseline (the code before any edit)
-    # accepts anything: it cannot select, and its "pass" carries zero
-    # information, so it must never produce a "verified" claim either. Probe
-    # the baseline once; if the check can't fail on unsolved code, sample a
-    # single attempt and treat its result as UNVERIFIED.
+    # A check that passes the untouched baseline accepts anything — it can
+    # neither select nor verify. Probe once; if so, drop to a single attempt
+    # and treat its result as unverified.
     check_discriminates = True
     if seed_from and has_check:
         check_discriminates = await _verifier_discriminates(verify_cwd, seed_from)
         if not check_discriminates:
             log.info("bestof_verifier_nondiscriminating_k1", original_k=k)
             k = 1
-            # Disable only the Evidence-Gate component: the probe ran on the
-            # unchanged baseline, where targeted repo tests don't exist yet,
-            # so what it proved vacuous is the EG's synthetic check. Real repo
-            # tests found for a candidate's changed files remain valid.
+            # Only the EG check was proven vacuous (targeted tests don't
+            # exist on the unchanged baseline) — disable just that component.
             verify_cwd.eg_disabled = True  # type: ignore[attr-defined]
 
     # Cap concurrent attempt subprocesses: each is a full agent run, so a large
@@ -1000,10 +986,8 @@ async def _best_of_async(
     await _learn_from_failures(message, failed_ev)
 
     try:
-        # A selection made by the repo's EXISTING tests is PROVISIONAL: those
-        # tests pass the pre-fix code too, so passing them proves "nothing
-        # broke", not "issue fixed". It picks the candidate and stops the
-        # sampling, but the delivery must stay unverified.
+        # Existing-tests pass = PROVISIONAL: pre-fix code passes them too, so
+        # it selects the candidate but must deliver as unverified.
         _provisional = bool(
             res.solved
             and res.selected is not None
@@ -1098,11 +1082,8 @@ async def _best_of_async(
         # flips "done", so this cannot manufacture a fake success.
         no_artifact = sum(1 for a in artifacts if not a.produced)
         best = _rank_best_effort(artifacts, ev_map) if artifacts else None
-        # Deleting the work is wrong either way — we only established that we
-        # couldn't verify it, not that it's wrong. In seeded mode, APPLY the
-        # best-effort candidate's edits (with backup/undo) so the work
-        # actually lands instead of being withheld. Elsewhere (or when opted
-        # out) park it beside the project for deliberate adoption.
+        # Unverified is not wrong: seeded mode applies the best effort
+        # (with backup); otherwise park it beside the project.
         applied: list[str] = []
         apply_backup: str | None = None
         unverified_dir: str | None = None

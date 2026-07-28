@@ -33,13 +33,9 @@ log = get_logger(__name__)
 # so it stays opt-in until an A/B measures its false-positive rate.
 _GENERATED_TEST_ENV = "RUNE_GENERATED_TEST_VERIFY"
 
-# Targeted-test verification: for a seeded (edit-existing-repo) candidate, run
-# the repo's OWN test files nearest to the files the candidate changed. This is
-# both stronger than the Evidence Gate's synthetic check (real held-out tests)
-# and far cheaper than the full suite (which times out on big repos — 60s cap —
-# so a correct fix could never verify there). Only test files that already
-# existed in the SEED count (an agent-written test is not evidence), and the
-# seed's canonical copy is restored before running (tamper guard).
+# Targeted tests: run the repo's own test files nearest to the changed
+# sources — cheaper than the full suite, stronger than a synthetic check.
+# Only seed-canonical test files count, restored before running.
 _TARGETED_TEST_TIMEOUT_S = 120.0
 _TARGETED_TEST_MAX_FILES = 5
 _TARGETED_CHANGED_CAP = 50  # give up mapping if the candidate rewrote the world
@@ -233,13 +229,10 @@ def _targeted_test_files(cwd: str, seed_cwd: str) -> list[str]:
 
 
 def _project_python(seed_cwd: str) -> str:
-    """The interpreter to run the project's tests with.
+    """Project venv python if present, else RUNE's own interpreter.
 
-    Prefer the project's OWN venv (``.venv``/``venv`` beside the code): old
-    repos frequently cannot even import under RUNE's interpreter (removed
-    stdlib modules, version-pinned dependencies), which leaves the verifier
-    with no usable execution signal. Falls back to RUNE's own interpreter
-    when no project venv exists.
+    Old repos often can't even import under RUNE's interpreter, which would
+    leave the verifier with no execution signal.
     """
     import os
     import sys
@@ -449,10 +442,8 @@ async def make_verifier(
     # can report what the winner passed (test command vs Evidence Gate).
     method_by_cwd: dict[str, str] = {}
 
-    # Task-level memo: once the FULL suite comes back inconclusive (timeout /
-    # collection error), it will for every sibling candidate too — suite size
-    # and environment don't change with a small patch, and each repeat costs
-    # up to the full run timeout.
+    # The full suite's inconclusive verdict (timeout/collection error) holds
+    # for every sibling candidate — pay it once.
     _suite_unusable = False
 
     # Contract-derived test, built at most once per task and reused unchanged so
@@ -501,9 +492,8 @@ async def make_verifier(
         nonlocal _suite_unusable
         cmd = None if _suite_unusable else detect_test_command(cwd)
         if cmd:
-            # Same interpreter + candidate-shadowing treatment as targeted
-            # tests: RUNE's own python often cannot even import old repos, and
-            # the resulting collection error must not read as a test failure.
+            # Use the project interpreter and shadow with the candidate
+            # tree, same as targeted tests below.
             import re as _re
             import sys as _sys
             if seed_cwd and cmd[0] == _sys.executable:
@@ -555,9 +545,8 @@ async def make_verifier(
                 import re as _re
 
                 _restore_canonical_tests(cwd, seed_cwd, targets)
-                # PYTHONPATH-front the CANDIDATE tree: a project venv whose
-                # editable install points at the seed would otherwise import
-                # the seed's (unfixed) code and grade the wrong tree.
+                # Shadow the venv's editable install with the candidate
+                # tree, or the seed's unfixed code gets graded instead.
                 t_state, t_evidence = await run_verify(
                     [
                         "/usr/bin/env",
@@ -582,13 +571,8 @@ async def make_verifier(
                         method_by_cwd[cwd] = (
                             f"targeted tests ({', '.join(targets)})"
                         )
-                        # A pass of the repo's EXISTING tests selects this
-                        # candidate but is PROVISIONAL, never "verified": the
-                        # pre-fix code passes those same tests by definition,
-                        # so a pass proves only "didn't break existing
-                        # behavior" — a wrong fix that breaks nothing passes
-                        # too. Callers must deliver provisional selections as
-                        # unverified.
+                        # Provisional: pre-fix code passes these tests too,
+                        # so a pass selects but never verifies.
                         verify.provisional_by_cwd[cwd] = True  # type: ignore[attr-defined]
                         log.info("targeted_tests_pass", files=targets)
                         return True
@@ -614,10 +598,8 @@ async def make_verifier(
             return False
 
         method_by_cwd[cwd] = "Evidence Gate"
-        # A caller that probed the EG check against the unfixed baseline and
-        # saw it PASS sets this flag: such a check accepts anything, so its
-        # "pass" must never count as verified. The execution paths above are
-        # unaffected.
+        # Set when the EG check passed the unfixed baseline: such a check
+        # accepts anything, so its pass never counts as verified.
         if getattr(verify, "eg_disabled", False):
             return False
         return await eg(cwd)

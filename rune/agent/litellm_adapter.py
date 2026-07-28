@@ -52,23 +52,15 @@ _STOP_BATCH_FAILURE_TOOLS = frozenset({
 # failure-stop list.
 _WRITE_EXEC_TOOLS = _STOP_BATCH_FAILURE_TOOLS
 
-# --- Exploration-round budget -------------------------------------------------
-# A weak model on a code-edit task can burn its entire tool-round budget on
-# read-only spelunking (grep/find/read), hit the round cap, and end the run
-# with NO edit — an empty patch. The budget counts consecutive tool rounds in
-# which no file-mutating tool was called; at the budget a steering message is
-# injected, and near cap exhaustion — if the model is still exploring — the
-# next call is forced to be file_edit via tool_choice (a narrow edit path:
-# weak models do better when the action space is constrained).
+# Exploration-round budget: too many consecutive no-edit tool rounds first
+# draws a steering nudge, then (near cap exhaustion) a forced file_edit —
+# otherwise a weak model can explore until the cap and end with no edit.
 _EDIT_TOOLS: frozenset[str] = frozenset({"file_write", "file_edit", "file_delete"})
 _EXPLORE_BUDGET_ENV = "RUNE_EXPLORE_BUDGET"  # rounds; 0 disables
 _EXPLORE_FORCE_EDIT_ENV = "RUNE_EXPLORE_FORCE_EDIT"  # "0" disables the forced call
 
-# Escalation timing is computed relative to the round cap in stream_text:
-# the nudge fires at the configured budget (but no later than cap-6) and the
-# forced edit only near cap exhaustion (cap-3). Forcing earlier interrupts
-# the model mid-diagnosis — it capitulates and patches whatever code is in
-# context, converting empty-patch failures into confident wrong patches.
+# Nudge at the budget (no later than cap-6); force only at cap-3 — forcing
+# earlier interrupts diagnosis and yields confident wrong patches.
 
 _EXPLORE_NUDGE = (
     "You have spent several tool rounds exploring without editing any file. "
@@ -84,12 +76,8 @@ _EXPLORE_FORCE_MSG = (
     "it. An applied fix beats an unfinished investigation."
 )
 
-# --- Verify-on-stop ----------------------------------------------------------
-# When the model tries to finish with a prose answer after editing code
-# without having run any test command since the last edit, inject ONE bounded
-# reminder to run the relevant tests first (then it may finish regardless).
-# This converts "declares done" into one cheap test→repair round with the real
-# failure output in context. RUNE_VERIFY_ON_STOP=0 disables.
+# Verify-on-stop: finishing after an untested edit gets one reminder to run
+# the tests first. RUNE_VERIFY_ON_STOP=0 disables.
 _VERIFY_ON_STOP_ENV = "RUNE_VERIFY_ON_STOP"
 # Structured match on the bash command string (documented runner invocations,
 # not NL). Matching is per shell segment and anchored at the command head, so

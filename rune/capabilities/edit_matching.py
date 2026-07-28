@@ -1,20 +1,9 @@
 """Fault-tolerant search-block matching for file_edit.
 
-A weak model's most common edit failure is a near-miss search string —
-whitespace drift, indent drift, or a stale copy of the line. An exact-match
-tool then errors, the model retries variations, and the run ends in a
-failed-patch spiral. The ladder here recovers the safe cases and turns the
-rest into actionable feedback:
-
-  1. exact substring (unchanged fast path);
-  2. line-trimmed match — every line equal after strip(), unique in file;
-  3. whitespace-normalized match — internal runs of blanks collapsed, unique;
-  4. no match → a "closest section" hint so the next attempt uses real lines.
-
-Fuzzy matches must be UNIQUE in the file; ambiguity refuses (editing the
-wrong of two candidates is worse than failing). Replacement text is
-re-indented by the indent delta of the matched block so an indent-drifted
-search still lands correctly-shaped code.
+Match ladder: exact substring → unique line-trimmed match → unique
+whitespace-normalized match → no match, with a closest-section hint.
+Ambiguous fuzzy matches refuse; replacements are re-indented to the matched
+block's indentation.
 """
 
 from __future__ import annotations
