@@ -74,7 +74,7 @@ def test_repo_tree_and_extract(tmp_path):
     repo = _mk_repo(tmp_path, "r3")
     tree = _repo_tree(str(repo))
     assert "pkg/mod.py" in tree
-    picked = _extract_files("I think pkg/mod.py and nothing/else.py", tree)
+    picked = _extract_files("I think pkg/mod.py and nothing/else.py", str(repo))
     assert picked == ["pkg/mod.py"]
 
 

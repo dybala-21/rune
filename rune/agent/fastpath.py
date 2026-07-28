@@ -26,7 +26,7 @@ from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
 
-_TREE_MAX_FILES = 400
+_TREE_MAX_FILES = 1500
 _SKELETON_MAX_FILES = 4
 _SKELETON_MAX_CHARS = 24_000
 _CANDIDATE_SAMPLES = 4
@@ -117,13 +117,12 @@ def _skeleton(source: str) -> str:
     return "\n".join(out)
 
 
-def _extract_files(text: str, tree_listing: str) -> list[str]:
-    """File paths from an LLM reply, kept only if they exist in the listing."""
-    known = set(tree_listing.splitlines())
+def _extract_files(text: str, root: str) -> list[str]:
+    """File paths from an LLM reply, kept only if they exist on disk."""
     found: list[str] = []
     for m in re.finditer(r"[\w./-]+\.py", text):
         p = m.group().lstrip("./")
-        if p in known and p not in found:
+        if p not in found and os.path.isfile(os.path.join(root, p)):
             found.append(p)
     return found
 
@@ -261,9 +260,12 @@ async def run_fastpath(
         f"file paths from this list, one per line, nothing else.\n\n"
         f"Bug report:\n{issue}\n\nFiles:\n{tree}",
     )
-    files = _extract_files(picks[0] if picks else "", tree)[:_SKELETON_MAX_FILES]
+    files = _extract_files(picks[0] if picks else "", seed_cwd)
+    files = files[:_SKELETON_MAX_FILES]
     if not files:
+        log.info("fastpath_no_files_located")
         return res
+    log.info("fastpath_localized", files=files)
     res.located_files = files
 
     context_parts: list[str] = []
