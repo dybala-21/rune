@@ -252,10 +252,9 @@ def _repo_scale_workspace(cwd: str = ".") -> bool:
     Structural markers only (no NL matching): a project marker at the root
     plus >200 files. NOT ".git"-only — best-of seeds attempts with a COPY of
     the tree that has no .git dir, and the floor must hold there too. Used to
-    floor the tool-round budget for code work inside an existing repo — the
+    floor the tool-round budget for code work inside an existing repo: the
     LLM classifier misses is_complex_coding often enough that repo-fix runs
-    were measured at a 14-round cap and got truncated mid-diagnosis
-    (SWE-bench trace autopsy, 2026-07-26).
+    otherwise land on the small round cap and get truncated mid-diagnosis.
     """
     try:
         if not any(
@@ -322,9 +321,9 @@ def _compute_tool_rounds(
 def _compute_explore_budget(classification: Any, repo_fix: bool = False) -> int:
     """Exploration-round budget for the adapter (0 = off).
 
-    Complex-coding (or repo-fix) tasks get one: that is where the observed
-    failure mode lives (a weak model spends its whole round budget on
-    read-only spelunking and ends with no edit — an empty patch). 8 rounds is
+    Complex-coding (or repo-fix) tasks get one: that is where a weak model
+    can spend its whole round budget on read-only spelunking and end with no
+    edit at all — an empty patch. 8 rounds is
     roughly a third of the complex-coding round budget. The adapter times the
     escalation stages relative to the round cap (nudge early, forced edit only
     near exhaustion) — see litellm_adapter. RUNE_EXPLORE_BUDGET overrides
@@ -1724,10 +1723,10 @@ class NativeAgentLoop(EventEmitter):
         # Scale tool rounds by complexity and executor capability.
         # Structural repo-fix signal: code/execution/full-scope work inside a
         # real project tree floors the round budget at the complex tier.
-        # "full" is included because it is also the classifier's fallback —
-        # SWE-bench fix prompts were observed classified `full conf=0.5`,
-        # which left them at a 14-round cap and truncated mid-diagnosis.
-        # Read-only types (chat/web/research) keep the small budget.
+        # "full" is included because it is also the classifier's FALLBACK
+        # type, so low-confidence repo-fix prompts land there and would
+        # otherwise get the small cap. Read-only types (chat/web/research)
+        # keep the small budget.
         _repo_fix = (
             getattr(classification, "goal_type", "")
             in ("code_modify", "execution", "full")

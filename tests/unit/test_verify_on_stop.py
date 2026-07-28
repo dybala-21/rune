@@ -1,9 +1,8 @@
 """Verify-on-stop: one bounded reminder when the model finishes with a prose
 answer after editing code without running any test since the last edit.
 
-Measured motivation (SWE-bench trace autopsy 2026-07-26): runs were truncated
-or self-declared done before any test executed; hermes's equivalent gate was
-one of the three scaffold traits behind its higher per-sample fix rate.
+Without this gate a model can edit, skip the tests, and declare the work
+done — the reminder buys one test-and-repair round before the run ends.
 """
 
 from __future__ import annotations

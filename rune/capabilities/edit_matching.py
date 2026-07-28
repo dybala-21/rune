@@ -1,11 +1,10 @@
 """Fault-tolerant search-block matching for file_edit.
 
 A weak model's most common edit failure is a near-miss search string —
-whitespace drift, indent drift, or a stale copy of the line. The exact-match
+whitespace drift, indent drift, or a stale copy of the line. An exact-match
 tool then errors, the model retries variations, and the run ends in a
-failed-patch spiral (measured: this is a top consistency gap vs harnesses
-with fuzzy edit application). The ladder here recovers the safe cases and
-turns the rest into actionable feedback:
+failed-patch spiral. The ladder here recovers the safe cases and turns the
+rest into actionable feedback:
 
   1. exact substring (unchanged fast path);
   2. line-trimmed match — every line equal after strip(), unique in file;

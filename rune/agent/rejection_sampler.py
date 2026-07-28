@@ -138,8 +138,7 @@ def _tokens_similar(a: str, b: str) -> bool:
 def _targeted_test_files(cwd: str, seed_cwd: str) -> list[str]:
     """Seed-canonical test files covering the candidate's changed sources.
 
-    Layered static mapper (no LLM, seconds — design per FSE'16 static-RTS and
-    TCTracer traceability results):
+    Layered static mapper (no LLM, runs in seconds):
       L1 reverse import grep — test files importing the changed module (or
          importing its stem from the parent package); precision anchor.
       L2 name/path conventions — test_<stem>.py near the module;
@@ -237,11 +236,10 @@ def _project_python(seed_cwd: str) -> str:
     """The interpreter to run the project's tests with.
 
     Prefer the project's OWN venv (``.venv``/``venv`` beside the code): old
-    repos frequently cannot even import under RUNE's interpreter (measured:
-    sympy 1.5 fails on py3.13 — no distutils — so every targeted-test run
-    skipped and best-of had no selection signal, leaving flaky 1/3 cells that
-    a working verifier would converge to 3/3). Falls back to RUNE's own
-    interpreter when no project venv exists.
+    repos frequently cannot even import under RUNE's interpreter (removed
+    stdlib modules, version-pinned dependencies), which leaves the verifier
+    with no usable execution signal. Falls back to RUNE's own interpreter
+    when no project venv exists.
     """
     import os
     import sys
@@ -453,8 +451,8 @@ async def make_verifier(
 
     # Task-level memo: once the FULL suite comes back inconclusive (timeout /
     # collection error), it will for every sibling candidate too — suite size
-    # and environment don't change with a small patch. Measured: ~57-60s of
-    # repeated timeout per candidate on django/sphinx-family repos.
+    # and environment don't change with a small patch, and each repeat costs
+    # up to the full run timeout.
     _suite_unusable = False
 
     # Contract-derived test, built at most once per task and reused unchanged so
@@ -516,9 +514,8 @@ async def make_verifier(
             state, evidence = await run_verify(cmd, cwd)
             if state == "fail" and not _re.search(r"\b\d+ failed\b", evidence):
                 # Non-zero exit without failed tests = collection/usage error
-                # (e.g. interpreter mismatch, missing plugin) — inconclusive.
-                # Blocked repos previously died here and never reached the
-                # targeted-test fallback (observed: sphinx, top-level tests/).
+                # (e.g. interpreter mismatch, missing plugin) — inconclusive,
+                # not a rejection; fall through to the targeted-test path.
                 log.info("verify_suite_inconclusive", cmd=" ".join(cmd[:4]))
                 state, evidence = "skip", ""
                 _suite_unusable = True  # don't re-pay this per sibling
@@ -589,10 +586,9 @@ async def make_verifier(
                         # candidate but is PROVISIONAL, never "verified": the
                         # pre-fix code passes those same tests by definition,
                         # so a pass proves only "didn't break existing
-                        # behavior". Treating it as verified was measured to
-                        # produce false verified claims (2/18 on sphinx —
-                        # wrong fixes that broke nothing). Callers must
-                        # deliver provisional selections as unverified.
+                        # behavior" — a wrong fix that breaks nothing passes
+                        # too. Callers must deliver provisional selections as
+                        # unverified.
                         verify.provisional_by_cwd[cwd] = True  # type: ignore[attr-defined]
                         log.info("targeted_tests_pass", files=targets)
                         return True
@@ -620,8 +616,8 @@ async def make_verifier(
         method_by_cwd[cwd] = "Evidence Gate"
         # A caller that probed the EG check against the unfixed baseline and
         # saw it PASS sets this flag: such a check accepts anything, so its
-        # "pass" must never count as verified (measured false-verified 3/3 on
-        # sympy-17022). The execution paths above are unaffected.
+        # "pass" must never count as verified. The execution paths above are
+        # unaffected.
         if getattr(verify, "eg_disabled", False):
             return False
         return await eg(cwd)

@@ -50,20 +50,18 @@ _TIMEOUT_RETURNCODE = 124  # mirror coreutils `timeout`
 
 # Seeded mode only: when no attempt verifies, write the best-effort candidate's
 # edits into the working tree (with the same backup/undo as a verified winner)
-# instead of parking them in a side directory. Parking was measured to be the
-# single largest coverage loss on SWE-bench Lite (7/26 empty patches — the
-# entire gap vs harnesses that deliver); on large repos the execution verifier
-# times out, so even a correct fix could never verify and was always withheld.
-# The run still exits non-zero and the change is reported as UNVERIFIED — this
-# changes delivery, never what counts as done. Set to "0" to park instead.
+# instead of parking them in a side directory. On large repos the execution
+# verifier can time out, so even a correct fix may never verify — withholding
+# in that case throws away real work. The run still exits non-zero and the
+# change is reported as UNVERIFIED — this changes delivery, never what counts
+# as done. Set to "0" to park instead.
 _APPLY_UNVERIFIED_ENV = "RUNE_BESTOF_APPLY_UNVERIFIED"
 
-# Sampling strategy. With a trustworthy verifier the optimal stop is "first
-# verified pass" (sequential expected samples (1-(1-p)^K)/p ≈ 1.4-2.2 vs a
-# flat K=3 — 27-54% cost cut at identical solve rate). Above the ~17B repair
-# crossover (arXiv 2604.10508) a follow-up attempt that SEES the previous
-# failure output beats an independent resample; at/below it (small local
-# models) fresh sampling wins — matching RUNE's own 7B advisor data.
+# Sampling strategy. With a trustworthy verifier, stopping at the first
+# verified pass keeps the solve rate of flat-K sampling at a fraction of the
+# cost. Mid-size and larger models make better use of a follow-up attempt
+# that sees the previous failure output; small local models do better with a
+# fresh independent sample.
 #   auto       — ollama → sequential (serial server, max token saving);
 #                otherwise race2 (2 parallel attempts, early-exit verify,
 #                then ONE repair attempt if both fail — wall ≈ parallel).
@@ -134,11 +132,6 @@ async def _run_attempt_subprocess(
     def _produced() -> list[str]:
         if seed_manifest is not None:
             changed = _changed_vs_seed(workdir, seed_manifest)
-            # mtime changes with identical bytes are NOT changes: an agent
-            # that edited a file and then reverted it (observed: broke a
-            # test, reverted, declared "already fixed") must not be ranked
-            # or applied as if it produced work — that path shipped a
-            # zero-delta "best effort" as the final patch.
             return _drop_build_metadata(
                 _drop_seed_identical(workdir, seed_from, changed)
             )
@@ -183,8 +176,8 @@ async def _run_attempt_subprocess(
         cmd += ["--provider", provider]
 
     # Seeded (edit-existing-repo) attempts need more wall than greenfield
-    # ones: the 10-min default was measured killing 2/3 of attempts on
-    # SWE-bench-scale repos, degrading best-of-K to best-of-1-interrupted.
+    # ones: diagnosing a large codebase routinely outlives the 10-min default,
+    # and a killed attempt degrades best-of-K to best-of-1-interrupted.
     _default_ms = _DEFAULT_ATTEMPT_TIMEOUT_MS + (300_000 if seed_from else 0)
     timeout_s = max(
         1.0, env_int(_ATTEMPT_TIMEOUT_MS_ENV, _default_ms) / 1000.0
@@ -373,11 +366,10 @@ def _seed_workdir(src: str, workdir: str) -> None:
 def _drop_build_metadata(rels: list[str]) -> list[str]:
     """Drop packaging byproducts (egg-info/dist-info) from a changed-file list.
 
-    A pip/setuptools invocation inside an attempt regenerates these; they are
-    never the agent's intended work, they pollute the best-effort ranking
-    (a junk-only candidate ties a real edit on the "produced" signal), and
-    they bury the actual edit in the applied-files report (observed: 8-file
-    apply list led by Flask.egg-info/* with cli.py hidden behind the "…").
+    A pip/setuptools invocation inside an attempt regenerates these. They are
+    never the agent's intended work, and counting them lets a junk-only
+    candidate tie a real edit in the best-effort ranking while burying the
+    actual edit in the applied-files report.
     """
     def _is_meta(rel: str) -> bool:
         parts = rel.replace("\\", "/").split("/")
@@ -392,7 +384,12 @@ def _drop_build_metadata(rels: list[str]) -> list[str]:
 def _drop_seed_identical(
     workdir: str, seed_from: str | None, rels: list[str]
 ) -> list[str]:
-    """Drop rels whose bytes equal the seed original (edit-then-revert)."""
+    """Drop rels whose bytes equal the seed original.
+
+    Seeding preserves mtimes, so an edit that was later reverted still shows
+    as "changed" by mtime while carrying no delta — it must not be ranked or
+    applied as produced work.
+    """
     if not seed_from:
         return rels
     real: list[str] = []
@@ -583,10 +580,9 @@ def _best_effort_score(a: AttemptArtifact, evidence: str) -> tuple:
 
     Purely a delivery choice — never promotes anything to "verified". Signals,
     cheap and in priority order: produced files at all; changed a non-test
-    source file (a scratch test alone is not a fix — observed: a wrong-file
-    attempt outranking a sibling that edited the right source); the verifier
-    ran far enough to fail an assertion (vs never compiling); fewer
-    inconclusive errors; then lowest index for determinism.
+    source file (a scratch test alone is not a fix); the verifier ran far
+    enough to fail an assertion (vs never compiling); fewer inconclusive
+    errors; then lowest index for determinism.
     """
     ev = (evidence or "").lower()
     produced = 1 if a.produced else 0
@@ -866,12 +862,10 @@ async def _best_of_async(
 
     # best-of-K only pays when the verifier can tell a good candidate from a bad
     # one. A check that PASSES the untouched baseline (the code before any edit)
-    # accepts anything: it cannot select AND its "pass" carries zero information,
-    # so it must never produce a "verified" claim either. (Measured on SWE-bench
-    # sympy-17022: the EG check passed the unfixed baseline, collapsed to K=1,
-    # then the same vacuous check "verified" a wrong patch 3/3 — exit 0 while the
-    # held-out tests fail.) Probe the baseline once; if the check can't fail on
-    # unsolved code, sample a single attempt and treat its result as UNVERIFIED.
+    # accepts anything: it cannot select, and its "pass" carries zero
+    # information, so it must never produce a "verified" claim either. Probe
+    # the baseline once; if the check can't fail on unsolved code, sample a
+    # single attempt and treat its result as UNVERIFIED.
     check_discriminates = True
     if seed_from and has_check:
         check_discriminates = await _verifier_discriminates(verify_cwd, seed_from)
@@ -907,8 +901,8 @@ async def _best_of_async(
 
     async def verify(artifact: AttemptArtifact) -> bool:
         # Seeded mode: an attempt that changed NOTHING cannot have fixed
-        # anything — a check pass on it is vacuous (observed: a 0-byte-diff
-        # candidate "verified" via EG). Never verify a no-change candidate.
+        # anything, so a check pass on it is vacuous. Never verify a
+        # no-change candidate.
         if seed_cwd and not artifact.produced:
             return False
         # Cap verifier subprocesses too: sample_parallel gathers all K verifies
@@ -1009,8 +1003,7 @@ async def _best_of_async(
         # A selection made by the repo's EXISTING tests is PROVISIONAL: those
         # tests pass the pre-fix code too, so passing them proves "nothing
         # broke", not "issue fixed". It picks the candidate and stops the
-        # sampling (speed), but the delivery must stay unverified — claiming
-        # verified here was measured to produce false claims.
+        # sampling, but the delivery must stay unverified.
         _provisional = bool(
             res.solved
             and res.selected is not None
@@ -1107,11 +1100,9 @@ async def _best_of_async(
         best = _rank_best_effort(artifacts, ev_map) if artifacts else None
         # Deleting the work is wrong either way — we only established that we
         # couldn't verify it, not that it's wrong. In seeded mode, APPLY the
-        # best-effort candidate's edits (with backup/undo) so the work actually
-        # lands: parking was measured as the whole SWE-bench coverage gap
-        # (empty patches), and every shipped agent examined delivers under a
-        # recoverability guarantee rather than withholding. Elsewhere (or when
-        # opted out) park it beside the project for deliberate adoption.
+        # best-effort candidate's edits (with backup/undo) so the work
+        # actually lands instead of being withheld. Elsewhere (or when opted
+        # out) park it beside the project for deliberate adoption.
         applied: list[str] = []
         apply_backup: str | None = None
         unverified_dir: str | None = None

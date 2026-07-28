@@ -53,24 +53,22 @@ _STOP_BATCH_FAILURE_TOOLS = frozenset({
 _WRITE_EXEC_TOOLS = _STOP_BATCH_FAILURE_TOOLS
 
 # --- Exploration-round budget -------------------------------------------------
-# Observed failure mode on code-edit tasks (SWE-bench traces): a weak model
-# burns its entire tool-round budget on read-only spelunking (grep/find/read),
-# hits the round cap, and the run ends with NO edit — an empty patch. The
-# budget counts consecutive tool rounds in which no file-mutating tool was
-# called; at the budget a steering message is injected ("stop exploring, make
-# the edit"), and a few rounds later — if the model is still exploring — the
-# next call is forced to be file_edit via tool_choice (aider-style narrow edit
-# path: weak models perform better when the action space is constrained).
+# A weak model on a code-edit task can burn its entire tool-round budget on
+# read-only spelunking (grep/find/read), hit the round cap, and end the run
+# with NO edit — an empty patch. The budget counts consecutive tool rounds in
+# which no file-mutating tool was called; at the budget a steering message is
+# injected, and near cap exhaustion — if the model is still exploring — the
+# next call is forced to be file_edit via tool_choice (a narrow edit path:
+# weak models do better when the action space is constrained).
 _EDIT_TOOLS: frozenset[str] = frozenset({"file_write", "file_edit", "file_delete"})
 _EXPLORE_BUDGET_ENV = "RUNE_EXPLORE_BUDGET"  # rounds; 0 disables
 _EXPLORE_FORCE_EDIT_ENV = "RUNE_EXPLORE_FORCE_EDIT"  # "0" disables the forced call
 
 # Escalation timing is computed relative to the round cap in stream_text:
 # the nudge fires at the configured budget (but no later than cap-6) and the
-# forced edit only near cap exhaustion (cap-3). The earlier fixed-grace
-# schedule (nudge+4) was measured to force edits MID-diagnosis on repo-fix
-# tasks — the model capitulated and patched whatever class was in context,
-# converting empty-patch failures into confident wrong patches.
+# forced edit only near cap exhaustion (cap-3). Forcing earlier interrupts
+# the model mid-diagnosis — it capitulates and patches whatever code is in
+# context, converting empty-patch failures into confident wrong patches.
 
 _EXPLORE_NUDGE = (
     "You have spent several tool rounds exploring without editing any file. "

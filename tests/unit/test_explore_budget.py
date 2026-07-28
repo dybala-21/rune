@@ -1,6 +1,6 @@
 """Exploration-round budget in StreamResult.stream_text.
 
-The observed SWE-bench failure mode: a weak model spends every tool round on
+The failure mode this guards against: a weak model spends every tool round on
 read-only exploration (grep/find/read), hits the round cap, and the run ends
 with no edit — an empty patch. The budget counts consecutive no-edit tool
 rounds; at the budget a steering nudge is injected, and after a grace window a

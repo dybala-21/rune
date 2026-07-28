@@ -720,7 +720,7 @@ async def test_nondiscriminating_check_never_claims_verified(monkeypatch, tmp_pa
 @pytest.mark.asyncio
 async def test_seeded_no_change_candidate_never_verifies(monkeypatch, tmp_path):
     # A candidate that changed NOTHING must not be selectable as "verified"
-    # even when the check passes it (observed: 0-byte-diff EG "win").
+    # even when the check passes it.
     dest = tmp_path / "dest"
     dest.mkdir()
     (dest / "app.py").write_text("ORIGINAL")
@@ -791,7 +791,7 @@ def test_best_effort_prefers_source_edit_over_test_only(tmp_path):
     from rune.cli.best_of import AttemptArtifact, _rank_best_effort
 
     # Attempt 0 wrote only a scratch test; attempt 1 edited real source.
-    # The source-editing sibling must win the hand-off (observed failure:
+    # The source-editing sibling must win the hand-off (otherwise
     # a wrong-file/scratch attempt was handed off over the right-file one).
     a0 = AttemptArtifact(index=0, workdir="w0", stdout="", returncode=0,
                          produced=["test_scratch.py"])

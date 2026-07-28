@@ -576,7 +576,7 @@ async def test_suite_collection_error_falls_through_to_targeted(monkeypatch, tmp
 @pytest.mark.asyncio
 async def test_suite_verdict_memoized_across_candidates(monkeypatch, tmp_path):
     # An inconclusive full-suite run (timeout/collection error) must not be
-    # re-paid for every sibling candidate — measured ~60s each on django-family.
+    # re-paid for every sibling candidate (each repeat costs the full timeout).
     import rune.agent.auto_verify as av
     import rune.agent.rejection_sampler as rs
 

@@ -1,10 +1,9 @@
 """Fuzzy edit-application ladder (edit_matching) + file_edit wiring.
 
-Motivation (scaffold autopsy 2026-07): near-miss search strings are the top
-weak-model edit failure; exact-match-only file_edit bounced them into retry
-spirals. The ladder recovers unique trimmed/whitespace-normalized matches,
-hints the closest real section otherwise, and escalates after repeated
-failures on one file.
+Near-miss search strings are the most common weak-model edit failure;
+exact-match-only file_edit bounces them into retry spirals. The ladder
+recovers unique trimmed/whitespace-normalized matches, hints the closest
+real section otherwise, and escalates after repeated failures on one file.
 """
 
 from __future__ import annotations
