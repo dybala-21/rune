@@ -575,6 +575,15 @@ async def make_verifier(
                         method_by_cwd[cwd] = (
                             f"targeted tests ({', '.join(targets)})"
                         )
+                        # A pass of the repo's EXISTING tests selects this
+                        # candidate but is PROVISIONAL, never "verified": the
+                        # pre-fix code passes those same tests by definition,
+                        # so a pass proves only "didn't break existing
+                        # behavior". Treating it as verified was measured to
+                        # produce false verified claims (2/18 on sphinx —
+                        # wrong fixes that broke nothing). Callers must
+                        # deliver provisional selections as unverified.
+                        verify.provisional_by_cwd[cwd] = True  # type: ignore[attr-defined]
                         log.info("targeted_tests_pass", files=targets)
                         return True
                 elif t_state == "fail":
@@ -609,6 +618,7 @@ async def make_verifier(
 
     verify.eg_disabled = False  # type: ignore[attr-defined]
     verify.has_check = has_check  # type: ignore[attr-defined]
+    verify.provisional_by_cwd = {}  # type: ignore[attr-defined]
     verify.evidence_by_cwd = evidence_by_cwd  # type: ignore[attr-defined]
     verify.method_by_cwd = method_by_cwd  # type: ignore[attr-defined]
     return verify

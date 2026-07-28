@@ -985,6 +985,50 @@ async def _best_of_async(
     await _learn_from_failures(message, failed_ev)
 
     try:
+        # A selection made by the repo's EXISTING tests is PROVISIONAL: those
+        # tests pass the pre-fix code too, so passing them proves "nothing
+        # broke", not "issue fixed". It picks the candidate and stops the
+        # sampling (speed), but the delivery must stay unverified — claiming
+        # verified here was measured to produce false claims.
+        _provisional = bool(
+            res.solved
+            and res.selected is not None
+            and getattr(verify_cwd, "provisional_by_cwd", {}).get(
+                res.selected.workdir
+            )
+        )
+        if res.solved and res.selected is not None and _provisional:
+            selected = res.selected
+            if seed_cwd:
+                applied, apply_backup = _restore_changed(
+                    selected.workdir, dest, selected.produced
+                )
+            else:
+                applied, _sk = _restore_artifacts(
+                    selected.workdir, dest, selected.produced
+                )
+                apply_backup = None
+            log.info(
+                "bestof_provisional_selection",
+                index=res.selected_index,
+                files=len(applied),
+            )
+            report(
+                selected.stdout,
+                solved=False,
+                selected_index=res.selected_index,
+                pass_count=0,
+                k=k,
+                copied=[],
+                skipped=[],
+                has_check=has_check,
+                no_artifact=0,
+                applied=applied,
+                apply_backup=apply_backup,
+                provisional=True,
+            )
+            return 1
+
         if res.solved and res.selected is not None:
             selected: AttemptArtifact = res.selected
             if seed_cwd:
@@ -1152,6 +1196,7 @@ def run_best_of(
         applied: list[str] | None = None,
         apply_backup: str | None = None,
         check_discriminates: bool = True,
+        provisional: bool = False,
     ) -> None:
         def _applied_note() -> str:
             """Describe the applied-but-unverified delivery and its undo path."""
@@ -1224,6 +1269,13 @@ def run_best_of(
                     f"[yellow]best-of: NOT overwritten (already exist in cwd): "
                     f"{', '.join(skipped)}.{where}[/yellow]"
                 )
+        elif provisional:
+            console.print(
+                f"[yellow]best-of-{k}: picked the candidate that passes the "
+                f"repo's EXISTING tests — but those tests also pass the "
+                f"pre-fix code, so the change itself is NOT verified."
+                f"{_applied_note()}[/yellow]"
+            )
         elif not has_check:
             console.print(
                 f"[yellow]best-of-{k}: no mechanical success check could be built "

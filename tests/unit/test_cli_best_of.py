@@ -1579,3 +1579,49 @@ async def test_repair_env_opt_out(monkeypatch, tmp_path):
         "task", 3, None, "anthropic", report=lambda s, **kw: None, seed_cwd=True,
     )
     assert all("expected 3 got 2" not in m for _, m in spawned)
+
+
+@pytest.mark.asyncio
+async def test_provisional_selection_never_claims_verified(monkeypatch, tmp_path):
+    # Repo-existing-tests pass selects the candidate but must deliver as
+    # UNVERIFIED (exit 1, files applied) — those tests pass pre-fix code too.
+    monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "sequential")
+    dest = tmp_path / "dp"; dest.mkdir()
+    (dest / "app.py").write_text("ORIGINAL")
+
+    async def fake_attempt(index, message, model, provider, seed_from=None):
+        w = tmp_path / f"pv_w{index}"
+        w.mkdir()
+        (w / "app.py").write_text("PROVISIONAL FIX")
+        return AttemptArtifact(
+            index=index, workdir=str(w), stdout="out", returncode=0,
+            produced=["app.py"],
+        )
+
+    async def fake_make_verifier(instruction, seed_cwd=None):
+        async def verify(cwd):
+            verify.provisional_by_cwd[cwd] = True  # targeted-pass semantics
+            return True
+
+        verify.has_check = True
+        verify.evidence_by_cwd = {}
+        verify.provisional_by_cwd = {}
+        return verify
+
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
+    monkeypatch.setattr(best_of, "make_verifier", fake_make_verifier)
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    monkeypatch.chdir(dest)
+
+    reports: list = []
+    code = await _best_of_async(
+        "fix", 3, None, "anthropic",
+        report=lambda s, **kw: reports.append(kw), seed_cwd=True,
+    )
+    assert code == 1  # NOT a verified success
+    kw = reports[0]
+    assert kw.get("provisional") is True
+    assert kw["solved"] is False
+    assert kw["applied"] == ["app.py"]
+    assert (dest / "app.py").read_text() == "PROVISIONAL FIX"  # still delivered
