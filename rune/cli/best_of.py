@@ -63,6 +63,11 @@ _STRATEGY_ENV = "RUNE_BESTOF_STRATEGY"
 _REPAIR_ENV = "RUNE_BESTOF_REPAIR"  # "0" disables failure-fed repair attempts
 _REPAIR_EVIDENCE_CAP = 1500
 
+# Rung-0 fast path before the agentic attempts: single-shot localize+edit,
+# accepted only when a baseline-failing repro script flips to passing (a
+# discriminating check → honest verified). "0" disables.
+_FASTPATH_ENV = "RUNE_FASTPATH"
+
 
 def _repair_suffix(evidence: str) -> str:
     return (
@@ -895,6 +900,52 @@ async def _best_of_async(
         # at once, each an Evidence-Gate check subprocess.
         async with sem:
             return await verify_cwd(artifact.workdir)
+
+    # Rung 0: cheap single-shot pass, gated on a discriminating repro check.
+    fastpath_evidence = ""
+    if seed_from and os.environ.get(_FASTPATH_ENV, "1") != "0":
+        from rune.agent.fastpath import run_fastpath
+
+        fp_workdir = tempfile.mkdtemp(
+            prefix="rune_fastpath_", dir=_attempt_work_root()
+        )
+        try:
+            _seed_workdir(seed_from, fp_workdir)
+            fp = await run_fastpath(message, seed_from, fp_workdir,
+                                    model, provider)
+        except Exception as exc:  # rung-0 must never sink the run
+            log.warning("fastpath_error", error=str(exc)[:160])
+            fp = None
+        if fp and fp.verified and fp.applied:
+            copied, backup_dir = _restore_changed(
+                fp_workdir, dest, fp.applied
+            )
+            shutil.rmtree(fp_workdir, ignore_errors=True)
+            await _record_winner(message, "", copied)
+            report(
+                "",
+                solved=True,
+                selected_index=0,
+                pass_count=1,
+                k=1,
+                copied=copied,
+                skipped=[],
+                backup_dir=backup_dir,
+                has_check=True,
+                no_artifact=0,
+                verify_method=fp.method,
+            )
+            return 0
+        shutil.rmtree(fp_workdir, ignore_errors=True)
+        if fp and fp.repro_script:
+            # Hand the agentic rung the evidence, not a failed diff.
+            fastpath_evidence = (
+                "\n\nA reproduction script for this issue (currently "
+                "FAILING) — make it pass without breaking existing tests:\n"
+                "```python\n" + fp.repro_script[:3000] + "\n```\n"
+                "Its current output:\n" + fp.repro_output[:800]
+            )
+            message = message + fastpath_evidence
 
     strategy = os.environ.get(_STRATEGY_ENV, "auto").strip().lower()
     if strategy == "auto":

@@ -1653,3 +1653,81 @@ def test_drop_build_metadata_filters_packaging_junk():
         "tests/test_cli.py",
     ]
     assert _drop_build_metadata(rels) == ["src/flask/cli.py", "tests/test_cli.py"]
+
+
+@pytest.mark.asyncio
+async def test_fastpath_verified_short_circuits(monkeypatch, tmp_path):
+    # Rung-0 verified → solved exit 0, no agentic attempts spawned.
+    monkeypatch.setenv("RUNE_FASTPATH", "1")
+    dest = tmp_path / "fp"
+    dest.mkdir()
+    (dest / "app.py").write_text("BROKEN")
+
+    async def fake_fastpath(issue, seed, workdir, model, provider):
+        import os
+
+        from rune.agent.fastpath import FastPathResult
+        with open(os.path.join(workdir, "app.py"), "w") as fh:
+            fh.write("FIXED")
+        return FastPathResult(verified=True, applied=["app.py"],
+                              method="reproduction script")
+
+    import rune.agent.fastpath as fp_mod
+    monkeypatch.setattr(fp_mod, "run_fastpath", fake_fastpath)
+
+    async def no_attempts(*a, **k):
+        raise AssertionError("agentic rung must not run")
+
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", no_attempts)
+
+    async def fake_make_verifier(instruction, seed_cwd=None):
+        async def verify(cwd):
+            return False
+        verify.has_check = True
+        verify.evidence_by_cwd = {}
+        return verify
+
+    monkeypatch.setattr(best_of, "make_verifier", fake_make_verifier)
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.chdir(dest)
+
+    reports: list = []
+    code = await _best_of_async(
+        "fix", 3, None, "anthropic",
+        report=lambda s, **kw: reports.append(kw), seed_cwd=True,
+    )
+    assert code == 0
+    assert reports[0]["solved"] is True
+    assert reports[0]["verify_method"] == "reproduction script"
+    assert (dest / "app.py").read_text() == "FIXED"
+
+
+@pytest.mark.asyncio
+async def test_fastpath_evidence_reaches_agentic_rung(monkeypatch, tmp_path):
+    # Rung-0 fails but found a discriminating repro → attempts get the
+    # script as structured evidence in their message.
+    monkeypatch.setenv("RUNE_FASTPATH", "1")
+    monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "sequential")
+    dest = tmp_path / "fp2"
+    dest.mkdir()
+    (dest / "app.py").write_text("BROKEN")
+
+    async def fake_fastpath(issue, seed, workdir, model, provider):
+        from rune.agent.fastpath import FastPathResult
+        return FastPathResult(repro_script="assert fixed()",
+                              repro_output="AssertionError")
+
+    import rune.agent.fastpath as fp_mod
+    monkeypatch.setattr(fp_mod, "run_fastpath", fake_fastpath)
+
+    spawned: list = []
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", _mk_attempts(tmp_path, spawned))
+    monkeypatch.setattr(best_of, "make_verifier", _mk_verifier(pass_indices=set()))
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    monkeypatch.chdir(dest)
+
+    await _best_of_async(
+        "fix", 1, None, "anthropic", report=lambda s, **kw: None, seed_cwd=True,
+    )
+    assert spawned and "assert fixed()" in spawned[0][1]
