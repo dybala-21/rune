@@ -216,37 +216,74 @@ async def file_edit(params: FileEditParams) -> CapabilityResult:
 
     content = file_path.read_text()
 
-    if params.search not in content:
-        return CapabilityResult(
-            success=False,
-            error=f"Search string not found in {params.path}",
-        )
+    from rune.capabilities.edit_matching import (
+        apply_block,
+        closest_section_hint,
+        escalation_hint,
+        find_block,
+        record_edit_failure,
+        record_edit_success,
+    )
 
-    if params.all:
-        new_content = content.replace(params.search, params.replace)
-        count = content.count(params.search)
+    matched_via = "exact"
+    if params.search in content:
+        if params.all:
+            new_content = content.replace(params.search, params.replace)
+            count = content.count(params.search)
+        else:
+            new_content = content.replace(params.search, params.replace, 1)
+            count = 1
     else:
-        new_content = content.replace(params.search, params.replace, 1)
+        # Fuzzy ladder: a near-miss search (whitespace/indent drift) is the
+        # most common weak-model edit failure; recover the UNIQUE-match cases
+        # instead of bouncing the model into a retry spiral. `all` implies
+        # multiple occurrences — fuzzy handles single-block edits only.
+        block = None if params.all else find_block(content, params.search)
+        if block is None:
+            failures = record_edit_failure(str(file_path))
+            hint = closest_section_hint(content, params.search)
+            return CapabilityResult(
+                success=False,
+                error=(
+                    f"Search string not found in {params.path}."
+                    + (f"\n{hint}" if hint else "")
+                    + escalation_hint(params.path, failures)
+                ),
+            )
+        new_content = apply_block(content, block, params.replace)
+        matched_via = block.strategy
         count = 1
 
     if new_content == content:
+        record_edit_success(str(file_path))
         return CapabilityResult(success=True, output="No changes made")
 
     # Syntax guard: validate replacement before writing to disk
     from rune.agent.syntax_guard import validate as _syntax_validate
     _syn_err = _syntax_validate(str(file_path), new_content)
     if _syn_err:
+        failures = record_edit_failure(str(file_path))
         return CapabilityResult(
             success=False,
-            output=f"Edit would create syntax error in {file_path.name}: {_syn_err}. Fix and retry.",
+            output=(
+                f"Edit would create syntax error in {file_path.name}: "
+                f"{_syn_err}. Fix and retry."
+                + escalation_hint(params.path, failures)
+            ),
         )
 
     file_path.write_text(new_content)
+    record_edit_success(str(file_path))
 
+    note = "" if matched_via == "exact" else (
+        f" (matched via {matched_via} fuzzy match — verify the edit landed "
+        f"where intended with file_read if unsure)"
+    )
     return CapabilityResult(
         success=True,
-        output=f"Replaced {count} occurrence(s) in {params.path}",
-        metadata={"path": str(file_path), "replacements": count},
+        output=f"Replaced {count} occurrence(s) in {params.path}{note}",
+        metadata={"path": str(file_path), "replacements": count,
+                  "matched_via": matched_via},
     )
 
 

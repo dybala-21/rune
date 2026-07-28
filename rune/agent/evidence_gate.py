@@ -66,6 +66,14 @@ _EXTRACT_SYSTEM = (
     "row file just to re-run the transform.\n"
     "- Use only commands available in a minimal container (sh, cmp, diff, head, "
     "sed, awk, the task's own required tools). No network.\n"
+    "- POSIX only — the check also runs on macOS, where `timeout`, `head -n-N`, "
+    "`tail -n+N` and `grep -P` do NOT exist. Never use them.\n"
+    "- If the task is a SERVICE, do not start a server and curl a fixed port: "
+    "ports collide across parallel checks and a leaked server fails every later "
+    "one. Exercise it through the project's own in-process entry point instead "
+    "(its test runner, or a short program that calls the handler directly). Only "
+    "bind a port if there is no other way, and then bind port 0 and read back "
+    "the assigned port rather than hardcoding one.\n"
     "- If the task's success criteria are not mechanically checkable from public "
     "files, output exactly the token NO_CHECK and nothing else.\n"
     "Output ONLY the script body (or NO_CHECK). No markdown fences, no prose."
@@ -167,23 +175,73 @@ async def run_evidence_check(script: str, cwd: str) -> tuple[str, str]:
             cwd=cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
+            # Own process group, so cleanup below can reach what the script
+            # spawned. A check for a service starts a server in the background;
+            # killing only the shell leaves that server holding its port, and
+            # every later candidate then dies on EADDRINUSE regardless of
+            # whether its code was right. Measured: a service project scored
+            # correct-pass 0/5 that way, with a leaked server still running
+            # after the run.
+            start_new_session=True,
         )
     except Exception as exc:  # pragma: no cover - spawn failure
         log.warning("evidence_gate_spawn_error", error=str(exc)[:120])
         return "skip", ""
 
+    import os
+    import signal
+
+    # Resolve the group NOW, while the shell is certainly alive. Looking it up
+    # at cleanup time fails for the common `server & ... ; exit 0` shape: the
+    # shell is already gone, getpgid raises, and the fallback kills only a dead
+    # pid while the server it spawned keeps the port.
     try:
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
-    except TimeoutError:
+        _pgid: int | None = os.getpgid(proc.pid)
+    except (ProcessLookupError, OSError):
+        _pgid = None
+
+    def _kill_group() -> None:
+        """Kill the check and anything it started."""
+        if _pgid is not None:
+            try:
+                os.killpg(_pgid, signal.SIGKILL)
+                return
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
         try:
             proc.kill()
         except ProcessLookupError:
             pass
-        log.warning("evidence_gate_timeout", timeout_s=timeout_s)
-        return "skip", ""  # inconclusive → neither block nor pass
+
+    # Watch for the SHELL's exit code directly. Neither communicate() nor
+    # wait() can be used here: both also wait for the stdout pipe to
+    # disconnect, and a backgrounded server inherits that pipe, so a check that
+    # had already finished and produced a verdict would burn the full timeout
+    # and come back "skip" — which is how service checks became inconclusive by
+    # construction. returncode is set from the child signal alone.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_s
+    try:
+        while proc.returncode is None:
+            if loop.time() >= deadline:
+                _kill_group()
+                log.warning("evidence_gate_timeout", timeout_s=timeout_s)
+                return "skip", ""  # inconclusive → neither block nor pass
+            await asyncio.sleep(0.05)
     except Exception as exc:  # pragma: no cover
+        _kill_group()
         log.warning("evidence_gate_run_error", error=str(exc)[:120])
         return "skip", ""
+
+    # The verdict is in; reap anything still running so it releases the pipe,
+    # then drain what the check printed.
+    _kill_group()
+    stdout = b""
+    if proc.stdout is not None:
+        try:
+            stdout = await asyncio.wait_for(proc.stdout.read(), timeout=5.0)
+        except (TimeoutError, Exception):  # pragma: no cover - drain best-effort
+            stdout = b""
 
     output = (stdout.decode("utf-8", errors="replace") if stdout else "")[
         :_MAX_EVIDENCE_OUTPUT_CHARS

@@ -27,6 +27,8 @@ from pathlib import Path
 
 from rune.agent.isolation import ISOLATION_ENV
 from rune.agent.rejection_sampler import (
+    Attempt,
+    RejectionResult,
     make_verifier,
     sample_parallel,
 )
@@ -45,6 +47,32 @@ RECURSION_GUARD_ENV = "RUNE_IN_BEST_OF"
 _ATTEMPT_TIMEOUT_MS_ENV = "RUNE_BESTOF_ATTEMPT_TIMEOUT_MS"
 _DEFAULT_ATTEMPT_TIMEOUT_MS = 600_000  # 10 min
 _TIMEOUT_RETURNCODE = 124  # mirror coreutils `timeout`
+
+# Seeded mode: when nothing verifies, apply the best-effort edits (with
+# backup/undo) instead of parking them — a correct fix can fail to verify,
+# and withholding it throws away real work. Still exits non-zero, reported
+# UNVERIFIED. "0" parks instead.
+_APPLY_UNVERIFIED_ENV = "RUNE_BESTOF_APPLY_UNVERIFIED"
+
+# Sampling strategy: stop at the first verified pass instead of always
+# paying flat K. auto = sequential for ollama (serial server), race2
+# otherwise (2 parallel attempts, then one failure-fed repair attempt);
+# "parallel" restores flat K. Larger models profit from seeing the previous
+# failure; small local ones resample fresh.
+_STRATEGY_ENV = "RUNE_BESTOF_STRATEGY"
+_REPAIR_ENV = "RUNE_BESTOF_REPAIR"  # "0" disables failure-fed repair attempts
+_REPAIR_EVIDENCE_CAP = 1500
+
+
+def _repair_suffix(evidence: str) -> str:
+    return (
+        "\n\nNOTE: a previous independent attempt at this task FAILED "
+        "verification with this output:\n```\n"
+        + evidence[-_REPAIR_EVIDENCE_CAP:]
+        + "\n```\nDiagnose what that attempt likely got wrong, then implement "
+        "a correct fix for the root cause. Do not repeat an approach the "
+        "failure output already refutes."
+    )
 
 
 @dataclass
@@ -94,7 +122,10 @@ async def _run_attempt_subprocess(
 
     def _produced() -> list[str]:
         if seed_manifest is not None:
-            return _changed_vs_seed(workdir, seed_manifest)
+            changed = _changed_vs_seed(workdir, seed_manifest)
+            return _drop_build_metadata(
+                _drop_seed_identical(workdir, seed_from, changed)
+            )
         return _snapshot_produced(workdir)
 
     env = dict(os.environ)
@@ -105,14 +136,42 @@ async def _run_attempt_subprocess(
     # contained without an OS sandbox.
     env[ISOLATION_ENV] = workdir
 
-    cmd = [sys.executable, "-m", "rune.cli.main", "--message", message]
+    # Verify handover (seeded mode): tell the attempt what this project's test
+    # command is — or how to find the nearest tests — so it spends rounds
+    # fixing, not rediscovering the verify loop. Detection is structural
+    # (detect_test_command); same hint for every attempt.
+    child_message = message
+    if seed_from:
+        try:
+            from rune.agent.auto_verify import detect_test_command
+            _tc = detect_test_command(seed_from)
+        except Exception:
+            _tc = None
+        if _tc:
+            child_message += (
+                f"\n\nThis project's test command: `{' '.join(_tc)}`. After "
+                "editing, run the RELEVANT subset (the test file(s) covering "
+                "the code you changed) and fix failures before finishing."
+            )
+        else:
+            child_message += (
+                "\n\nAfter editing, locate and run the tests covering the "
+                "files you changed (look for a tests/ directory or "
+                "test_*.py near them); fix failures before finishing."
+            )
+
+    cmd = [sys.executable, "-m", "rune.cli.main", "--message", child_message]
     if model:
         cmd += ["--model", model]
     if provider:
         cmd += ["--provider", provider]
 
+    # Seeded (edit-existing-repo) attempts need more wall than greenfield
+    # ones: diagnosing a large codebase routinely outlives the 10-min default,
+    # and a killed attempt degrades best-of-K to best-of-1-interrupted.
+    _default_ms = _DEFAULT_ATTEMPT_TIMEOUT_MS + (300_000 if seed_from else 0)
     timeout_s = max(
-        1.0, env_int(_ATTEMPT_TIMEOUT_MS_ENV, _DEFAULT_ATTEMPT_TIMEOUT_MS) / 1000.0
+        1.0, env_int(_ATTEMPT_TIMEOUT_MS_ENV, _default_ms) / 1000.0
     )
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -295,6 +354,49 @@ def _seed_workdir(src: str, workdir: str) -> None:
     shutil.copytree(src, workdir, ignore=_SEED_IGNORE, dirs_exist_ok=True, symlinks=False)
 
 
+def _drop_build_metadata(rels: list[str]) -> list[str]:
+    """Drop packaging byproducts (egg-info/dist-info) from a changed-file list.
+
+    A pip/setuptools invocation inside an attempt regenerates these. They are
+    never the agent's intended work, and counting them lets a junk-only
+    candidate tie a real edit in the best-effort ranking while burying the
+    actual edit in the applied-files report.
+    """
+    def _is_meta(rel: str) -> bool:
+        parts = rel.replace("\\", "/").split("/")
+        return any(
+            p.endswith(".egg-info") or p.endswith(".dist-info") or p == ".eggs"
+            for p in parts
+        )
+
+    return [r for r in rels if not _is_meta(r)]
+
+
+def _drop_seed_identical(
+    workdir: str, seed_from: str | None, rels: list[str]
+) -> list[str]:
+    """Drop rels whose bytes equal the seed original.
+
+    Seeding preserves mtimes, so an edit that was later reverted still shows
+    as "changed" by mtime while carrying no delta — it must not be ranked or
+    applied as produced work.
+    """
+    if not seed_from:
+        return rels
+    real: list[str] = []
+    for rel in rels:
+        try:
+            if (
+                Path(workdir, rel).read_bytes()
+                == Path(seed_from, rel).read_bytes()
+            ):
+                continue
+        except OSError:
+            pass  # new or unreadable file → keep
+        real.append(rel)
+    return real
+
+
 def _tree_manifest(root: str) -> dict[str, tuple[float, int]]:
     """Map each file's relpath -> (mtime, size). Used to diff seed vs final."""
     manifest: dict[str, tuple[float, int]] = {}
@@ -454,7 +556,50 @@ def _preserve_skipped(workdir: str, dest: str, skipped: list[str]) -> str | None
     return preserve
 
 
-def _preserve_unverified(workdir: str, dest: str, produced: list[str]) -> str | None:
+# Verifier output markers, cheapest first, that a candidate got FURTHER: a suite
+# that ran and failed an assertion is closer to correct than one that never
+# compiled/collected. Structured runner strings only — not NL matching.
+_PROGRESS_MARKERS = ("failed", "assertionerror", "assert", " passed")
+_INCONCLUSIVE_MARKERS = (
+    "error[e", "could not compile", "cannot find", "unresolved import",
+    "modulenotfounderror", "importerror", "collection error", "syntaxerror",
+)
+
+
+def _best_effort_score(a: AttemptArtifact, evidence: str) -> tuple:
+    """Rank a FAILED candidate for hand-off. Higher is better.
+
+    Purely a delivery choice — never promotes anything to "verified". Signals,
+    cheap and in priority order: produced files at all; changed a non-test
+    source file (a scratch test alone is not a fix); the verifier ran far
+    enough to fail an assertion (vs never compiling); fewer inconclusive
+    errors; then lowest index for determinism.
+    """
+    ev = (evidence or "").lower()
+    produced = 1 if a.produced else 0
+    src = 1 if any(
+        not os.path.basename(f).startswith("test") for f in a.produced
+    ) else 0
+    ran = 1 if any(m in ev for m in _PROGRESS_MARKERS) else 0
+    inconclusive = sum(ev.count(m) for m in _INCONCLUSIVE_MARKERS)
+    return (produced, src, ran, -inconclusive, -a.index)
+
+
+def _rank_best_effort(
+    artifacts: list[AttemptArtifact], evidence_by_cwd: dict[str, str]
+) -> AttemptArtifact | None:
+    """Pick the furthest-along failed candidate to hand off, or None."""
+    if not artifacts:
+        return None
+    return max(
+        artifacts,
+        key=lambda a: _best_effort_score(a, evidence_by_cwd.get(a.workdir, "")),
+    )
+
+
+def _preserve_unverified(
+    workdir: str, dest: str, produced: list[str]
+) -> tuple[str | None, list[str]]:
     """Park an unverified attempt's files beside the project instead of deleting.
 
     When no attempt passes the verifier we deliberately do not restore anything
@@ -464,29 +609,66 @@ def _preserve_unverified(workdir: str, dest: str, produced: list[str]) -> str | 
     ``.rune-bestof-unverified-*`` dir inside ``dest`` (dotfile → ignored by the
     non-empty-cwd warning) so the user can diff and adopt it deliberately.
 
-    Returns the path, or ``None`` when there was nothing to save.
+    Returns ``(path, saved_relpaths)``, or ``(None, [])`` when nothing was saved.
     """
     if not produced:
-        return None
+        return None, []
     preserve = tempfile.mkdtemp(prefix=".rune-bestof-unverified-", dir=dest)
-    saved = False
+    saved: list[str] = []
     for name in produced:
         src = os.path.join(workdir, name)
         if not os.path.exists(src):
             continue
         dst = os.path.join(preserve, name)
         try:
+            # In seeded mode `produced` holds CHANGED relpaths like
+            # "src/lib.rs", so the parent has to exist first. Without this the
+            # copy raised and was swallowed, and the parked dir ended up with
+            # only the top-level files — the actual edit was dropped while we
+            # told the user their work had been kept.
+            parent = os.path.dirname(dst)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
             if os.path.isdir(src):
-                shutil.copytree(src, dst)
+                shutil.copytree(src, dst, dirs_exist_ok=True)
             else:
                 shutil.copy2(src, dst)
-        except OSError:
+        except OSError as exc:
+            log.warning("bestof_preserve_failed", name=name, error=str(exc)[:120])
             continue
-        saved = True
+        saved.append(name)
     if not saved:
         shutil.rmtree(preserve, ignore_errors=True)
-        return None
-    return preserve
+        return None, []
+    return preserve, saved
+
+
+async def _verifier_discriminates(verify_cwd, seed_from: str) -> bool:
+    """Can this verifier fail the untouched baseline?
+
+    Runs the check against a throwaway COPY of the pre-edit tree (never the
+    user's own — the check may write files / run a build). Returns:
+      True  — baseline FAILS the check (or the check is inconclusive there), so
+              the check discriminates and best-of-K can select on it.
+      False — baseline PASSES, so the check accepts anything and cannot select.
+    On any error, default True: never suppress best-of on a probe failure.
+    """
+    scratch = None
+    try:
+        scratch = tempfile.mkdtemp(prefix="rune-probe-")
+        probe = os.path.join(scratch, "baseline")
+        shutil.copytree(
+            seed_from, probe, symlinks=False,
+            ignore=shutil.ignore_patterns(*_SEED_IGNORE_PATTERNS),
+        )
+        passed = await verify_cwd(probe)
+        return not passed
+    except Exception as exc:  # never let the probe break the run
+        log.warning("bestof_probe_failed", error=str(exc)[:120])
+        return True
+    finally:
+        if scratch:
+            shutil.rmtree(scratch, ignore_errors=True)
 
 
 def _cleanup(artifacts: list[AttemptArtifact]) -> None:
@@ -669,6 +851,19 @@ async def _best_of_async(
     verify_cwd = await make_verifier(message, seed_cwd=seed_from)
     has_check = bool(getattr(verify_cwd, "has_check", True))
 
+    # A check that passes the untouched baseline accepts anything — it can
+    # neither select nor verify. Probe once; if so, drop to a single attempt
+    # and treat its result as unverified.
+    check_discriminates = True
+    if seed_from and has_check:
+        check_discriminates = await _verifier_discriminates(verify_cwd, seed_from)
+        if not check_discriminates:
+            log.info("bestof_verifier_nondiscriminating_k1", original_k=k)
+            k = 1
+            # Only the EG check was proven vacuous (targeted tests don't
+            # exist on the unchanged baseline) — disable just that component.
+            verify_cwd.eg_disabled = True  # type: ignore[attr-defined]
+
     # Cap concurrent attempt subprocesses: each is a full agent run, so a large
     # K must not spawn K heavyweight processes at once. Mirrors the workflow
     # engine's min(cores-2, ...) policy.
@@ -691,12 +886,94 @@ async def _best_of_async(
             )
 
     async def verify(artifact: AttemptArtifact) -> bool:
+        # Seeded mode: an attempt that changed NOTHING cannot have fixed
+        # anything, so a check pass on it is vacuous. Never verify a
+        # no-change candidate.
+        if seed_cwd and not artifact.produced:
+            return False
         # Cap verifier subprocesses too: sample_parallel gathers all K verifies
         # at once, each an Evidence-Gate check subprocess.
         async with sem:
             return await verify_cwd(artifact.workdir)
 
-    res = await sample_parallel(run_attempt, verify, k)
+    strategy = os.environ.get(_STRATEGY_ENV, "auto").strip().lower()
+    if strategy == "auto":
+        strategy = "sequential" if (provider or "").lower() == "ollama" else "race2"
+    repair_ok = (
+        os.environ.get(_REPAIR_ENV, "1") != "0"
+        and (provider or "").lower() != "ollama"  # ≥17B repair crossover
+    )
+
+    async def run_with(i: int, msg: str) -> AttemptArtifact:
+        async with sem:
+            return await _run_attempt_subprocess(
+                i, msg, model, provider, seed_from=seed_from
+            )
+
+    def _last_evidence(arts: list[AttemptArtifact]) -> str:
+        for a in reversed(arts):
+            ev = ev_map_ref.get(a.workdir, "")
+            if ev:
+                return ev
+        return ""
+
+    # NOTE: must alias the live dict, not `or {}` it — it is still EMPTY here
+    # (falsy), and evidence written during verification has to be visible.
+    ev_map_ref = getattr(verify_cwd, "evidence_by_cwd", None)
+    if ev_map_ref is None:
+        ev_map_ref = {}
+
+    if k <= 1 or strategy == "parallel":
+        res = await sample_parallel(run_attempt, verify, k)
+    elif strategy == "sequential":
+        # Sample → verify → exit on first pass; attempt 2 sees the failure.
+        attempts: list[Attempt] = []
+        selected = selected_index = None
+        for i in range(k):
+            msg = message
+            if i == 1 and repair_ok:
+                ev = _last_evidence([a.candidate for a in attempts])
+                if ev:
+                    msg = message + _repair_suffix(ev)
+        # (attempt 3+ goes back to fresh independent samples for diversity)
+            art = await run_with(i, msg)
+            passed = await verify(art)
+            attempts.append(Attempt(index=i, candidate=art, passed=passed))
+            if passed:
+                selected, selected_index = art, i
+                log.info("bestof_sequential_early_exit", attempts=i + 1)
+                break
+        res = RejectionResult(
+            selected=selected, selected_index=selected_index, attempts=attempts
+        )
+    else:  # race2: two parallel attempts, early-exit verify, one repair shot
+        first_two = await asyncio.gather(
+            run_with(0, message), run_with(1, message)
+        )
+        attempts = []
+        selected = selected_index = None
+        for i, art in enumerate(first_two):
+            passed = False
+            if selected is None:  # early-exit: skip verifying after a pass
+                passed = await verify(art)
+            attempts.append(Attempt(index=i, candidate=art, passed=passed))
+            if passed and selected is None:
+                selected, selected_index = art, i
+        if selected is None and k > 2:
+            msg = message
+            if repair_ok:
+                ev = _last_evidence(first_two)
+                if ev:
+                    msg = message + _repair_suffix(ev)
+                    log.info("bestof_repair_attempt")
+            art = await run_with(2, msg)
+            passed = await verify(art)
+            attempts.append(Attempt(index=2, candidate=art, passed=passed))
+            if passed:
+                selected, selected_index = art, 2
+        res = RejectionResult(
+            selected=selected, selected_index=selected_index, attempts=attempts
+        )
     artifacts: list[AttemptArtifact] = [a.candidate for a in res.attempts]
 
     # Learn a correctness rule from any failed attempts' verifier evidence
@@ -709,6 +986,47 @@ async def _best_of_async(
     await _learn_from_failures(message, failed_ev)
 
     try:
+        # Existing-tests pass = PROVISIONAL: pre-fix code passes them too, so
+        # it selects the candidate but must deliver as unverified.
+        _provisional = bool(
+            res.solved
+            and res.selected is not None
+            and getattr(verify_cwd, "provisional_by_cwd", {}).get(
+                res.selected.workdir
+            )
+        )
+        if res.solved and res.selected is not None and _provisional:
+            selected = res.selected
+            if seed_cwd:
+                applied, apply_backup = _restore_changed(
+                    selected.workdir, dest, selected.produced
+                )
+            else:
+                applied, _sk = _restore_artifacts(
+                    selected.workdir, dest, selected.produced
+                )
+                apply_backup = None
+            log.info(
+                "bestof_provisional_selection",
+                index=res.selected_index,
+                files=len(applied),
+            )
+            report(
+                selected.stdout,
+                solved=False,
+                selected_index=res.selected_index,
+                pass_count=0,
+                k=k,
+                copied=[],
+                skipped=[],
+                has_check=has_check,
+                no_artifact=0,
+                applied=applied,
+                apply_backup=apply_backup,
+                provisional=True,
+            )
+            return 1
+
         if res.solved and res.selected is not None:
             selected: AttemptArtifact = res.selected
             if seed_cwd:
@@ -756,18 +1074,34 @@ async def _best_of_async(
         #  - no mechanical check could be built  → best-of-K cannot select at all
         #  - attempts produced no files          → generator didn't write artifacts
         #  - attempts wrote files but failed      → generator produced wrong output
-        # Surface attempt #0's output as a best-effort but DO NOT restore it
-        # (unverified); never silently drop the K-1 candidates.
-        best = artifacts[0] if artifacts else None
+        # When nothing verifies, hand off the BEST-EFFORT candidate rather than
+        # always attempt #0: #0 may have produced nothing while a sibling wrote a
+        # real (if unverified) patch, which is how a would-be delivery became an
+        # empty one. Ranking picks the furthest-along candidate; it only chooses
+        # what to hand off — a passing verification is still the ONLY thing that
+        # flips "done", so this cannot manufacture a fake success.
         no_artifact = sum(1 for a in artifacts if not a.produced)
-        # Not restoring is right; deleting is not. `_cleanup` wipes every
-        # workdir below, and we only established that we couldn't verify this
-        # work — not that it's wrong. Park it where the user can inspect it.
-        unverified_dir = (
-            _preserve_unverified(best.workdir, dest, best.produced)
-            if best and best.produced
-            else None
-        )
+        best = _rank_best_effort(artifacts, ev_map) if artifacts else None
+        # Unverified is not wrong: seeded mode applies the best effort
+        # (with backup); otherwise park it beside the project.
+        applied: list[str] = []
+        apply_backup: str | None = None
+        unverified_dir: str | None = None
+        unverified_files: list[str] = []
+        if best and best.produced:
+            if seed_cwd and os.environ.get(_APPLY_UNVERIFIED_ENV, "1") != "0":
+                applied, apply_backup = _restore_changed(
+                    best.workdir, dest, best.produced
+                )
+                log.info(
+                    "bestof_unverified_applied",
+                    files=len(applied),
+                    backup=apply_backup,
+                )
+            if not applied:
+                unverified_dir, unverified_files = _preserve_unverified(
+                    best.workdir, dest, best.produced
+                )
         report(
             best.stdout if best else "",
             solved=False,
@@ -779,6 +1113,10 @@ async def _best_of_async(
             has_check=has_check,
             no_artifact=no_artifact,
             unverified_dir=unverified_dir,
+            unverified_files=unverified_files,
+            applied=applied,
+            apply_backup=apply_backup,
+            check_discriminates=check_discriminates,
         )
         return 1
     finally:
@@ -847,18 +1185,53 @@ def run_best_of(
         no_artifact: int = 0,
         verify_method: str | None = None,
         unverified_dir: str | None = None,
+        unverified_files: list[str] | None = None,
+        applied: list[str] | None = None,
+        apply_backup: str | None = None,
+        check_discriminates: bool = True,
+        provisional: bool = False,
     ) -> None:
+        def _applied_note() -> str:
+            """Describe the applied-but-unverified delivery and its undo path."""
+            if not applied:
+                return ""
+            listed = ", ".join(applied[:5]) + ("…" if len(applied) > 5 else "")
+            undo = ""
+            if apply_backup:
+                try:
+                    shown = os.path.relpath(apply_backup)
+                except ValueError:
+                    shown = apply_backup
+                undo = f"\n  undo:  cp -R {shown}/. ."
+            return (
+                f"\nApplied the best-effort attempt to {len(applied)} file(s) "
+                f"(UNVERIFIED — review before trusting): {listed}.{undo}"
+            )
+
         def _kept(path: str | None) -> str:
-            """Tell the user where an unverified attempt was parked, if anywhere."""
+            """Hand the unverified work over: what it is, and how to take it.
+
+            Deliberately NOT a bare "UNVERIFIED" banner. A blanket
+            low-confidence label was measured to cut trust and drive
+            under-reliance without improving decisions (arXiv:2402.07632 Exp2),
+            so name the files and give the exact apply command — the reader can
+            then size the review against the actual change instead of against a
+            warning.
+            """
             if not path:
                 return ""
             try:
                 shown = os.path.relpath(path)
             except ValueError:  # different drive/root
                 shown = path
+            files = unverified_files or []
+            listed = ", ".join(files[:5]) + ("…" if len(files) > 5 else "")
+            what = f" {len(files)} file(s): {listed}." if files else ""
             return (
-                f" Attempt #0's files kept in {shown}/ (UNVERIFIED — review "
-                f"before adopting)."
+                f"\nUnverified result kept — nothing was written to your files."
+                f"{what}"
+                f"\n  see:   diff -ru . {shown} | head"
+                f"\n  apply: cp -R {shown}/. ."
             )
 
         if stdout:
@@ -889,12 +1262,27 @@ def run_best_of(
                     f"[yellow]best-of: NOT overwritten (already exist in cwd): "
                     f"{', '.join(skipped)}.{where}[/yellow]"
                 )
+        elif provisional:
+            console.print(
+                f"[yellow]best-of-{k}: picked the candidate that passes the "
+                f"repo's EXISTING tests — but those tests also pass the "
+                f"pre-fix code, so the change itself is NOT verified."
+                f"{_applied_note()}[/yellow]"
+            )
         elif not has_check:
             console.print(
                 f"[yellow]best-of-{k}: no mechanical success check could be built "
                 f"for this task, so the verifier cannot select a candidate "
-                f"(best-of-K only helps verifiable tasks). Showing attempt #0 "
-                f"unverified, nothing restored.{_kept(unverified_dir)}[/yellow]"
+                f"(best-of-K only helps verifiable tasks). Showing the best "
+                f"attempt unverified.{_applied_note()}{_kept(unverified_dir)}"
+                f"[/yellow]"
+            )
+        elif not check_discriminates:
+            console.print(
+                f"[yellow]best-of-{k}: the success check also passes the "
+                f"UNFIXED baseline, so it cannot verify this task — a pass "
+                f"from it would be meaningless. Showing the best attempt "
+                f"unverified.{_applied_note()}{_kept(unverified_dir)}[/yellow]"
             )
         else:
             wrote = k - no_artifact
@@ -902,8 +1290,8 @@ def run_best_of(
                 f"[yellow]best-of-{k}: no attempt passed the verifier (0/{k}); "
                 f"{no_artifact}/{k} produced no files (generator didn't write "
                 f"artifacts), {wrote}/{k} wrote files but failed the check. "
-                f"Showing attempt #0 unverified, nothing restored."
-                f"{_kept(unverified_dir)}[/yellow]"
+                f"Showing the best attempt unverified."
+                f"{_applied_note()}{_kept(unverified_dir)}[/yellow]"
             )
 
     exit_code = asyncio.run(

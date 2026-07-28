@@ -228,3 +228,47 @@ async def test_timeout_skip_does_not_override(tmp_path, monkeypatch):
     gate = eg.EvidenceGate("t", str(tmp_path))
     state, msg = await gate.verdict()
     assert state == "skip" and msg is None
+
+
+class TestCheckProcessLifecycle:
+    """A service check backgrounds a server; the run must survive that."""
+
+    @pytest.mark.asyncio
+    async def test_verdict_returned_while_background_process_holds_stdout(self):
+        """Exit code decides, not pipe EOF.
+
+        A backgrounded server inherits stdout, so waiting for the pipe to close
+        made a finished check look like a timeout — every service check came
+        back "skip" no matter what the code did.
+        """
+        import time
+
+        from rune.agent.evidence_gate import run_evidence_check
+
+        t0 = time.time()
+        state, _ = await run_evidence_check("sleep 300 & echo up; exit 0", ".")
+        assert state == "pass"
+        assert time.time() - t0 < 10  # not the 30s timeout
+
+        t0 = time.time()
+        state, _ = await run_evidence_check("sleep 300 & echo bad; exit 1", ".")
+        assert state == "fail"
+        assert time.time() - t0 < 10
+
+    @pytest.mark.asyncio
+    async def test_spawned_server_is_not_left_running(self):
+        """A leaked server holds its port and fails every later candidate."""
+        import asyncio
+        import subprocess
+
+        from rune.agent.evidence_gate import run_evidence_check
+
+        marker = "rune_eg_leak_probe_9931"
+        await run_evidence_check(f"sleep 300 & echo {marker}; exit 0", ".")
+        await asyncio.sleep(0.5)
+        found = subprocess.run(
+            ["pgrep", "-f", "sleep 300"], capture_output=True, text=True
+        ).stdout.split()
+        for pid in found:
+            subprocess.run(["kill", "-9", pid], capture_output=True)
+        assert not found, "check leaked a background process"

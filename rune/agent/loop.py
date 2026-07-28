@@ -240,13 +240,54 @@ def _effective_max_steps(budget: int) -> int:
     return 20
 
 
+_PROJECT_MARKERS = (
+    ".git", "pyproject.toml", "setup.py", "setup.cfg", "package.json",
+    "Cargo.toml", "go.mod", "Makefile",
+)
+
+
+def _repo_scale_workspace(cwd: str = ".") -> bool:
+    """Deterministic check: cwd is a code project tree of non-toy size.
+
+    Structural markers only (no NL matching): a project marker at the root
+    plus >200 files. NOT ".git"-only — best-of seeds attempts with a COPY of
+    the tree that has no .git dir, and the floor must hold there too. Used to
+    floor the tool-round budget for code work inside an existing repo: the
+    LLM classifier misses is_complex_coding often enough that repo-fix runs
+    otherwise land on the small round cap and get truncated mid-diagnosis.
+    """
+    try:
+        if not any(
+            os.path.exists(os.path.join(cwd, m)) for m in _PROJECT_MARKERS
+        ):
+            return False
+        n = 0
+        for _, dirs, files in os.walk(cwd):
+            dirs[:] = [
+                d for d in dirs
+                if d not in (".git", "node_modules", ".venv", "venv",
+                             "__pycache__")
+            ]
+            n += len(files)
+            if n > 200:
+                return True
+        return False
+    except OSError:
+        return False
+
+
 def _compute_tool_rounds(
     classification: Any,
     executor_model: str,
     advisor_enabled: bool,
     fast_lane: bool = False,
+    repo_fix: bool = False,
 ) -> int:
     """Tool-round budget by task complexity and executor tier."""
+    override = _env_int("RUNE_TOOL_ROUNDS")
+    if override is not None:
+        return override
+
     if fast_lane:
         from rune.agent.fast_lane import FAST_LANE_TOOL_ROUNDS
 
@@ -257,7 +298,10 @@ def _compute_tool_rounds(
     provider, model_name = extract_provider_and_model(executor_model)
     tier = resolve_tier(provider, model_name)
 
-    is_complex = getattr(classification, "is_complex_coding", False)
+    # Code work inside a real repo gets the complex budget even when the
+    # classifier missed is_complex_coding — a large tree cannot be diagnosed
+    # AND fixed AND verified in 12 rounds.
+    is_complex = getattr(classification, "is_complex_coding", False) or repo_fix
     # Per-turn tool-round budget. Token budget and max_iterations bound runaway.
     base = 24 if is_complex else 12
 
@@ -272,6 +316,21 @@ def _compute_tool_rounds(
 
     advisor_discount = -2 if advisor_enabled else 0
     return max(base + tier_bonus + advisor_discount, base)
+
+
+def _compute_explore_budget(classification: Any, repo_fix: bool = False) -> int:
+    """Exploration-round budget for the adapter (0 = off).
+
+    Complex-coding (or repo-fix) tasks get one: that is where a weak model
+    can spend its whole round budget on read-only spelunking and end with no
+    edit at all — an empty patch. 8 rounds is
+    roughly a third of the complex-coding round budget. The adapter times the
+    escalation stages relative to the round cap (nudge early, forced edit only
+    near exhaustion) — see litellm_adapter. RUNE_EXPLORE_BUDGET overrides
+    per-process, including "0" to disable.
+    """
+    is_code = getattr(classification, "is_complex_coding", False) or repo_fix
+    return 8 if is_code else 0
 
 
 # Phase-adaptive observation windows (#12)
@@ -1662,18 +1721,32 @@ class NativeAgentLoop(EventEmitter):
             )
 
         # Scale tool rounds by complexity and executor capability.
+        # Structural repo-fix signal: code/execution/full-scope work inside a
+        # real project tree floors the round budget at the complex tier.
+        # "full" is included because it is also the classifier's FALLBACK
+        # type, so low-confidence repo-fix prompts land there and would
+        # otherwise get the small cap. Read-only types (chat/web/research)
+        # keep the small budget.
+        _repo_fix = (
+            getattr(classification, "goal_type", "")
+            in ("code_modify", "execution", "full")
+            or getattr(classification, "requires_code", False)
+        ) and _repo_scale_workspace()
         _tool_rounds = _compute_tool_rounds(
             classification,
             model,
             advisor_service.enabled,
             fast_lane=_fast_lane_active,
+            repo_fix=_repo_fix,
         )
+        _explore_budget = _compute_explore_budget(classification, _repo_fix)
         agent = LiteLLMAgent(
             model=model,
             system_prompt=system_prompt,
             tools=list(tool_functions.values()),
             max_tool_rounds=_tool_rounds,
             extra_headers=_native_cfg.beta_headers,
+            explore_budget=_explore_budget,
         )
 
         messages: list[Any] = []
@@ -1859,6 +1932,7 @@ class NativeAgentLoop(EventEmitter):
                     classification,
                     model,
                     advisor_service.enabled,
+                    repo_fix=_repo_fix,
                 )
                 agent = LiteLLMAgent(
                     model=model,
@@ -1866,6 +1940,7 @@ class NativeAgentLoop(EventEmitter):
                     tools=list(tool_functions.values()),
                     max_tool_rounds=_tool_rounds,
                     extra_headers=_native_cfg.beta_headers,
+                    explore_budget=_explore_budget,
                 )
 
             # BCT: check compliance for a pending advisor plan
@@ -1994,6 +2069,7 @@ class NativeAgentLoop(EventEmitter):
                         system_prompt=system_prompt,
                         tools=list(tool_functions.values()),
                         max_tool_rounds=_tool_rounds,
+                        explore_budget=_explore_budget,
                     )
                     log.info("tools_reduced_final_phase", tools=len(tools))
                 messages = self._maybe_force_wind_down_write(messages)
@@ -2010,6 +2086,7 @@ class NativeAgentLoop(EventEmitter):
                         system_prompt=system_prompt,
                         tools=list(tool_functions.values()),
                         max_tool_rounds=_tool_rounds,
+                        explore_budget=_explore_budget,
                     )
 
             # Stall-limit tool removal (#H3)
@@ -2025,6 +2102,7 @@ class NativeAgentLoop(EventEmitter):
                         system_prompt=system_prompt,
                         tools=list(tool_functions.values()),
                         max_tool_rounds=_tool_rounds,
+                        explore_budget=_explore_budget,
                     )
                     log.info("tools_disabled_stall", disabled=sorted(disabled))
 
@@ -2888,6 +2966,7 @@ class NativeAgentLoop(EventEmitter):
                             model=model,
                             system_prompt=system_prompt,
                             tools=list(tool_functions.values()),
+                            explore_budget=_explore_budget,
                         )
                         log.info("agent_model_switched", model=model)
 

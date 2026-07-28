@@ -256,3 +256,40 @@ def test_config_defaults_are_on_and_reversible():
     assert llm2.route_simple_queries is False
     assert llm2.simple_query_tier == "best"
     assert llm2.simple_query_confidence == 0.9
+
+
+def test_repo_fix_floors_rounds_at_complex_tier():
+    from types import SimpleNamespace
+
+    from rune.agent.loop import _compute_tool_rounds
+
+    plain = SimpleNamespace(is_complex_coding=False)
+    # Classifier miss + repo-fix signal → complex budget, not the 12-base.
+    assert _compute_tool_rounds(
+        plain, "anthropic/claude-opus-4-6", False, repo_fix=True
+    ) >= 24
+    assert _compute_tool_rounds(
+        plain, "anthropic/claude-opus-4-6", False, repo_fix=False
+    ) < 24
+
+
+def test_tool_rounds_env_override(monkeypatch):
+    from types import SimpleNamespace
+
+    from rune.agent.loop import _compute_tool_rounds
+
+    monkeypatch.setenv("RUNE_TOOL_ROUNDS", "40")
+    assert _compute_tool_rounds(
+        SimpleNamespace(is_complex_coding=False), "anthropic/claude-opus-4-6",
+        False,
+    ) == 40
+    monkeypatch.delenv("RUNE_TOOL_ROUNDS")
+
+
+def test_repo_scale_workspace_small_dir_false(tmp_path, monkeypatch):
+    from rune.agent.loop import _repo_scale_workspace
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "a.py").write_text("x")
+    assert _repo_scale_workspace(str(tmp_path)) is False  # tiny tree
+    assert _repo_scale_workspace(str(tmp_path / "nope")) is False  # no .git
