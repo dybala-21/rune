@@ -938,6 +938,10 @@ async def _best_of_async(
             return 0
         shutil.rmtree(fp_workdir, ignore_errors=True)
         if fp and fp.repro_script:
+            # The discriminating repro also becomes the verifier's first
+            # check, so agentic candidates that fix the issue get a real
+            # verified verdict (and best-of can early-exit on it).
+            verify_cwd.repro_script = fp.repro_script  # type: ignore[attr-defined]
             # Hand the agentic rung the evidence, not a failed diff.
             fastpath_evidence = (
                 "\n\nA reproduction script for this issue (currently "

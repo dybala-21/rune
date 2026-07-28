@@ -490,6 +490,54 @@ async def make_verifier(
 
     async def verify(cwd: str) -> bool:
         nonlocal _suite_unusable
+
+        # A baseline-failing reproduction script (attached by the fast path)
+        # is the strongest check available: it discriminates by construction,
+        # so a flip to passing is a real verification — run it first.
+        repro = getattr(verify, "repro_script", "")
+        if repro and seed_cwd:
+            import os
+            import shutil
+            import tempfile as _tf
+
+            from rune.agent.fastpath import _run_script
+            scratch = _tf.mkdtemp(prefix="rune-repro-verify-")
+            try:
+                path = os.path.join(scratch, "repro.py")
+                with open(path, "w") as fh:
+                    fh.write(repro)
+                rc, out = await _run_script(_project_python(seed_cwd), path, cwd)
+            finally:
+                shutil.rmtree(scratch, ignore_errors=True)
+            if rc == 0:
+                # Fixed per the repro — still require no regression breakage.
+                targets = _targeted_test_files(cwd, seed_cwd)
+                if targets:
+                    import re as _re2
+                    import sys as _sys2  # noqa: F401
+                    _restore_canonical_tests(cwd, seed_cwd, targets)
+                    t_state, t_evidence = await run_verify(
+                        ["/usr/bin/env", f"PYTHONPATH={cwd}:{cwd}/src",
+                         _project_python(seed_cwd), "-m", "pytest", "-q",
+                         *targets],
+                        cwd, timeout=_TARGETED_TEST_TIMEOUT_S,
+                    )
+                    if t_state == "fail" and _re2.search(
+                        r"\b\d+ failed\b", t_evidence
+                    ):
+                        evidence_by_cwd[cwd] = t_evidence
+                        return False
+                method_by_cwd[cwd] = (
+                    "reproduction script (fails pre-fix) + targeted tests"
+                )
+                log.info("repro_verify_pass")
+                return True
+            if rc != 125:  # ran and still failing → decisive rejection
+                evidence_by_cwd[cwd] = out[-1500:]
+                log.info("repro_verify_fail")
+                return False
+            # rc 125: couldn't run — fall through to the normal chain.
+
         cmd = None if _suite_unusable else detect_test_command(cwd)
         if cmd:
             # Use the project interpreter and shadow with the candidate
@@ -607,6 +655,7 @@ async def make_verifier(
     verify.eg_disabled = False  # type: ignore[attr-defined]
     verify.has_check = has_check  # type: ignore[attr-defined]
     verify.provisional_by_cwd = {}  # type: ignore[attr-defined]
+    verify.repro_script = ""  # type: ignore[attr-defined]
     verify.evidence_by_cwd = evidence_by_cwd  # type: ignore[attr-defined]
     verify.method_by_cwd = method_by_cwd  # type: ignore[attr-defined]
     return verify

@@ -617,3 +617,46 @@ async def test_suite_verdict_memoized_across_candidates(monkeypatch, tmp_path):
     await verify(cand)
     await verify(cand)
     assert suite_runs["n"] == 1  # paid once, memoized for siblings
+
+
+@pytest.mark.asyncio
+async def test_repro_script_verifies_fixing_candidate(monkeypatch, tmp_path):
+    # A baseline-failing repro attached to the verifier: candidate that makes
+    # it pass (and breaks no targeted tests) is VERIFIED; one that doesn't is
+    # rejected with the repro output as evidence.
+    import rune.agent.auto_verify as av
+    import rune.agent.rejection_sampler as rs
+
+    seed, cand = _seed_and_candidate(tmp_path)
+    monkeypatch.setattr(av, "detect_test_command", lambda cwd: None)
+
+    async def fake_run(cmd, cwd, timeout=60.0):
+        return "pass", "2 passed in 0.1s"  # targeted regressions fine
+
+    monkeypatch.setattr(av, "run_verify", fake_run)
+
+    async def fake_eg(instruction):
+        async def v(cwd):
+            return False
+
+        v.has_check = True
+        v.evidence_by_cwd = {}
+        return v
+
+    monkeypatch.setattr(rs, "make_evidence_gate_verifier", fake_eg)
+
+    verify = await make_verifier("task", seed_cwd=seed)
+    # Repro checks the candidate's mod.py content.
+    verify.repro_script = (
+        "import sys, os\nsys.path.insert(0, os.getcwd())\n"
+        "src = open('pkg/mod.py').read()\nassert 'x = 2' in src\n"
+    )
+    assert await verify(cand) is True  # cand has x = 2 → repro passes
+    assert "reproduction script" in verify.method_by_cwd[cand]
+
+    # Now a candidate that does NOT fix (seed copy has x = 1):
+    import shutil as _sh
+    unfixed = tmp_path / "unfixed"
+    _sh.copytree(seed, unfixed, copy_function=_sh.copy2)
+    assert await verify(str(unfixed)) is False
+    assert "AssertionError" in verify.evidence_by_cwd[str(unfixed)]
