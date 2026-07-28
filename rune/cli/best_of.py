@@ -139,7 +139,9 @@ async def _run_attempt_subprocess(
             # test, reverted, declared "already fixed") must not be ranked
             # or applied as if it produced work — that path shipped a
             # zero-delta "best effort" as the final patch.
-            return _drop_seed_identical(workdir, seed_from, changed)
+            return _drop_build_metadata(
+                _drop_seed_identical(workdir, seed_from, changed)
+            )
         return _snapshot_produced(workdir)
 
     env = dict(os.environ)
@@ -366,6 +368,25 @@ def _seed_workdir(src: str, workdir: str) -> None:
                 continue
         return
     shutil.copytree(src, workdir, ignore=_SEED_IGNORE, dirs_exist_ok=True, symlinks=False)
+
+
+def _drop_build_metadata(rels: list[str]) -> list[str]:
+    """Drop packaging byproducts (egg-info/dist-info) from a changed-file list.
+
+    A pip/setuptools invocation inside an attempt regenerates these; they are
+    never the agent's intended work, they pollute the best-effort ranking
+    (a junk-only candidate ties a real edit on the "produced" signal), and
+    they bury the actual edit in the applied-files report (observed: 8-file
+    apply list led by Flask.egg-info/* with cli.py hidden behind the "…").
+    """
+    def _is_meta(rel: str) -> bool:
+        parts = rel.replace("\\", "/").split("/")
+        return any(
+            p.endswith(".egg-info") or p.endswith(".dist-info") or p == ".eggs"
+            for p in parts
+        )
+
+    return [r for r in rels if not _is_meta(r)]
 
 
 def _drop_seed_identical(

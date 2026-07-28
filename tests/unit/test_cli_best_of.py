@@ -1625,3 +1625,17 @@ async def test_provisional_selection_never_claims_verified(monkeypatch, tmp_path
     assert kw["solved"] is False
     assert kw["applied"] == ["app.py"]
     assert (dest / "app.py").read_text() == "PROVISIONAL FIX"  # still delivered
+
+
+def test_drop_build_metadata_filters_packaging_junk():
+    from rune.cli.best_of import _drop_build_metadata
+
+    rels = [
+        "src/flask/cli.py",
+        "src/Flask.egg-info/PKG-INFO",
+        "src/Flask.egg-info/SOURCES.txt",
+        "pkg.dist-info/METADATA",
+        ".eggs/setuptools_scm/x.py",
+        "tests/test_cli.py",
+    ]
+    assert _drop_build_metadata(rels) == ["src/flask/cli.py", "tests/test_cli.py"]

@@ -571,3 +571,46 @@ async def test_suite_collection_error_falls_through_to_targeted(monkeypatch, tmp
     verify = await make_verifier("task", seed_cwd=seed)
     assert await verify(cand) is True  # verified via targeted, not rejected
     assert "targeted tests" in verify.method_by_cwd[cand]
+
+
+@pytest.mark.asyncio
+async def test_suite_verdict_memoized_across_candidates(monkeypatch, tmp_path):
+    # An inconclusive full-suite run (timeout/collection error) must not be
+    # re-paid for every sibling candidate — measured ~60s each on django-family.
+    import rune.agent.auto_verify as av
+    import rune.agent.rejection_sampler as rs
+
+    seed, cand = _seed_and_candidate(tmp_path)
+    detect_calls = {"n": 0}
+
+    def fake_detect(cwd):
+        detect_calls["n"] += 1
+        return ["python", "-m", "pytest", "-q"]
+
+    monkeypatch.setattr(av, "detect_test_command", fake_detect)
+
+    suite_runs = {"n": 0}
+
+    async def fake_run(cmd, cwd, timeout=60.0):
+        if "-q" in cmd and not any("test_mod" in c for c in cmd):
+            suite_runs["n"] += 1
+            return "skip", ""  # timeout — inconclusive
+        return "fail", "1 failed in 0.1s"  # targeted rejects
+
+    monkeypatch.setattr(av, "run_verify", fake_run)
+
+    async def fake_eg(instruction):
+        async def v(cwd):
+            return False
+
+        v.has_check = True
+        v.evidence_by_cwd = {}
+        return v
+
+    monkeypatch.setattr(rs, "make_evidence_gate_verifier", fake_eg)
+
+    verify = await make_verifier("task", seed_cwd=seed)
+    await verify(cand)
+    await verify(cand)
+    await verify(cand)
+    assert suite_runs["n"] == 1  # paid once, memoized for siblings

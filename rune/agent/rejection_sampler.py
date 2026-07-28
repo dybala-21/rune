@@ -451,6 +451,12 @@ async def make_verifier(
     # can report what the winner passed (test command vs Evidence Gate).
     method_by_cwd: dict[str, str] = {}
 
+    # Task-level memo: once the FULL suite comes back inconclusive (timeout /
+    # collection error), it will for every sibling candidate too — suite size
+    # and environment don't change with a small patch. Measured: ~57-60s of
+    # repeated timeout per candidate on django/sphinx-family repos.
+    _suite_unusable = False
+
     # Contract-derived test, built at most once per task and reused unchanged so
     # every candidate faces the same bar. The "done" key separates "not built
     # yet" from "built, unusable".
@@ -494,7 +500,8 @@ async def make_verifier(
         return await run_generated_test(body, fw, cwd)  # type: ignore[arg-type]
 
     async def verify(cwd: str) -> bool:
-        cmd = detect_test_command(cwd)
+        nonlocal _suite_unusable
+        cmd = None if _suite_unusable else detect_test_command(cwd)
         if cmd:
             # Same interpreter + candidate-shadowing treatment as targeted
             # tests: RUNE's own python often cannot even import old repos, and
@@ -514,6 +521,9 @@ async def make_verifier(
                 # targeted-test fallback (observed: sphinx, top-level tests/).
                 log.info("verify_suite_inconclusive", cmd=" ".join(cmd[:4]))
                 state, evidence = "skip", ""
+                _suite_unusable = True  # don't re-pay this per sibling
+            elif state == "skip":
+                _suite_unusable = True  # spawn error / timeout: same next time
             if state in ("pass", "fail"):
                 method_by_cwd[cwd] = f"`{' '.join(cmd)}`"
             if state == "pass":
