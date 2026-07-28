@@ -415,9 +415,9 @@ async def test_eg_disabled_blocks_vacuous_eg_pass(monkeypatch, tmp_path):
 
 
 def test_project_python_prefers_repo_venv(tmp_path):
-    from rune.agent.rejection_sampler import _project_python
-
     import sys
+
+    from rune.agent.rejection_sampler import _project_python
     # No venv → RUNE's own interpreter.
     assert _project_python(str(tmp_path)) == sys.executable
     # Project venv present → its python wins.
@@ -489,7 +489,8 @@ def test_mapper_sphinx_path_join_layout(tmp_path):
     shutil.copytree(seed, cand, copy_function=shutil.copy2)
     p = cand / "sphinx/ext/autodoc/importer.py"
     p.write_text("x=2\n")
-    import os, time
+    import os
+    import time
     os.utime(p, (time.time() + 5, time.time() + 5))
 
     assert "tests/test_ext_autodoc.py" in _targeted_test_files(str(cand), str(seed))
@@ -508,7 +509,8 @@ def test_mapper_import_grep_finds_unrelated_name(tmp_path):
     shutil.copytree(seed, cand, copy_function=shutil.copy2)
     p = cand / "pkg/core/engine.py"
     p.write_text("x=2\n")
-    import os, time
+    import os
+    import time
     os.utime(p, (time.time() + 5, time.time() + 5))
 
     out = _targeted_test_files(str(cand), str(seed))
@@ -528,7 +530,8 @@ def test_mapper_django_dir_token_layout(tmp_path):
     shutil.copytree(seed, cand, copy_function=shutil.copy2)
     p = cand / "django/db/models/query.py"
     p.write_text("x=2\n")
-    import os, time
+    import os
+    import time
     os.utime(p, (time.time() + 5, time.time() + 5))
 
     out = _targeted_test_files(str(cand), str(seed))

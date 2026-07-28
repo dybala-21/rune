@@ -67,7 +67,9 @@ def _find_unique_window(
     # Indent delta: matched first non-empty line's leading blanks minus the
     # search's — applied to replacement lines so shape follows the file.
     delta = ""
-    for cl, sl in zip(content_lines[start:start + n], search_lines):
+    for cl, sl in zip(
+        content_lines[start:start + n], search_lines, strict=True
+    ):
         if cl.strip():
             c_ind = cl[: len(cl) - len(cl.lstrip())]
             s_ind = sl[: len(sl) - len(sl.lstrip())]

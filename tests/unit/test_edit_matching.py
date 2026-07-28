@@ -42,8 +42,7 @@ def test_trimmed_match_recovers_indent_drift():
 
 
 def test_ws_normalized_match():
-    search = "value =    compute( x )".replace("( x )", "(x)")
-    # single line with extra internal spaces
+    # A single line with extra internal spaces still matches uniquely.
     m = find_block(CONTENT, "        value =    compute(x)")
     assert m is not None
     assert m.strategy in ("trimmed", "ws-normalized")

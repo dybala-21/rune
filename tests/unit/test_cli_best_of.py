@@ -775,8 +775,11 @@ async def test_seeded_no_change_candidate_never_verifies(monkeypatch, tmp_path):
 def test_drop_seed_identical_filters_reverted_edits(tmp_path):
     from rune.cli.best_of import _drop_seed_identical
 
-    seed = tmp_path / "seed"; seed.mkdir()
-    work = tmp_path / "work"; work.mkdir()
+    seed = tmp_path / "seed"
+
+    seed.mkdir()
+    work = tmp_path / "work"
+    work.mkdir()
     (seed / "same.py").write_text("x = 1\n")
     (work / "same.py").write_text("x = 1\n")   # edit-then-revert: mtime differs
     (seed / "diff.py").write_text("x = 1\n")
@@ -820,7 +823,9 @@ async def test_seeded_attempt_message_carries_test_hint(monkeypatch, tmp_path):
     monkeypatch.setattr(best_of.asyncio, "create_subprocess_exec", fake_exec)
     monkeypatch.setattr(av, "detect_test_command", lambda cwd: ["pytest", "-q"])
 
-    seed = tmp_path / "seed"; seed.mkdir()
+    seed = tmp_path / "seed"
+
+    seed.mkdir()
     (seed / "app.py").write_text("x")
 
     await _run_attempt_subprocess(0, "fix it", None, None, seed_from=str(seed))
@@ -1510,7 +1515,9 @@ async def test_sequential_stops_at_first_verified(monkeypatch, tmp_path):
     monkeypatch.setattr(best_of, "make_verifier", _mk_verifier(pass_indices={0}))
     monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
     monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
-    dest = tmp_path / "d1"; dest.mkdir(); monkeypatch.chdir(dest)
+    dest = tmp_path / "d1"
+    dest.mkdir()
+    monkeypatch.chdir(dest)
 
     reports: list = []
     code = await _best_of_async(
@@ -1531,7 +1538,9 @@ async def test_sequential_repair_feeds_failure_output(monkeypatch, tmp_path):
     monkeypatch.setattr(best_of, "make_verifier", _mk_verifier(pass_indices=set()))
     monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
     monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
-    dest = tmp_path / "d2"; dest.mkdir(); monkeypatch.chdir(dest)
+    dest = tmp_path / "d2"
+    dest.mkdir()
+    monkeypatch.chdir(dest)
 
     await _best_of_async(
         "task", 3, None, "anthropic", report=lambda s, **kw: None, seed_cwd=True,
@@ -1551,7 +1560,9 @@ async def test_race2_runs_two_then_repairs(monkeypatch, tmp_path):
     monkeypatch.setattr(best_of, "make_verifier", _mk_verifier(pass_indices={2}))
     monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
     monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
-    dest = tmp_path / "d3"; dest.mkdir(); monkeypatch.chdir(dest)
+    dest = tmp_path / "d3"
+    dest.mkdir()
+    monkeypatch.chdir(dest)
 
     reports: list = []
     code = await _best_of_async(
@@ -1573,7 +1584,9 @@ async def test_repair_env_opt_out(monkeypatch, tmp_path):
     monkeypatch.setattr(best_of, "make_verifier", _mk_verifier(pass_indices=set()))
     monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
     monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
-    dest = tmp_path / "d4"; dest.mkdir(); monkeypatch.chdir(dest)
+    dest = tmp_path / "d4"
+    dest.mkdir()
+    monkeypatch.chdir(dest)
 
     await _best_of_async(
         "task", 3, None, "anthropic", report=lambda s, **kw: None, seed_cwd=True,
@@ -1586,7 +1599,8 @@ async def test_provisional_selection_never_claims_verified(monkeypatch, tmp_path
     # Repo-existing-tests pass selects the candidate but must deliver as
     # UNVERIFIED (exit 1, files applied) — those tests pass pre-fix code too.
     monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "sequential")
-    dest = tmp_path / "dp"; dest.mkdir()
+    dest = tmp_path / "dp"
+    dest.mkdir()
     (dest / "app.py").write_text("ORIGINAL")
 
     async def fake_attempt(index, message, model, provider, seed_from=None):
