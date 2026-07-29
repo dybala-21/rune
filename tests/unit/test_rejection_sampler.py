@@ -654,9 +654,17 @@ async def test_repro_script_verifies_fixing_candidate(monkeypatch, tmp_path):
     assert await verify(cand) is True  # cand has x = 2 → repro passes
     assert "reproduction script" in verify.method_by_cwd[cand]
 
-    # Now a candidate that does NOT fix (seed copy has x = 1):
+    # A candidate the repro still fails on is NOT vetoed (repros can be
+    # over-strict): it falls through to targeted tests and lands as a
+    # PROVISIONAL selection, with the repro output kept as evidence.
+    import os as _os
     import shutil as _sh
+    import time as _time
     unfixed = tmp_path / "unfixed"
     _sh.copytree(seed, unfixed, copy_function=_sh.copy2)
-    assert await verify(str(unfixed)) is False
+    wrong = unfixed / "pkg" / "mod.py"
+    wrong.write_text("x = 3\n")  # changed, but not what the repro wants
+    _os.utime(wrong, (_time.time() + 5, _time.time() + 5))
+    assert await verify(str(unfixed)) is True
+    assert verify.provisional_by_cwd.get(str(unfixed)) is True
     assert "AssertionError" in verify.evidence_by_cwd[str(unfixed)]

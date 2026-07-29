@@ -220,6 +220,10 @@ async def _discriminating_repro(
         "- import from the repo (assume it is on sys.path),\n"
         "- exit non-zero (e.g. failed assert) while the bug EXISTS,\n"
         "- exit 0 once the bug is FIXED.\n"
+        "Ground every assertion in the EXACT inputs and expected outputs "
+        "quoted in the bug report. Do not assert any behavior the report "
+        "does not show — an over-strict script that also fails on a correct "
+        "fix is useless.\n"
         "Keep it minimal. Reply with ONLY the script in one ```python block."
         f"\n\nBug report:\n{issue}\n\nRelevant code:\n{context}"
     )

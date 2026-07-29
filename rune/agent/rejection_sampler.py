@@ -532,11 +532,16 @@ async def make_verifier(
                 )
                 log.info("repro_verify_pass")
                 return True
-            if rc != 125:  # ran and still failing → decisive rejection
+            if rc != 125:
+                # Still failing is a SIGNAL, not a veto: generated repros can
+                # be stricter than the real requirement, and a hard reject
+                # here demotes genuinely correct fixes. Keep the output as
+                # evidence and let the normal chain (targeted tests →
+                # provisional) decide.
                 evidence_by_cwd[cwd] = out[-1500:]
                 log.info("repro_verify_fail")
-                return False
-            log.info("repro_verify_inconclusive")  # couldn't run; fall through
+            else:
+                log.info("repro_verify_inconclusive")  # couldn't run
 
         cmd = None if _suite_unusable else detect_test_command(cwd)
         if cmd:
