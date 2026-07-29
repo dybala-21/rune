@@ -496,6 +496,7 @@ async def make_verifier(
         # so a flip to passing is a real verification — run it first.
         repro = getattr(verify, "repro_script", "")
         if repro and seed_cwd:
+            log.info("repro_verify_start")
             import os
             import shutil
             import tempfile as _tf

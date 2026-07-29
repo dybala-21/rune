@@ -1731,3 +1731,66 @@ async def test_fastpath_evidence_reaches_agentic_rung(monkeypatch, tmp_path):
         "fix", 1, None, "anthropic", report=lambda s, **kw: None, seed_cwd=True,
     )
     assert spawned and "assert fixed()" in spawned[0][1]
+
+
+@pytest.mark.asyncio
+async def test_fastpath_repro_reaches_real_verifier(monkeypatch, tmp_path):
+    # Full flow: fastpath attaches its repro to the REAL make_verifier object
+    # and candidate verification actually executes the repro branch.
+    import rune.agent.auto_verify as av
+    import rune.agent.fastpath as fp_mod
+    import rune.agent.rejection_sampler as rs
+
+    monkeypatch.setenv("RUNE_FASTPATH", "1")
+    monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "sequential")
+    dest = tmp_path / "flow"
+    dest.mkdir()
+    (dest / "pkg").mkdir()
+    (dest / "pkg" / "mod.py").write_text("x = 1\n")
+    (dest / "setup.py").write_text("# marker\n")
+
+    async def fake_fastpath(issue, seed, workdir, model, provider):
+        from rune.agent.fastpath import FastPathResult
+        return FastPathResult(
+            repro_script=(
+                "import sys, os\nsys.path.insert(0, os.getcwd())\n"
+                "src = open('pkg/mod.py').read()\nassert 'x = 2' in src\n"
+            ),
+            repro_output="AssertionError",
+        )
+
+    monkeypatch.setattr(fp_mod, "run_fastpath", fake_fastpath)
+    monkeypatch.setattr(av, "detect_test_command", lambda cwd: None)
+
+    async def fake_eg(instruction):
+        async def v(cwd):
+            return False
+        v.has_check = True
+        v.evidence_by_cwd = {}
+        return v
+
+    monkeypatch.setattr(rs, "make_evidence_gate_verifier", fake_eg)
+
+    async def fake_attempt(index, message, model, provider, seed_from=None):
+        w = tmp_path / f"flow_w{index}"
+        (w / "pkg").mkdir(parents=True)
+        (w / "pkg" / "mod.py").write_text("x = 2\n")  # the fix
+        return AttemptArtifact(
+            index=index, workdir=str(w), stdout="out", returncode=0,
+            produced=["pkg/mod.py"],
+        )
+
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    monkeypatch.chdir(dest)
+
+    reports: list = []
+    code = await _best_of_async(
+        "fix the bug", 3, None, "anthropic",
+        report=lambda s, **kw: reports.append(kw), seed_cwd=True,
+    )
+    # The candidate flips the repro → verified solve through the REAL verifier.
+    assert code == 0
+    assert reports[0]["solved"] is True
+    assert "reproduction script" in (reports[0].get("verify_method") or "")

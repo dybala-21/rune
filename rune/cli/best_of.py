@@ -942,6 +942,7 @@ async def _best_of_async(
             # check, so agentic candidates that fix the issue get a real
             # verified verdict (and best-of can early-exit on it).
             verify_cwd.repro_script = fp.repro_script  # type: ignore[attr-defined]
+            log.info("repro_attached", chars=len(fp.repro_script))
             # Hand the agentic rung the evidence, not a failed diff.
             fastpath_evidence = (
                 "\n\nA reproduction script for this issue (currently "
