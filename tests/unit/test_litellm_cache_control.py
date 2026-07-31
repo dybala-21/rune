@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from rune.agent.litellm_adapter import (
     _apply_anthropic_cache_control,
+    _apply_anthropic_message_cache,
     _is_anthropic_model,
 )
 
@@ -86,3 +87,58 @@ class TestApplyAnthropicCacheControl:
         msgs = [{"role": "system", "content": ""}, {"role": "user", "content": "Hi"}]
         out = _apply_anthropic_cache_control("anthropic/claude-opus-4-6", msgs)
         assert out == msgs  # Empty content not converted
+
+
+class TestApplyAnthropicMessageCache:
+    """Moving breakpoint on the last message caches the transcript prefix."""
+
+    _M = "anthropic/claude-haiku-4-5"
+
+    def test_tool_tail_gets_message_level_cache_control(self):
+        msgs = [
+            {"role": "user", "content": "fix"},
+            {"role": "assistant", "content": None, "tool_calls": []},
+            {"role": "tool", "tool_call_id": "t1", "content": "output"},
+        ]
+        out = _apply_anthropic_message_cache(self._M, msgs)
+        assert out[-1]["cache_control"] == {"type": "ephemeral"}
+        assert out[-1]["content"] == "output"
+        # earlier messages untouched, original list not mutated
+        assert out[:-1] == msgs[:-1]
+        assert "cache_control" not in msgs[-1]
+
+    def test_user_string_tail_converted_to_block(self):
+        msgs = [{"role": "user", "content": "hello"}]
+        out = _apply_anthropic_message_cache(self._M, msgs)
+        block = out[-1]["content"][0]
+        assert block["type"] == "text"
+        assert block["text"] == "hello"
+        assert block["cache_control"] == {"type": "ephemeral"}
+        assert isinstance(msgs[-1]["content"], str)  # original untouched
+
+    def test_block_list_tail_marks_last_text_block(self):
+        msgs = [
+            {"role": "user", "content": [
+                {"type": "text", "text": "a"},
+                {"type": "text", "text": "b"},
+            ]},
+        ]
+        out = _apply_anthropic_message_cache(self._M, msgs)
+        assert "cache_control" not in out[-1]["content"][0]
+        assert out[-1]["content"][1]["cache_control"] == {"type": "ephemeral"}
+
+    def test_non_anthropic_unchanged(self):
+        msgs = [{"role": "user", "content": "hello"}]
+        assert _apply_anthropic_message_cache("openai/gpt-5.4", msgs) == msgs
+        assert isinstance(msgs[-1]["content"], str)
+
+    def test_env_off_unchanged(self, monkeypatch):
+        monkeypatch.setenv("RUNE_MSG_CACHE", "0")
+        msgs = [{"role": "user", "content": "hello"}]
+        out = _apply_anthropic_message_cache(self._M, msgs)
+        assert out is msgs
+
+    def test_empty_and_contentless_tails_safe(self):
+        assert _apply_anthropic_message_cache(self._M, []) == []
+        msgs = [{"role": "assistant", "content": None, "tool_calls": []}]
+        assert _apply_anthropic_message_cache(self._M, msgs) == msgs

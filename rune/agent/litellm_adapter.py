@@ -79,6 +79,11 @@ _EXPLORE_FORCE_MSG = (
 # Verify-on-stop: finishing after an untested edit gets one reminder to run
 # the tests first. RUNE_VERIFY_ON_STOP=0 disables.
 _VERIFY_ON_STOP_ENV = "RUNE_VERIFY_ON_STOP"
+# Moving cache breakpoint on the last message so the growing transcript is
+# read from cache instead of re-prefilled every tool round. =0 disables.
+_MSG_CACHE_ENV = "RUNE_MSG_CACHE"
+# Anthropic fast mode (research preview, Opus-class models only). Opt-in.
+_FAST_MODE_ENV = "RUNE_FAST_MODE"
 # Structured match on the bash command string (documented runner invocations,
 # not NL). Matching is per shell segment and anchored at the command head, so
 # "grep -r pytest" or "pip install pytest" never count as running tests.
@@ -704,6 +709,54 @@ def _apply_anthropic_cache_control(model: str, messages: list[Any]) -> list[Any]
     return messages
 
 
+def _apply_anthropic_message_cache(model: str, messages: list[Any]) -> list[Any]:
+    """Add a moving cache_control breakpoint to the final message.
+
+    The system breakpoint only covers tools+system, so the growing message
+    history is re-prefilled at full price on every tool round. Marking the
+    last message caches the whole prefix: from round 2 the prior transcript
+    is a 0.1x cache read and only the new tail is written. Stale-observation
+    masking edits messages near the tail, which invalidates just the last few
+    messages — the bulk of the prefix stays cached.
+
+    Uses 1 of Anthropic's 4 breakpoints (system uses up to 2). litellm maps a
+    message-level ``cache_control`` on tool messages onto the converted
+    tool_result block; user/assistant messages need it inside a content block.
+    """
+    if os.environ.get(_MSG_CACHE_ENV, "1") == "0":
+        return messages
+    if not _is_anthropic_model(model) or not messages:
+        return messages
+    last = messages[-1]
+    if not isinstance(last, dict):
+        return messages
+    role = last.get("role")
+    content = last.get("content")
+    ephemeral = {"type": "ephemeral"}
+    if role == "tool":
+        marked: dict[str, Any] = {**last, "cache_control": ephemeral}
+    elif role in ("user", "assistant") and isinstance(content, str) and content:
+        marked = {
+            **last,
+            "content": [
+                {"type": "text", "text": content, "cache_control": ephemeral}
+            ],
+        }
+    elif role in ("user", "assistant") and isinstance(content, list) and content:
+        new_content = list(content)
+        for i in range(len(new_content) - 1, -1, -1):
+            block = new_content[i]
+            if isinstance(block, dict) and block.get("type") == "text":
+                new_content[i] = {**block, "cache_control": ephemeral}
+                break
+        else:
+            return messages
+        marked = {**last, "content": new_content}
+    else:
+        return messages
+    return [*messages[:-1], marked]
+
+
 def _ensure_anthropic_user_tail(model: str, messages: list[Any]) -> list[Any]:
     """Keep Anthropic requests valid when the wire history ends with an
     assistant turn. Anthropic rejects that ("does not support assistant message
@@ -941,11 +994,16 @@ class StreamResult:
                 # stays full so history/rollover are unaffected.
                 # Apply Anthropic cache_control to system message for ~82% reduction
                 # in fixed overhead (tools+system cached at 0.1x from step 2).
-                "messages": _ensure_anthropic_user_tail(
+                "messages": _apply_anthropic_message_cache(
                     self._model,
-                    _apply_anthropic_cache_control(
+                    _ensure_anthropic_user_tail(
                         self._model,
-                        mask_stale_tool_messages(validate_tool_pairs(self._messages)),
+                        _apply_anthropic_cache_control(
+                            self._model,
+                            mask_stale_tool_messages(
+                                validate_tool_pairs(self._messages)
+                            ),
+                        ),
                     ),
                 ),
                 "tools": _tools,
@@ -956,6 +1014,8 @@ class StreamResult:
             }
             if self._model in _TEMPERATURE_REJECTED:
                 _acompletion_kwargs.pop("temperature", None)
+            if _env_flag(_FAST_MODE_ENV) and _is_anthropic_model(self._model):
+                _acompletion_kwargs["speed"] = "fast"
             if self._extra_headers:
                 _acompletion_kwargs["extra_headers"] = dict(self._extra_headers)
             _acompletion_kwargs.update(self._provider_extra)
@@ -1065,6 +1125,14 @@ class StreamResult:
                 # Usage from final chunk
                 if hasattr(chunk, "usage") and chunk.usage:
                     self._update_usage(chunk.usage)
+
+            log.info(
+                "round_usage",
+                round=_tool_round,
+                input_tokens=self._usage.input_tokens,
+                cached_read=self._usage.cached_input_tokens,
+                cache_write=self._usage.cache_write_tokens,
+            )
 
             # Local-model fallback: if there were no native tool_calls but the
             # text is a JSON tool call naming a known tool, recover it. Small
