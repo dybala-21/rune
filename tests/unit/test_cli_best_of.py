@@ -567,7 +567,8 @@ async def test_best_of_none_pass_no_restore(monkeypatch, tmp_path):
     stdout, kw = reports[0]
     assert kw["solved"] is False
     assert kw["copied"] == []
-    assert stdout == "out0"  # first attempt surfaced as best-effort
+    # on an all-tied field the later attempt is surfaced as best-effort
+    assert stdout == "out1"
     # F: both attempts wrote files (wrong.txt) but failed → no_artifact == 0
     assert kw["has_check"] is True
     assert kw["no_artifact"] == 0
@@ -802,6 +803,40 @@ def test_best_effort_prefers_source_edit_over_test_only(tmp_path):
                          produced=["pkg/core.py"])
     best = _rank_best_effort([a0, a1], {})
     assert best is a1
+
+
+def test_best_effort_scratch_files_lose_to_seed_source(tmp_path):
+    from rune.cli.best_of import AttemptArtifact, _rank_best_effort
+
+    # Attempt 0 wrote only debug scripts (new files, not in the seed);
+    # attempt 2 edited a file that exists in the seed. A pile of scratch
+    # files is not a fix — the real edit must be delivered.
+    seed = tmp_path / "seed"
+    (seed / "pkg").mkdir(parents=True)
+    (seed / "pkg" / "core.py").write_text("x = 1\n")
+    a0 = AttemptArtifact(index=0, workdir="w0", stdout="", returncode=0,
+                         produced=["debug_ast.py", "check_fix.py"])
+    a2 = AttemptArtifact(index=2, workdir="w2", stdout="", returncode=0,
+                         produced=["pkg/core.py"])
+    best = _rank_best_effort([a0, a2], {}, seed_from=str(seed))
+    assert best is a2
+
+
+def test_best_effort_tie_prefers_repair_attempt(tmp_path):
+    from rune.cli.best_of import AttemptArtifact, _rank_best_effort
+
+    # With zero verifier signal and identical shapes, the repair attempt
+    # (highest index) saw failure evidence the others didn't — prefer it.
+    seed = tmp_path / "seed"
+    (seed / "pkg").mkdir(parents=True)
+    (seed / "pkg" / "core.py").write_text("x = 1\n")
+    arts = [
+        AttemptArtifact(index=i, workdir=f"w{i}", stdout="", returncode=0,
+                        produced=["pkg/core.py"])
+        for i in range(3)
+    ]
+    best = _rank_best_effort(arts, {}, seed_from=str(seed))
+    assert best is arts[2]
 
 
 @pytest.mark.asyncio
@@ -1427,7 +1462,8 @@ def test_rank_best_effort_prefers_ran_over_did_not_compile():
 
 def test_rank_best_effort_deterministic_and_empty():
     from rune.cli.best_of import _rank_best_effort
-    assert _rank_best_effort([_art(0, []), _art(1, [])], {}).index == 0
+    # deterministic on a tie: the later (better-informed) attempt wins
+    assert _rank_best_effort([_art(0, []), _art(1, [])], {}).index == 1
     assert _rank_best_effort([], {}) is None
 
 
@@ -1657,7 +1693,9 @@ def test_drop_build_metadata_filters_packaging_junk():
 
 @pytest.mark.asyncio
 async def test_fastpath_verified_short_circuits(monkeypatch, tmp_path):
-    # Rung-0 verified → solved exit 0, no agentic attempts spawned.
+    # Rung-0 repro flip: fix applied, no agentic attempts spawned, and the
+    # delivery is provisional (exit 1) — a repro written from the issue
+    # text selects a candidate, it does not verify one.
     monkeypatch.setenv("RUNE_FASTPATH", "1")
     dest = tmp_path / "fp"
     dest.mkdir()
@@ -1696,9 +1734,10 @@ async def test_fastpath_verified_short_circuits(monkeypatch, tmp_path):
         "fix", 3, None, "anthropic",
         report=lambda s, **kw: reports.append(kw), seed_cwd=True,
     )
-    assert code == 0
-    assert reports[0]["solved"] is True
-    assert reports[0]["verify_method"] == "reproduction script"
+    assert code == 1
+    assert reports[0]["solved"] is False
+    assert reports[0]["provisional"] is True
+    assert reports[0]["applied"] == ["app.py"]
     assert (dest / "app.py").read_text() == "FIXED"
 
 
@@ -1731,6 +1770,39 @@ async def test_fastpath_evidence_reaches_agentic_rung(monkeypatch, tmp_path):
         "fix", 1, None, "anthropic", report=lambda s, **kw: None, seed_cwd=True,
     )
     assert spawned and "assert fixed()" in spawned[0][1]
+
+
+@pytest.mark.asyncio
+async def test_fastpath_evidence_only_reaches_first_attempt(monkeypatch, tmp_path):
+    # The repro encodes ONE reading of the issue. Broadcasting it to every
+    # attempt pins all K samples to that reading — only attempt 0 gets it.
+    monkeypatch.setenv("RUNE_FASTPATH", "1")
+    monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "sequential")
+    dest = tmp_path / "fp3"
+    dest.mkdir()
+    (dest / "app.py").write_text("BROKEN")
+
+    async def fake_fastpath(issue, seed, workdir, model, provider):
+        from rune.agent.fastpath import FastPathResult
+        return FastPathResult(repro_script="assert fixed()",
+                              repro_output="AssertionError")
+
+    import rune.agent.fastpath as fp_mod
+    monkeypatch.setattr(fp_mod, "run_fastpath", fake_fastpath)
+
+    spawned: list = []
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", _mk_attempts(tmp_path, spawned))
+    monkeypatch.setattr(best_of, "make_verifier", _mk_verifier(pass_indices=set()))
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    monkeypatch.chdir(dest)
+
+    await _best_of_async(
+        "fix", 2, None, "anthropic", report=lambda s, **kw: None, seed_cwd=True,
+    )
+    assert len(spawned) == 2
+    assert "assert fixed()" in spawned[0][1]
+    assert "assert fixed()" not in spawned[1][1]
 
 
 @pytest.mark.asyncio
@@ -1791,6 +1863,7 @@ async def test_fastpath_repro_reaches_real_verifier(monkeypatch, tmp_path):
         report=lambda s, **kw: reports.append(kw), seed_cwd=True,
     )
     # The candidate flips the repro → verified solve through the REAL verifier.
-    assert code == 0
-    assert reports[0]["solved"] is True
-    assert "reproduction script" in (reports[0].get("verify_method") or "")
+    # repro flip selects the candidate; the delivery label is provisional
+    assert code == 1
+    assert reports[0]["solved"] is False
+    assert reports[0]["provisional"] is True

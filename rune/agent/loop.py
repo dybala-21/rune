@@ -300,10 +300,16 @@ def _compute_tool_rounds(
 
     # Code work inside a real repo gets the complex budget even when the
     # classifier missed is_complex_coding — a large tree cannot be diagnosed
-    # AND fixed AND verified in 12 rounds.
+    # AND fixed AND verified in 12 rounds. Repo fixes get more still: the
+    # cap has to leave room to localize inside a multi-thousand-line module,
+    # understand the mechanism, edit, install, and run the tests. Runs that
+    # die at the cap die mid-diagnosis and ship a half-formed guess.
     is_complex = getattr(classification, "is_complex_coding", False) or repo_fix
     # Per-turn tool-round budget. Token budget and max_iterations bound runaway.
-    base = 24 if is_complex else 12
+    if repo_fix:
+        base = 40
+    else:
+        base = 24 if is_complex else 12
 
     # Modest tier bonus. Larger bonuses burn tokens on weak models
     # that keep retrying the same failing tool.
@@ -330,6 +336,11 @@ def _compute_explore_budget(classification: Any, repo_fix: bool = False) -> int:
     per-process, including "0" to disable.
     """
     is_code = getattr(classification, "is_complex_coding", False) or repo_fix
+    # Repo fixes need the deeper diagnosis runway: forcing an edit after 8
+    # read-only rounds interrupts exactly the investigation that produces a
+    # correct patch (the adapter still nudges/forces near the round cap).
+    if repo_fix:
+        return 16
     return 8 if is_code else 0
 
 

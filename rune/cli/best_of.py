@@ -571,34 +571,52 @@ _INCONCLUSIVE_MARKERS = (
 )
 
 
-def _best_effort_score(a: AttemptArtifact, evidence: str) -> tuple:
+_SCRATCH_PREFIXES = ("test", "debug", "tmp", "scratch", "repro", "verify")
+
+
+def _is_real_change(f: str, seed_from: str | None) -> bool:
+    """A produced file that plausibly changes behavior: an edit of a file
+    that exists in the seed (whatever its name), or a new file that isn't a
+    scratch test/debug script."""
+    if seed_from and os.path.isfile(os.path.join(seed_from, f)):
+        return True
+    return not os.path.basename(f).startswith(_SCRATCH_PREFIXES)
+
+
+def _best_effort_score(
+    a: AttemptArtifact, evidence: str, seed_from: str | None = None
+) -> tuple:
     """Rank a FAILED candidate for hand-off. Higher is better.
 
     Purely a delivery choice — never promotes anything to "verified". Signals,
-    cheap and in priority order: produced files at all; changed a non-test
-    source file (a scratch test alone is not a fix); the verifier ran far
-    enough to fail an assertion (vs never compiling); fewer inconclusive
-    errors; then lowest index for determinism.
+    cheap and in priority order: produced files at all; made a real change
+    (see _is_real_change — a pile of debug scripts is not a fix); the
+    verifier ran far enough to fail an assertion (vs never compiling); fewer
+    inconclusive errors; then highest index — the repair attempt saw failure
+    evidence the others didn't, so on an otherwise silent tie it is the
+    best-informed candidate.
     """
     ev = (evidence or "").lower()
     produced = 1 if a.produced else 0
-    src = 1 if any(
-        not os.path.basename(f).startswith("test") for f in a.produced
-    ) else 0
+    src = 1 if any(_is_real_change(f, seed_from) for f in a.produced) else 0
     ran = 1 if any(m in ev for m in _PROGRESS_MARKERS) else 0
     inconclusive = sum(ev.count(m) for m in _INCONCLUSIVE_MARKERS)
-    return (produced, src, ran, -inconclusive, -a.index)
+    return (produced, src, ran, -inconclusive, a.index)
 
 
 def _rank_best_effort(
-    artifacts: list[AttemptArtifact], evidence_by_cwd: dict[str, str]
+    artifacts: list[AttemptArtifact],
+    evidence_by_cwd: dict[str, str],
+    seed_from: str | None = None,
 ) -> AttemptArtifact | None:
     """Pick the furthest-along failed candidate to hand off, or None."""
     if not artifacts:
         return None
     return max(
         artifacts,
-        key=lambda a: _best_effort_score(a, evidence_by_cwd.get(a.workdir, "")),
+        key=lambda a: _best_effort_score(
+            a, evidence_by_cwd.get(a.workdir, ""), seed_from
+        ),
     )
 
 
@@ -886,15 +904,21 @@ async def _best_of_async(
 
     async def run_attempt(i: int) -> AttemptArtifact:
         async with sem:
+            msg = message + (fastpath_evidence if i == 0 else "")
             return await _run_attempt_subprocess(
-                i, message, model, provider, seed_from=seed_from
+                i, msg, model, provider, seed_from=seed_from
             )
 
     async def verify(artifact: AttemptArtifact) -> bool:
         # Seeded mode: an attempt that changed NOTHING cannot have fixed
-        # anything, so a check pass on it is vacuous. Never verify a
-        # no-change candidate.
-        if seed_cwd and not artifact.produced:
+        # anything, so a check pass on it is vacuous — and an attempt whose
+        # only output is scratch test/debug scripts changed nothing that
+        # matters (pre-fix code passes the existing tests just the same).
+        # Never select either. A file that exists in the seed is a real
+        # edit regardless of its name (django/test/testcases.py is source).
+        if seed_cwd and not any(
+            _is_real_change(f, seed_from) for f in artifact.produced
+        ):
             return False
         # Cap verifier subprocesses too: sample_parallel gathers all K verifies
         # at once, each an Evidence-Gate check subprocess.
@@ -917,6 +941,9 @@ async def _best_of_async(
             log.warning("fastpath_error", error=str(exc)[:160])
             fp = None
         if fp and fp.verified and fp.applied:
+            # A model-authored repro flipping to pass selects this fix but
+            # cannot verify it — a fix for the reported example can still
+            # miss the real requirement. Deliver as provisional.
             copied, backup_dir = _restore_changed(
                 fp_workdir, dest, fp.applied
             )
@@ -924,33 +951,36 @@ async def _best_of_async(
             await _record_winner(message, "", copied)
             report(
                 "",
-                solved=True,
+                solved=False,
                 selected_index=0,
-                pass_count=1,
+                pass_count=0,
                 k=1,
-                copied=copied,
+                copied=[],
                 skipped=[],
-                backup_dir=backup_dir,
                 has_check=True,
                 no_artifact=0,
-                verify_method=fp.method,
+                applied=copied,
+                apply_backup=backup_dir,
+                provisional=True,
             )
-            return 0
+            return 1
         shutil.rmtree(fp_workdir, ignore_errors=True)
         if fp and fp.repro_script:
             # The discriminating repro also becomes the verifier's first
-            # check, so agentic candidates that fix the issue get a real
-            # verified verdict (and best-of can early-exit on it).
+            # check: flip-to-pass picks the winning candidate early — the
+            # delivery label stays provisional.
             verify_cwd.repro_script = fp.repro_script  # type: ignore[attr-defined]
             log.info("repro_attached", chars=len(fp.repro_script))
-            # Hand the agentic rung the evidence, not a failed diff.
+            # Hand the agentic rung the evidence, not a failed diff. Only
+            # attempt 0 gets it: the repro encodes ONE reading of the issue,
+            # and broadcasting it to every attempt pins all K samples to
+            # that reading — when it's wrong, best-of loses its diversity.
             fastpath_evidence = (
                 "\n\nA reproduction script for this issue (currently "
                 "FAILING) — make it pass without breaking existing tests:\n"
                 "```python\n" + fp.repro_script[:3000] + "\n```\n"
                 "Its current output:\n" + fp.repro_output[:800]
             )
-            message = message + fastpath_evidence
 
     strategy = os.environ.get(_STRATEGY_ENV, "auto").strip().lower()
     if strategy == "auto":
@@ -986,7 +1016,7 @@ async def _best_of_async(
         attempts: list[Attempt] = []
         selected = selected_index = None
         for i in range(k):
-            msg = message
+            msg = message + (fastpath_evidence if i == 0 else "")
             if i == 1 and repair_ok:
                 ev = _last_evidence([a.candidate for a in attempts])
                 if ev:
@@ -1004,7 +1034,7 @@ async def _best_of_async(
         )
     else:  # race2: two parallel attempts, early-exit verify, one repair shot
         first_two = await asyncio.gather(
-            run_with(0, message), run_with(1, message)
+            run_with(0, message + fastpath_evidence), run_with(1, message)
         )
         attempts = []
         selected = selected_index = None
@@ -1137,7 +1167,10 @@ async def _best_of_async(
         # what to hand off — a passing verification is still the ONLY thing that
         # flips "done", so this cannot manufacture a fake success.
         no_artifact = sum(1 for a in artifacts if not a.produced)
-        best = _rank_best_effort(artifacts, ev_map) if artifacts else None
+        best = (
+            _rank_best_effort(artifacts, ev_map, seed_from)
+            if artifacts else None
+        )
         # Unverified is not wrong: seeded mode applies the best effort
         # (with backup); otherwise park it beside the project.
         applied: list[str] = []
