@@ -118,3 +118,34 @@ async def test_a_read_only_command_is_not_snapshotted(workspace, monkeypatch):
     await bash_execute(BashParams(
         command="ls -la", cwd=str(workspace), timeout=30))
     assert ws.latest(workspace) is None
+
+
+class TestRecoveryAcrossSnapshots:
+    """A file removed two commands ago is still recoverable.
+
+    Each mutating command takes its own snapshot, so the newest one no
+    longer holds what the previous command deleted. Looking only at the
+    newest copy would recover nothing but the most recent loss.
+    """
+
+    def test_a_file_deleted_before_the_last_snapshot_comes_back(self, workspace):
+        ws.take(workspace)                      # holds notes.md and mod.py
+        (workspace / "notes.md").unlink()
+        ws.take(workspace)                      # notes.md already gone here
+        (workspace / "pkg" / "mod.py").unlink()
+
+        assert ws.restore(workspace, "notes.md")
+        assert (workspace / "notes.md").read_text() == "keep me\n"
+        assert ws.restore(workspace, "pkg/mod.py")
+
+    def test_a_file_older_than_every_kept_snapshot_is_gone(self, workspace):
+        # Bounded history is a deliberate trade; say so rather than imply
+        # the copies are permanent.
+        (workspace / "old.txt").write_text("x")
+        ws.take(workspace)
+        (workspace / "old.txt").unlink()
+        for i in range(ws._KEEP + 1):
+            (workspace / f"pad{i}.txt").write_text("p")
+            ws.take(workspace)
+        assert not ws.restore(workspace, "old.txt")
+

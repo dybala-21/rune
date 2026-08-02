@@ -153,32 +153,43 @@ def take(workspace: str | Path) -> Path | None:
         return None
 
 
-def latest(workspace: str | Path) -> Path | None:
-    """Most recent snapshot of *workspace*, if there is one."""
+def snapshots(workspace: str | Path) -> list[Path]:
+    """Kept snapshots of *workspace*, newest first."""
     root = _snapshot_root(Path(workspace).expanduser().resolve())
     try:
-        snaps = sorted((p for p in root.iterdir() if p.is_dir()), reverse=True)
+        return sorted((p for p in root.iterdir() if p.is_dir()), reverse=True)
     except OSError:
-        return None
+        return []
+
+
+def latest(workspace: str | Path) -> Path | None:
+    """Most recent snapshot of *workspace*, if there is one."""
+    snaps = snapshots(workspace)
     return snaps[0] if snaps else None
 
 
 def restore(workspace: str | Path, rel: str) -> bool:
-    """Put one file back from the newest snapshot. Returns whether it worked."""
-    snap = latest(workspace)
-    if snap is None:
-        return False
-    src = snap / rel
-    if not src.is_file():
-        return False
+    """Put one file back, from the newest snapshot that still holds it.
+
+    A command that removes something is followed by a snapshot taken for
+    the next command, and that one no longer contains what was just
+    deleted. Looking only at the newest copy would therefore fail to
+    recover anything except what the most recent command removed, so this
+    walks back through the kept snapshots.
+    """
     dst = Path(workspace).expanduser().resolve() / rel
-    try:
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
-    except OSError:
-        return False
-    log.info("workspace_restored", path=rel)
-    return True
+    for snap in snapshots(workspace):
+        src = snap / rel
+        if not src.is_file():
+            continue
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+        except OSError:
+            return False
+        log.info("workspace_restored", path=rel, snapshot=snap.name)
+        return True
+    return False
 
 
 def missing_since_snapshot(workspace: str | Path) -> list[str]:
