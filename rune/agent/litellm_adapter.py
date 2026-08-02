@@ -953,6 +953,8 @@ class StreamResult:
         self._artifact_request = ""
         self._task_blocked = ""
         self._tamper_blocks = 0
+        self._postconditions = []
+        self._postcondition_nudges = 0
         self._policy.reset()
 
         while True:
@@ -1342,6 +1344,27 @@ class StreamResult:
                     log.info("verify_on_stop_nudge", round=_tool_round)
                     continue
 
+                # Conditions fixed before the work started, checked against
+                # the filesystem rather than against the summary.
+                _unmet = self._unmet_postconditions()
+                if (
+                    _unmet
+                    and getattr(self, "_postcondition_nudges", 0) == 0
+                    and _tool_round < _max_tool_rounds - 1
+                ):
+                    from rune.agent.postconditions import unmet_note
+                    self._postcondition_nudges = 1
+                    if text_this_turn:
+                        self._messages.append({
+                            "role": "assistant", "content": text_this_turn,
+                        })
+                    self._messages.append({
+                        "role": "user", "content": unmet_note(_unmet),
+                    })
+                    self._collected_text = ""
+                    log.info("postcondition_nudge", unmet=_unmet[:5])
+                    continue
+
                 # An input the request named was searched for and never
                 # found. Finishing here would report on work that had no
                 # basis, so say so once before the answer is written.
@@ -1680,6 +1703,10 @@ class StreamResult:
         if roles:
             ledger.roles.update(roles)
             log.info("artifact_roles", roles=roles)
+            from pathlib import Path as _FsPath
+
+            from rune.agent.postconditions import derive
+            self._postconditions = derive(roles, _FsPath.cwd())
 
     def _revert_circumvented_writes(self) -> str:
         """Undo a refused artifact that appeared anyway.
@@ -1725,6 +1752,15 @@ class StreamResult:
             log.info("phantom_write_reverted", path=name)
             notes.append(circumvented_note(name))
         return "\n".join(notes)
+
+    def _unmet_postconditions(self) -> list[str]:
+        conds = getattr(self, "_postconditions", None)
+        if not conds:
+            return []
+        from pathlib import Path as _FsPath
+
+        from rune.agent.postconditions import check
+        return check(conds, _FsPath.cwd())
 
     def _unresolved_artifacts(self) -> list[str]:
         ledger = self._ledger()
