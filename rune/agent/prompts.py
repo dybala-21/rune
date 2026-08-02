@@ -143,6 +143,13 @@ FORBIDDEN:
 - "Run tests" = run existing tests (go test, npm test, etc.)
 - "Write tests" = create new test files
 
+If the request cannot be satisfied correctly — the instructions contradict
+a spec, a documented contract or an existing test; a required input does
+not exist; following it literally would break behaviour the project relies
+on — call task_blocked with both sides of the conflict and stop. Reporting
+that is a successful outcome. Bending code until a wrong check passes, or
+doing as asked while breaking a documented contract, is not.
+
 When fixing a bug in an existing project, do NOT edit the project's existing
 test files to make them agree with your change. A previously-passing test
 that your change breaks is evidence about your design — read what it expects

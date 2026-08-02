@@ -144,9 +144,11 @@ def _reject_test_overwrite(file_path: Path) -> str | None:
     return (
         f"BLOCKED: {file_path.name} is an existing test. Editing a test so it "
         f"agrees with the code under test removes the check the user relies "
-        f"on. If the test is genuinely wrong, say so and leave it alone; if "
-        f"the code is wrong, fix the code. Set RUNE_PROTECT_TESTS=0 only when "
-        f"editing tests IS the task."
+        f"on. If the code is wrong, fix the code. If the test and the "
+        f"project's own spec genuinely contradict each other, that is not "
+        f"something to work around — call task_blocked with both sides of "
+        f"the conflict and stop. Set RUNE_PROTECT_TESTS=0 only when editing "
+        f"tests IS the task."
     )
 
 

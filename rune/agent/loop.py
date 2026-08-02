@@ -3087,6 +3087,13 @@ class NativeAgentLoop(EventEmitter):
                 error=str(exc)[:200],
             )
 
+        # Abstaining is its own outcome, not a completion. Checked here so
+        # every path that finishes a run reports it the same way.
+        from rune.capabilities.blocked import consume_block
+        if consume_block():
+            trace.reason = "task_blocked"
+            log.info("run_task_blocked", step=self._step)
+
         trace.total_tokens_used = self._token_budget.used
         return trace
 

@@ -136,6 +136,7 @@ def _register_all_capabilities(registry: CapabilityRegistry) -> None:
     """Register all built-in capabilities."""
     from rune.capabilities.ask_user import register_ask_user_capability
     from rune.capabilities.bash import register_bash_capabilities
+    from rune.capabilities.blocked import register_blocked_capability
     from rune.capabilities.browser import register_browser_capabilities
     from rune.capabilities.code_intelligence import register_code_intelligence_capabilities
     from rune.capabilities.credential import register_credential_capabilities
@@ -169,3 +170,4 @@ def _register_all_capabilities(registry: CapabilityRegistry) -> None:
     register_ask_user_capability(registry)
     register_service_capabilities(registry)
     register_safety_capabilities(registry)
+    register_blocked_capability(registry)
