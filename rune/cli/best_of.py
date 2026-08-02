@@ -1066,6 +1066,19 @@ async def _best_of_async(
             )
 
     def _last_evidence(arts: list[AttemptArtifact]) -> str:
+        """Failure output to hand the repair attempt, if it is worth having.
+
+        When the reproduction script comes out the same way on every
+        candidate it has told us nothing, and its output is an actively
+        misleading brief — it describes a requirement the correct fix may
+        not even be meant to satisfy. Withhold it rather than aim the next
+        attempt at it.
+        """
+        from rune.agent.rejection_sampler import repro_discriminates
+
+        if repro_discriminates(verify_cwd) is False:
+            log.info("repro_non_discriminating")
+            return ""
         for a in reversed(arts):
             ev = ev_map_ref.get(a.workdir, "")
             if ev:

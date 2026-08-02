@@ -351,6 +351,21 @@ def _heal_test_env(cwd: str) -> None:
                 log.info("verify_env_healed", stub=os.path.relpath(ver, cwd))
 
 
+def repro_discriminates(verify) -> bool | None:
+    """Whether the reproduction script told the candidates apart.
+
+    None while fewer than two have been graded. True only when it passed on
+    at least one and failed on at least one — a script with the same verdict
+    everywhere carries no information about which candidate to keep, and its
+    failure output is a misleading thing to hand the next attempt.
+    """
+    results = getattr(verify, "repro_results", None) or {}
+    if len(results) < 2:
+        return None
+    values = set(results.values())
+    return len(values) > 1
+
+
 def _project_python(seed_cwd: str) -> str:
     """Project venv python if present, else RUNE's own interpreter.
 
@@ -663,6 +678,7 @@ async def make_verifier(
                 # falling short of the real requirement. Flip-to-pass picks
                 # the candidate; delivery stays provisional.
                 verify.provisional_by_cwd[cwd] = True  # type: ignore[attr-defined]
+                verify.repro_results[cwd] = True  # type: ignore[attr-defined]
                 log.info("repro_verify_pass")
                 return True
             if rc != 125:
@@ -671,6 +687,7 @@ async def make_verifier(
                 # here demotes genuinely correct fixes. Keep the output as
                 # evidence and let the normal chain (targeted tests →
                 # provisional) decide.
+                verify.repro_results[cwd] = False  # type: ignore[attr-defined]
                 evidence_by_cwd[cwd] = out[-1500:]
                 log.info("repro_verify_fail")
             else:
@@ -796,6 +813,11 @@ async def make_verifier(
     verify.has_check = has_check  # type: ignore[attr-defined]
     verify.provisional_by_cwd = {}  # type: ignore[attr-defined]
     verify.repro_script = ""  # type: ignore[attr-defined]
+    # Per-candidate repro outcomes. A script that comes out the same way on
+    # every candidate separates nothing, whichever way that is: too strict
+    # and it rejects the correct fix along with the rest, too loose and it
+    # accepts anything. Only a split verdict is worth acting on.
+    verify.repro_results = {}  # type: ignore[attr-defined]
     verify.evidence_by_cwd = evidence_by_cwd  # type: ignore[attr-defined]
     verify.method_by_cwd = method_by_cwd  # type: ignore[attr-defined]
     return verify
