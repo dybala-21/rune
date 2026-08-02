@@ -69,6 +69,38 @@ _REPAIR_EVIDENCE_CAP = 1500
 _FASTPATH_ENV = "RUNE_FASTPATH"
 
 
+# Attempts used to be near-copies: all at temperature 0, and race2 handed
+# the first two the same message, so K samples walked the same path and K
+# bought far less than it should. Each attempt now gets a different
+# starting point and a different sampling temperature. "0" restores the
+# identical-attempt behaviour.
+_DIVERSITY_ENV = "RUNE_BESTOF_DIVERSIFY"
+
+# Distinct entry points into the same problem, not instructions to try
+# harder. Index 0 keeps the default framing so the cheapest, most direct
+# attempt is always among the K.
+_ENTRY_POINTS = (
+    "",
+    "\n\nApproach: reproduce the reported behaviour first and let what you "
+    "observe tell you where the cause is, rather than starting from the "
+    "file the report names.",
+    "\n\nApproach: find the code that already handles the neighbouring "
+    "cases correctly and work out why this case does not reach it.",
+)
+
+# Attempt 0 stays deterministic; later attempts sample more widely so they
+# are not re-drawing the same trajectory.
+_TEMPERATURES = (0.0, 0.4, 0.7)
+
+
+def _diversify(index: int) -> tuple[str, float | None]:
+    """Entry-point suffix and sampling temperature for attempt *index*."""
+    if os.environ.get(_DIVERSITY_ENV, "1") == "0":
+        return "", None
+    return (_ENTRY_POINTS[index % len(_ENTRY_POINTS)],
+            _TEMPERATURES[index % len(_TEMPERATURES)])
+
+
 def _repair_suffix(evidence: str) -> str:
     return (
         "\n\nNOTE: a previous independent attempt at this task FAILED "
@@ -135,6 +167,9 @@ async def _run_attempt_subprocess(
 
     env = dict(os.environ)
     env[RECURSION_GUARD_ENV] = "1"  # recursion guard
+    _entry, _temp = _diversify(index)
+    if _temp is not None:
+        env["RUNE_TEMPERATURE"] = str(_temp)
     # Confine file writes to this attempt's dir via enforce() (same as the
     # parallel-isolated path). enforce() covers the file_write/edit/delete and
     # document_create capabilities; shell/exec and the browser capability are not
@@ -145,7 +180,7 @@ async def _run_attempt_subprocess(
     # command is — or how to find the nearest tests — so it spends rounds
     # fixing, not rediscovering the verify loop. Detection is structural
     # (detect_test_command); same hint for every attempt.
-    child_message = message
+    child_message = message + _entry
     if seed_from:
         try:
             from rune.agent.auto_verify import detect_test_command
@@ -694,6 +729,40 @@ async def _verifier_discriminates(verify_cwd, seed_from: str) -> bool:
             shutil.rmtree(scratch, ignore_errors=True)
 
 
+# Attempt workdirs are wiped once a winner is chosen. Point this at a
+# directory to keep each attempt's changed files, so it stays possible to
+# ask later whether a correct fix was generated and not selected. Files
+# rather than a patch, because delivery copies files too — an archive
+# graded the same way cannot disagree with what shipped.
+_KEEP_ATTEMPTS_ENV = "RUNE_BESTOF_KEEP_ATTEMPTS"
+
+
+def _archive_attempts(artifacts: list[AttemptArtifact], seed_from: str | None) -> None:
+    dest_root = os.environ.get(_KEEP_ATTEMPTS_ENV, "").strip()
+    if not dest_root or not seed_from:
+        return
+    root = Path(dest_root).expanduser()
+    for a in artifacts:
+        out = root / f"attempt_{a.index}"
+        try:
+            shutil.rmtree(out, ignore_errors=True)
+            out.mkdir(parents=True, exist_ok=True)
+            kept = 0
+            for rel in a.produced:
+                src = Path(a.workdir) / rel
+                if not src.is_file():
+                    continue
+                dst = out / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+                kept += 1
+            (out / "_manifest.txt").write_text(
+                "\n".join(a.produced) + f"\ncopied={kept}\n"
+            )
+        except OSError as exc:  # archiving must never affect the run
+            log.debug("attempt_archive_failed", index=a.index, error=str(exc)[:80])
+
+
 def _cleanup(artifacts: list[AttemptArtifact]) -> None:
     for a in artifacts:
         shutil.rmtree(a.workdir, ignore_errors=True)
@@ -1061,6 +1130,7 @@ async def _best_of_async(
             selected=selected, selected_index=selected_index, attempts=attempts
         )
     artifacts: list[AttemptArtifact] = [a.candidate for a in res.attempts]
+    _archive_attempts(artifacts, seed_from)
 
     # Learn a correctness rule from any failed attempts' verifier evidence
     # (fires whether or not a winner was found — every failed candidate is a
@@ -1097,6 +1167,18 @@ async def _best_of_async(
                 index=res.selected_index,
                 files=len(applied),
             )
+            # A provisional pick still separates one candidate that passed a
+            # real check from siblings that failed one, which is the contrast
+            # worth learning from. Only the verified branch had this, and
+            # since a repro flip stopped counting as verified that branch
+            # almost never opens on a repo fix — so the distillation was
+            # wired to a path that no longer runs.
+            if os.environ.get("RUNE_CONTRASTIVE_DISTILL", "1") != "0":
+                await _learn_from_contrast(
+                    selected,
+                    [a.candidate for a in res.attempts if not a.passed],
+                    ev_map,
+                )
             report(
                 selected.stdout,
                 solved=False,

@@ -423,7 +423,10 @@ async def test_run_attempt_sets_guard_and_omits_best_of(monkeypatch):
     # child runs the plain single-attempt path: --best-of must NOT be propagated
     assert "--best-of" not in captured["cmd"]
     # but model/provider/message ARE propagated
-    assert "--message" in captured["cmd"] and "do it" in captured["cmd"]
+    # the message is propagated; attempts past the first also carry a
+    # distinct entry point, so match on content rather than equality
+    assert "--message" in captured["cmd"]
+    assert any("do it" in c for c in captured["cmd"])
     assert "--model" in captured["cmd"] and "m1" in captured["cmd"]
     assert "--provider" in captured["cmd"] and "p1" in captured["cmd"]
     # isolated workdir (a real temp dir)
@@ -1867,3 +1870,171 @@ async def test_fastpath_repro_reaches_real_verifier(monkeypatch, tmp_path):
     assert code == 1
     assert reports[0]["solved"] is False
     assert reports[0]["provisional"] is True
+
+
+@pytest.mark.asyncio
+async def test_provisional_selection_still_distills_the_contrast(monkeypatch, tmp_path):
+    """The winner-vs-losers contrast was only learned from a verified win.
+    Since a reproduction flip stopped counting as verified, that branch
+    barely opens on a repo fix, so the distillation ran almost never — the
+    provisional pick carries the same contrast and must feed it too."""
+    dest = tmp_path / "proj"
+    dest.mkdir()
+    (dest / "app.py").write_text("x = 1\n")
+
+    async def fake_make_verifier(instruction, seed_cwd=None):
+        async def verify(cwd):
+            passed = os.path.exists(os.path.join(cwd, "fix.py"))
+            if passed:
+                verify.provisional_by_cwd[cwd] = True
+            return passed
+        verify.has_check = True
+        verify.evidence_by_cwd = {}
+        verify.provisional_by_cwd = {}
+        verify.method_by_cwd = {}
+        return verify
+
+    works = []
+    for i in range(2):
+        w = tmp_path / f"w{i}"
+        w.mkdir()
+        if i == 0:
+            (w / "fix.py").write_text("correct")
+        else:
+            (w / "wrong.py").write_text("wrong")
+        works.append(str(w))
+
+    async def fake_attempt(index, message, model, provider, seed_from=None):
+        return AttemptArtifact(index=index, workdir=works[index],
+                               stdout=f"o{index}", returncode=0,
+                               produced=sorted(os.listdir(works[index])))
+
+    called = {}
+
+    async def fake_contrast(winner, losers, ev_map):
+        called["winner"] = winner.index
+        called["losers"] = [lo.index for lo in losers]
+        return "rule-key"
+
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
+    monkeypatch.setattr(best_of, "make_verifier", fake_make_verifier)
+    monkeypatch.setattr(best_of, "_learn_from_contrast", fake_contrast)
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "parallel")
+    monkeypatch.delenv("RUNE_CONTRASTIVE_DISTILL", raising=False)
+    monkeypatch.chdir(dest)
+
+    code = await _best_of_async("fix", 2, None, None,
+                                report=lambda s, **kw: None, seed_cwd=True)
+
+    assert code == 1                       # provisional, not a claim of success
+    assert called.get("winner") == 0
+    assert called.get("losers") == [1]
+
+
+@pytest.mark.asyncio
+async def test_contrast_distillation_can_be_switched_off(monkeypatch, tmp_path):
+    dest = tmp_path / "proj2"
+    dest.mkdir()
+    (dest / "app.py").write_text("x = 1\n")
+
+    async def fake_make_verifier(instruction, seed_cwd=None):
+        async def verify(cwd):
+            passed = os.path.exists(os.path.join(cwd, "fix.py"))
+            if passed:
+                verify.provisional_by_cwd[cwd] = True
+            return passed
+        verify.has_check = True
+        verify.evidence_by_cwd = {}
+        verify.provisional_by_cwd = {}
+        verify.method_by_cwd = {}
+        return verify
+
+    w = tmp_path / "wa"
+    w.mkdir()
+    (w / "fix.py").write_text("correct")
+
+    async def fake_attempt(index, message, model, provider, seed_from=None):
+        return AttemptArtifact(index=index, workdir=str(w), stdout="o",
+                               returncode=0, produced=["fix.py"])
+
+    called = {}
+
+    async def fake_contrast(winner, losers, ev_map):
+        called["ran"] = True
+        return None
+
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
+    monkeypatch.setattr(best_of, "make_verifier", fake_make_verifier)
+    monkeypatch.setattr(best_of, "_learn_from_contrast", fake_contrast)
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    monkeypatch.setenv("RUNE_CONTRASTIVE_DISTILL", "0")
+    monkeypatch.chdir(dest)
+
+    await _best_of_async("fix", 1, None, None,
+                         report=lambda s, **kw: None, seed_cwd=True)
+    assert "ran" not in called
+
+
+class TestAttemptDiversity:
+    """K attempts were near-copies: all at temperature 0, and race2 gave the
+    first two the same message. Grading every attempt against the hidden
+    tests showed three attempts at 33% each covering only 50% of runs where
+    independence predicts 70%."""
+
+    def test_attempt_zero_keeps_the_default_framing(self):
+        from rune.cli.best_of import _diversify
+        entry, temp = _diversify(0)
+        assert entry == ""
+        assert temp == 0.0
+
+    def test_later_attempts_get_a_different_entry_point_and_temperature(self):
+        from rune.cli.best_of import _diversify
+        e1, t1 = _diversify(1)
+        e2, t2 = _diversify(2)
+        assert e1 and e2 and e1 != e2
+        assert 0.0 < t1 < t2
+
+    def test_it_cycles_for_larger_k(self):
+        from rune.cli.best_of import _diversify
+        assert _diversify(3) == _diversify(0)
+
+    def test_diversity_can_be_switched_off(self, monkeypatch):
+        from rune.cli.best_of import _diversify
+        monkeypatch.setenv("RUNE_BESTOF_DIVERSIFY", "0")
+        assert _diversify(2) == ("", None)
+
+
+@pytest.mark.asyncio
+async def test_each_attempt_is_spawned_with_its_own_temperature(monkeypatch, tmp_path):
+    import rune.agent.auto_verify as av
+
+    captured = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"ok\n", b"")
+
+    async def fake_exec(*cmd, cwd=None, env=None, **kwargs):
+        captured[env.get("RUNE_TEMPERATURE")] = list(cmd)
+        return _FakeProc()
+
+    monkeypatch.setattr(best_of.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(av, "detect_test_command", lambda cwd: None)
+    monkeypatch.delenv("RUNE_BESTOF_DIVERSIFY", raising=False)
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    (seed / "app.py").write_text("x")
+
+    for i in range(3):
+        await _run_attempt_subprocess(i, "fix it", None, None, seed_from=str(seed))
+
+    assert sorted(captured) == ["0.0", "0.4", "0.7"]
+    # the later attempts also carry a distinct entry point in the message
+    msgs = ["".join(c) for c in captured.values()]
+    assert len({m for m in msgs}) == 3
+
