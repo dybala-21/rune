@@ -946,6 +946,13 @@ class StreamResult:
         # Verify-on-stop state (per stream_text call).
         self._vos_edited = False
         self._vos_nudges = 0
+        # Artifact-provenance state (per stream_text call).
+        self._artifact_ledger = None
+        self._artifact_nudges = 0
+        self._artifact_roles_tried = False
+        self._artifact_request = ""
+        self._task_blocked = ""
+        self._tamper_blocks = 0
         self._policy.reset()
 
         while True:
@@ -1334,6 +1341,28 @@ class StreamResult:
                     self._collected_text = ""
                     log.info("verify_on_stop_nudge", round=_tool_round)
                     continue
+
+                # An input the request named was searched for and never
+                # found. Finishing here would report on work that had no
+                # basis, so say so once before the answer is written.
+                _missing = self._unresolved_artifacts()
+                if (
+                    _missing
+                    and getattr(self, "_artifact_nudges", 0) == 0
+                    and _tool_round < _max_tool_rounds - 1
+                ):
+                    from rune.agent.provenance import unresolved_stop_note
+                    self._artifact_nudges = 1
+                    if text_this_turn:
+                        self._messages.append({
+                            "role": "assistant", "content": text_this_turn,
+                        })
+                    self._messages.append({
+                        "role": "user", "content": unresolved_stop_note(_missing),
+                    })
+                    self._collected_text = ""
+                    log.info("unresolved_artifact_nudge", missing=_missing)
+                    continue
                 if text_this_turn:
                     self._messages.append({
                         "role": "assistant",
@@ -1374,6 +1403,13 @@ class StreamResult:
             # write/execute tools run serially.
             tc_list = list(tool_calls_by_index.values())
             await self._execute_tool_batch(tc_list)
+
+            # Abstaining ends the run there and then: the point of the tool
+            # is that there is nothing further to attempt.
+            if getattr(self, "_task_blocked", ""):
+                self._collected_text = self._task_blocked
+                log.info("abstain_stop", round=_tool_round)
+                break
 
             # Exploration-round budget: steer a wandering model toward the
             # edit. Appended AFTER the batch so every tool_call_id already has
@@ -1602,6 +1638,148 @@ class StreamResult:
             self._messages.append({"role": "user", "content": nudge_text})
             log.info("policy_tool_loop_nudge")
 
+    def _ledger(self) -> Any:
+        """Artifact ledger for this run, seeded from the user's request."""
+        from rune.agent.provenance import ArtifactLedger, provenance_enabled
+
+        if not provenance_enabled():
+            return None
+        if getattr(self, "_artifact_ledger", None) is None:
+            # Every user turn, not just the first: memory and context get
+            # injected ahead of the goal, so "the first user message" is
+            # often not the request.
+            parts = [
+                m["content"] for m in self._messages
+                if isinstance(m, dict) and m.get("role") == "user"
+                and isinstance(m.get("content"), str)
+            ]
+            self._artifact_ledger = ArtifactLedger.for_request("\n".join(parts))
+            self._artifact_request = "\n".join(parts)
+            log.info("artifact_ledger_init",
+                     referenced=sorted(self._artifact_ledger.referenced)[:10])
+        return self._artifact_ledger
+
+    async def _classify_artifact_roles(self) -> None:
+        """Settle input-versus-output once, the first time it matters.
+
+        Skipped entirely when the request names no files, which is most of
+        them, so the extra call is not a per-run cost. If it fails the
+        ledger keeps its weaker fallback rule rather than blocking work.
+        """
+        ledger = self._ledger()
+        if ledger is None or ledger.roles or not ledger.referenced:
+            return
+        if getattr(self, "_artifact_roles_tried", False):
+            return
+        self._artifact_roles_tried = True
+        from rune.agent.provenance import classify_roles
+        roles = await classify_roles(
+            getattr(self, "_artifact_request", ""),
+            sorted(ledger.referenced), self._model, None,
+        )
+        if roles:
+            ledger.roles.update(roles)
+            log.info("artifact_roles", roles=roles)
+
+    def _revert_circumvented_writes(self) -> str:
+        """Undo a refused artifact that appeared anyway.
+
+        Blocking the write tool only closes one door: the same file can be
+        produced by a shell redirect. Rather than trying to recognise every
+        way a command can write (a losing game — flags, variables and
+        redirects defeat any pattern), this checks the one thing that
+        matters after the fact: did a path we explicitly refused come into
+        existence? If so it was not found, it was authored, so it goes.
+        """
+        from pathlib import Path as _PathT
+
+        from rune.agent.provenance import circumvented_note
+
+        ledger = self._ledger()
+        if ledger is None:
+            return ""
+        # Only paths this run positively saw to be missing. Classifying a
+        # file as an input is NOT enough on its own: an input the agent read
+        # with a shell command never reaches the read ledger, and removing
+        # it because of that would destroy the very file the task depends
+        # on — the failure this whole area exists to prevent.
+        candidates = set(ledger.refused) | set(ledger.known_absent)
+        if not candidates:
+            return ""
+        notes: list[str] = []
+        for name in sorted(candidates):
+            p = _PathT.cwd() / name
+            if not p.exists():
+                continue
+            try:
+                from rune.safety.recoverable import move_to_trash
+                move_to_trash(p)
+            except OSError:
+                continue
+            # Reading back a file the run just authored would otherwise
+            # stand as proof it was there all along, and the next write
+            # would sail through. Removing the file removes that proof.
+            ledger.read_ok.discard(name)
+            ledger.refused.add(name)
+            ledger.known_absent.add(name)
+            log.info("phantom_write_reverted", path=name)
+            notes.append(circumvented_note(name))
+        return "\n".join(notes)
+
+    def _unresolved_artifacts(self) -> list[str]:
+        ledger = self._ledger()
+        return ledger.unresolved() if ledger is not None else []
+
+    def _phantom_write_check(self, name: str, params: dict[str, Any]) -> str | None:
+        """Refuse to author a file the request treated as already existing."""
+        from rune.agent.provenance import (
+            _WRITE_TOOLS,
+            path_exists,
+            phantom_write_error,
+        )
+
+        if name not in _WRITE_TOOLS:
+            return None
+        ledger = self._ledger()
+        if ledger is None:
+            return None
+        target = params.get("path") or params.get("file_path") or ""
+        if not target or path_exists(str(target)):
+            return None
+        if not ledger.is_phantom(str(target)):
+            return None
+        import os as _os
+        _name = _os.path.basename(str(target))
+        ledger.refused.add(_name)
+        log.info("phantom_write_blocked", path=str(target))
+        return phantom_write_error(_name)
+
+    def _record_provenance(
+        self, name: str, params: dict[str, Any], result: str
+    ) -> None:
+        """Note what this call proved about the workspace."""
+        from rune.agent.provenance import (
+            _READ_TOOLS,
+            _WRITE_TOOLS,
+            path_exists,
+        )
+
+        ledger = self._ledger()
+        if ledger is None:
+            return
+        target = params.get("path") or params.get("file_path") or ""
+        if name not in _WRITE_TOOLS:
+            try:
+                ledger.record_lookup(json.dumps(params, ensure_ascii=False))
+            except (TypeError, ValueError):
+                ledger.record_lookup(str(params))
+        if name in _READ_TOOLS and target:
+            # Whether the read found anything is a question about the
+            # filesystem, not about how the tool phrased its answer.
+            ledger.record_read(str(target), path_exists(str(target)))
+        if name in _WRITE_TOOLS and target:
+            ledger.record_write(str(target), path_exists(str(target)))
+
     async def _execute_tool(self, name: str, params: dict[str, Any]) -> str:
         """Execute a tool by name and return string result.
 
@@ -1654,10 +1832,30 @@ class StreamResult:
         func = self._tool_lookup.get(name)
         if func is None:
             return f"Error: unknown tool '{name}'"
+
+        # Settled before the first tool runs, not just before a write: the
+        # file can be authored by a shell command that never touches the
+        # write tools, and the revert needs the classification to exist by
+        # then. Self-guarded, so this costs one call per run at most.
+        await self._classify_artifact_roles()
+        _phantom = self._phantom_write_check(name, params)
+        if _phantom:
+            return _phantom
+
         try:
             result = await func(**params)
             result_str = str(result) if result is not None else ""
+            if name == "task_blocked":
+                from rune.capabilities.blocked import blocked_reason
+                _why = blocked_reason()
+                if _why:
+                    self._task_blocked = result_str or _why
+                    log.info("abstain_invoked")
+            _reverted = self._revert_circumvented_writes()
+            if _reverted:
+                result_str += "\n" + _reverted
             self._tool_result_cache[_cache_key] = result_str
+            self._record_provenance(name, params, result_str)
             # Reset fail streak on success.
             # Also treat "NO CHANGES DETECTED" as failure — the action
             # technically executed but had no effect (phantom click).
@@ -1782,6 +1980,15 @@ class LiteLLMAgent:
         self._tool_lookup = _build_tool_lookup(self._tools)
         self._requested_max_tokens = max_tokens
         self._max_tokens = _clamp_max_tokens(self._model, max_tokens)
+        # Sampling temperature is 0 everywhere by default. Best-of raises it
+        # for the later attempts so K samples are not near-copies of each
+        # other; see the diversity suffix in cli/best_of.
+        _t_override = os.environ.get("RUNE_TEMPERATURE", "").strip()
+        if _t_override:
+            try:
+                temperature = float(_t_override)
+            except ValueError:
+                log.debug("temperature_override_invalid", value=_t_override[:16])
         self._temperature = temperature
         self._max_tool_rounds = max_tool_rounds
         self._explore_budget = explore_budget
