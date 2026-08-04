@@ -358,12 +358,44 @@ def repro_discriminates(verify) -> bool | None:
     at least one and failed on at least one — a script with the same verdict
     everywhere carries no information about which candidate to keep, and its
     failure output is a misleading thing to hand the next attempt.
+
+    RUNE_REPRO_GATE=0 answers "don't know" throughout, which is what the
+    callers did before this existed.
     """
+    import os
+
+    if os.environ.get("RUNE_REPRO_GATE", "1") == "0":
+        return None
     results = getattr(verify, "repro_results", None) or {}
     if len(results) < 2:
         return None
     values = set(results.values())
     return len(values) > 1
+
+
+async def ensure_two_graded(verify, workdirs: list[str]) -> None:
+    """Measure candidates against the repro until two verdicts exist.
+
+    Whether the script separates the candidates cannot be answered from one
+    verdict, and one verdict is usually all there is: verification stops as
+    soon as a candidate passes, and an attempt that times out is never run
+    against the script at all. Measured over the runs that carried a repro,
+    three in four reached the decision point undecided, so the evidence went
+    through by default — the case the check exists to catch.
+
+    Grading here costs one script run per missing candidate and records
+    nothing but the verdict, so asking the question cannot select or reject
+    anyone as a side effect.
+    """
+    grade = getattr(verify, "grade_repro", None)
+    results = getattr(verify, "repro_results", None)
+    if grade is None or results is None or not getattr(verify, "repro_script", ""):
+        return
+    for cwd in workdirs:
+        if len(results) >= 2:
+            return
+        if cwd not in results:
+            await grade(cwd)
 
 
 def _project_python(seed_cwd: str) -> str:
@@ -809,6 +841,47 @@ async def make_verifier(
             return False
         return await eg(cwd)
 
+    async def _grade_repro(cwd: str) -> bool | None:
+        """Record how the repro script comes out on *cwd*, if not already known.
+
+        Verification stops early — a candidate that times out, produces
+        nothing, or arrives after a sibling has already passed is never run
+        against the script. That left the caller holding a single verdict at
+        the point where it has to decide whether the script separates the
+        candidates, and one verdict can never answer that. This fills the
+        gap on demand: it is one script run, and it touches nothing else, so
+        a candidate cannot be selected or rejected as a side effect of being
+        asked about.
+        """
+        results = verify.repro_results  # type: ignore[attr-defined]
+        if cwd in results:
+            return results[cwd]
+        repro = getattr(verify, "repro_script", "")
+        if not repro or not seed_cwd:
+            return None
+        import os
+        import shutil
+        import tempfile as _tf
+
+        from rune.agent.fastpath import _run_script
+        scratch = _tf.mkdtemp(prefix="rune-repro-grade-")
+        try:
+            path = os.path.join(scratch, "repro.py")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(repro)
+            rc, _out = await _run_script(_project_python(seed_cwd), path, cwd)
+        except (OSError, TimeoutError) as exc:
+            log.debug("repro_grade_error", error=str(exc)[:120])
+            return None
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+        if rc == 125:  # could not run at all — says nothing either way
+            return None
+        results[cwd] = rc == 0
+        log.info("repro_graded", passed=rc == 0)
+        return results[cwd]
+
+    verify.grade_repro = _grade_repro  # type: ignore[attr-defined]
     verify.eg_disabled = False  # type: ignore[attr-defined]
     verify.has_check = has_check  # type: ignore[attr-defined]
     verify.provisional_by_cwd = {}  # type: ignore[attr-defined]
