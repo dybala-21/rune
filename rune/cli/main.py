@@ -288,6 +288,31 @@ def _handle_voice_mode(
 # Non-interactive message handling
 
 
+def _defer_memory_work() -> None:
+    """Keep the memory work off the path of a process that is about to exit.
+
+    Consolidation, daily promotion and the vector index used to run once the
+    answer was already on screen, holding the process open a further 7.8s
+    median across 119 runs. They make their own model calls, so on a short
+    request they cost more than the request did.
+
+    Two placements were measured and both were worse than none. Waiting for
+    them at the end is the original 7.8s. Starting them at the beginning looks
+    free while nothing is pending, but every deferred episode is a model call
+    the *next* run pays before it can answer: with two pending, a trivial
+    request went from 4.2s to 6.0s and the agent's own first call was pushed
+    0.6s later. So a one-shot run does neither. It writes the episode and
+    leaves it; the sweep belongs to something that is not answering a user —
+    the REPL, the TUI, or the daemon, all of which stay up long enough to do
+    it unnoticed.
+    """
+    try:
+        from rune.agent import memory_bridge
+        memory_bridge.defer_consolidation = True
+    except Exception:
+        pass
+
+
 def _handle_non_interactive(
     message: str,
     model: str | None = None,
@@ -368,6 +393,20 @@ def _handle_non_interactive(
         except Exception:
             pass  # MCP init is best-effort
 
+        # Classification needs nothing but the message, and it is a network
+        # round trip — around 1.15s. Leaving it until after the context is
+        # prepared meant opening the store, migrating the schema and warming
+        # the embedding engine first, and only then starting to wait. Start
+        # it here and collect it below: same call, same inputs, same answer,
+        # roughly a second of it spent alongside work that was happening
+        # anyway.
+        _classify_task = None
+        try:
+            from rune.agent.goal_classifier import classify_goal
+            _classify_task = asyncio.ensure_future(classify_goal(message))
+        except Exception:
+            pass
+
         # --session <id>: load prior turns and persist this exchange.
         # Throwaway best-of samples never persist.
         conv_manager = None
@@ -396,8 +435,11 @@ def _handle_non_interactive(
         classification = None
         goal_type: str | None = None
         try:
-            from rune.agent.goal_classifier import classify_goal
-            classification = await classify_goal(message)
+            if _classify_task is not None:
+                classification = await _classify_task
+            else:
+                from rune.agent.goal_classifier import classify_goal
+                classification = await classify_goal(message)
             goal_type = classification.goal_type
         except Exception:
             pass
@@ -416,6 +458,9 @@ def _handle_non_interactive(
                     console.print(f"[dim]{_note}[/dim]")
         except Exception:
             pass
+
+        if not _throwaway:
+            _defer_memory_work()
 
         trace = await loop.run(
             ctx.goal,
@@ -479,19 +524,11 @@ def _handle_non_interactive(
             except Exception:
                 pass  # best-effort memory save
 
-            # The episode's consolidation is fired as a background task that a
-            # one-shot CLI process exits before finishing, so nothing would be
-            # consolidated. Drain it here (bounded), the same catch-up the
-            # interactive controller runs. Gated by is_consolidation_enabled
-            # (RUNE_LEARNING=0 opts out); skipped for throwaway best-of attempts.
-            try:
-                from rune.memory.consolidation import consolidate_recent
-                await consolidate_recent(limit=2)
-            except Exception:
-                pass
-
-            # A one-shot run is a whole session; flush its events into the daily
-            # tier on exit (else promotion never runs). No-op if no events.
+            # A one-shot run is a whole session; flush its events into the
+            # daily tier on exit, or promotion never runs for anyone who only
+            # uses --message. This one stays: it is local bookkeeping, not a
+            # model call, and it is what the consolidation above was holding
+            # the process open for.
             try:
                 from rune.memory.manager import get_memory_manager
                 await get_memory_manager().promote_memories()
