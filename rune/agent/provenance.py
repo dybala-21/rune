@@ -83,18 +83,42 @@ class ArtifactLedger:
     # Paths this run positively observed to be missing. Only these can have
     # been fabricated later; anything else that exists was already there.
     known_absent: set[str] = field(default_factory=set)
+    # The tree the request is about. A request names a bare file, so the
+    # ledger keys on bare names — which means a file of the same name
+    # somewhere else would otherwise answer for it. Empty disables the
+    # check, for callers with no workspace to speak of.
+    root: str = ""
 
     @classmethod
-    def for_request(cls, request: str) -> ArtifactLedger:
-        return cls(referenced=referenced_paths(request))
+    def for_request(cls, request: str, root: str = "") -> ArtifactLedger:
+        return cls(referenced=referenced_paths(request), root=root)
+
+    def _within_root(self, path: str) -> bool:
+        """Whether *path* is the workspace's copy and not a namesake.
+
+        Observed: asked to fix the bug in a BUGREPORT.md that did not exist,
+        the agent searched the parent directory, found an unrelated file of
+        that name, and read it. Keyed on the bare name, that read counted as
+        having found the requested input — so the guard against writing a
+        file the request assumed already existed stopped applying, and the
+        run authored one and reported success. Reading someone else's file
+        proves nothing about this task's.
+        """
+        if not self.root:
+            return True
+        try:
+            base = Path(self.root).expanduser().resolve()
+            return Path(path).expanduser().resolve().is_relative_to(base)
+        except (OSError, ValueError):
+            return False
 
     def record_read(self, path: str, ok: bool) -> None:
         k = _key(path)
         self.looked_up.add(k)
-        if ok:
+        if ok and self._within_root(path):
             self.read_ok.add(k)
             self.known_absent.discard(k)
-        else:
+        elif not ok:
             self.known_absent.add(k)
 
     def record_lookup(self, blob: str) -> None:

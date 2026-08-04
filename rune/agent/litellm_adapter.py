@@ -1005,6 +1005,12 @@ class StreamResult:
         self._postcondition_nudges = 0
         self._policy.reset()
 
+        # Input-versus-output classification rides along with the first
+        # round's network wait instead of blocking in front of the first
+        # tool. The tool path still waits for the result before any
+        # phantom-write decision — only the start moves, not the ordering.
+        self._start_artifact_role_classification()
+
         while True:
             # Early stop: already have a substantial answer after 2+ tool
             # rounds. Don't make another LLM call that would regenerate
@@ -1725,11 +1731,39 @@ class StreamResult:
                 if isinstance(m, dict) and m.get("role") == "user"
                 and isinstance(m.get("content"), str)
             ]
-            self._artifact_ledger = ArtifactLedger.for_request("\n".join(parts))
+            import os as _os
+            self._artifact_ledger = ArtifactLedger.for_request(
+                "\n".join(parts), root=_os.getcwd()
+            )
             self._artifact_request = "\n".join(parts)
             log.info("artifact_ledger_init",
                      referenced=sorted(self._artifact_ledger.referenced)[:10])
         return self._artifact_ledger
+
+    def _start_artifact_role_classification(self) -> None:
+        """Start settling input-versus-output alongside the first model round.
+
+        The classification is one model call that needs nothing but the
+        request text, yet it used to run as a blocking step in front of the
+        first tool — 1.6s measured, spent while the answer to the first
+        round was already known. Started here instead, it rides along with
+        the round's own network wait and is normally done before any tool
+        needs it.
+        """
+        ledger = self._ledger()
+        if ledger is None or ledger.roles or not ledger.referenced:
+            return
+        if getattr(self, "_artifact_roles_tried", False):
+            return
+        if getattr(self, "_artifact_roles_task", None) is not None:
+            return
+        import asyncio as _aio
+        try:
+            self._artifact_roles_task = _aio.ensure_future(
+                self._classify_artifact_roles()
+            )
+        except Exception:
+            self._artifact_roles_task = None
 
     async def _classify_artifact_roles(self) -> None:
         """Settle input-versus-output once, the first time it matters.
@@ -1737,7 +1771,21 @@ class StreamResult:
         Skipped entirely when the request names no files, which is most of
         them, so the extra call is not a per-run cost. If it fails the
         ledger keeps its weaker fallback rule rather than blocking work.
+
+        A caller that arrives while an earlier start is still in flight
+        WAITS for it rather than skipping past it: the phantom-write guard
+        runs right after this returns, and letting it run unclassified
+        because the classification happened to still be on the wire would
+        reopen the exact hole the guard closes.
         """
+        import asyncio as _aio
+        pending = getattr(self, "_artifact_roles_task", None)
+        if pending is not None and _aio.current_task() is not pending:
+            try:
+                await _aio.shield(pending)
+            except Exception:
+                pass
+            return
         ledger = self._ledger()
         if ledger is None or ledger.roles or not ledger.referenced:
             return

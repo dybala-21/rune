@@ -485,3 +485,132 @@ async def test_an_input_read_via_shell_is_never_removed(monkeypatch, tmp_path):
     assert policy.exists(), "an existing input file was removed"
     assert policy.read_text() == "# rules\n"
 
+
+class TestANamesakeElsewhereDoesNotCount:
+    """A file of the same name outside the workspace is a different file.
+
+    Measured on the bench: asked to fix the bug described in a BUGREPORT.md
+    that was not there, the run searched the parent directory, found an
+    unrelated file with that name and read it successfully. The ledger keys
+    on bare names — the request only ever gives one — so that read
+    registered as having found the requested input, the phantom-write guard
+    stopped applying, and the run wrote its own BUGREPORT.md and called the
+    task done. Three runs in three.
+    """
+
+    def test_reading_a_namesake_outside_the_tree_proves_nothing(self, tmp_path):
+        ws = tmp_path / "project"
+        ws.mkdir()
+        elsewhere = tmp_path / "other"
+        elsewhere.mkdir()
+        (elsewhere / "BUGREPORT.md").write_text("someone else's report\n")
+
+        led = ArtifactLedger.for_request("fix the bug in BUGREPORT.md",
+                                         root=str(ws))
+        led.roles["BUGREPORT.md"] = "input"
+        led.record_read(str(ws / "BUGREPORT.md"), False)
+        led.record_read(str(elsewhere / "BUGREPORT.md"), True)
+
+        assert "BUGREPORT.md" not in led.read_ok
+        assert led.is_phantom("BUGREPORT.md")
+        assert led.unresolved() == ["BUGREPORT.md"]
+
+    def test_the_workspace_copy_still_counts(self, tmp_path):
+        ws = tmp_path / "project"
+        ws.mkdir()
+        (ws / "notes.md").write_text("real\n")
+        led = ArtifactLedger.for_request("summarise notes.md", root=str(ws))
+        led.record_read(str(ws / "notes.md"), True)
+        assert "notes.md" in led.read_ok
+        assert not led.is_phantom("notes.md")
+
+    def test_a_nested_file_is_still_the_workspace_copy(self, tmp_path):
+        ws = tmp_path / "project"
+        (ws / "docs").mkdir(parents=True)
+        led = ArtifactLedger.for_request("read docs/spec.md", root=str(ws))
+        led.record_read(str(ws / "docs" / "spec.md"), True)
+        assert "spec.md" in led.read_ok
+
+    def test_a_relative_path_resolves_against_the_process_directory(
+            self, tmp_path, monkeypatch):
+        ws = tmp_path / "project"
+        ws.mkdir()
+        (ws / "a.md").write_text("x")
+        monkeypatch.chdir(ws)
+        led = ArtifactLedger.for_request("read a.md", root=str(ws))
+        led.record_read("a.md", True)
+        assert "a.md" in led.read_ok
+
+    def test_with_no_workspace_set_nothing_changes(self, tmp_path):
+        # Callers with no tree to speak of keep the old behaviour.
+        led = ArtifactLedger.for_request("read a.md")
+        led.record_read(str(tmp_path / "a.md"), True)
+        assert "a.md" in led.read_ok
+
+
+@pytest.mark.asyncio
+async def test_slow_classification_is_waited_for_not_skipped(monkeypatch, tmp_path):
+    """The classification now starts alongside the first round; the guard
+    must WAIT for it at the first tool, not shrug past it.
+
+    The hazard: the started-early task marks itself as tried, and a guard
+    that treated "tried" as "answered" would let the first write through
+    while the classification was still on the wire — reopening the exact
+    fabrication hole (write the missing BUGREPORT.md, report done) that the
+    guard exists to close.
+    """
+    import asyncio
+
+    import rune.agent.provenance as prov
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("RUNE_ARTIFACT_PROVENANCE", raising=False)
+
+    async def slow_classifier(request, names, model, provider):
+        await asyncio.sleep(0.25)          # still in flight at first tool
+        return {"BUGREPORT.md": "input"}
+    monkeypatch.setattr(prov, "classify_roles", slow_classifier)
+
+    reads, writes = [], []
+    res = _result(tmp_path, reads, writes)
+    # The model tries to WRITE the missing file in its very first turn, so
+    # the guard has to decide before the classification would have finished
+    # on its own.
+    monkeypatch.setattr(la.litellm, "acompletion",
+                        _fake_completion([_WRITE_TURN, _FINAL, _FINAL]))
+
+    async for _ in res.stream_text():
+        pass
+
+    assert writes == []  # blocked WITH the classification, not without it
+    blocked = [m for m in res.all_messages()
+               if m.get("role") == "tool" and "BLOCKED" in str(m.get("content"))]
+    assert blocked
+
+
+@pytest.mark.asyncio
+async def test_classification_started_once_not_per_round(monkeypatch, tmp_path):
+    import asyncio
+
+    import rune.agent.provenance as prov
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("RUNE_ARTIFACT_PROVENANCE", raising=False)
+    calls = []
+
+    async def counting_classifier(request, names, model, provider):
+        calls.append(names)
+        await asyncio.sleep(0)
+        return {"BUGREPORT.md": "input"}
+    monkeypatch.setattr(prov, "classify_roles", counting_classifier)
+
+    reads, writes = [], []
+    res = _result(tmp_path, reads, writes)
+    monkeypatch.setattr(la.litellm, "acompletion",
+                        _fake_completion([_READ_TURN, _READ_TURN, _FINAL, _FINAL]))
+
+    async for _ in res.stream_text():
+        pass
+
+    assert len(calls) == 1
+
