@@ -1718,6 +1718,83 @@ async def test_race2_failed_fast_attempt_does_not_end_the_race(monkeypatch, tmp_
     assert sorted(finished) == [0, 1]  # nobody was cancelled
 
 
+def _mk_repro_verifier(tmp_path, verdicts):
+    """A verifier whose repro script grades each candidate per *verdicts*.
+
+    This drives the REAL evidence hand-off in _best_of_async — the earlier
+    version of these tests re-implemented that logic inside the test and
+    then tested the copy, which would have kept passing however the
+    production path broke.
+    """
+    async def fake_make_verifier(instruction, seed_cwd=None):
+        async def verify(cwd):
+            i = int(cwd.rsplit("_w", 1)[-1])
+            verify.repro_results[cwd] = verdicts.get(i, False)
+            verify.evidence_by_cwd[cwd] = f"AssertionError: attempt {i} wrong"
+            return False                      # nobody passes; repair must fire
+
+        async def grade(cwd):
+            i = int(cwd.rsplit("_w", 1)[-1])
+            verify.repro_results[cwd] = verdicts.get(i, False)
+            return verify.repro_results[cwd]
+
+        verify.has_check = True
+        verify.repro_script = "assert fixed()"
+        verify.repro_results = {}
+        verify.grade_repro = grade
+        verify.evidence_by_cwd = {}
+        return verify
+
+    return fake_make_verifier
+
+
+@pytest.mark.asyncio
+async def test_repair_evidence_is_withheld_when_the_repro_separates_nothing(
+        monkeypatch, tmp_path):
+    # Both candidates fail the repro the same way: the script has separated
+    # nothing, and its output would aim the repair attempt at a requirement
+    # the correct fix may not even be meant to satisfy.
+    monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "race2")
+    monkeypatch.delenv("RUNE_BESTOF_REPAIR", raising=False)
+    spawned: list = []
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", _mk_attempts(tmp_path, spawned))
+    monkeypatch.setattr(best_of, "make_verifier",
+                        _mk_repro_verifier(tmp_path, {0: False, 1: False}))
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    dest = tmp_path / "d_withhold"
+    dest.mkdir()
+    monkeypatch.chdir(dest)
+
+    await _best_of_async(
+        "task", 3, None, "anthropic", report=lambda s, **kw: None, seed_cwd=True,
+    )
+    repair_msgs = [m for i, m in spawned if i == 2]
+    assert repair_msgs and "AssertionError" not in repair_msgs[0]
+
+
+@pytest.mark.asyncio
+async def test_repair_evidence_is_passed_on_when_the_repro_separates(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "race2")
+    monkeypatch.delenv("RUNE_BESTOF_REPAIR", raising=False)
+    spawned: list = []
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", _mk_attempts(tmp_path, spawned))
+    monkeypatch.setattr(best_of, "make_verifier",
+                        _mk_repro_verifier(tmp_path, {0: True, 1: False}))
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    dest = tmp_path / "d_passon"
+    dest.mkdir()
+    monkeypatch.chdir(dest)
+
+    await _best_of_async(
+        "task", 3, None, "anthropic", report=lambda s, **kw: None, seed_cwd=True,
+    )
+    repair_msgs = [m for i, m in spawned if i == 2]
+    assert repair_msgs and "AssertionError" in repair_msgs[0]
+
+
 @pytest.mark.asyncio
 async def test_repair_env_opt_out(monkeypatch, tmp_path):
     monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "sequential")

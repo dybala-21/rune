@@ -44,41 +44,6 @@ class TestDiscrimination:
         assert repro_discriminates(SimpleNamespace()) is None
 
 
-class TestRepairEvidence:
-    def _harness(self, monkeypatch, verify, evidence):
-        """Reproduce best_of's evidence selection against a given verifier."""
-        import rune.cli.best_of as bo
-
-        captured = {}
-
-        def fake_log_info(name, **kw):
-            captured[name] = kw
-        monkeypatch.setattr(bo.log, "info", fake_log_info)
-
-        from rune.agent.rejection_sampler import repro_discriminates as rd
-        if rd(verify) is False:
-            bo.log.info("repro_non_discriminating")
-            return "", captured
-        return (list(evidence.values())[-1] if evidence else ""), captured
-
-    def test_evidence_is_withheld_when_the_repro_told_us_nothing(self, monkeypatch):
-        ev, captured = self._harness(
-            monkeypatch,
-            _verify({"a": False, "b": False, "c": False}),
-            {"c": "AssertionError: expected array, got NotImplementedError"},
-        )
-        assert ev == ""
-        assert "repro_non_discriminating" in captured
-
-    def test_evidence_is_passed_on_when_the_repro_separated_them(self, monkeypatch):
-        ev, _ = self._harness(
-            monkeypatch,
-            _verify({"a": True, "b": False}),
-            {"b": "AssertionError: still wrong"},
-        )
-        assert "still wrong" in ev
-
-
 class TestReachingAVerdict:
     """The check is worthless if it is asked before it can answer.
 
