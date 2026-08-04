@@ -230,6 +230,17 @@ async def _run_attempt_subprocess(
     try:
         stdout_b, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
         returncode = proc.returncode or 0
+    except asyncio.CancelledError:
+        # The race was decided without this attempt. Its subprocess does not
+        # stop just because the task awaiting it did — left alone it keeps
+        # making model calls nobody will read — so it is killed before the
+        # cancellation is allowed to proceed.
+        try:
+            proc.kill()
+            await proc.wait()
+        except ProcessLookupError:
+            pass
+        raise
     except TimeoutError:
         # A stalled attempt must not hang the whole best-of gather. Kill it and
         # record a failed attempt (its partial workdir is left for the verifier,
@@ -1065,7 +1076,7 @@ async def _best_of_async(
                 i, msg, model, provider, seed_from=seed_from
             )
 
-    def _last_evidence(arts: list[AttemptArtifact]) -> str:
+    async def _last_evidence(arts: list[AttemptArtifact]) -> str:
         """Failure output to hand the repair attempt, if it is worth having.
 
         When the reproduction script comes out the same way on every
@@ -1073,9 +1084,22 @@ async def _best_of_async(
         misleading brief — it describes a requirement the correct fix may
         not even be meant to satisfy. Withhold it rather than aim the next
         attempt at it.
-        """
-        from rune.agent.rejection_sampler import repro_discriminates
 
+        Telling those apart needs two candidates measured against the
+        script, and getting there cannot be left to chance: verification
+        stops as soon as one candidate passes, and an attempt that times out
+        is never measured at all. In practice that left only one verdict in
+        roughly three runs out of four, and with one verdict the question is
+        unanswerable — the evidence went through by default, which is the
+        case this was written to catch. So grade whatever is still ungraded
+        before deciding.
+        """
+        from rune.agent.rejection_sampler import (
+            ensure_two_graded,
+            repro_discriminates,
+        )
+
+        await ensure_two_graded(verify_cwd, [a.workdir for a in arts])
         if repro_discriminates(verify_cwd) is False:
             log.info("repro_non_discriminating")
             return ""
@@ -1100,7 +1124,7 @@ async def _best_of_async(
         for i in range(k):
             msg = message + (fastpath_evidence if i == 0 else "")
             if i == 1 and repair_ok:
-                ev = _last_evidence([a.candidate for a in attempts])
+                ev = await _last_evidence([a.candidate for a in attempts])
                 if ev:
                     msg = message + _repair_suffix(ev)
         # (attempt 3+ goes back to fresh independent samples for diversity)
@@ -1114,23 +1138,50 @@ async def _best_of_async(
         res = RejectionResult(
             selected=selected, selected_index=selected_index, attempts=attempts
         )
-    else:  # race2: two parallel attempts, early-exit verify, one repair shot
-        first_two = await asyncio.gather(
-            run_with(0, message + fastpath_evidence), run_with(1, message)
-        )
+    else:  # race2: two parallel attempts, verify as they land, one repair shot
+        # This used to wait for BOTH attempts before verifying either, so a
+        # finished candidate sat unexamined while its sibling went on
+        # generating — and if that candidate then passed, the sibling's whole
+        # remaining runtime had bought nothing. Verify each attempt the moment
+        # it lands, and when one passes, cancel the other (its subprocess is
+        # killed with it). A cancelled attempt appears nowhere in the results:
+        # it neither passed nor failed, it stopped being needed.
+        async def _generate_then_verify(i: int, msg: str) -> Attempt:
+            art = await run_with(i, msg)
+            return Attempt(index=i, candidate=art, passed=await verify(art))
+
+        pending: set[asyncio.Task[Attempt]] = {
+            asyncio.create_task(
+                _generate_then_verify(0, message + fastpath_evidence)
+            ),
+            asyncio.create_task(_generate_then_verify(1, message)),
+        }
         attempts = []
         selected = selected_index = None
-        for i, art in enumerate(first_two):
-            passed = False
-            if selected is None:  # early-exit: skip verifying after a pass
-                passed = await verify(art)
-            attempts.append(Attempt(index=i, candidate=art, passed=passed))
-            if passed and selected is None:
-                selected, selected_index = art, i
+        try:
+            while pending and selected is None:
+                done, pending = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED
+                )
+                # Lower index first within a batch, so two passers landing
+                # together resolve the same way the sequential check did.
+                for a in sorted((t.result() for t in done), key=lambda x: x.index):
+                    attempts.append(a)
+                    if a.passed and selected is None:
+                        selected, selected_index = a.candidate, a.index
+                        if pending:
+                            log.info("bestof_race_sibling_cancelled",
+                                     winner=a.index)
+        finally:
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+        attempts.sort(key=lambda a: a.index)
         if selected is None and k > 2:
             msg = message
             if repair_ok:
-                ev = _last_evidence(first_two)
+                ev = await _last_evidence([a.candidate for a in attempts])
                 if ev:
                     msg = message + _repair_suffix(ev)
                     log.info("bestof_repair_attempt")

@@ -1614,6 +1614,110 @@ async def test_race2_runs_two_then_repairs(monkeypatch, tmp_path):
     assert reports[0]["selected_index"] == 2
 
 
+def _mk_timed_attempts(tmp_path, spawned, finished, delays):
+    """Attempts that take different amounts of time, and say if they finished."""
+    async def fake_attempt(index, message, model, provider, seed_from=None):
+        spawned.append(index)
+        await asyncio.sleep(delays.get(index, 0.0))
+        w = tmp_path / f"strat_w{index}"
+        w.mkdir(exist_ok=True)
+        (w / "fix.py").write_text(f"attempt {index}")
+        finished.append(index)
+        return AttemptArtifact(
+            index=index, workdir=str(w), stdout=f"out{index}", returncode=0,
+            produced=["fix.py"],
+        )
+
+    return fake_attempt
+
+
+@pytest.mark.asyncio
+async def test_race2_winner_cancels_the_running_sibling(monkeypatch, tmp_path):
+    """A pass must stop the race, not wait politely for the loser.
+
+    The old shape gathered both attempts before verifying either, so when the
+    fast one passed, the slow one's whole remaining runtime had already been
+    paid for nothing. Now the sibling is cancelled the moment a winner
+    verifies — on the seeded path that is minutes of model time per race.
+    """
+    monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "race2")
+    spawned, finished = [], []
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess",
+                        _mk_timed_attempts(tmp_path, spawned, finished,
+                                           {0: 0.0, 1: 30.0}))
+    monkeypatch.setattr(best_of, "make_verifier", _mk_verifier(pass_indices={0}))
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    dest = tmp_path / "d_race_cancel"
+    dest.mkdir()
+    monkeypatch.chdir(dest)
+
+    reports: list = []
+    code = await asyncio.wait_for(
+        _best_of_async("task", 3, None, "anthropic",
+                       report=lambda s, **kw: reports.append(kw), seed_cwd=True),
+        timeout=10,   # far under the loser's 30s: the win must not wait for it
+    )
+    assert code == 0
+    assert reports[0]["selected_index"] == 0
+    assert sorted(spawned) == [0, 1]   # both started
+    assert finished == [0]             # the loser never completed
+
+
+@pytest.mark.asyncio
+async def test_race2_first_to_land_passer_wins(monkeypatch, tmp_path):
+    # Verification runs as attempts land, so a passing attempt 1 that
+    # finishes first is the winner — there is no reason to keep paying for
+    # attempt 0 to find out whether it would also have passed.
+    monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "race2")
+    spawned, finished = [], []
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess",
+                        _mk_timed_attempts(tmp_path, spawned, finished,
+                                           {0: 30.0, 1: 0.0}))
+    monkeypatch.setattr(best_of, "make_verifier", _mk_verifier(pass_indices={0, 1}))
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    dest = tmp_path / "d_race_land"
+    dest.mkdir()
+    monkeypatch.chdir(dest)
+
+    reports: list = []
+    code = await asyncio.wait_for(
+        _best_of_async("task", 3, None, "anthropic",
+                       report=lambda s, **kw: reports.append(kw), seed_cwd=True),
+        timeout=10,
+    )
+    assert code == 0
+    assert reports[0]["selected_index"] == 1
+    assert finished == [1]
+
+
+@pytest.mark.asyncio
+async def test_race2_failed_fast_attempt_does_not_end_the_race(monkeypatch, tmp_path):
+    # A fast failure is not a verdict on the race: the slower attempt still
+    # gets verified and can win.
+    monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "race2")
+    spawned, finished = [], []
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess",
+                        _mk_timed_attempts(tmp_path, spawned, finished,
+                                           {0: 0.3, 1: 0.0}))
+    monkeypatch.setattr(best_of, "make_verifier", _mk_verifier(pass_indices={0}))
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    dest = tmp_path / "d_race_slowwin"
+    dest.mkdir()
+    monkeypatch.chdir(dest)
+
+    reports: list = []
+    code = await _best_of_async(
+        "task", 3, None, "anthropic",
+        report=lambda s, **kw: reports.append(kw), seed_cwd=True,
+    )
+    assert code == 0
+    assert reports[0]["selected_index"] == 0
+    assert sorted(finished) == [0, 1]  # nobody was cancelled
+
+
 @pytest.mark.asyncio
 async def test_repair_env_opt_out(monkeypatch, tmp_path):
     monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "sequential")
