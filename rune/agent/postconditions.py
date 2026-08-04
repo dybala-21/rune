@@ -5,16 +5,21 @@ survive that: graders asked to rate whether a summary "addresses the
 request" agree with people barely more often than not, and are weakest
 exactly where the answer depends on what happened to the filesystem.
 
-So only the mechanical part is written down. From the files a request
-names, and which of them it treats as already existing versus asked for,
-two conditions follow that need no judgement at all:
+So only the mechanical part is written down, and it comes to one thing:
+a file the request relies on is still there at the end. Nothing has to be
+judged to settle that — the file is present or it is not.
 
-  - a file the request relies on is still there at the end
-  - a file the request asks for exists and has something in it
-
-That is a small set deliberately. Everything else — whether the numbers
-are right, whether the summary is fair — is left to the checks that can
-actually establish it, rather than dressed up as a rule here.
+Demanding that a named output exist looked like the obvious companion
+rule, and it was wrong. Whether a request is owed its output depends on
+whether the data behind it was there, which is not visible on the
+filesystem and is usually only discovered part way through the work. Asked
+for a discount report from a table with no discount column, the correct
+answer is to say the figures cannot be produced — and a rule insisting the
+file appear pushes toward inventing one, on exactly the tasks where that
+is the failure being guarded against. Across 36 runs it fired four times,
+three of them on work that was right, and never once changed how a run
+came out. Everything else — whether the numbers are right, whether the
+summary is fair — is left to the checks that can actually establish it.
 
 Conditions are derived once, before the work starts, so they cannot be
 quietly relaxed to match whatever the run ended up doing.
@@ -40,19 +45,12 @@ def postconditions_enabled() -> bool:
 @dataclass(frozen=True)
 class Postcondition:
     name: str
-    kind: str  # "present" (input survives) | "produced" (output exists)
+    kind: str  # "present" — an input the task relies on survives
 
     def unmet(self, workspace: Path) -> str | None:
         """Why this condition is not satisfied, or None when it is."""
-        hits = [p for p in _candidates(workspace, self.name) if p.is_file()]
-        if self.kind == "present":
-            if not hits:
-                return f"{self.name} was an input to this task and is gone"
-            return None
-        if not hits:
-            return f"{self.name} was asked for and does not exist"
-        if all(p.stat().st_size == 0 for p in hits):
-            return f"{self.name} was created but is empty"
+        if not _candidates(workspace, self.name):
+            return f"{self.name} was an input to this task and is gone"
         return None
 
 
@@ -75,21 +73,18 @@ def derive(roles: dict[str, str], workspace: str | Path) -> list[Postcondition]:
     a named file that never existed is the missing-input case, which the
     artifact ledger already reports, and duplicating it here would just
     produce a second complaint about the same thing.
+
+    Outputs earn nothing. What a request is owed depends on what the data
+    turns out to support, and that is not a filesystem question.
     """
     if not postconditions_enabled():
         return []
     ws = Path(workspace).expanduser().resolve()
-    out: list[Postcondition] = []
-    for name, role in sorted(roles.items()):
-        if role == "input":
-            if _candidates(ws, name):
-                out.append(Postcondition(name, "present"))
-        elif role == "output":
-            out.append(Postcondition(name, "produced"))
+    out = [Postcondition(name, "present")
+           for name, role in sorted(roles.items())
+           if role == "input" and _candidates(ws, name)]
     if out:
-        log.info("postconditions_derived",
-                 present=[c.name for c in out if c.kind == "present"],
-                 produced=[c.name for c in out if c.kind == "produced"])
+        log.info("postconditions_derived", present=[c.name for c in out])
     return out
 
 
