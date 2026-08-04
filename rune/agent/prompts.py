@@ -661,6 +661,14 @@ def build_system_prompt(
     # 10. Repo map (changes as the tree changes -> dynamic tail)
     if repo_map:
         dynamic_parts.append(f"\n## Repository Map\n{repo_map}")
+    elif environment and environment.get("cwd"):
+        # No map means either a non-code goal or a tree with nothing
+        # tree-sitter can parse — a directory of spreadsheets and notes hits
+        # both. Those runs would otherwise start knowing only their path.
+        from rune.agent.workspace_listing import listing_section
+        section = listing_section(environment["cwd"])
+        if section:
+            dynamic_parts.append(section)
 
     # 11. Channel-specific output rules
     if channel and channel not in ("tui", "cli", None):
