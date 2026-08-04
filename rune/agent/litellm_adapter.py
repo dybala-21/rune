@@ -15,16 +15,47 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
-import litellm
+_litellm_mod: Any = None
 
-# Suppress cost-calculation warnings for models not in LiteLLM's price DB
-# (e.g., local ollama models routed via openai/ prefix).
-litellm.suppress_debug_info = True
-# Drop params a model doesn't accept rather than raising. Lets litellm decide
-# per model instead of us hardcoding which ones reject temperature != 1 (gpt-5,
-# o-series, ...). Without it, temperature=0 on those raises and failover treats
-# it as a dead model.
-litellm.drop_params = True
+
+def _litellm() -> Any:
+    """Import litellm on first use, not on import of this module.
+
+    It costs 1.17s to load — it pulls in its proxy types, every provider
+    handler and several cloud integrations — and importing this module is on
+    the path of every CLI invocation. Measured on "say ok": 4.54s total, of
+    which 0.81s was the actual model call and 1.32s was importing this
+    module's dependencies. Nothing here needs litellm until a request is
+    about to go out.
+    """
+    global _litellm_mod
+    if _litellm_mod is None:
+        import litellm as _ll
+
+        # Suppress cost-calculation warnings for models not in LiteLLM's
+        # price DB (e.g., local ollama models routed via openai/ prefix).
+        _ll.suppress_debug_info = True
+        # Drop params a model doesn't accept rather than raising. Lets
+        # litellm decide per model instead of us hardcoding which ones reject
+        # temperature != 1 (gpt-5, o-series, ...). Without it, temperature=0
+        # on those raises and failover treats it as a dead model.
+        _ll.drop_params = True
+        _litellm_mod = _ll
+    return _litellm_mod
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve ``litellm_adapter.litellm`` on demand.
+
+    The module attribute is what callers and tests reach for, so keeping the
+    name working means the laziness costs nothing at the seam: touching it
+    performs the import, and everything that patches it still patches the one
+    module object this file goes on to use.
+    """
+    if name == "litellm":
+        return _litellm()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 from rune.agent.message_utils import validate_tool_pairs
 from rune.agent.obs_cap import mask_stale_tool_messages
@@ -1059,16 +1090,17 @@ class StreamResult:
                     "json_schema": {"name": "rune_action", "schema": _gschema},
                 }
 
+            _ll = _litellm()
             try:
-                self._stream = await litellm.acompletion(**_acompletion_kwargs)
-            except litellm.BadRequestError as _e:
+                self._stream = await _ll.acompletion(**_acompletion_kwargs)
+            except _ll.BadRequestError as _e:
                 # Model rejected temperature and litellm didn't strip it; drop it
                 # and retry once, remembering for next time.
                 if "temperature" in _acompletion_kwargs and _is_temperature_error(_e):
                     _note_temperature_rejected(self._model)
                     _acompletion_kwargs.pop("temperature", None)
                     log.warning("temperature_unsupported_retry", model=self._model)
-                    self._stream = await litellm.acompletion(**_acompletion_kwargs)
+                    self._stream = await _ll.acompletion(**_acompletion_kwargs)
                 else:
                     raise
 
