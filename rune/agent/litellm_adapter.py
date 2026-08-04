@@ -149,6 +149,138 @@ _VERIFY_ON_STOP_MSG = (
     "the final summary stating what passed."
 )
 
+# Run the check ourselves at the stop instead of asking the model to.
+# "=0" falls back to the message-only nudge above.
+# The latest MECHANICAL verdict on the work: what the last test execution
+# said, whoever ran it — the harness at a stop, or the model through bash.
+# The loop reads it once at the end of a run: work whose last known check
+# FAILED must not exit as a quiet success. Same channel pattern as
+# capabilities.blocked.
+from contextvars import ContextVar as _CtxVar
+
+_MECH_CHECK: _CtxVar[str] = _CtxVar("rune_mech_check", default="")
+
+
+def consume_mech_check() -> str:
+    """The last mechanical check verdict ("pass"/"fail"/""), then clear it."""
+    v = _MECH_CHECK.get()
+    _MECH_CHECK.set("")
+    return v
+
+
+_VOS_EXEC_ENV = "RUNE_VOS_EXEC"
+
+# The reminder is about TESTS, so it arms on files tests cover. An edit to a
+# CSV or a markdown file used to arm it too, and the model, told to "run the
+# tests" on a spreadsheet task, went hunting for a test suite that does not
+# exist — measured at ~3 rounds (~8s) on office cells. Extension check, not
+# language inference: structured, deterministic, same everywhere.
+_VOS_CODE_SUFFIXES = frozenset({
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".go", ".rs",
+    ".java", ".kt", ".rb", ".php", ".c", ".cc", ".cpp", ".h", ".hpp",
+    ".cs", ".swift", ".scala", ".sh", ".bash",
+})
+
+
+def _vos_arms_for(path: str) -> bool:
+    import os as _os
+    return _os.path.splitext(str(path))[1].lower() in _VOS_CODE_SUFFIXES
+_VOS_EXEC_TIMEOUT_S = 60.0
+_VOS_OUTPUT_CAP = 1500
+
+
+_STOP_CHECK_GENERIC = frozenset({
+    "src", "lib", "app", "core", "tests", "test", "__init__", "main", "utils",
+})
+
+
+def _stop_check_targets(
+    cwd: str, edited: set[str], allowed: set[str] | None = None
+) -> list[str]:
+    """Test files that answer for the edited files, by name.
+
+    Tokens come from every component of the edited path, not just the module:
+    a test file is as often named after the package as the module (edited
+    cache/store.py, tested by tests/test_cache.py — the miss that was
+    measured live). Generic components match everything and so mean nothing.
+    """
+    import os as _os
+
+    from rune.agent.rejection_sampler import _enumerate_test_files
+    tokens = set()
+    for path in edited:
+        parts = _os.path.normpath(str(path)).replace("\\", "/").split("/")
+        for part in parts:
+            stem = _os.path.splitext(part)[0].lower()
+            if stem and stem not in _STOP_CHECK_GENERIC \
+                    and not stem.startswith("test"):
+                tokens.add(stem)
+    if not tokens:
+        return []
+    hits = []
+    for tf in _enumerate_test_files(cwd):
+        if allowed is not None and tf not in allowed:
+            continue          # a test authored during the run answers for nothing
+        name = _os.path.splitext(_os.path.basename(tf))[0].lower()
+        if any(tok in name for tok in tokens):
+            hits.append(tf)
+    return hits[:5]
+
+
+async def _run_stop_check(
+    cwd: str, edited: set[str], allowed: set[str] | None = None
+) -> tuple[str, str, int] | None:
+    """Execute the tests that cover the edited files, and say what happened.
+
+    The stop-nudge used to be words: "run the tests before finishing". That
+    costs two model rounds — one to decide to obey, one to read the result —
+    and it is only words, so a model that restates "done" has skipped the
+    check entirely; several measured nudges changed nothing. So run the
+    check here, mechanically, and hand the model the outcome instead of the
+    request. The check itself is unchanged — who runs it is.
+
+    Only the test files that answer by name for the edited files are run,
+    never the whole suite: on a large repository the full command is minutes
+    long, and burning a timeout on it would cost more than the two rounds
+    this saves ever did. No matching test files, or a non-pytest runner —
+    fall back to the message-only nudge, never to silence.
+    """
+    import asyncio as _aio
+
+    from rune.agent.auto_verify import detect_test_command
+    cmd = detect_test_command(cwd)
+    if not cmd or not any("pytest" in part for part in cmd):
+        return None
+    targets = _stop_check_targets(cwd, edited, allowed)
+    if not targets:
+        return None
+    cmd = [*cmd, *targets]
+    # The same recoverability layer a shell command gets: tests can write.
+    try:
+        from rune.safety.workspace_snapshot import take as _snap
+        _snap(cwd)
+    except Exception:
+        pass
+    try:
+        proc = await _aio.create_subprocess_exec(
+            *cmd, cwd=cwd,
+            stdout=_aio.subprocess.PIPE, stderr=_aio.subprocess.STDOUT,
+        )
+        out_b, _ = await _aio.wait_for(
+            proc.communicate(), timeout=_VOS_EXEC_TIMEOUT_S
+        )
+    except TimeoutError:
+        try:
+            proc.kill()
+            await proc.wait()
+        except ProcessLookupError:
+            pass
+        return None
+    except Exception:
+        return None
+    out = (out_b or b"").decode("utf-8", "replace")
+    return " ".join(cmd), out[-_VOS_OUTPUT_CAP:], proc.returncode or 0
+
 
 def _looks_like_tool_failure(result: str) -> bool:
     return looks_like_failure_output(result)
@@ -992,12 +1124,18 @@ class StreamResult:
         _explore_stage = 0
         _force_edit_tool = False
         # Verify-on-stop state (per stream_text call).
+        _MECH_CHECK.set("")
         self._vos_edited = False
+        self._vos_edited_paths: set[str] = set()
         self._vos_nudges = 0
         # Artifact-provenance state (per stream_text call).
         self._artifact_ledger = None
         self._artifact_nudges = 0
         self._artifact_roles_tried = False
+        _stale_roles = getattr(self, "_artifact_roles_task", None)
+        if _stale_roles is not None and not _stale_roles.done():
+            _stale_roles.cancel()
+        self._artifact_roles_task = None
         self._artifact_request = ""
         self._task_blocked = ""
         self._tamper_blocks = 0
@@ -1390,9 +1528,39 @@ class StreamResult:
                             "role": "assistant",
                             "content": text_this_turn,
                         })
-                    self._messages.append({
-                        "role": "user", "content": _VERIFY_ON_STOP_MSG,
-                    })
+                    # Run the check here rather than asking for it: the
+                    # asked-for version costs two extra rounds and can be
+                    # ignored; the executed version can be neither skipped
+                    # nor misreported. Falls back to the words when there is
+                    # nothing runnable.
+                    _stop_check = None
+                    if os.environ.get(_VOS_EXEC_ENV, "1") != "0":
+                        import os as _os2
+                        _stop_check = await _run_stop_check(
+                            _os2.getcwd(),
+                            getattr(self, "_vos_edited_paths", set()),
+                        )
+                    if _stop_check is not None:
+                        _cmd, _out, _rc = _stop_check
+                        _MECH_CHECK.set("fail" if _rc != 0 else "pass")
+                        self._messages.append({
+                            "role": "user", "content": (
+                                "You edited code and stopped without running "
+                                "any test since the last edit. The covering "
+                                "tests have ALREADY been run for you — this "
+                                "is their authoritative result, do NOT run "
+                                f"them again: `{_cmd}`\n```\n{_out}\n```\n"
+                                "If it failed, fix the code (then you may "
+                                "re-test). If it passed, give the final "
+                                "summary now, stating exactly what passed."
+                            ),
+                        })
+                        log.info("verify_on_stop_executed", round=_tool_round,
+                                 cmd=_cmd)
+                    else:
+                        self._messages.append({
+                            "role": "user", "content": _VERIFY_ON_STOP_MSG,
+                        })
                     # The pre-verification answer is superseded; without this
                     # reset the early-stop guard would kill the next round.
                     self._collected_text = ""
@@ -1560,6 +1728,29 @@ class StreamResult:
 
     # Tool group mapping for failure-based group blocking.
     # When browser_act fails 3 times, all browser_* tools are blocked.
+
+        # The final word on edited work belongs to a harness-run check, not
+        # to whatever the model happened to execute last. Measured: the stop
+        # check reported a failure, the model then ran a narrower command of
+        # its own that passed, and that pass overwrote the verdict — the run
+        # exited 0 with the real tests still failing. Re-run the covering
+        # tests here, restricted to files that existed before the editing
+        # started, and let THAT outcome be what the end of the run answers
+        # to. One bounded subprocess, only on runs that edited code.
+        if (
+            getattr(self, "_vos_edited_paths", None)
+            and os.environ.get(_VOS_EXEC_ENV, "1") != "0"
+        ):
+            import os as _os4
+            _final = await _run_stop_check(
+                _os4.getcwd(), self._vos_edited_paths,
+                getattr(self, "_vos_pretest_files", None),
+            )
+            if _final is not None:
+                _fcmd, _fout, _frc = _final
+                _MECH_CHECK.set("fail" if _frc != 0 else "pass")
+                log.info("final_check_executed", cmd=_fcmd, rc=_frc)
+
     _TOOL_GROUPS: dict[str, str] = {
         "browser_act": "browser", "browser_navigate": "browser",
         "browser_observe": "browser", "browser_find": "browser",
@@ -1692,12 +1883,40 @@ class StreamResult:
                     self._messages.append({
                         "role": "tool", "tool_call_id": tc_id, "content": res,
                     })
+                    # The check verdict is recorded whichever way it went —
+                    # the failing case is the one the end-of-run gate exists
+                    # for, and the success-only block below never sees it.
+                    if fn == "bash_execute" and _is_test_command(
+                        str(args.get("command", ""))
+                    ):
+                        _MECH_CHECK.set(
+                            "fail" if _looks_like_tool_failure(res) else "pass"
+                        )
                     if is_write_exec and not _looks_like_tool_failure(res):
                         self._action_ok = True  # a real action succeeded
                         # Verify-on-stop bookkeeping: edits arm the reminder,
                         # a test-runner bash command satisfies it.
                         if fn in _EDIT_TOOLS:
-                            self._vos_edited = True
+                            _vp = args.get("path") or args.get("file_path")
+                            if _vp and _vos_arms_for(_vp):
+                                self._vos_edited = True
+                                if not hasattr(self, "_vos_edited_paths"):
+                                    self._vos_edited_paths = set()
+                                if not self._vos_edited_paths:
+                                    # Which test files exist BEFORE the work
+                                    # starts editing. Only these can answer
+                                    # for it at the end.
+                                    import os as _os3
+
+                                    from rune.agent.rejection_sampler import (
+                                        _enumerate_test_files,
+                                    )
+                                    self._vos_pretest_files = set(
+                                        _enumerate_test_files(_os3.getcwd())
+                                    )
+                                self._vos_edited_paths.add(str(_vp))
+                            elif not _vp:
+                                self._vos_edited = True
                         elif fn == "bash_execute" and _is_test_command(
                             str(args.get("command", ""))
                         ):

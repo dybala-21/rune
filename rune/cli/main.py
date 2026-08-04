@@ -370,7 +370,7 @@ def _handle_non_interactive(
     # tool capability.
     _throwaway = bool(os.environ.get("RUNE_IN_BEST_OF"))
 
-    async def _run() -> None:
+    async def _run() -> Any:
         from rune.agent.agent_context import (
             PostProcessInput,
             PrepareContextOptions,
@@ -542,10 +542,24 @@ def _handle_non_interactive(
         except Exception:
             pass
 
+        return trace
+
+    _exit_code = 0
+
+    async def _run_and_grade() -> None:
+        nonlocal _exit_code
+        trace = await _run()
+        # A run whose last mechanical check failed exits nonzero: scripts and
+        # benches read the exit code as the claim, and this one is not "done".
+        if trace is not None and getattr(trace, "reason", "") == "checks_failed":
+            _exit_code = 1
+
     try:
-        asyncio.run(_run())
+        asyncio.run(_run_and_grade())
     except KeyboardInterrupt:
         console.print("\n[yellow]Cancelled.[/yellow]")
+    if _exit_code:
+        raise typer.Exit(_exit_code)
 
 
 # Interactive REPL

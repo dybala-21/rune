@@ -3094,6 +3094,17 @@ class NativeAgentLoop(EventEmitter):
             trace.reason = "task_blocked"
             log.info("run_task_blocked", step=self._step)
 
+        # Neither is finishing on top of a failing check. The verdict is
+        # mechanical — the last test execution this run saw, whoever ran it —
+        # so a confident closing summary cannot overrule it. Measured case:
+        # the transcript showed "4 failed" and the run still exited as a
+        # success, which is exactly the false-done the verified path already
+        # refuses.
+        from rune.agent.litellm_adapter import consume_mech_check
+        if consume_mech_check() == "fail" and trace.reason == "completed":
+            trace.reason = "checks_failed"
+            log.info("run_checks_failed", step=self._step)
+
         trace.total_tokens_used = self._token_budget.used
         return trace
 
