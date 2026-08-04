@@ -90,11 +90,21 @@ async def test_msg_cache_env_off_leaves_wire_clean(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fast_mode_env_adds_speed_param(monkeypatch):
+async def test_fast_mode_reaches_a_model_that_supports_it(monkeypatch):
     monkeypatch.setenv("RUNE_FAST_MODE", "1")
     captured = _capture_kwargs(monkeypatch)
-    await _drain(_make_result())
+    await _drain(_make_result(model="anthropic/claude-opus-5"))
     assert captured[0]["speed"] == "fast"
+
+
+@pytest.mark.asyncio
+async def test_fast_mode_is_withheld_from_a_model_that_does_not(monkeypatch):
+    # Measured: haiku answers `speed` with a 400 and the run makes no
+    # progress at all, while finishing fast enough to look like a win.
+    monkeypatch.setenv("RUNE_FAST_MODE", "1")
+    captured = _capture_kwargs(monkeypatch)
+    await _drain(_make_result(model="anthropic/claude-haiku-4-5"))
+    assert "speed" not in captured[0]
 
 
 @pytest.mark.asyncio

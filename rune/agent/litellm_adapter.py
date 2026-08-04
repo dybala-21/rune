@@ -636,6 +636,23 @@ def _is_anthropic_model(model: str) -> bool:
     return "claude" in model.lower() or "anthropic" in model.lower()
 
 
+def _supports_speed(model: str) -> bool:
+    """Whether *model* accepts the `speed` parameter.
+
+    It is not a hint the API ignores when unavailable — an unsupported model
+    rejects the whole request:
+
+        claude-haiku-4-5 does not support the `speed` parameter.
+        This feature is only available on supported models.
+
+    Measured: with the flag on and haiku selected, every round failed with
+    that 400 and the run finished in a third of the usual time having done
+    nothing. Wall-clock alone reads like a large speed-up, which is why the
+    check belongs here rather than in whoever sets the flag.
+    """
+    return _is_anthropic_model(model) and "opus" in model.lower()
+
+
 def _apply_anthropic_cache_control(model: str, messages: list[Any]) -> list[Any]:
     """Add cache_control breakpoint(s) to the system message for Anthropic.
 
@@ -1054,7 +1071,7 @@ class StreamResult:
             }
             if self._model in _TEMPERATURE_REJECTED:
                 _acompletion_kwargs.pop("temperature", None)
-            if _env_flag(_FAST_MODE_ENV) and _is_anthropic_model(self._model):
+            if _env_flag(_FAST_MODE_ENV) and _supports_speed(self._model):
                 _acompletion_kwargs["speed"] = "fast"
             if self._extra_headers:
                 _acompletion_kwargs["extra_headers"] = dict(self._extra_headers)
