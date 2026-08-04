@@ -423,7 +423,10 @@ async def test_run_attempt_sets_guard_and_omits_best_of(monkeypatch):
     # child runs the plain single-attempt path: --best-of must NOT be propagated
     assert "--best-of" not in captured["cmd"]
     # but model/provider/message ARE propagated
-    assert "--message" in captured["cmd"] and "do it" in captured["cmd"]
+    # the message is propagated; attempts past the first also carry a
+    # distinct entry point, so match on content rather than equality
+    assert "--message" in captured["cmd"]
+    assert any("do it" in c for c in captured["cmd"])
     assert "--model" in captured["cmd"] and "m1" in captured["cmd"]
     assert "--provider" in captured["cmd"] and "p1" in captured["cmd"]
     # isolated workdir (a real temp dir)
@@ -567,7 +570,8 @@ async def test_best_of_none_pass_no_restore(monkeypatch, tmp_path):
     stdout, kw = reports[0]
     assert kw["solved"] is False
     assert kw["copied"] == []
-    assert stdout == "out0"  # first attempt surfaced as best-effort
+    # on an all-tied field the later attempt is surfaced as best-effort
+    assert stdout == "out1"
     # F: both attempts wrote files (wrong.txt) but failed → no_artifact == 0
     assert kw["has_check"] is True
     assert kw["no_artifact"] == 0
@@ -802,6 +806,40 @@ def test_best_effort_prefers_source_edit_over_test_only(tmp_path):
                          produced=["pkg/core.py"])
     best = _rank_best_effort([a0, a1], {})
     assert best is a1
+
+
+def test_best_effort_scratch_files_lose_to_seed_source(tmp_path):
+    from rune.cli.best_of import AttemptArtifact, _rank_best_effort
+
+    # Attempt 0 wrote only debug scripts (new files, not in the seed);
+    # attempt 2 edited a file that exists in the seed. A pile of scratch
+    # files is not a fix — the real edit must be delivered.
+    seed = tmp_path / "seed"
+    (seed / "pkg").mkdir(parents=True)
+    (seed / "pkg" / "core.py").write_text("x = 1\n")
+    a0 = AttemptArtifact(index=0, workdir="w0", stdout="", returncode=0,
+                         produced=["debug_ast.py", "check_fix.py"])
+    a2 = AttemptArtifact(index=2, workdir="w2", stdout="", returncode=0,
+                         produced=["pkg/core.py"])
+    best = _rank_best_effort([a0, a2], {}, seed_from=str(seed))
+    assert best is a2
+
+
+def test_best_effort_tie_prefers_repair_attempt(tmp_path):
+    from rune.cli.best_of import AttemptArtifact, _rank_best_effort
+
+    # With zero verifier signal and identical shapes, the repair attempt
+    # (highest index) saw failure evidence the others didn't — prefer it.
+    seed = tmp_path / "seed"
+    (seed / "pkg").mkdir(parents=True)
+    (seed / "pkg" / "core.py").write_text("x = 1\n")
+    arts = [
+        AttemptArtifact(index=i, workdir=f"w{i}", stdout="", returncode=0,
+                        produced=["pkg/core.py"])
+        for i in range(3)
+    ]
+    best = _rank_best_effort(arts, {}, seed_from=str(seed))
+    assert best is arts[2]
 
 
 @pytest.mark.asyncio
@@ -1427,7 +1465,8 @@ def test_rank_best_effort_prefers_ran_over_did_not_compile():
 
 def test_rank_best_effort_deterministic_and_empty():
     from rune.cli.best_of import _rank_best_effort
-    assert _rank_best_effort([_art(0, []), _art(1, [])], {}).index == 0
+    # deterministic on a tie: the later (better-informed) attempt wins
+    assert _rank_best_effort([_art(0, []), _art(1, [])], {}).index == 1
     assert _rank_best_effort([], {}) is None
 
 
@@ -1575,6 +1614,187 @@ async def test_race2_runs_two_then_repairs(monkeypatch, tmp_path):
     assert reports[0]["selected_index"] == 2
 
 
+def _mk_timed_attempts(tmp_path, spawned, finished, delays):
+    """Attempts that take different amounts of time, and say if they finished."""
+    async def fake_attempt(index, message, model, provider, seed_from=None):
+        spawned.append(index)
+        await asyncio.sleep(delays.get(index, 0.0))
+        w = tmp_path / f"strat_w{index}"
+        w.mkdir(exist_ok=True)
+        (w / "fix.py").write_text(f"attempt {index}")
+        finished.append(index)
+        return AttemptArtifact(
+            index=index, workdir=str(w), stdout=f"out{index}", returncode=0,
+            produced=["fix.py"],
+        )
+
+    return fake_attempt
+
+
+@pytest.mark.asyncio
+async def test_race2_winner_cancels_the_running_sibling(monkeypatch, tmp_path):
+    """A pass must stop the race, not wait politely for the loser.
+
+    The old shape gathered both attempts before verifying either, so when the
+    fast one passed, the slow one's whole remaining runtime had already been
+    paid for nothing. Now the sibling is cancelled the moment a winner
+    verifies — on the seeded path that is minutes of model time per race.
+    """
+    monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "race2")
+    spawned, finished = [], []
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess",
+                        _mk_timed_attempts(tmp_path, spawned, finished,
+                                           {0: 0.0, 1: 30.0}))
+    monkeypatch.setattr(best_of, "make_verifier", _mk_verifier(pass_indices={0}))
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    dest = tmp_path / "d_race_cancel"
+    dest.mkdir()
+    monkeypatch.chdir(dest)
+
+    reports: list = []
+    code = await asyncio.wait_for(
+        _best_of_async("task", 3, None, "anthropic",
+                       report=lambda s, **kw: reports.append(kw), seed_cwd=True),
+        timeout=10,   # far under the loser's 30s: the win must not wait for it
+    )
+    assert code == 0
+    assert reports[0]["selected_index"] == 0
+    assert sorted(spawned) == [0, 1]   # both started
+    assert finished == [0]             # the loser never completed
+
+
+@pytest.mark.asyncio
+async def test_race2_first_to_land_passer_wins(monkeypatch, tmp_path):
+    # Verification runs as attempts land, so a passing attempt 1 that
+    # finishes first is the winner — there is no reason to keep paying for
+    # attempt 0 to find out whether it would also have passed.
+    monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "race2")
+    spawned, finished = [], []
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess",
+                        _mk_timed_attempts(tmp_path, spawned, finished,
+                                           {0: 30.0, 1: 0.0}))
+    monkeypatch.setattr(best_of, "make_verifier", _mk_verifier(pass_indices={0, 1}))
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    dest = tmp_path / "d_race_land"
+    dest.mkdir()
+    monkeypatch.chdir(dest)
+
+    reports: list = []
+    code = await asyncio.wait_for(
+        _best_of_async("task", 3, None, "anthropic",
+                       report=lambda s, **kw: reports.append(kw), seed_cwd=True),
+        timeout=10,
+    )
+    assert code == 0
+    assert reports[0]["selected_index"] == 1
+    assert finished == [1]
+
+
+@pytest.mark.asyncio
+async def test_race2_failed_fast_attempt_does_not_end_the_race(monkeypatch, tmp_path):
+    # A fast failure is not a verdict on the race: the slower attempt still
+    # gets verified and can win.
+    monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "race2")
+    spawned, finished = [], []
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess",
+                        _mk_timed_attempts(tmp_path, spawned, finished,
+                                           {0: 0.3, 1: 0.0}))
+    monkeypatch.setattr(best_of, "make_verifier", _mk_verifier(pass_indices={0}))
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    dest = tmp_path / "d_race_slowwin"
+    dest.mkdir()
+    monkeypatch.chdir(dest)
+
+    reports: list = []
+    code = await _best_of_async(
+        "task", 3, None, "anthropic",
+        report=lambda s, **kw: reports.append(kw), seed_cwd=True,
+    )
+    assert code == 0
+    assert reports[0]["selected_index"] == 0
+    assert sorted(finished) == [0, 1]  # nobody was cancelled
+
+
+def _mk_repro_verifier(tmp_path, verdicts):
+    """A verifier whose repro script grades each candidate per *verdicts*.
+
+    This drives the REAL evidence hand-off in _best_of_async — the earlier
+    version of these tests re-implemented that logic inside the test and
+    then tested the copy, which would have kept passing however the
+    production path broke.
+    """
+    async def fake_make_verifier(instruction, seed_cwd=None):
+        async def verify(cwd):
+            i = int(cwd.rsplit("_w", 1)[-1])
+            verify.repro_results[cwd] = verdicts.get(i, False)
+            verify.evidence_by_cwd[cwd] = f"AssertionError: attempt {i} wrong"
+            return False                      # nobody passes; repair must fire
+
+        async def grade(cwd):
+            i = int(cwd.rsplit("_w", 1)[-1])
+            verify.repro_results[cwd] = verdicts.get(i, False)
+            return verify.repro_results[cwd]
+
+        verify.has_check = True
+        verify.repro_script = "assert fixed()"
+        verify.repro_results = {}
+        verify.grade_repro = grade
+        verify.evidence_by_cwd = {}
+        return verify
+
+    return fake_make_verifier
+
+
+@pytest.mark.asyncio
+async def test_repair_evidence_is_withheld_when_the_repro_separates_nothing(
+        monkeypatch, tmp_path):
+    # Both candidates fail the repro the same way: the script has separated
+    # nothing, and its output would aim the repair attempt at a requirement
+    # the correct fix may not even be meant to satisfy.
+    monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "race2")
+    monkeypatch.delenv("RUNE_BESTOF_REPAIR", raising=False)
+    spawned: list = []
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", _mk_attempts(tmp_path, spawned))
+    monkeypatch.setattr(best_of, "make_verifier",
+                        _mk_repro_verifier(tmp_path, {0: False, 1: False}))
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    dest = tmp_path / "d_withhold"
+    dest.mkdir()
+    monkeypatch.chdir(dest)
+
+    await _best_of_async(
+        "task", 3, None, "anthropic", report=lambda s, **kw: None, seed_cwd=True,
+    )
+    repair_msgs = [m for i, m in spawned if i == 2]
+    assert repair_msgs and "AssertionError" not in repair_msgs[0]
+
+
+@pytest.mark.asyncio
+async def test_repair_evidence_is_passed_on_when_the_repro_separates(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "race2")
+    monkeypatch.delenv("RUNE_BESTOF_REPAIR", raising=False)
+    spawned: list = []
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", _mk_attempts(tmp_path, spawned))
+    monkeypatch.setattr(best_of, "make_verifier",
+                        _mk_repro_verifier(tmp_path, {0: True, 1: False}))
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    dest = tmp_path / "d_passon"
+    dest.mkdir()
+    monkeypatch.chdir(dest)
+
+    await _best_of_async(
+        "task", 3, None, "anthropic", report=lambda s, **kw: None, seed_cwd=True,
+    )
+    repair_msgs = [m for i, m in spawned if i == 2]
+    assert repair_msgs and "AssertionError" in repair_msgs[0]
+
+
 @pytest.mark.asyncio
 async def test_repair_env_opt_out(monkeypatch, tmp_path):
     monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "sequential")
@@ -1653,3 +1873,349 @@ def test_drop_build_metadata_filters_packaging_junk():
         "tests/test_cli.py",
     ]
     assert _drop_build_metadata(rels) == ["src/flask/cli.py", "tests/test_cli.py"]
+
+
+@pytest.mark.asyncio
+async def test_fastpath_verified_short_circuits(monkeypatch, tmp_path):
+    # Rung-0 repro flip: fix applied, no agentic attempts spawned, and the
+    # delivery is provisional (exit 1) — a repro written from the issue
+    # text selects a candidate, it does not verify one.
+    monkeypatch.setenv("RUNE_FASTPATH", "1")
+    dest = tmp_path / "fp"
+    dest.mkdir()
+    (dest / "app.py").write_text("BROKEN")
+
+    async def fake_fastpath(issue, seed, workdir, model, provider):
+        import os
+
+        from rune.agent.fastpath import FastPathResult
+        with open(os.path.join(workdir, "app.py"), "w") as fh:
+            fh.write("FIXED")
+        return FastPathResult(verified=True, applied=["app.py"],
+                              method="reproduction script")
+
+    import rune.agent.fastpath as fp_mod
+    monkeypatch.setattr(fp_mod, "run_fastpath", fake_fastpath)
+
+    async def no_attempts(*a, **k):
+        raise AssertionError("agentic rung must not run")
+
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", no_attempts)
+
+    async def fake_make_verifier(instruction, seed_cwd=None):
+        async def verify(cwd):
+            return False
+        verify.has_check = True
+        verify.evidence_by_cwd = {}
+        return verify
+
+    monkeypatch.setattr(best_of, "make_verifier", fake_make_verifier)
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.chdir(dest)
+
+    reports: list = []
+    code = await _best_of_async(
+        "fix", 3, None, "anthropic",
+        report=lambda s, **kw: reports.append(kw), seed_cwd=True,
+    )
+    assert code == 1
+    assert reports[0]["solved"] is False
+    assert reports[0]["provisional"] is True
+    assert reports[0]["applied"] == ["app.py"]
+    assert (dest / "app.py").read_text() == "FIXED"
+
+
+@pytest.mark.asyncio
+async def test_fastpath_evidence_reaches_agentic_rung(monkeypatch, tmp_path):
+    # Rung-0 fails but found a discriminating repro → attempts get the
+    # script as structured evidence in their message.
+    monkeypatch.setenv("RUNE_FASTPATH", "1")
+    monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "sequential")
+    dest = tmp_path / "fp2"
+    dest.mkdir()
+    (dest / "app.py").write_text("BROKEN")
+
+    async def fake_fastpath(issue, seed, workdir, model, provider):
+        from rune.agent.fastpath import FastPathResult
+        return FastPathResult(repro_script="assert fixed()",
+                              repro_output="AssertionError")
+
+    import rune.agent.fastpath as fp_mod
+    monkeypatch.setattr(fp_mod, "run_fastpath", fake_fastpath)
+
+    spawned: list = []
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", _mk_attempts(tmp_path, spawned))
+    monkeypatch.setattr(best_of, "make_verifier", _mk_verifier(pass_indices=set()))
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    monkeypatch.chdir(dest)
+
+    await _best_of_async(
+        "fix", 1, None, "anthropic", report=lambda s, **kw: None, seed_cwd=True,
+    )
+    assert spawned and "assert fixed()" in spawned[0][1]
+
+
+@pytest.mark.asyncio
+async def test_fastpath_evidence_only_reaches_first_attempt(monkeypatch, tmp_path):
+    # The repro encodes ONE reading of the issue. Broadcasting it to every
+    # attempt pins all K samples to that reading — only attempt 0 gets it.
+    monkeypatch.setenv("RUNE_FASTPATH", "1")
+    monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "sequential")
+    dest = tmp_path / "fp3"
+    dest.mkdir()
+    (dest / "app.py").write_text("BROKEN")
+
+    async def fake_fastpath(issue, seed, workdir, model, provider):
+        from rune.agent.fastpath import FastPathResult
+        return FastPathResult(repro_script="assert fixed()",
+                              repro_output="AssertionError")
+
+    import rune.agent.fastpath as fp_mod
+    monkeypatch.setattr(fp_mod, "run_fastpath", fake_fastpath)
+
+    spawned: list = []
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", _mk_attempts(tmp_path, spawned))
+    monkeypatch.setattr(best_of, "make_verifier", _mk_verifier(pass_indices=set()))
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    monkeypatch.chdir(dest)
+
+    await _best_of_async(
+        "fix", 2, None, "anthropic", report=lambda s, **kw: None, seed_cwd=True,
+    )
+    assert len(spawned) == 2
+    assert "assert fixed()" in spawned[0][1]
+    assert "assert fixed()" not in spawned[1][1]
+
+
+@pytest.mark.asyncio
+async def test_fastpath_repro_reaches_real_verifier(monkeypatch, tmp_path):
+    # Full flow: fastpath attaches its repro to the REAL make_verifier object
+    # and candidate verification actually executes the repro branch.
+    import rune.agent.auto_verify as av
+    import rune.agent.fastpath as fp_mod
+    import rune.agent.rejection_sampler as rs
+
+    monkeypatch.setenv("RUNE_FASTPATH", "1")
+    monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "sequential")
+    dest = tmp_path / "flow"
+    dest.mkdir()
+    (dest / "pkg").mkdir()
+    (dest / "pkg" / "mod.py").write_text("x = 1\n")
+    (dest / "setup.py").write_text("# marker\n")
+
+    async def fake_fastpath(issue, seed, workdir, model, provider):
+        from rune.agent.fastpath import FastPathResult
+        return FastPathResult(
+            repro_script=(
+                "import sys, os\nsys.path.insert(0, os.getcwd())\n"
+                "src = open('pkg/mod.py').read()\nassert 'x = 2' in src\n"
+            ),
+            repro_output="AssertionError",
+        )
+
+    monkeypatch.setattr(fp_mod, "run_fastpath", fake_fastpath)
+    monkeypatch.setattr(av, "detect_test_command", lambda cwd: None)
+
+    async def fake_eg(instruction):
+        async def v(cwd):
+            return False
+        v.has_check = True
+        v.evidence_by_cwd = {}
+        return v
+
+    monkeypatch.setattr(rs, "make_evidence_gate_verifier", fake_eg)
+
+    async def fake_attempt(index, message, model, provider, seed_from=None):
+        w = tmp_path / f"flow_w{index}"
+        (w / "pkg").mkdir(parents=True)
+        (w / "pkg" / "mod.py").write_text("x = 2\n")  # the fix
+        return AttemptArtifact(
+            index=index, workdir=str(w), stdout="out", returncode=0,
+            produced=["pkg/mod.py"],
+        )
+
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    monkeypatch.chdir(dest)
+
+    reports: list = []
+    code = await _best_of_async(
+        "fix the bug", 3, None, "anthropic",
+        report=lambda s, **kw: reports.append(kw), seed_cwd=True,
+    )
+    # The candidate flips the repro → verified solve through the REAL verifier.
+    # repro flip selects the candidate; the delivery label is provisional
+    assert code == 1
+    assert reports[0]["solved"] is False
+    assert reports[0]["provisional"] is True
+
+
+@pytest.mark.asyncio
+async def test_provisional_selection_still_distills_the_contrast(monkeypatch, tmp_path):
+    """The winner-vs-losers contrast was only learned from a verified win.
+    Since a reproduction flip stopped counting as verified, that branch
+    barely opens on a repo fix, so the distillation ran almost never — the
+    provisional pick carries the same contrast and must feed it too."""
+    dest = tmp_path / "proj"
+    dest.mkdir()
+    (dest / "app.py").write_text("x = 1\n")
+
+    async def fake_make_verifier(instruction, seed_cwd=None):
+        async def verify(cwd):
+            passed = os.path.exists(os.path.join(cwd, "fix.py"))
+            if passed:
+                verify.provisional_by_cwd[cwd] = True
+            return passed
+        verify.has_check = True
+        verify.evidence_by_cwd = {}
+        verify.provisional_by_cwd = {}
+        verify.method_by_cwd = {}
+        return verify
+
+    works = []
+    for i in range(2):
+        w = tmp_path / f"w{i}"
+        w.mkdir()
+        if i == 0:
+            (w / "fix.py").write_text("correct")
+        else:
+            (w / "wrong.py").write_text("wrong")
+        works.append(str(w))
+
+    async def fake_attempt(index, message, model, provider, seed_from=None):
+        return AttemptArtifact(index=index, workdir=works[index],
+                               stdout=f"o{index}", returncode=0,
+                               produced=sorted(os.listdir(works[index])))
+
+    called = {}
+
+    async def fake_contrast(winner, losers, ev_map):
+        called["winner"] = winner.index
+        called["losers"] = [lo.index for lo in losers]
+        return "rule-key"
+
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
+    monkeypatch.setattr(best_of, "make_verifier", fake_make_verifier)
+    monkeypatch.setattr(best_of, "_learn_from_contrast", fake_contrast)
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "parallel")
+    monkeypatch.delenv("RUNE_CONTRASTIVE_DISTILL", raising=False)
+    monkeypatch.chdir(dest)
+
+    code = await _best_of_async("fix", 2, None, None,
+                                report=lambda s, **kw: None, seed_cwd=True)
+
+    assert code == 1                       # provisional, not a claim of success
+    assert called.get("winner") == 0
+    assert called.get("losers") == [1]
+
+
+@pytest.mark.asyncio
+async def test_contrast_distillation_can_be_switched_off(monkeypatch, tmp_path):
+    dest = tmp_path / "proj2"
+    dest.mkdir()
+    (dest / "app.py").write_text("x = 1\n")
+
+    async def fake_make_verifier(instruction, seed_cwd=None):
+        async def verify(cwd):
+            passed = os.path.exists(os.path.join(cwd, "fix.py"))
+            if passed:
+                verify.provisional_by_cwd[cwd] = True
+            return passed
+        verify.has_check = True
+        verify.evidence_by_cwd = {}
+        verify.provisional_by_cwd = {}
+        verify.method_by_cwd = {}
+        return verify
+
+    w = tmp_path / "wa"
+    w.mkdir()
+    (w / "fix.py").write_text("correct")
+
+    async def fake_attempt(index, message, model, provider, seed_from=None):
+        return AttemptArtifact(index=index, workdir=str(w), stdout="o",
+                               returncode=0, produced=["fix.py"])
+
+    called = {}
+
+    async def fake_contrast(winner, losers, ev_map):
+        called["ran"] = True
+        return None
+
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
+    monkeypatch.setattr(best_of, "make_verifier", fake_make_verifier)
+    monkeypatch.setattr(best_of, "_learn_from_contrast", fake_contrast)
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    monkeypatch.setenv("RUNE_CONTRASTIVE_DISTILL", "0")
+    monkeypatch.chdir(dest)
+
+    await _best_of_async("fix", 1, None, None,
+                         report=lambda s, **kw: None, seed_cwd=True)
+    assert "ran" not in called
+
+
+class TestAttemptDiversity:
+    """K attempts were near-copies: all at temperature 0, and race2 gave the
+    first two the same message. Grading every attempt against the hidden
+    tests showed three attempts at 33% each covering only 50% of runs where
+    independence predicts 70%."""
+
+    def test_attempt_zero_keeps_the_default_framing(self):
+        from rune.cli.best_of import _diversify
+        entry, temp = _diversify(0)
+        assert entry == ""
+        assert temp == 0.0
+
+    def test_later_attempts_get_a_different_entry_point_and_temperature(self):
+        from rune.cli.best_of import _diversify
+        e1, t1 = _diversify(1)
+        e2, t2 = _diversify(2)
+        assert e1 and e2 and e1 != e2
+        assert 0.0 < t1 < t2
+
+    def test_it_cycles_for_larger_k(self):
+        from rune.cli.best_of import _diversify
+        assert _diversify(3) == _diversify(0)
+
+    def test_diversity_can_be_switched_off(self, monkeypatch):
+        from rune.cli.best_of import _diversify
+        monkeypatch.setenv("RUNE_BESTOF_DIVERSIFY", "0")
+        assert _diversify(2) == ("", None)
+
+
+@pytest.mark.asyncio
+async def test_each_attempt_is_spawned_with_its_own_temperature(monkeypatch, tmp_path):
+    import rune.agent.auto_verify as av
+
+    captured = {}
+
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            return (b"ok\n", b"")
+
+    async def fake_exec(*cmd, cwd=None, env=None, **kwargs):
+        captured[env.get("RUNE_TEMPERATURE")] = list(cmd)
+        return _FakeProc()
+
+    monkeypatch.setattr(best_of.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(av, "detect_test_command", lambda cwd: None)
+    monkeypatch.delenv("RUNE_BESTOF_DIVERSIFY", raising=False)
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    (seed / "app.py").write_text("x")
+
+    for i in range(3):
+        await _run_attempt_subprocess(i, "fix it", None, None, seed_from=str(seed))
+
+    assert sorted(captured) == ["0.0", "0.4", "0.7"]
+    # the later attempts also carry a distinct entry point in the message
+    msgs = ["".join(c) for c in captured.values()]
+    assert len({m for m in msgs}) == 3
+

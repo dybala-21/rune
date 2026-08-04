@@ -69,6 +69,14 @@ _HONEST_STOP_NOTES = {
         "Delivered with caveats: the artifact exists but some quality checks did "
         "not fully pass — treat it as unverified."
     ),
+    "checks_failed": (
+        "Not marking this done: the last test run on this work FAILED and no "
+        "later run passed. The changes are in place but unverified."
+    ),
+    "task_blocked": (
+        "Stopping: the task cannot be completed correctly as stated — see the "
+        "conflict described above. Nothing was forced through."
+    ),
     "stalled": (
         "Stopping: I stopped making progress and won't claim a result I didn't "
         "actually reach."

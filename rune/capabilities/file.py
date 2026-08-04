@@ -121,6 +121,37 @@ async def file_read(params: FileReadParams) -> CapabilityResult:
     )
 
 
+def _reject_test_overwrite(file_path: Path) -> str | None:
+    """Refuse to rewrite a test that already exists.
+
+    The verifier-side guard restores tampered tests before a check runs,
+    but that only covers runs that reach a verifier. On the plain path an
+    agent asked to "make the failing test pass" will simply edit the
+    assertion, and nothing notices. A pre-existing test is the user's
+    specification: changing it to agree with the code under test destroys
+    the only independent signal there is. Writing NEW tests stays free.
+    RUNE_PROTECT_TESTS=0 turns this off for genuine test-editing work.
+    """
+    from rune.agent.validation_guard import _is_test_file, protect_tests_enabled
+
+    if not protect_tests_enabled() or not file_path.is_file():
+        return None
+    under_test_dir = any(
+        part in {"tests", "test", "__tests__", "spec"} for part in file_path.parts
+    )
+    if not _is_test_file(file_path, under_test_dir):
+        return None
+    return (
+        f"BLOCKED: {file_path.name} is an existing test. Editing a test so it "
+        f"agrees with the code under test removes the check the user relies "
+        f"on. If the code is wrong, fix the code. If the test and the "
+        f"project's own spec genuinely contradict each other, that is not "
+        f"something to work around — call task_blocked with both sides of "
+        f"the conflict and stop. Set RUNE_PROTECT_TESTS=0 only when editing "
+        f"tests IS the task."
+    )
+
+
 async def file_write(params: FileWriteParams) -> CapabilityResult:
     """Write content to a file."""
     if not params.path or not params.path.strip():
@@ -169,12 +200,22 @@ async def file_write(params: FileWriteParams) -> CapabilityResult:
             output=f"Syntax error in {file_path.name}: {_syn_err}. Fix the content and retry.",
         )
 
+    _tamper = _reject_test_overwrite(file_path)
+    if _tamper:
+        return CapabilityResult(success=False, error=_tamper)
+
     file_path.write_text(params.content, encoding=params.encoding)
+
+    from rune.safety.recoverable import verify_written
+    check = verify_written(file_path, len(params.content))
+    if not check.ok:
+        return CapabilityResult(success=False, error=f"Write failed: {check.detail}")
 
     return CapabilityResult(
         success=True,
         output=f"Written {len(params.content)} bytes to {params.path}",
-        metadata={"path": str(file_path), "size": len(params.content), "changed": True},
+        metadata={"path": str(file_path), "size": len(params.content),
+                  "changed": True, "verified": check.detail},
     )
 
 
@@ -272,8 +313,17 @@ async def file_edit(params: FileEditParams) -> CapabilityResult:
             ),
         )
 
+    _tamper = _reject_test_overwrite(file_path)
+    if _tamper:
+        return CapabilityResult(success=False, error=_tamper)
+
     file_path.write_text(new_content)
     record_edit_success(str(file_path))
+
+    from rune.safety.recoverable import verify_written
+    _check = verify_written(file_path, len(new_content))
+    if not _check.ok:
+        return CapabilityResult(success=False, error=f"Edit failed: {_check.detail}")
 
     note = "" if matched_via == "exact" else (
         f" (matched via {matched_via} fuzzy match — verify the edit landed "
@@ -322,20 +372,48 @@ async def file_delete(params: FileDeleteParams) -> CapabilityResult:
     if not file_path.exists():
         return CapabilityResult(success=False, error=f"Path not found: {params.path}")
 
-    if file_path.is_dir():
-        if not params.recursive:
-            return CapabilityResult(
-                success=False,
-                error=f"'{params.path}' is a directory. Use recursive=true to delete.",
-            )
-        import shutil
-        shutil.rmtree(file_path)
-    else:
-        file_path.unlink()
+    if file_path.is_dir() and not params.recursive:
+        return CapabilityResult(
+            success=False,
+            error=f"'{params.path}' is a directory. Use recursive=true to delete.",
+        )
 
+    from rune.safety.recoverable import (
+        is_regenerable,
+        move_to_trash,
+        trash_enabled,
+        verify_gone,
+    )
+
+    # Build output and OS cruft can be rebuilt, so they go for real.
+    # Anything else the user might not be able to recreate, so it goes to
+    # the workspace trash and stays recoverable.
+    recycled = is_regenerable(file_path) or not trash_enabled()
+    stored: str | None = None
+    if recycled:
+        if file_path.is_dir():
+            import shutil
+            shutil.rmtree(file_path)
+        else:
+            file_path.unlink()
+    else:
+        stored = move_to_trash(file_path).stored
+
+    check = verify_gone(file_path)
+    if not check.ok:
+        return CapabilityResult(success=False, error=f"Delete failed: {check.detail}")
+
+    if stored:
+        return CapabilityResult(
+            success=True,
+            output=(f"Moved to trash (recoverable): {params.path}\n"
+                    f"Restore from: {stored}"),
+            metadata={"path": str(file_path), "trashed": stored},
+        )
     return CapabilityResult(
         success=True,
         output=f"Deleted: {params.path}",
+        metadata={"path": str(file_path), "trashed": None},
     )
 
 

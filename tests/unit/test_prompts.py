@@ -73,6 +73,27 @@ class TestPromptConstants:
         """AGENT_SYSTEM_PROMPT is an alias for PROMPT_CORE."""
         assert AGENT_SYSTEM_PROMPT is PROMPT_CORE
 
+    def test_fanout_hint_pinned_to_core(self):
+        # The builder strips FANOUT_HINT verbatim when RUNE_FANOUT_READS=0,
+        # so the constant must stay byte-identical to the PROMPT_CORE text.
+        from rune.agent.prompts import FANOUT_HINT
+        assert FANOUT_HINT in PROMPT_CORE
+
+
+class TestFanoutHintSwitch:
+    def test_hint_present_by_default(self, monkeypatch):
+        from rune.agent.prompts import FANOUT_HINT
+        monkeypatch.delenv("RUNE_FANOUT_READS", raising=False)
+        assert FANOUT_HINT in build_system_prompt(goal="test")
+
+    def test_hint_stripped_when_env_off(self, monkeypatch):
+        from rune.agent.prompts import FANOUT_HINT
+        monkeypatch.setenv("RUNE_FANOUT_READS", "0")
+        prompt = build_system_prompt(goal="test")
+        assert FANOUT_HINT not in prompt
+        # the surrounding item survives the strip
+        assert "then read them together in one step." in prompt
+
 
 class TestBuildSystemPrompt:
     """Test conditional assembly logic."""

@@ -300,10 +300,16 @@ def _compute_tool_rounds(
 
     # Code work inside a real repo gets the complex budget even when the
     # classifier missed is_complex_coding — a large tree cannot be diagnosed
-    # AND fixed AND verified in 12 rounds.
+    # AND fixed AND verified in 12 rounds. Repo fixes get more still: the
+    # cap has to leave room to localize inside a multi-thousand-line module,
+    # understand the mechanism, edit, install, and run the tests. Runs that
+    # die at the cap die mid-diagnosis and ship a half-formed guess.
     is_complex = getattr(classification, "is_complex_coding", False) or repo_fix
     # Per-turn tool-round budget. Token budget and max_iterations bound runaway.
-    base = 24 if is_complex else 12
+    if repo_fix:
+        base = 40
+    else:
+        base = 24 if is_complex else 12
 
     # Modest tier bonus. Larger bonuses burn tokens on weak models
     # that keep retrying the same failing tool.
@@ -330,6 +336,11 @@ def _compute_explore_budget(classification: Any, repo_fix: bool = False) -> int:
     per-process, including "0" to disable.
     """
     is_code = getattr(classification, "is_complex_coding", False) or repo_fix
+    # Repo fixes need the deeper diagnosis runway: forcing an edit after 8
+    # read-only rounds interrupts exactly the investigation that produces a
+    # correct patch (the adapter still nudges/forces near the round cap).
+    if repo_fix:
+        return 16
     return 8 if is_code else 0
 
 
@@ -3075,6 +3086,24 @@ class NativeAgentLoop(EventEmitter):
                 "advisor_events_persist_failed",
                 error=str(exc)[:200],
             )
+
+        # Abstaining is its own outcome, not a completion. Checked here so
+        # every path that finishes a run reports it the same way.
+        from rune.capabilities.blocked import consume_block
+        if consume_block():
+            trace.reason = "task_blocked"
+            log.info("run_task_blocked", step=self._step)
+
+        # Neither is finishing on top of a failing check. The verdict is
+        # mechanical — the last test execution this run saw, whoever ran it —
+        # so a confident closing summary cannot overrule it. Measured case:
+        # the transcript showed "4 failed" and the run still exited as a
+        # success, which is exactly the false-done the verified path already
+        # refuses.
+        from rune.agent.litellm_adapter import consume_mech_check
+        if consume_mech_check() == "fail" and trace.reason == "completed":
+            trace.reason = "checks_failed"
+            log.info("run_checks_failed", step=self._step)
 
         trace.total_tokens_used = self._token_budget.used
         return trace

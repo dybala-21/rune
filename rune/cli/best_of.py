@@ -63,6 +63,43 @@ _STRATEGY_ENV = "RUNE_BESTOF_STRATEGY"
 _REPAIR_ENV = "RUNE_BESTOF_REPAIR"  # "0" disables failure-fed repair attempts
 _REPAIR_EVIDENCE_CAP = 1500
 
+# Rung-0 fast path before the agentic attempts: single-shot localize+edit,
+# accepted only when a baseline-failing repro script flips to passing (a
+# discriminating check → honest verified). "0" disables.
+_FASTPATH_ENV = "RUNE_FASTPATH"
+
+
+# Attempts used to be near-copies: all at temperature 0, and race2 handed
+# the first two the same message, so K samples walked the same path and K
+# bought far less than it should. Each attempt now gets a different
+# starting point and a different sampling temperature. "0" restores the
+# identical-attempt behaviour.
+_DIVERSITY_ENV = "RUNE_BESTOF_DIVERSIFY"
+
+# Distinct entry points into the same problem, not instructions to try
+# harder. Index 0 keeps the default framing so the cheapest, most direct
+# attempt is always among the K.
+_ENTRY_POINTS = (
+    "",
+    "\n\nApproach: reproduce the reported behaviour first and let what you "
+    "observe tell you where the cause is, rather than starting from the "
+    "file the report names.",
+    "\n\nApproach: find the code that already handles the neighbouring "
+    "cases correctly and work out why this case does not reach it.",
+)
+
+# Attempt 0 stays deterministic; later attempts sample more widely so they
+# are not re-drawing the same trajectory.
+_TEMPERATURES = (0.0, 0.4, 0.7)
+
+
+def _diversify(index: int) -> tuple[str, float | None]:
+    """Entry-point suffix and sampling temperature for attempt *index*."""
+    if os.environ.get(_DIVERSITY_ENV, "1") == "0":
+        return "", None
+    return (_ENTRY_POINTS[index % len(_ENTRY_POINTS)],
+            _TEMPERATURES[index % len(_TEMPERATURES)])
+
 
 def _repair_suffix(evidence: str) -> str:
     return (
@@ -130,6 +167,9 @@ async def _run_attempt_subprocess(
 
     env = dict(os.environ)
     env[RECURSION_GUARD_ENV] = "1"  # recursion guard
+    _entry, _temp = _diversify(index)
+    if _temp is not None:
+        env["RUNE_TEMPERATURE"] = str(_temp)
     # Confine file writes to this attempt's dir via enforce() (same as the
     # parallel-isolated path). enforce() covers the file_write/edit/delete and
     # document_create capabilities; shell/exec and the browser capability are not
@@ -140,7 +180,7 @@ async def _run_attempt_subprocess(
     # command is — or how to find the nearest tests — so it spends rounds
     # fixing, not rediscovering the verify loop. Detection is structural
     # (detect_test_command); same hint for every attempt.
-    child_message = message
+    child_message = message + _entry
     if seed_from:
         try:
             from rune.agent.auto_verify import detect_test_command
@@ -190,6 +230,17 @@ async def _run_attempt_subprocess(
     try:
         stdout_b, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
         returncode = proc.returncode or 0
+    except asyncio.CancelledError:
+        # The race was decided without this attempt. Its subprocess does not
+        # stop just because the task awaiting it did — left alone it keeps
+        # making model calls nobody will read — so it is killed before the
+        # cancellation is allowed to proceed.
+        try:
+            proc.kill()
+            await proc.wait()
+        except ProcessLookupError:
+            pass
+        raise
     except TimeoutError:
         # A stalled attempt must not hang the whole best-of gather. Kill it and
         # record a failed attempt (its partial workdir is left for the verifier,
@@ -566,34 +617,52 @@ _INCONCLUSIVE_MARKERS = (
 )
 
 
-def _best_effort_score(a: AttemptArtifact, evidence: str) -> tuple:
+_SCRATCH_PREFIXES = ("test", "debug", "tmp", "scratch", "repro", "verify")
+
+
+def _is_real_change(f: str, seed_from: str | None) -> bool:
+    """A produced file that plausibly changes behavior: an edit of a file
+    that exists in the seed (whatever its name), or a new file that isn't a
+    scratch test/debug script."""
+    if seed_from and os.path.isfile(os.path.join(seed_from, f)):
+        return True
+    return not os.path.basename(f).startswith(_SCRATCH_PREFIXES)
+
+
+def _best_effort_score(
+    a: AttemptArtifact, evidence: str, seed_from: str | None = None
+) -> tuple:
     """Rank a FAILED candidate for hand-off. Higher is better.
 
     Purely a delivery choice — never promotes anything to "verified". Signals,
-    cheap and in priority order: produced files at all; changed a non-test
-    source file (a scratch test alone is not a fix); the verifier ran far
-    enough to fail an assertion (vs never compiling); fewer inconclusive
-    errors; then lowest index for determinism.
+    cheap and in priority order: produced files at all; made a real change
+    (see _is_real_change — a pile of debug scripts is not a fix); the
+    verifier ran far enough to fail an assertion (vs never compiling); fewer
+    inconclusive errors; then highest index — the repair attempt saw failure
+    evidence the others didn't, so on an otherwise silent tie it is the
+    best-informed candidate.
     """
     ev = (evidence or "").lower()
     produced = 1 if a.produced else 0
-    src = 1 if any(
-        not os.path.basename(f).startswith("test") for f in a.produced
-    ) else 0
+    src = 1 if any(_is_real_change(f, seed_from) for f in a.produced) else 0
     ran = 1 if any(m in ev for m in _PROGRESS_MARKERS) else 0
     inconclusive = sum(ev.count(m) for m in _INCONCLUSIVE_MARKERS)
-    return (produced, src, ran, -inconclusive, -a.index)
+    return (produced, src, ran, -inconclusive, a.index)
 
 
 def _rank_best_effort(
-    artifacts: list[AttemptArtifact], evidence_by_cwd: dict[str, str]
+    artifacts: list[AttemptArtifact],
+    evidence_by_cwd: dict[str, str],
+    seed_from: str | None = None,
 ) -> AttemptArtifact | None:
     """Pick the furthest-along failed candidate to hand off, or None."""
     if not artifacts:
         return None
     return max(
         artifacts,
-        key=lambda a: _best_effort_score(a, evidence_by_cwd.get(a.workdir, "")),
+        key=lambda a: _best_effort_score(
+            a, evidence_by_cwd.get(a.workdir, ""), seed_from
+        ),
     )
 
 
@@ -669,6 +738,40 @@ async def _verifier_discriminates(verify_cwd, seed_from: str) -> bool:
     finally:
         if scratch:
             shutil.rmtree(scratch, ignore_errors=True)
+
+
+# Attempt workdirs are wiped once a winner is chosen. Point this at a
+# directory to keep each attempt's changed files, so it stays possible to
+# ask later whether a correct fix was generated and not selected. Files
+# rather than a patch, because delivery copies files too — an archive
+# graded the same way cannot disagree with what shipped.
+_KEEP_ATTEMPTS_ENV = "RUNE_BESTOF_KEEP_ATTEMPTS"
+
+
+def _archive_attempts(artifacts: list[AttemptArtifact], seed_from: str | None) -> None:
+    dest_root = os.environ.get(_KEEP_ATTEMPTS_ENV, "").strip()
+    if not dest_root or not seed_from:
+        return
+    root = Path(dest_root).expanduser()
+    for a in artifacts:
+        out = root / f"attempt_{a.index}"
+        try:
+            shutil.rmtree(out, ignore_errors=True)
+            out.mkdir(parents=True, exist_ok=True)
+            kept = 0
+            for rel in a.produced:
+                src = Path(a.workdir) / rel
+                if not src.is_file():
+                    continue
+                dst = out / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+                kept += 1
+            (out / "_manifest.txt").write_text(
+                "\n".join(a.produced) + f"\ncopied={kept}\n"
+            )
+        except OSError as exc:  # archiving must never affect the run
+            log.debug("attempt_archive_failed", index=a.index, error=str(exc)[:80])
 
 
 def _cleanup(artifacts: list[AttemptArtifact]) -> None:
@@ -881,20 +984,83 @@ async def _best_of_async(
 
     async def run_attempt(i: int) -> AttemptArtifact:
         async with sem:
+            msg = message + (fastpath_evidence if i == 0 else "")
             return await _run_attempt_subprocess(
-                i, message, model, provider, seed_from=seed_from
+                i, msg, model, provider, seed_from=seed_from
             )
 
     async def verify(artifact: AttemptArtifact) -> bool:
         # Seeded mode: an attempt that changed NOTHING cannot have fixed
-        # anything, so a check pass on it is vacuous. Never verify a
-        # no-change candidate.
-        if seed_cwd and not artifact.produced:
+        # anything, so a check pass on it is vacuous — and an attempt whose
+        # only output is scratch test/debug scripts changed nothing that
+        # matters (pre-fix code passes the existing tests just the same).
+        # Never select either. A file that exists in the seed is a real
+        # edit regardless of its name (django/test/testcases.py is source).
+        if seed_cwd and not any(
+            _is_real_change(f, seed_from) for f in artifact.produced
+        ):
             return False
         # Cap verifier subprocesses too: sample_parallel gathers all K verifies
         # at once, each an Evidence-Gate check subprocess.
         async with sem:
             return await verify_cwd(artifact.workdir)
+
+    # Rung 0: cheap single-shot pass, gated on a discriminating repro check.
+    fastpath_evidence = ""
+    if seed_from and os.environ.get(_FASTPATH_ENV, "1") != "0":
+        from rune.agent.fastpath import run_fastpath
+
+        fp_workdir = tempfile.mkdtemp(
+            prefix="rune_fastpath_", dir=_attempt_work_root()
+        )
+        try:
+            _seed_workdir(seed_from, fp_workdir)
+            fp = await run_fastpath(message, seed_from, fp_workdir,
+                                    model, provider)
+        except Exception as exc:  # rung-0 must never sink the run
+            log.warning("fastpath_error", error=str(exc)[:160])
+            fp = None
+        if fp and fp.verified and fp.applied:
+            # A model-authored repro flipping to pass selects this fix but
+            # cannot verify it — a fix for the reported example can still
+            # miss the real requirement. Deliver as provisional.
+            copied, backup_dir = _restore_changed(
+                fp_workdir, dest, fp.applied
+            )
+            shutil.rmtree(fp_workdir, ignore_errors=True)
+            await _record_winner(message, "", copied)
+            report(
+                "",
+                solved=False,
+                selected_index=0,
+                pass_count=0,
+                k=1,
+                copied=[],
+                skipped=[],
+                has_check=True,
+                no_artifact=0,
+                applied=copied,
+                apply_backup=backup_dir,
+                provisional=True,
+            )
+            return 1
+        shutil.rmtree(fp_workdir, ignore_errors=True)
+        if fp and fp.repro_script:
+            # The discriminating repro also becomes the verifier's first
+            # check: flip-to-pass picks the winning candidate early — the
+            # delivery label stays provisional.
+            verify_cwd.repro_script = fp.repro_script  # type: ignore[attr-defined]
+            log.info("repro_attached", chars=len(fp.repro_script))
+            # Hand the agentic rung the evidence, not a failed diff. Only
+            # attempt 0 gets it: the repro encodes ONE reading of the issue,
+            # and broadcasting it to every attempt pins all K samples to
+            # that reading — when it's wrong, best-of loses its diversity.
+            fastpath_evidence = (
+                "\n\nA reproduction script for this issue (currently "
+                "FAILING) — make it pass without breaking existing tests:\n"
+                "```python\n" + fp.repro_script[:3000] + "\n```\n"
+                "Its current output:\n" + fp.repro_output[:800]
+            )
 
     strategy = os.environ.get(_STRATEGY_ENV, "auto").strip().lower()
     if strategy == "auto":
@@ -910,7 +1076,33 @@ async def _best_of_async(
                 i, msg, model, provider, seed_from=seed_from
             )
 
-    def _last_evidence(arts: list[AttemptArtifact]) -> str:
+    async def _last_evidence(arts: list[AttemptArtifact]) -> str:
+        """Failure output to hand the repair attempt, if it is worth having.
+
+        When the reproduction script comes out the same way on every
+        candidate it has told us nothing, and its output is an actively
+        misleading brief — it describes a requirement the correct fix may
+        not even be meant to satisfy. Withhold it rather than aim the next
+        attempt at it.
+
+        Telling those apart needs two candidates measured against the
+        script, and getting there cannot be left to chance: verification
+        stops as soon as one candidate passes, and an attempt that times out
+        is never measured at all. In practice that left only one verdict in
+        roughly three runs out of four, and with one verdict the question is
+        unanswerable — the evidence went through by default, which is the
+        case this was written to catch. So grade whatever is still ungraded
+        before deciding.
+        """
+        from rune.agent.rejection_sampler import (
+            ensure_two_graded,
+            repro_discriminates,
+        )
+
+        await ensure_two_graded(verify_cwd, [a.workdir for a in arts])
+        if repro_discriminates(verify_cwd) is False:
+            log.info("repro_non_discriminating")
+            return ""
         for a in reversed(arts):
             ev = ev_map_ref.get(a.workdir, "")
             if ev:
@@ -930,9 +1122,9 @@ async def _best_of_async(
         attempts: list[Attempt] = []
         selected = selected_index = None
         for i in range(k):
-            msg = message
+            msg = message + (fastpath_evidence if i == 0 else "")
             if i == 1 and repair_ok:
-                ev = _last_evidence([a.candidate for a in attempts])
+                ev = await _last_evidence([a.candidate for a in attempts])
                 if ev:
                     msg = message + _repair_suffix(ev)
         # (attempt 3+ goes back to fresh independent samples for diversity)
@@ -946,23 +1138,50 @@ async def _best_of_async(
         res = RejectionResult(
             selected=selected, selected_index=selected_index, attempts=attempts
         )
-    else:  # race2: two parallel attempts, early-exit verify, one repair shot
-        first_two = await asyncio.gather(
-            run_with(0, message), run_with(1, message)
-        )
+    else:  # race2: two parallel attempts, verify as they land, one repair shot
+        # This used to wait for BOTH attempts before verifying either, so a
+        # finished candidate sat unexamined while its sibling went on
+        # generating — and if that candidate then passed, the sibling's whole
+        # remaining runtime had bought nothing. Verify each attempt the moment
+        # it lands, and when one passes, cancel the other (its subprocess is
+        # killed with it). A cancelled attempt appears nowhere in the results:
+        # it neither passed nor failed, it stopped being needed.
+        async def _generate_then_verify(i: int, msg: str) -> Attempt:
+            art = await run_with(i, msg)
+            return Attempt(index=i, candidate=art, passed=await verify(art))
+
+        pending: set[asyncio.Task[Attempt]] = {
+            asyncio.create_task(
+                _generate_then_verify(0, message + fastpath_evidence)
+            ),
+            asyncio.create_task(_generate_then_verify(1, message)),
+        }
         attempts = []
         selected = selected_index = None
-        for i, art in enumerate(first_two):
-            passed = False
-            if selected is None:  # early-exit: skip verifying after a pass
-                passed = await verify(art)
-            attempts.append(Attempt(index=i, candidate=art, passed=passed))
-            if passed and selected is None:
-                selected, selected_index = art, i
+        try:
+            while pending and selected is None:
+                done, pending = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED
+                )
+                # Lower index first within a batch, so two passers landing
+                # together resolve the same way the sequential check did.
+                for a in sorted((t.result() for t in done), key=lambda x: x.index):
+                    attempts.append(a)
+                    if a.passed and selected is None:
+                        selected, selected_index = a.candidate, a.index
+                        if pending:
+                            log.info("bestof_race_sibling_cancelled",
+                                     winner=a.index)
+        finally:
+            for t in pending:
+                t.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+        attempts.sort(key=lambda a: a.index)
         if selected is None and k > 2:
             msg = message
             if repair_ok:
-                ev = _last_evidence(first_two)
+                ev = await _last_evidence([a.candidate for a in attempts])
                 if ev:
                     msg = message + _repair_suffix(ev)
                     log.info("bestof_repair_attempt")
@@ -975,6 +1194,7 @@ async def _best_of_async(
             selected=selected, selected_index=selected_index, attempts=attempts
         )
     artifacts: list[AttemptArtifact] = [a.candidate for a in res.attempts]
+    _archive_attempts(artifacts, seed_from)
 
     # Learn a correctness rule from any failed attempts' verifier evidence
     # (fires whether or not a winner was found — every failed candidate is a
@@ -1011,6 +1231,18 @@ async def _best_of_async(
                 index=res.selected_index,
                 files=len(applied),
             )
+            # A provisional pick still separates one candidate that passed a
+            # real check from siblings that failed one, which is the contrast
+            # worth learning from. Only the verified branch had this, and
+            # since a repro flip stopped counting as verified that branch
+            # almost never opens on a repo fix — so the distillation was
+            # wired to a path that no longer runs.
+            if os.environ.get("RUNE_CONTRASTIVE_DISTILL", "1") != "0":
+                await _learn_from_contrast(
+                    selected,
+                    [a.candidate for a in res.attempts if not a.passed],
+                    ev_map,
+                )
             report(
                 selected.stdout,
                 solved=False,
@@ -1081,7 +1313,10 @@ async def _best_of_async(
         # what to hand off — a passing verification is still the ONLY thing that
         # flips "done", so this cannot manufacture a fake success.
         no_artifact = sum(1 for a in artifacts if not a.produced)
-        best = _rank_best_effort(artifacts, ev_map) if artifacts else None
+        best = (
+            _rank_best_effort(artifacts, ev_map, seed_from)
+            if artifacts else None
+        )
         # Unverified is not wrong: seeded mode applies the best effort
         # (with backup); otherwise park it beside the project.
         applied: list[str] = []

@@ -129,7 +129,8 @@ async def test_nudge_after_budget_no_edit_rounds(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_edit_round_resets_budget(monkeypatch):
+async def test_edit_round_resets_budget(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("RUNE_EXPLORE_BUDGET", raising=False)
     result = _make_result(explore_budget=2)
     # read, edit (reset), read — never 2 consecutive no-edit rounds

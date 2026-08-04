@@ -539,6 +539,84 @@ def test_mapper_django_dir_token_layout(tmp_path):
     assert "tests/migrations/tests.py" not in out
 
 
+def _edited(seed, cand, rel, content):
+    import os
+    import shutil
+    import time
+
+    shutil.copytree(seed, cand, copy_function=shutil.copy2)
+    p = cand / rel
+    p.write_text(content)
+    os.utime(p, (time.time() + 5, time.time() + 5))
+
+
+def test_mapper_prefix_family_matches_suffixed_siblings(tmp_path):
+    # test_ext_autodoc.py's family: test_ext_autodoc_autoclass.py must also
+    # be claimed — big suites split one module's tests across suffixed files.
+    from rune.agent.rejection_sampler import _targeted_test_files
+
+    seed = tmp_path / "seed"
+    _mk(seed, "sphinx/ext/autodoc/importer.py", "x=1\n")
+    _mk(seed, "tests/test_ext_autodoc_autoclass.py", "def test_a(): pass\n")
+    _edited(seed, tmp_path / "cand", "sphinx/ext/autodoc/importer.py", "x=2\n")
+
+    out = _targeted_test_files(str(tmp_path / "cand"), str(seed))
+    assert "tests/test_ext_autodoc_autoclass.py" in out
+
+
+def test_enumerate_excludes_fixture_trees(tmp_path):
+    from rune.agent.rejection_sampler import _enumerate_test_files
+
+    _mk(tmp_path, "tests/test_real.py", "def test_a(): pass\n")
+    _mk(tmp_path, "tests/roots/test-apidoc/a/d.py", "x=1\n")
+    _mk(tmp_path, "tests/util.py", "def helper(): pass\n")
+    out = _enumerate_test_files(str(tmp_path))
+    assert "tests/test_real.py" in out
+    assert not any("roots" in t for t in out)
+    assert not any(t.endswith("util.py") for t in out)
+
+
+def test_mapper_removed_literal_selects_asserting_test(tmp_path):
+    # A fix that rewrites a user-facing string must be graded by the test
+    # asserting the OLD string, wherever it lives.
+    from rune.agent.rejection_sampler import _targeted_test_files
+
+    seed = tmp_path / "seed"
+    _mk(seed, "src/_pytest/python.py",
+        'msg = "Using pytest.skip outside of a test is not allowed here"\n')
+    _mk(seed, "testing/test_skipping.py",
+        'def test_m(res):\n'
+        '    res.match("*Using pytest.skip outside of a test is not allowed here*")\n')
+    _mk(seed, "testing/test_unrelated.py", "def test_u(): pass\n")
+    _edited(seed, tmp_path / "cand", "src/_pytest/python.py",
+            'msg = "Using pytest.skip outside of a test will skip the module"\n')
+
+    out = _targeted_test_files(str(tmp_path / "cand"), str(seed))
+    assert out and out[0] == "testing/test_skipping.py"
+
+
+def test_heal_test_env_synthesizes_version_stub(tmp_path):
+    from rune.agent.rejection_sampler import _heal_test_env
+
+    _mk(tmp_path, "src/mypkg/__init__.py",
+        "from mypkg._version import version as __version__\n")
+    _heal_test_env(str(tmp_path))
+    stub = (tmp_path / "src/mypkg/_version.py").read_text()
+    assert "version" in stub and "version_tuple" in stub
+    # idempotent: an existing stub is never overwritten
+    (tmp_path / "src/mypkg/_version.py").write_text('version = "9.9.9"\n')
+    _heal_test_env(str(tmp_path))
+    assert (tmp_path / "src/mypkg/_version.py").read_text() == 'version = "9.9.9"\n'
+
+
+def test_heal_test_env_leaves_normal_packages_alone(tmp_path):
+    from rune.agent.rejection_sampler import _heal_test_env
+
+    _mk(tmp_path, "src/plainpkg/__init__.py", "__version__ = '1.0'\n")
+    _heal_test_env(str(tmp_path))
+    assert not (tmp_path / "src/plainpkg/_version.py").exists()
+
+
 @pytest.mark.asyncio
 async def test_suite_collection_error_falls_through_to_targeted(monkeypatch, tmp_path):
     # Top-level tests/ triggers the full-suite path; a collection error there
@@ -617,3 +695,54 @@ async def test_suite_verdict_memoized_across_candidates(monkeypatch, tmp_path):
     await verify(cand)
     await verify(cand)
     assert suite_runs["n"] == 1  # paid once, memoized for siblings
+
+
+@pytest.mark.asyncio
+async def test_repro_script_verifies_fixing_candidate(monkeypatch, tmp_path):
+    # A baseline-failing repro attached to the verifier: candidate that makes
+    # it pass (and breaks no targeted tests) is VERIFIED; one that doesn't is
+    # rejected with the repro output as evidence.
+    import rune.agent.auto_verify as av
+    import rune.agent.rejection_sampler as rs
+
+    seed, cand = _seed_and_candidate(tmp_path)
+    monkeypatch.setattr(av, "detect_test_command", lambda cwd: None)
+
+    async def fake_run(cmd, cwd, timeout=60.0):
+        return "pass", "2 passed in 0.1s"  # targeted regressions fine
+
+    monkeypatch.setattr(av, "run_verify", fake_run)
+
+    async def fake_eg(instruction):
+        async def v(cwd):
+            return False
+
+        v.has_check = True
+        v.evidence_by_cwd = {}
+        return v
+
+    monkeypatch.setattr(rs, "make_evidence_gate_verifier", fake_eg)
+
+    verify = await make_verifier("task", seed_cwd=seed)
+    # Repro checks the candidate's mod.py content.
+    verify.repro_script = (
+        "import sys, os\nsys.path.insert(0, os.getcwd())\n"
+        "src = open('pkg/mod.py').read()\nassert 'x = 2' in src\n"
+    )
+    assert await verify(cand) is True  # cand has x = 2 → repro passes
+    assert "reproduction script" in verify.method_by_cwd[cand]
+
+    # A candidate the repro still fails on is NOT vetoed (repros can be
+    # over-strict): it falls through to targeted tests and lands as a
+    # PROVISIONAL selection, with the repro output kept as evidence.
+    import os as _os
+    import shutil as _sh
+    import time as _time
+    unfixed = tmp_path / "unfixed"
+    _sh.copytree(seed, unfixed, copy_function=_sh.copy2)
+    wrong = unfixed / "pkg" / "mod.py"
+    wrong.write_text("x = 3\n")  # changed, but not what the repro wants
+    _os.utime(wrong, (_time.time() + 5, _time.time() + 5))
+    assert await verify(str(unfixed)) is True
+    assert verify.provisional_by_cwd.get(str(unfixed)) is True
+    assert "AssertionError" in verify.evidence_by_cwd[str(unfixed)]

@@ -7,6 +7,7 @@ injectable based on task classification and goal category.
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from typing import Any
 
@@ -63,7 +64,7 @@ Tool results are cached within each session. Re-calling the same tool with ident
 1. Read files ONCE and in FULL. Never re-read a file unless you edited it first.
 2. Never re-search with the same pattern+path. Refer to previous search results in context.
 3. Read files fully - avoid partial reads (offset/limit) on files under 500 lines.
-4. Identify all needed files first, then read them together in one step.
+4. Identify all needed files first, then read them together in one step: emit ALL independent read-only calls (file_read / file_search / file_list) in a SINGLE response — they execute concurrently. One read per response wastes a full round-trip each.
 5. Prefer file_search over sequential file_read to find specific patterns across files.
 6. Your text output is streamed to the user in real-time. After tool calls return new information, extend and refine your previous analysis - never rewrite it from scratch.
 
@@ -141,6 +142,19 @@ FORBIDDEN:
 - curl, wget for HTTP probes (installation not guaranteed)
 - "Run tests" = run existing tests (go test, npm test, etc.)
 - "Write tests" = create new test files
+
+If the request cannot be satisfied correctly — the instructions contradict
+a spec, a documented contract or an existing test; a required input does
+not exist; following it literally would break behaviour the project relies
+on — call task_blocked with both sides of the conflict and stop. Reporting
+that is a successful outcome. Bending code until a wrong check passes, or
+doing as asked while breaking a documented contract, is not.
+
+When fixing a bug in an existing project, do NOT edit the project's existing
+test files to make them agree with your change. A previously-passing test
+that your change breaks is evidence about your design — read what it expects
+and reconsider the fix. Add NEW tests freely; rewrite existing expectations
+only when the task explicitly asks for that behavior change.
 
 ## Implementation Research (CRITICAL)
 
@@ -526,6 +540,17 @@ AGENT_SYSTEM_PROMPT = PROMPT_CORE
 SYSTEM_CACHE_BOUNDARY = "␞␞RUNE_CACHE_BOUNDARY␞␞"
 
 
+# The read fan-out sentence inside PROMPT_CORE's Working Memory item 4.
+# Kept as a named constant so the builder can strip it when
+# RUNE_FANOUT_READS=0; a unit test pins it to the PROMPT_CORE text.
+FANOUT_HINT = (
+    ": emit ALL independent read-only calls (file_read / file_search / "
+    "file_list) in a SINGLE response — they execute concurrently. One read "
+    "per response wastes a full round-trip each"
+)
+FANOUT_READS_ENV = "RUNE_FANOUT_READS"
+
+
 # Prompt builders
 
 def build_system_prompt(
@@ -636,6 +661,14 @@ def build_system_prompt(
     # 10. Repo map (changes as the tree changes -> dynamic tail)
     if repo_map:
         dynamic_parts.append(f"\n## Repository Map\n{repo_map}")
+    elif environment and environment.get("cwd"):
+        # No map means either a non-code goal or a tree with nothing
+        # tree-sitter can parse — a directory of spreadsheets and notes hits
+        # both. Those runs would otherwise start knowing only their path.
+        from rune.agent.workspace_listing import listing_section
+        section = listing_section(environment["cwd"])
+        if section:
+            dynamic_parts.append(section)
 
     # 11. Channel-specific output rules
     if channel and channel not in ("tui", "cli", None):
@@ -736,14 +769,18 @@ def build_system_prompt(
     # Instructional prefix first, then the dynamic tail. When both sides exist,
     # insert the boundary the adapter turns into an Anthropic breakpoint.
     if mark_cache_boundary and parts and dynamic_parts:
-        return (
+        prompt = (
             "\n\n".join(parts)
             + "\n\n"
             + SYSTEM_CACHE_BOUNDARY
             + "\n\n"
             + "\n\n".join(dynamic_parts)
         )
-    return "\n\n".join(parts + dynamic_parts)
+    else:
+        prompt = "\n\n".join(parts + dynamic_parts)
+    if os.environ.get(FANOUT_READS_ENV, "1") == "0":
+        prompt = prompt.replace(FANOUT_HINT, "")
+    return prompt
 
 
 def build_continuation_prompt(

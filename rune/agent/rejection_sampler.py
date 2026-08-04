@@ -78,12 +78,18 @@ _TEST_READ_CAP = 200_000  # bytes read per test file for import grep
 
 
 def _enumerate_test_files(root: str) -> list[str]:
-    """Conventional test files: test_*.py, *_test.py, tests.py, under tests/."""
+    """Conventional test files: test_*.py, *_test.py, tests.py, under tests/.
+
+    Fixture trees (tests/roots/, fixtures/, testdata/) are excluded: their
+    .py files contain no tests but would eat targeted-test slots, and pytest
+    "passes" them vacuously.
+    """
     import os
 
     out: list[str] = []
     skip = {".git", "node_modules", ".venv", "venv", "__pycache__", ".tox",
-            "build", "dist", ".mypy_cache", ".pytest_cache"}
+            "build", "dist", ".mypy_cache", ".pytest_cache",
+            "roots", "fixtures", "testdata"}
     for dirpath, dirs, files in os.walk(root):
         dirs[:] = [d for d in dirs if d not in skip]
         rel_dir = os.path.relpath(dirpath, root)
@@ -92,7 +98,7 @@ def _enumerate_test_files(root: str) -> list[str]:
             if not fn.endswith(".py") or fn in ("__init__.py", "conftest.py"):
                 continue
             if (fn.startswith("test_") or fn.endswith("_test.py")
-                    or fn == "tests.py" or in_tests):
+                    or fn == "tests.py" or (in_tests and fn.startswith("test"))):
                 out.append(os.path.normpath(os.path.join(rel_dir, fn)))
                 if len(out) >= _TEST_ENUM_CAP:
                     return out
@@ -131,12 +137,74 @@ def _tokens_similar(a: str, b: str) -> bool:
     return difflib.SequenceMatcher(a=a, b=b).ratio() >= 0.85
 
 
+_LITERAL_MIN_LEN = 12
+
+
+def _changed_string_literals(cwd: str, seed_cwd: str, rel: str) -> list[str]:
+    """String literals on lines the candidate removed or rewrote in *rel*.
+
+    When a fix edits a user-facing string, the test asserting the OLD text is
+    the discriminating check — find the old literals so the mapper can grep
+    tests for them.
+    """
+    import difflib
+    import os
+    import re
+
+    try:
+        with open(os.path.join(seed_cwd, rel), encoding="utf-8",
+                  errors="replace") as fh:
+            old = fh.readlines()
+        with open(os.path.join(cwd, rel), encoding="utf-8",
+                  errors="replace") as fh:
+            new = fh.readlines()
+    except OSError:
+        return []
+    removed = [
+        line[1:] for line in difflib.unified_diff(old, new, n=0)
+        if line.startswith("-") and not line.startswith("---")
+    ]
+    lits: list[str] = []
+    pat = re.compile(rf"""(["'])((?:(?!\1).){{{_LITERAL_MIN_LEN},}}?)\1""")
+    for line in removed:
+        for m in pat.finditer(line):
+            lit = m.group(2)
+            if not re.match(r"^[\s\\/.:_%{}-]*$", lit):
+                lits.append(lit)
+    return lits[:20]
+
+
+def _literal_test_hits(
+    cwd: str, seed_cwd: str, changed: list[str], test_files: list[str]
+) -> list[str]:
+    """Test files asserting a string literal the candidate removed."""
+    import os
+
+    lits: list[str] = []
+    for rel in changed:
+        lits.extend(_changed_string_literals(cwd, seed_cwd, rel))
+    if not lits:
+        return []
+    frags = [lit[:60] for lit in lits]
+    hits: list[str] = []
+    for tf in test_files:
+        try:
+            with open(os.path.join(seed_cwd, tf), "rb") as fh:
+                src = fh.read(_TEST_READ_CAP).decode("utf-8", "replace")
+        except OSError:
+            continue
+        if any(f in src for f in frags):
+            hits.append(tf)
+    return hits
+
+
 def _targeted_test_files(cwd: str, seed_cwd: str) -> list[str]:
     """Seed-canonical test files covering the candidate's changed sources.
 
     Layered static mapper (no LLM, runs in seconds):
       L1 reverse import grep — test files importing the changed module (or
          importing its stem from the parent package); precision anchor.
+      L1b removed-literal grep — tests asserting a string the fix rewrote.
       L2 name/path conventions — test_<stem>.py near the module;
          path-component join (sphinx/ext/autodoc -> test_ext_autodoc.py);
          django-style tests/<topic>/ directory-token match.
@@ -207,8 +275,13 @@ def _targeted_test_files(cwd: str, seed_cwd: str) -> list[str]:
         for seq in (comps, pkg_comps):
             for i in range(len(seq)):
                 joins.add("test_" + "_".join(seq[i:]) + ".py")
+        # Exact joins plus their prefix family: test_ext_autodoc.py also
+        # claims test_ext_autodoc_autoclass.py — big suites split one
+        # module's tests across suffixed siblings.
+        fams = tuple(j[:-3] + "_" for j in joins)
         for tf in test_files:
-            if tf not in l2 and os.path.basename(tf) in joins:
+            base = os.path.basename(tf)
+            if tf not in l2 and (base in joins or base.startswith(fams)):
                 l2.append(tf)
         # --- L2c: directory-token match (django tests/<topic>/tests.py)
         mod_tokens = {t for t in parts if t not in ("src",)}
@@ -222,10 +295,107 @@ def _targeted_test_files(cwd: str, seed_cwd: str) -> list[str]:
             ):
                 l2.append(tf)
 
+    # L1b: tests asserting a string literal the candidate rewrote — the most
+    # discriminating signal there is, so it outranks everything.
+    l1b = _literal_test_hits(cwd, seed_cwd, changed, test_files)
+
     # L1 outranks L2. If L1 exploded (django: hundreds import the package),
     # keep the ones whose grep hit the FULL dotted path first via order and cap.
-    ordered = l1 + [t for t in l2 if t not in l1]
+    ordered = l1b + [t for t in l1 if t not in l1b]
+    ordered += [t for t in l2 if t not in ordered]
     return ordered[:_TARGETED_TEST_MAX_FILES]
+
+
+def _heal_test_env(cwd: str) -> None:
+    """Synthesize missing setuptools_scm version stubs in the candidate copy.
+
+    Seeded repos are checkouts, not installs: the build-time-generated
+    _version.py is absent, the package's __init__ falls back to
+    __version__ = "unknown", and pytest's minversion gate then aborts every
+    invocation in under a second — the verifier goes silently blind and
+    best-of collapses to an index pick. A static stub restores the signal.
+    """
+    import os
+    import re
+
+    for base in (os.path.join(cwd, "src"), cwd):
+        if not os.path.isdir(base):
+            continue
+        try:
+            entries = os.listdir(base)
+        except OSError:
+            continue
+        for pkg in entries:
+            pkgdir = os.path.join(base, pkg)
+            init = os.path.join(pkgdir, "__init__.py")
+            ver = os.path.join(pkgdir, "_version.py")
+            if not os.path.isfile(init) or os.path.exists(ver):
+                continue
+            try:
+                with open(init, encoding="utf-8", errors="replace") as fh:
+                    head = fh.read(4096)
+            except OSError:
+                continue
+            # `._version` module reference, not the `__version__` attribute.
+            if re.search(r"(?<![A-Za-z0-9_])_version\b", head):
+                try:
+                    with open(ver, "w", encoding="utf-8") as fh:
+                        # High stub version: the point is to pass any
+                        # minversion gate, not to look plausible.
+                        fh.write(
+                            'version = "999.0.0"\n'
+                            "version_tuple = (999, 0, 0)\n"
+                        )
+                except OSError:
+                    continue
+                log.info("verify_env_healed", stub=os.path.relpath(ver, cwd))
+
+
+def repro_discriminates(verify) -> bool | None:
+    """Whether the reproduction script told the candidates apart.
+
+    None while fewer than two have been graded. True only when it passed on
+    at least one and failed on at least one — a script with the same verdict
+    everywhere carries no information about which candidate to keep, and its
+    failure output is a misleading thing to hand the next attempt.
+
+    RUNE_REPRO_GATE=0 answers "don't know" throughout, which is what the
+    callers did before this existed.
+    """
+    import os
+
+    if os.environ.get("RUNE_REPRO_GATE", "1") == "0":
+        return None
+    results = getattr(verify, "repro_results", None) or {}
+    if len(results) < 2:
+        return None
+    values = set(results.values())
+    return len(values) > 1
+
+
+async def ensure_two_graded(verify, workdirs: list[str]) -> None:
+    """Measure candidates against the repro until two verdicts exist.
+
+    Whether the script separates the candidates cannot be answered from one
+    verdict, and one verdict is usually all there is: verification stops as
+    soon as a candidate passes, and an attempt that times out is never run
+    against the script at all. Measured over the runs that carried a repro,
+    three in four reached the decision point undecided, so the evidence went
+    through by default — the case the check exists to catch.
+
+    Grading here costs one script run per missing candidate and records
+    nothing but the verdict, so asking the question cannot select or reject
+    anyone as a side effect.
+    """
+    grade = getattr(verify, "grade_repro", None)
+    results = getattr(verify, "repro_results", None)
+    if grade is None or results is None or not getattr(verify, "repro_script", ""):
+        return
+    for cwd in workdirs:
+        if len(results) >= 2:
+            return
+        if cwd not in results:
+            await grade(cwd)
 
 
 def _project_python(seed_cwd: str) -> str:
@@ -490,6 +660,71 @@ async def make_verifier(
 
     async def verify(cwd: str) -> bool:
         nonlocal _suite_unusable
+
+        if seed_cwd:
+            _heal_test_env(cwd)
+
+        # A baseline-failing reproduction script (attached by the fast path)
+        # is the strongest check available: it discriminates by construction,
+        # so a flip to passing is a real verification — run it first.
+        repro = getattr(verify, "repro_script", "")
+        if repro and seed_cwd:
+            log.info("repro_verify_start")
+            import os
+            import shutil
+            import tempfile as _tf
+
+            from rune.agent.fastpath import _run_script
+            scratch = _tf.mkdtemp(prefix="rune-repro-verify-")
+            try:
+                path = os.path.join(scratch, "repro.py")
+                with open(path, "w") as fh:
+                    fh.write(repro)
+                rc, out = await _run_script(_project_python(seed_cwd), path, cwd)
+            finally:
+                shutil.rmtree(scratch, ignore_errors=True)
+            if rc == 0:
+                # Fixed per the repro — still require no regression breakage.
+                targets = _targeted_test_files(cwd, seed_cwd)
+                if targets:
+                    import re as _re2
+                    import sys as _sys2  # noqa: F401
+                    _restore_canonical_tests(cwd, seed_cwd, targets)
+                    t_state, t_evidence = await run_verify(
+                        ["/usr/bin/env", f"PYTHONPATH={cwd}:{cwd}/src",
+                         _project_python(seed_cwd), "-m", "pytest", "-q",
+                         *targets],
+                        cwd, timeout=_TARGETED_TEST_TIMEOUT_S,
+                    )
+                    if t_state == "fail" and _re2.search(
+                        r"\b\d+ failed\b", t_evidence
+                    ):
+                        evidence_by_cwd[cwd] = t_evidence
+                        return False
+                method_by_cwd[cwd] = (
+                    "reproduction script (fails pre-fix) + targeted tests"
+                )
+                # Selection evidence, not a verified claim: the repro is
+                # written from the issue text, so a partial fix that
+                # satisfies the reported example still flips it while
+                # falling short of the real requirement. Flip-to-pass picks
+                # the candidate; delivery stays provisional.
+                verify.provisional_by_cwd[cwd] = True  # type: ignore[attr-defined]
+                verify.repro_results[cwd] = True  # type: ignore[attr-defined]
+                log.info("repro_verify_pass")
+                return True
+            if rc != 125:
+                # Still failing is a SIGNAL, not a veto: generated repros can
+                # be stricter than the real requirement, and a hard reject
+                # here demotes genuinely correct fixes. Keep the output as
+                # evidence and let the normal chain (targeted tests →
+                # provisional) decide.
+                verify.repro_results[cwd] = False  # type: ignore[attr-defined]
+                evidence_by_cwd[cwd] = out[-1500:]
+                log.info("repro_verify_fail")
+            else:
+                log.info("repro_verify_inconclusive")  # couldn't run
+
         cmd = None if _suite_unusable else detect_test_command(cwd)
         if cmd:
             # Use the project interpreter and shadow with the candidate
@@ -506,7 +741,8 @@ async def make_verifier(
                 # Non-zero exit without failed tests = collection/usage error
                 # (e.g. interpreter mismatch, missing plugin) — inconclusive,
                 # not a rejection; fall through to the targeted-test path.
-                log.info("verify_suite_inconclusive", cmd=" ".join(cmd[:4]))
+                log.info("verify_suite_inconclusive", cmd=" ".join(cmd[:4]),
+                         tail=(evidence or "")[-200:])
                 state, evidence = "skip", ""
                 _suite_unusable = True  # don't re-pay this per sibling
             elif state == "skip":
@@ -581,7 +817,8 @@ async def make_verifier(
                     evidence_by_cwd[cwd] = t_evidence
                     log.info("targeted_tests_fail", files=targets)
                     return False
-                log.info("targeted_tests_inconclusive", files=targets)
+                log.info("targeted_tests_inconclusive", files=targets,
+                         tail=(t_evidence or "")[-200:])
 
         # Tried before the Evidence Gate: a test in the project's own framework
         # runs in-process, which the Gate's generated shell script cannot do —
@@ -604,9 +841,56 @@ async def make_verifier(
             return False
         return await eg(cwd)
 
+    async def _grade_repro(cwd: str) -> bool | None:
+        """Record how the repro script comes out on *cwd*, if not already known.
+
+        Verification stops early — a candidate that times out, produces
+        nothing, or arrives after a sibling has already passed is never run
+        against the script. That left the caller holding a single verdict at
+        the point where it has to decide whether the script separates the
+        candidates, and one verdict can never answer that. This fills the
+        gap on demand: it is one script run, and it touches nothing else, so
+        a candidate cannot be selected or rejected as a side effect of being
+        asked about.
+        """
+        results = verify.repro_results  # type: ignore[attr-defined]
+        if cwd in results:
+            return results[cwd]
+        repro = getattr(verify, "repro_script", "")
+        if not repro or not seed_cwd:
+            return None
+        import os
+        import shutil
+        import tempfile as _tf
+
+        from rune.agent.fastpath import _run_script
+        scratch = _tf.mkdtemp(prefix="rune-repro-grade-")
+        try:
+            path = os.path.join(scratch, "repro.py")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(repro)
+            rc, _out = await _run_script(_project_python(seed_cwd), path, cwd)
+        except (OSError, TimeoutError) as exc:
+            log.debug("repro_grade_error", error=str(exc)[:120])
+            return None
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+        if rc == 125:  # could not run at all — says nothing either way
+            return None
+        results[cwd] = rc == 0
+        log.info("repro_graded", passed=rc == 0)
+        return results[cwd]
+
+    verify.grade_repro = _grade_repro  # type: ignore[attr-defined]
     verify.eg_disabled = False  # type: ignore[attr-defined]
     verify.has_check = has_check  # type: ignore[attr-defined]
     verify.provisional_by_cwd = {}  # type: ignore[attr-defined]
+    verify.repro_script = ""  # type: ignore[attr-defined]
+    # Per-candidate repro outcomes. A script that comes out the same way on
+    # every candidate separates nothing, whichever way that is: too strict
+    # and it rejects the correct fix along with the rest, too loose and it
+    # accepts anything. Only a split verdict is worth acting on.
+    verify.repro_results = {}  # type: ignore[attr-defined]
     verify.evidence_by_cwd = evidence_by_cwd  # type: ignore[attr-defined]
     verify.method_by_cwd = method_by_cwd  # type: ignore[attr-defined]
     return verify

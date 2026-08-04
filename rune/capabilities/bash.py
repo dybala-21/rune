@@ -19,6 +19,7 @@ import signal
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -696,7 +697,29 @@ async def bash_execute(params: BashParams) -> CapabilityResult:
     if params.mode == "managed_service":
         return await _execute_managed_service(params)
 
-    return await _execute_oneshot(params)
+    # A shell command reaches files without passing the file capabilities,
+    # so nothing else here can make it undoable. Clone first, then run.
+    from rune.safety import workspace_snapshot as _snap
+    _took = None
+    if not _snap.looks_read_only(params.command):
+        _took = _snap.take(params.cwd or Path.cwd())
+
+    result = await _execute_oneshot(params)
+
+    if _took is not None:
+        gone = _snap.missing_since_snapshot(params.cwd or Path.cwd())
+        if gone:
+            listed = ", ".join(gone[:8]) + ("..." if len(gone) > 8 else "")
+            log.info("shell_removed_files", count=len(gone))
+            note = (
+                f"\n[{len(gone)} file(s) no longer present after this command: "
+                f"{listed}. A copy from before it ran is kept — say so if any "
+                f"of them were not meant to go.]"
+            )
+            result.output = (result.output or "") + note
+            result.metadata = {**(result.metadata or {}),
+                               "removed_files": gone[:50]}
+    return result
 
 
 # Registration

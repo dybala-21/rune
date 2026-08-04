@@ -35,6 +35,10 @@ PROJECT_MEMORY_MAX_LINES = 200
 PROJECT_MEMORY_MAX_CHARS = 3000
 
 # Auto-skill refinement limits
+# Set by callers that are about to exit, so the episode's consolidation is
+# left for the next run's catch-up instead of holding the process open.
+defer_consolidation = False
+
 _REFINEMENT_MAX_TOKENS = 600
 _REFINEMENT_MAX_STEPS = 20
 _REFINEMENT_MIN_STEPS = 1
@@ -645,15 +649,23 @@ async def save_agent_result_to_memory(
         except Exception:
             pass  # Daily log failure must never block episode saving
 
-        # Trigger background consolidation (LLM-based extraction)
-        try:
-            import asyncio
+        # Trigger background consolidation (LLM-based extraction).
+        #
+        # In a process that stays up — the REPL, the TUI, the daemon — this
+        # finishes while the user reads the answer. A one-shot CLI run has
+        # nowhere to put it: the model call takes about a second and the
+        # process is trying to exit, so the user waits for work whose result
+        # they will never see in this session. There it is left for the next
+        # run, which sweeps up anything unconsolidated on the way in.
+        if not defer_consolidation:
+            try:
+                import asyncio
 
-            from rune.memory.consolidation import consolidate_episode
+                from rune.memory.consolidation import consolidate_episode
 
-            asyncio.create_task(consolidate_episode(episode.id))
-        except Exception:
-            pass  # Consolidation failure must never block episode saving
+                asyncio.create_task(consolidate_episode(episode.id))
+            except Exception:
+                pass  # Consolidation failure must never block episode saving
 
         log.debug(
             "agent_result_saved",

@@ -15,16 +15,47 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
-import litellm
+_litellm_mod: Any = None
 
-# Suppress cost-calculation warnings for models not in LiteLLM's price DB
-# (e.g., local ollama models routed via openai/ prefix).
-litellm.suppress_debug_info = True
-# Drop params a model doesn't accept rather than raising. Lets litellm decide
-# per model instead of us hardcoding which ones reject temperature != 1 (gpt-5,
-# o-series, ...). Without it, temperature=0 on those raises and failover treats
-# it as a dead model.
-litellm.drop_params = True
+
+def _litellm() -> Any:
+    """Import litellm on first use, not on import of this module.
+
+    It costs 1.17s to load — it pulls in its proxy types, every provider
+    handler and several cloud integrations — and importing this module is on
+    the path of every CLI invocation. Measured on "say ok": 4.54s total, of
+    which 0.81s was the actual model call and 1.32s was importing this
+    module's dependencies. Nothing here needs litellm until a request is
+    about to go out.
+    """
+    global _litellm_mod
+    if _litellm_mod is None:
+        import litellm as _ll
+
+        # Suppress cost-calculation warnings for models not in LiteLLM's
+        # price DB (e.g., local ollama models routed via openai/ prefix).
+        _ll.suppress_debug_info = True
+        # Drop params a model doesn't accept rather than raising. Lets
+        # litellm decide per model instead of us hardcoding which ones reject
+        # temperature != 1 (gpt-5, o-series, ...). Without it, temperature=0
+        # on those raises and failover treats it as a dead model.
+        _ll.drop_params = True
+        _litellm_mod = _ll
+    return _litellm_mod
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve ``litellm_adapter.litellm`` on demand.
+
+    The module attribute is what callers and tests reach for, so keeping the
+    name working means the laziness costs nothing at the seam: touching it
+    performs the import, and everything that patches it still patches the one
+    module object this file goes on to use.
+    """
+    if name == "litellm":
+        return _litellm()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 from rune.agent.message_utils import validate_tool_pairs
 from rune.agent.obs_cap import mask_stale_tool_messages
@@ -79,6 +110,11 @@ _EXPLORE_FORCE_MSG = (
 # Verify-on-stop: finishing after an untested edit gets one reminder to run
 # the tests first. RUNE_VERIFY_ON_STOP=0 disables.
 _VERIFY_ON_STOP_ENV = "RUNE_VERIFY_ON_STOP"
+# Moving cache breakpoint on the last message so the growing transcript is
+# read from cache instead of re-prefilled every tool round. =0 disables.
+_MSG_CACHE_ENV = "RUNE_MSG_CACHE"
+# Anthropic fast mode (research preview, Opus-class models only). Opt-in.
+_FAST_MODE_ENV = "RUNE_FAST_MODE"
 # Structured match on the bash command string (documented runner invocations,
 # not NL). Matching is per shell segment and anchored at the command head, so
 # "grep -r pytest" or "pip install pytest" never count as running tests.
@@ -112,6 +148,138 @@ _VERIFY_ON_STOP_MSG = (
     "(bash_execute), read any failure, repair the code if needed, then give "
     "the final summary stating what passed."
 )
+
+# Run the check ourselves at the stop instead of asking the model to.
+# "=0" falls back to the message-only nudge above.
+# The latest MECHANICAL verdict on the work: what the last test execution
+# said, whoever ran it — the harness at a stop, or the model through bash.
+# The loop reads it once at the end of a run: work whose last known check
+# FAILED must not exit as a quiet success. Same channel pattern as
+# capabilities.blocked.
+from contextvars import ContextVar as _CtxVar
+
+_MECH_CHECK: _CtxVar[str] = _CtxVar("rune_mech_check", default="")
+
+
+def consume_mech_check() -> str:
+    """The last mechanical check verdict ("pass"/"fail"/""), then clear it."""
+    v = _MECH_CHECK.get()
+    _MECH_CHECK.set("")
+    return v
+
+
+_VOS_EXEC_ENV = "RUNE_VOS_EXEC"
+
+# The reminder is about TESTS, so it arms on files tests cover. An edit to a
+# CSV or a markdown file used to arm it too, and the model, told to "run the
+# tests" on a spreadsheet task, went hunting for a test suite that does not
+# exist — measured at ~3 rounds (~8s) on office cells. Extension check, not
+# language inference: structured, deterministic, same everywhere.
+_VOS_CODE_SUFFIXES = frozenset({
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs", ".go", ".rs",
+    ".java", ".kt", ".rb", ".php", ".c", ".cc", ".cpp", ".h", ".hpp",
+    ".cs", ".swift", ".scala", ".sh", ".bash",
+})
+
+
+def _vos_arms_for(path: str) -> bool:
+    import os as _os
+    return _os.path.splitext(str(path))[1].lower() in _VOS_CODE_SUFFIXES
+_VOS_EXEC_TIMEOUT_S = 60.0
+_VOS_OUTPUT_CAP = 1500
+
+
+_STOP_CHECK_GENERIC = frozenset({
+    "src", "lib", "app", "core", "tests", "test", "__init__", "main", "utils",
+})
+
+
+def _stop_check_targets(
+    cwd: str, edited: set[str], allowed: set[str] | None = None
+) -> list[str]:
+    """Test files that answer for the edited files, by name.
+
+    Tokens come from every component of the edited path, not just the module:
+    a test file is as often named after the package as the module (edited
+    cache/store.py, tested by tests/test_cache.py — the miss that was
+    measured live). Generic components match everything and so mean nothing.
+    """
+    import os as _os
+
+    from rune.agent.rejection_sampler import _enumerate_test_files
+    tokens = set()
+    for path in edited:
+        parts = _os.path.normpath(str(path)).replace("\\", "/").split("/")
+        for part in parts:
+            stem = _os.path.splitext(part)[0].lower()
+            if stem and stem not in _STOP_CHECK_GENERIC \
+                    and not stem.startswith("test"):
+                tokens.add(stem)
+    if not tokens:
+        return []
+    hits = []
+    for tf in _enumerate_test_files(cwd):
+        if allowed is not None and tf not in allowed:
+            continue          # a test authored during the run answers for nothing
+        name = _os.path.splitext(_os.path.basename(tf))[0].lower()
+        if any(tok in name for tok in tokens):
+            hits.append(tf)
+    return hits[:5]
+
+
+async def _run_stop_check(
+    cwd: str, edited: set[str], allowed: set[str] | None = None
+) -> tuple[str, str, int] | None:
+    """Execute the tests that cover the edited files, and say what happened.
+
+    The stop-nudge used to be words: "run the tests before finishing". That
+    costs two model rounds — one to decide to obey, one to read the result —
+    and it is only words, so a model that restates "done" has skipped the
+    check entirely; several measured nudges changed nothing. So run the
+    check here, mechanically, and hand the model the outcome instead of the
+    request. The check itself is unchanged — who runs it is.
+
+    Only the test files that answer by name for the edited files are run,
+    never the whole suite: on a large repository the full command is minutes
+    long, and burning a timeout on it would cost more than the two rounds
+    this saves ever did. No matching test files, or a non-pytest runner —
+    fall back to the message-only nudge, never to silence.
+    """
+    import asyncio as _aio
+
+    from rune.agent.auto_verify import detect_test_command
+    cmd = detect_test_command(cwd)
+    if not cmd or not any("pytest" in part for part in cmd):
+        return None
+    targets = _stop_check_targets(cwd, edited, allowed)
+    if not targets:
+        return None
+    cmd = [*cmd, *targets]
+    # The same recoverability layer a shell command gets: tests can write.
+    try:
+        from rune.safety.workspace_snapshot import take as _snap
+        _snap(cwd)
+    except Exception:
+        pass
+    try:
+        proc = await _aio.create_subprocess_exec(
+            *cmd, cwd=cwd,
+            stdout=_aio.subprocess.PIPE, stderr=_aio.subprocess.STDOUT,
+        )
+        out_b, _ = await _aio.wait_for(
+            proc.communicate(), timeout=_VOS_EXEC_TIMEOUT_S
+        )
+    except TimeoutError:
+        try:
+            proc.kill()
+            await proc.wait()
+        except ProcessLookupError:
+            pass
+        return None
+    except Exception:
+        return None
+    out = (out_b or b"").decode("utf-8", "replace")
+    return " ".join(cmd), out[-_VOS_OUTPUT_CAP:], proc.returncode or 0
 
 
 def _looks_like_tool_failure(result: str) -> bool:
@@ -600,6 +768,23 @@ def _is_anthropic_model(model: str) -> bool:
     return "claude" in model.lower() or "anthropic" in model.lower()
 
 
+def _supports_speed(model: str) -> bool:
+    """Whether *model* accepts the `speed` parameter.
+
+    It is not a hint the API ignores when unavailable — an unsupported model
+    rejects the whole request:
+
+        claude-haiku-4-5 does not support the `speed` parameter.
+        This feature is only available on supported models.
+
+    Measured: with the flag on and haiku selected, every round failed with
+    that 400 and the run finished in a third of the usual time having done
+    nothing. Wall-clock alone reads like a large speed-up, which is why the
+    check belongs here rather than in whoever sets the flag.
+    """
+    return _is_anthropic_model(model) and "opus" in model.lower()
+
+
 def _apply_anthropic_cache_control(model: str, messages: list[Any]) -> list[Any]:
     """Add cache_control breakpoint(s) to the system message for Anthropic.
 
@@ -702,6 +887,54 @@ def _apply_anthropic_cache_control(model: str, messages: list[Any]) -> list[Any]
         return [new_system, *messages[1:]]
 
     return messages
+
+
+def _apply_anthropic_message_cache(model: str, messages: list[Any]) -> list[Any]:
+    """Add a moving cache_control breakpoint to the final message.
+
+    The system breakpoint only covers tools+system, so the growing message
+    history is re-prefilled at full price on every tool round. Marking the
+    last message caches the whole prefix: from round 2 the prior transcript
+    is a 0.1x cache read and only the new tail is written. Stale-observation
+    masking edits messages near the tail, which invalidates just the last few
+    messages — the bulk of the prefix stays cached.
+
+    Uses 1 of Anthropic's 4 breakpoints (system uses up to 2). litellm maps a
+    message-level ``cache_control`` on tool messages onto the converted
+    tool_result block; user/assistant messages need it inside a content block.
+    """
+    if os.environ.get(_MSG_CACHE_ENV, "1") == "0":
+        return messages
+    if not _is_anthropic_model(model) or not messages:
+        return messages
+    last = messages[-1]
+    if not isinstance(last, dict):
+        return messages
+    role = last.get("role")
+    content = last.get("content")
+    ephemeral = {"type": "ephemeral"}
+    if role == "tool":
+        marked: dict[str, Any] = {**last, "cache_control": ephemeral}
+    elif role in ("user", "assistant") and isinstance(content, str) and content:
+        marked = {
+            **last,
+            "content": [
+                {"type": "text", "text": content, "cache_control": ephemeral}
+            ],
+        }
+    elif role in ("user", "assistant") and isinstance(content, list) and content:
+        new_content = list(content)
+        for i in range(len(new_content) - 1, -1, -1):
+            block = new_content[i]
+            if isinstance(block, dict) and block.get("type") == "text":
+                new_content[i] = {**block, "cache_control": ephemeral}
+                break
+        else:
+            return messages
+        marked = {**last, "content": new_content}
+    else:
+        return messages
+    return [*messages[:-1], marked]
 
 
 def _ensure_anthropic_user_tail(model: str, messages: list[Any]) -> list[Any]:
@@ -891,9 +1124,30 @@ class StreamResult:
         _explore_stage = 0
         _force_edit_tool = False
         # Verify-on-stop state (per stream_text call).
+        _MECH_CHECK.set("")
         self._vos_edited = False
+        self._vos_edited_paths: set[str] = set()
         self._vos_nudges = 0
+        # Artifact-provenance state (per stream_text call).
+        self._artifact_ledger = None
+        self._artifact_nudges = 0
+        self._artifact_roles_tried = False
+        _stale_roles = getattr(self, "_artifact_roles_task", None)
+        if _stale_roles is not None and not _stale_roles.done():
+            _stale_roles.cancel()
+        self._artifact_roles_task = None
+        self._artifact_request = ""
+        self._task_blocked = ""
+        self._tamper_blocks = 0
+        self._postconditions = []
+        self._postcondition_nudges = 0
         self._policy.reset()
+
+        # Input-versus-output classification rides along with the first
+        # round's network wait instead of blocking in front of the first
+        # tool. The tool path still waits for the result before any
+        # phantom-write decision — only the start moves, not the ordering.
+        self._start_artifact_role_classification()
 
         while True:
             # Early stop: already have a substantial answer after 2+ tool
@@ -941,11 +1195,16 @@ class StreamResult:
                 # stays full so history/rollover are unaffected.
                 # Apply Anthropic cache_control to system message for ~82% reduction
                 # in fixed overhead (tools+system cached at 0.1x from step 2).
-                "messages": _ensure_anthropic_user_tail(
+                "messages": _apply_anthropic_message_cache(
                     self._model,
-                    _apply_anthropic_cache_control(
+                    _ensure_anthropic_user_tail(
                         self._model,
-                        mask_stale_tool_messages(validate_tool_pairs(self._messages)),
+                        _apply_anthropic_cache_control(
+                            self._model,
+                            mask_stale_tool_messages(
+                                validate_tool_pairs(self._messages)
+                            ),
+                        ),
                     ),
                 ),
                 "tools": _tools,
@@ -956,6 +1215,8 @@ class StreamResult:
             }
             if self._model in _TEMPERATURE_REJECTED:
                 _acompletion_kwargs.pop("temperature", None)
+            if _env_flag(_FAST_MODE_ENV) and _supports_speed(self._model):
+                _acompletion_kwargs["speed"] = "fast"
             if self._extra_headers:
                 _acompletion_kwargs["extra_headers"] = dict(self._extra_headers)
             _acompletion_kwargs.update(self._provider_extra)
@@ -990,16 +1251,17 @@ class StreamResult:
                     "json_schema": {"name": "rune_action", "schema": _gschema},
                 }
 
+            _ll = _litellm()
             try:
-                self._stream = await litellm.acompletion(**_acompletion_kwargs)
-            except litellm.BadRequestError as _e:
+                self._stream = await _ll.acompletion(**_acompletion_kwargs)
+            except _ll.BadRequestError as _e:
                 # Model rejected temperature and litellm didn't strip it; drop it
                 # and retry once, remembering for next time.
                 if "temperature" in _acompletion_kwargs and _is_temperature_error(_e):
                     _note_temperature_rejected(self._model)
                     _acompletion_kwargs.pop("temperature", None)
                     log.warning("temperature_unsupported_retry", model=self._model)
-                    self._stream = await litellm.acompletion(**_acompletion_kwargs)
+                    self._stream = await _ll.acompletion(**_acompletion_kwargs)
                 else:
                     raise
 
@@ -1065,6 +1327,14 @@ class StreamResult:
                 # Usage from final chunk
                 if hasattr(chunk, "usage") and chunk.usage:
                     self._update_usage(chunk.usage)
+
+            log.info(
+                "round_usage",
+                round=_tool_round,
+                input_tokens=self._usage.input_tokens,
+                cached_read=self._usage.cached_input_tokens,
+                cache_write=self._usage.cache_write_tokens,
+            )
 
             # Local-model fallback: if there were no native tool_calls but the
             # text is a JSON tool call naming a known tool, recover it. Small
@@ -1258,13 +1528,86 @@ class StreamResult:
                             "role": "assistant",
                             "content": text_this_turn,
                         })
-                    self._messages.append({
-                        "role": "user", "content": _VERIFY_ON_STOP_MSG,
-                    })
+                    # Run the check here rather than asking for it: the
+                    # asked-for version costs two extra rounds and can be
+                    # ignored; the executed version can be neither skipped
+                    # nor misreported. Falls back to the words when there is
+                    # nothing runnable.
+                    _stop_check = None
+                    if os.environ.get(_VOS_EXEC_ENV, "1") != "0":
+                        import os as _os2
+                        _stop_check = await _run_stop_check(
+                            _os2.getcwd(),
+                            getattr(self, "_vos_edited_paths", set()),
+                        )
+                    if _stop_check is not None:
+                        _cmd, _out, _rc = _stop_check
+                        _MECH_CHECK.set("fail" if _rc != 0 else "pass")
+                        self._messages.append({
+                            "role": "user", "content": (
+                                "You edited code and stopped without running "
+                                "any test since the last edit. The covering "
+                                "tests have ALREADY been run for you — this "
+                                "is their authoritative result, do NOT run "
+                                f"them again: `{_cmd}`\n```\n{_out}\n```\n"
+                                "If it failed, fix the code (then you may "
+                                "re-test). If it passed, give the final "
+                                "summary now, stating exactly what passed."
+                            ),
+                        })
+                        log.info("verify_on_stop_executed", round=_tool_round,
+                                 cmd=_cmd)
+                    else:
+                        self._messages.append({
+                            "role": "user", "content": _VERIFY_ON_STOP_MSG,
+                        })
                     # The pre-verification answer is superseded; without this
                     # reset the early-stop guard would kill the next round.
                     self._collected_text = ""
                     log.info("verify_on_stop_nudge", round=_tool_round)
+                    continue
+
+                # Conditions fixed before the work started, checked against
+                # the filesystem rather than against the summary.
+                _unmet = self._unmet_postconditions()
+                if (
+                    _unmet
+                    and getattr(self, "_postcondition_nudges", 0) == 0
+                    and _tool_round < _max_tool_rounds - 1
+                ):
+                    from rune.agent.postconditions import unmet_note
+                    self._postcondition_nudges = 1
+                    if text_this_turn:
+                        self._messages.append({
+                            "role": "assistant", "content": text_this_turn,
+                        })
+                    self._messages.append({
+                        "role": "user", "content": unmet_note(_unmet),
+                    })
+                    self._collected_text = ""
+                    log.info("postcondition_nudge", unmet=_unmet[:5])
+                    continue
+
+                # An input the request named was searched for and never
+                # found. Finishing here would report on work that had no
+                # basis, so say so once before the answer is written.
+                _missing = self._unresolved_artifacts()
+                if (
+                    _missing
+                    and getattr(self, "_artifact_nudges", 0) == 0
+                    and _tool_round < _max_tool_rounds - 1
+                ):
+                    from rune.agent.provenance import unresolved_stop_note
+                    self._artifact_nudges = 1
+                    if text_this_turn:
+                        self._messages.append({
+                            "role": "assistant", "content": text_this_turn,
+                        })
+                    self._messages.append({
+                        "role": "user", "content": unresolved_stop_note(_missing),
+                    })
+                    self._collected_text = ""
+                    log.info("unresolved_artifact_nudge", missing=_missing)
                     continue
                 if text_this_turn:
                     self._messages.append({
@@ -1306,6 +1649,13 @@ class StreamResult:
             # write/execute tools run serially.
             tc_list = list(tool_calls_by_index.values())
             await self._execute_tool_batch(tc_list)
+
+            # Abstaining ends the run there and then: the point of the tool
+            # is that there is nothing further to attempt.
+            if getattr(self, "_task_blocked", ""):
+                self._collected_text = self._task_blocked
+                log.info("abstain_stop", round=_tool_round)
+                break
 
             # Exploration-round budget: steer a wandering model toward the
             # edit. Appended AFTER the batch so every tool_call_id already has
@@ -1378,6 +1728,29 @@ class StreamResult:
 
     # Tool group mapping for failure-based group blocking.
     # When browser_act fails 3 times, all browser_* tools are blocked.
+
+        # The final word on edited work belongs to a harness-run check, not
+        # to whatever the model happened to execute last. Measured: the stop
+        # check reported a failure, the model then ran a narrower command of
+        # its own that passed, and that pass overwrote the verdict — the run
+        # exited 0 with the real tests still failing. Re-run the covering
+        # tests here, restricted to files that existed before the editing
+        # started, and let THAT outcome be what the end of the run answers
+        # to. One bounded subprocess, only on runs that edited code.
+        if (
+            getattr(self, "_vos_edited_paths", None)
+            and os.environ.get(_VOS_EXEC_ENV, "1") != "0"
+        ):
+            import os as _os4
+            _final = await _run_stop_check(
+                _os4.getcwd(), self._vos_edited_paths,
+                getattr(self, "_vos_pretest_files", None),
+            )
+            if _final is not None:
+                _fcmd, _fout, _frc = _final
+                _MECH_CHECK.set("fail" if _frc != 0 else "pass")
+                log.info("final_check_executed", cmd=_fcmd, rc=_frc)
+
     _TOOL_GROUPS: dict[str, str] = {
         "browser_act": "browser", "browser_navigate": "browser",
         "browser_observe": "browser", "browser_find": "browser",
@@ -1510,12 +1883,40 @@ class StreamResult:
                     self._messages.append({
                         "role": "tool", "tool_call_id": tc_id, "content": res,
                     })
+                    # The check verdict is recorded whichever way it went —
+                    # the failing case is the one the end-of-run gate exists
+                    # for, and the success-only block below never sees it.
+                    if fn == "bash_execute" and _is_test_command(
+                        str(args.get("command", ""))
+                    ):
+                        _MECH_CHECK.set(
+                            "fail" if _looks_like_tool_failure(res) else "pass"
+                        )
                     if is_write_exec and not _looks_like_tool_failure(res):
                         self._action_ok = True  # a real action succeeded
                         # Verify-on-stop bookkeeping: edits arm the reminder,
                         # a test-runner bash command satisfies it.
                         if fn in _EDIT_TOOLS:
-                            self._vos_edited = True
+                            _vp = args.get("path") or args.get("file_path")
+                            if _vp and _vos_arms_for(_vp):
+                                self._vos_edited = True
+                                if not hasattr(self, "_vos_edited_paths"):
+                                    self._vos_edited_paths = set()
+                                if not self._vos_edited_paths:
+                                    # Which test files exist BEFORE the work
+                                    # starts editing. Only these can answer
+                                    # for it at the end.
+                                    import os as _os3
+
+                                    from rune.agent.rejection_sampler import (
+                                        _enumerate_test_files,
+                                    )
+                                    self._vos_pretest_files = set(
+                                        _enumerate_test_files(_os3.getcwd())
+                                    )
+                                self._vos_edited_paths.add(str(_vp))
+                            elif not _vp:
+                                self._vos_edited = True
                         elif fn == "bash_execute" and _is_test_command(
                             str(args.get("command", ""))
                         ):
@@ -1533,6 +1934,203 @@ class StreamResult:
         for nudge_text in deferred_nudges:
             self._messages.append({"role": "user", "content": nudge_text})
             log.info("policy_tool_loop_nudge")
+
+    def _ledger(self) -> Any:
+        """Artifact ledger for this run, seeded from the user's request."""
+        from rune.agent.provenance import ArtifactLedger, provenance_enabled
+
+        if not provenance_enabled():
+            return None
+        if getattr(self, "_artifact_ledger", None) is None:
+            # Every user turn, not just the first: memory and context get
+            # injected ahead of the goal, so "the first user message" is
+            # often not the request.
+            parts = [
+                m["content"] for m in self._messages
+                if isinstance(m, dict) and m.get("role") == "user"
+                and isinstance(m.get("content"), str)
+            ]
+            import os as _os
+            self._artifact_ledger = ArtifactLedger.for_request(
+                "\n".join(parts), root=_os.getcwd()
+            )
+            self._artifact_request = "\n".join(parts)
+            log.info("artifact_ledger_init",
+                     referenced=sorted(self._artifact_ledger.referenced)[:10])
+        return self._artifact_ledger
+
+    def _start_artifact_role_classification(self) -> None:
+        """Start settling input-versus-output alongside the first model round.
+
+        The classification is one model call that needs nothing but the
+        request text, yet it used to run as a blocking step in front of the
+        first tool — 1.6s measured, spent while the answer to the first
+        round was already known. Started here instead, it rides along with
+        the round's own network wait and is normally done before any tool
+        needs it.
+        """
+        ledger = self._ledger()
+        if ledger is None or ledger.roles or not ledger.referenced:
+            return
+        if getattr(self, "_artifact_roles_tried", False):
+            return
+        if getattr(self, "_artifact_roles_task", None) is not None:
+            return
+        import asyncio as _aio
+        try:
+            self._artifact_roles_task = _aio.ensure_future(
+                self._classify_artifact_roles()
+            )
+        except Exception:
+            self._artifact_roles_task = None
+
+    async def _classify_artifact_roles(self) -> None:
+        """Settle input-versus-output once, the first time it matters.
+
+        Skipped entirely when the request names no files, which is most of
+        them, so the extra call is not a per-run cost. If it fails the
+        ledger keeps its weaker fallback rule rather than blocking work.
+
+        A caller that arrives while an earlier start is still in flight
+        WAITS for it rather than skipping past it: the phantom-write guard
+        runs right after this returns, and letting it run unclassified
+        because the classification happened to still be on the wire would
+        reopen the exact hole the guard closes.
+        """
+        import asyncio as _aio
+        pending = getattr(self, "_artifact_roles_task", None)
+        if pending is not None and _aio.current_task() is not pending:
+            try:
+                await _aio.shield(pending)
+            except Exception:
+                pass
+            return
+        ledger = self._ledger()
+        if ledger is None or ledger.roles or not ledger.referenced:
+            return
+        if getattr(self, "_artifact_roles_tried", False):
+            return
+        self._artifact_roles_tried = True
+        from rune.agent.provenance import classify_roles
+        roles = await classify_roles(
+            getattr(self, "_artifact_request", ""),
+            sorted(ledger.referenced), self._model, None,
+        )
+        if roles:
+            ledger.roles.update(roles)
+            log.info("artifact_roles", roles=roles)
+            from pathlib import Path as _FsPath
+
+            from rune.agent.postconditions import derive
+            self._postconditions = derive(roles, _FsPath.cwd())
+
+    def _revert_circumvented_writes(self) -> str:
+        """Undo a refused artifact that appeared anyway.
+
+        Blocking the write tool only closes one door: the same file can be
+        produced by a shell redirect. Rather than trying to recognise every
+        way a command can write (a losing game — flags, variables and
+        redirects defeat any pattern), this checks the one thing that
+        matters after the fact: did a path we explicitly refused come into
+        existence? If so it was not found, it was authored, so it goes.
+        """
+        from pathlib import Path as _PathT
+
+        from rune.agent.provenance import circumvented_note
+
+        ledger = self._ledger()
+        if ledger is None:
+            return ""
+        # Only paths this run positively saw to be missing. Classifying a
+        # file as an input is NOT enough on its own: an input the agent read
+        # with a shell command never reaches the read ledger, and removing
+        # it because of that would destroy the very file the task depends
+        # on — the failure this whole area exists to prevent.
+        candidates = set(ledger.refused) | set(ledger.known_absent)
+        if not candidates:
+            return ""
+        notes: list[str] = []
+        for name in sorted(candidates):
+            p = _PathT.cwd() / name
+            if not p.exists():
+                continue
+            try:
+                from rune.safety.recoverable import move_to_trash
+                move_to_trash(p)
+            except OSError:
+                continue
+            # Reading back a file the run just authored would otherwise
+            # stand as proof it was there all along, and the next write
+            # would sail through. Removing the file removes that proof.
+            ledger.read_ok.discard(name)
+            ledger.refused.add(name)
+            ledger.known_absent.add(name)
+            log.info("phantom_write_reverted", path=name)
+            notes.append(circumvented_note(name))
+        return "\n".join(notes)
+
+    def _unmet_postconditions(self) -> list[str]:
+        conds = getattr(self, "_postconditions", None)
+        if not conds:
+            return []
+        from pathlib import Path as _FsPath
+
+        from rune.agent.postconditions import check
+        return check(conds, _FsPath.cwd())
+
+    def _unresolved_artifacts(self) -> list[str]:
+        ledger = self._ledger()
+        return ledger.unresolved() if ledger is not None else []
+
+    def _phantom_write_check(self, name: str, params: dict[str, Any]) -> str | None:
+        """Refuse to author a file the request treated as already existing."""
+        from rune.agent.provenance import (
+            _WRITE_TOOLS,
+            path_exists,
+            phantom_write_error,
+        )
+
+        if name not in _WRITE_TOOLS:
+            return None
+        ledger = self._ledger()
+        if ledger is None:
+            return None
+        target = params.get("path") or params.get("file_path") or ""
+        if not target or path_exists(str(target)):
+            return None
+        if not ledger.is_phantom(str(target)):
+            return None
+        import os as _os
+        _name = _os.path.basename(str(target))
+        ledger.refused.add(_name)
+        log.info("phantom_write_blocked", path=str(target))
+        return phantom_write_error(_name)
+
+    def _record_provenance(
+        self, name: str, params: dict[str, Any], result: str
+    ) -> None:
+        """Note what this call proved about the workspace."""
+        from rune.agent.provenance import (
+            _READ_TOOLS,
+            _WRITE_TOOLS,
+            path_exists,
+        )
+
+        ledger = self._ledger()
+        if ledger is None:
+            return
+        target = params.get("path") or params.get("file_path") or ""
+        if name not in _WRITE_TOOLS:
+            try:
+                ledger.record_lookup(json.dumps(params, ensure_ascii=False))
+            except (TypeError, ValueError):
+                ledger.record_lookup(str(params))
+        if name in _READ_TOOLS and target:
+            # Whether the read found anything is a question about the
+            # filesystem, not about how the tool phrased its answer.
+            ledger.record_read(str(target), path_exists(str(target)))
+        if name in _WRITE_TOOLS and target:
+            ledger.record_write(str(target), path_exists(str(target)))
 
     async def _execute_tool(self, name: str, params: dict[str, Any]) -> str:
         """Execute a tool by name and return string result.
@@ -1586,10 +2184,30 @@ class StreamResult:
         func = self._tool_lookup.get(name)
         if func is None:
             return f"Error: unknown tool '{name}'"
+
+        # Settled before the first tool runs, not just before a write: the
+        # file can be authored by a shell command that never touches the
+        # write tools, and the revert needs the classification to exist by
+        # then. Self-guarded, so this costs one call per run at most.
+        await self._classify_artifact_roles()
+        _phantom = self._phantom_write_check(name, params)
+        if _phantom:
+            return _phantom
+
         try:
             result = await func(**params)
             result_str = str(result) if result is not None else ""
+            if name == "task_blocked":
+                from rune.capabilities.blocked import blocked_reason
+                _why = blocked_reason()
+                if _why:
+                    self._task_blocked = result_str or _why
+                    log.info("abstain_invoked")
+            _reverted = self._revert_circumvented_writes()
+            if _reverted:
+                result_str += "\n" + _reverted
             self._tool_result_cache[_cache_key] = result_str
+            self._record_provenance(name, params, result_str)
             # Reset fail streak on success.
             # Also treat "NO CHANGES DETECTED" as failure — the action
             # technically executed but had no effect (phantom click).
@@ -1714,6 +2332,15 @@ class LiteLLMAgent:
         self._tool_lookup = _build_tool_lookup(self._tools)
         self._requested_max_tokens = max_tokens
         self._max_tokens = _clamp_max_tokens(self._model, max_tokens)
+        # Sampling temperature is 0 everywhere by default. Best-of raises it
+        # for the later attempts so K samples are not near-copies of each
+        # other; see the diversity suffix in cli/best_of.
+        _t_override = os.environ.get("RUNE_TEMPERATURE", "").strip()
+        if _t_override:
+            try:
+                temperature = float(_t_override)
+            except ValueError:
+                log.debug("temperature_override_invalid", value=_t_override[:16])
         self._temperature = temperature
         self._max_tool_rounds = max_tool_rounds
         self._explore_budget = explore_budget
