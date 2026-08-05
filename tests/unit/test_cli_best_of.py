@@ -1810,13 +1810,9 @@ async def test_children_inherit_the_parent_classification(monkeypatch, tmp_path)
                                        is_complex_coding=True)
     monkeypatch.setattr(best_of, "classify_goal", fake_classify, raising=False)
     monkeypatch.setattr(gc, "classify_goal", fake_classify)
-    monkeypatch.delenv("RUNE_BESTOF_CLASSIFICATION", raising=False)
     monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "race2")
-    spawned_envs = []
 
     async def fake_attempt(index, message, model, provider, seed_from=None):
-        import os as _os
-        spawned_envs.append(_os.environ.get("RUNE_BESTOF_CLASSIFICATION", ""))
         w = tmp_path / f"strat_w{index}"
         w.mkdir(exist_ok=True)
         (w / "fix.py").write_text("x")
@@ -1834,8 +1830,12 @@ async def test_children_inherit_the_parent_classification(monkeypatch, tmp_path)
         "task", 3, None, "anthropic", report=lambda s, **kw: None, seed_cwd=True,
     )
     assert len(calls) == 1                      # parent classified exactly once
-    assert spawned_envs and all(e for e in spawned_envs)
-    assert gc.from_wire(spawned_envs[0]).is_complex_coding is True
+    # The cache is run-scoped, not process-global: the parent's own environ
+    # must stay clean, or a second run in the same process would inherit the
+    # first message's classification (the leak CI caught between tests).
+    import os as _os
+    assert "RUNE_BESTOF_CLASSIFICATION" not in _os.environ
+    assert gc.from_wire(best_of._FAMILY_CLS.get()).is_complex_coding is True
 
 
 @pytest.mark.asyncio

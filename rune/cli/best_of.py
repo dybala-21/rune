@@ -69,8 +69,16 @@ _REPAIR_EVIDENCE_CAP = 1500
 _FASTPATH_ENV = "RUNE_FASTPATH"
 
 # The parent's one classification of the message, handed to every attempt
-# child so none of them asks the model the same question again.
+# child so none of them asks the model the same question again. The value
+# lives in a per-run ContextVar, NOT in os.environ: the parent process may
+# run best-of more than once (the REPL does), and a process-global cache
+# would hand run two the classification of run one's message. CI caught
+# exactly that leak between tests.
 CLASSIFICATION_ENV = "RUNE_BESTOF_CLASSIFICATION"
+
+from contextvars import ContextVar as _CtxVar
+
+_FAMILY_CLS: _CtxVar[str] = _CtxVar("rune_bestof_classification", default="")
 
 
 # Attempts used to be near-copies: all at temperature 0, and race2 handed
@@ -171,8 +179,9 @@ async def _run_attempt_subprocess(
 
     env = dict(os.environ)
     env[RECURSION_GUARD_ENV] = "1"  # recursion guard
-    # CLASSIFICATION_ENV rides through os.environ: _best_of_async sets it
-    # once before any attempt spawns.
+    _wire = _FAMILY_CLS.get()
+    if _wire:
+        env[CLASSIFICATION_ENV] = _wire
     _entry, _temp = _diversify(index)
     if _temp is not None:
         env["RUNE_TEMPERATURE"] = str(_temp)
@@ -931,17 +940,16 @@ async def _family_goal_type(message: str) -> str | None:
 
     Three separate sites used to classify the same message — the winner
     recorder, the failure learner, and (via the children) every attempt.
-    The result rides CLASSIFICATION_ENV once computed.
+    The result is cached for this run only; children receive it through
+    their spawn environment, never through the parent's.
     """
-    import os as _os
-
     from rune.agent.goal_classifier import classify_goal, from_wire, to_wire
-    cached = from_wire(_os.environ.get(CLASSIFICATION_ENV, ""))
+    cached = from_wire(_FAMILY_CLS.get())
     if cached is not None:
         return cached.goal_type
     try:
         c = await classify_goal(message)
-        _os.environ[CLASSIFICATION_ENV] = to_wire(c)
+        _FAMILY_CLS.set(to_wire(c))
         return c.goal_type
     except Exception:
         return None
@@ -1082,6 +1090,7 @@ async def _best_of_async(
     # One classification for the whole family. Every attempt child used to
     # re-classify the identical message — K identical model calls per run,
     # about a second each — because the child path classifies unconditionally.
+    _FAMILY_CLS.set("")   # a fresh run classifies for itself
     await _family_goal_type(message)
 
     strategy = os.environ.get(_STRATEGY_ENV, "auto").strip().lower()
