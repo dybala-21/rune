@@ -401,11 +401,24 @@ def _handle_non_interactive(
         # roughly a second of it spent alongside work that was happening
         # anyway.
         _classify_task = None
-        try:
-            from rune.agent.goal_classifier import classify_goal
-            _classify_task = asyncio.ensure_future(classify_goal(message))
-        except Exception:
-            pass
+        _handed_down = None
+        if _throwaway:
+            # A best-of attempt child: the parent already classified this
+            # exact message and handed the result down. Asking again is the
+            # same model call with the same answer, K times per run.
+            try:
+                from rune.agent.goal_classifier import from_wire
+                _handed_down = from_wire(
+                    os.environ.get("RUNE_BESTOF_CLASSIFICATION", "")
+                )
+            except Exception:
+                _handed_down = None
+        if _handed_down is None:
+            try:
+                from rune.agent.goal_classifier import classify_goal
+                _classify_task = asyncio.ensure_future(classify_goal(message))
+            except Exception:
+                pass
 
         # --session <id>: load prior turns and persist this exchange.
         # Throwaway best-of samples never persist.
@@ -435,7 +448,9 @@ def _handle_non_interactive(
         classification = None
         goal_type: str | None = None
         try:
-            if _classify_task is not None:
+            if _handed_down is not None:
+                classification = _handed_down
+            elif _classify_task is not None:
                 classification = await _classify_task
             else:
                 from rune.agent.goal_classifier import classify_goal

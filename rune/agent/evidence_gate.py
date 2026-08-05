@@ -191,14 +191,13 @@ async def run_evidence_check(script: str, cwd: str) -> tuple[str, str]:
     import os
     import signal
 
-    # Resolve the group NOW, while the shell is certainly alive. Looking it up
-    # at cleanup time fails for the common `server & ... ; exit 0` shape: the
-    # shell is already gone, getpgid raises, and the fallback kills only a dead
-    # pid while the server it spawned keeps the port.
-    try:
-        _pgid: int | None = os.getpgid(proc.pid)
-    except (ProcessLookupError, OSError):
-        _pgid = None
+    # No group lookup at all: start_new_session makes the shell the session
+    # leader, so its group id IS its pid, alive or dead. Resolving it with
+    # getpgid had a race — a check that finishes instantly ("echo; exit 0")
+    # can exit before the lookup runs, the lookup raises, and the fallback
+    # kills only the dead shell while the server it backgrounded keeps the
+    # port. CI hit exactly that window.
+    _pgid: int | None = proc.pid
 
     def _kill_group() -> None:
         """Kill the check and anything it started."""

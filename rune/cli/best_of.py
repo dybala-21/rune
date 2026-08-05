@@ -68,6 +68,18 @@ _REPAIR_EVIDENCE_CAP = 1500
 # discriminating check → honest verified). "0" disables.
 _FASTPATH_ENV = "RUNE_FASTPATH"
 
+# The parent's one classification of the message, handed to every attempt
+# child so none of them asks the model the same question again. The value
+# lives in a per-run ContextVar, NOT in os.environ: the parent process may
+# run best-of more than once (the REPL does), and a process-global cache
+# would hand run two the classification of run one's message. CI caught
+# exactly that leak between tests.
+CLASSIFICATION_ENV = "RUNE_BESTOF_CLASSIFICATION"
+
+from contextvars import ContextVar as _CtxVar
+
+_FAMILY_CLS: _CtxVar[str] = _CtxVar("rune_bestof_classification", default="")
+
 
 # Attempts used to be near-copies: all at temperature 0, and race2 handed
 # the first two the same message, so K samples walked the same path and K
@@ -167,6 +179,9 @@ async def _run_attempt_subprocess(
 
     env = dict(os.environ)
     env[RECURSION_GUARD_ENV] = "1"  # recursion guard
+    _wire = _FAMILY_CLS.get()
+    if _wire:
+        env[CLASSIFICATION_ENV] = _wire
     _entry, _temp = _diversify(index)
     if _temp is not None:
         env["RUNE_TEMPERATURE"] = str(_temp)
@@ -802,12 +817,7 @@ async def _record_winner(
         ctx = await prepare_agent_context(
             PrepareContextOptions(goal=message, channel="cli")
         )
-        goal_type: str | None = None
-        try:
-            from rune.agent.goal_classifier import classify_goal
-            goal_type = (await classify_goal(message)).goal_type
-        except Exception:
-            pass
+        goal_type = await _family_goal_type(message)
 
         await post_process_agent_result(
             PostProcessInput(
@@ -902,12 +912,7 @@ async def _learn_from_failures(message: str, evidence: list[str]) -> list[str]:
     if not distinct:
         return []
     try:
-        domain = "code_modify"
-        try:
-            from rune.agent.goal_classifier import classify_goal
-            domain = (await classify_goal(message)).goal_type or domain
-        except Exception:
-            pass
+        domain = (await _family_goal_type(message)) or "code_modify"
         from rune.memory.rule_learner import learn_from_crisp_failure
         learned: list[str] = []
         for ev in distinct[:_MAX_FAILURE_RULES]:
@@ -928,6 +933,26 @@ async def _learn_from_failures(message: str, evidence: list[str]) -> list[str]:
 
 # Reporter: (stdout, solved, selected_index, pass_count, k, copied) -> None
 Reporter = Callable[..., None]
+
+
+async def _family_goal_type(message: str) -> str | None:
+    """The one classification this run already made, else make it.
+
+    Three separate sites used to classify the same message — the winner
+    recorder, the failure learner, and (via the children) every attempt.
+    The result is cached for this run only; children receive it through
+    their spawn environment, never through the parent's.
+    """
+    from rune.agent.goal_classifier import classify_goal, from_wire, to_wire
+    cached = from_wire(_FAMILY_CLS.get())
+    if cached is not None:
+        return cached.goal_type
+    try:
+        c = await classify_goal(message)
+        _FAMILY_CLS.set(to_wire(c))
+        return c.goal_type
+    except Exception:
+        return None
 
 
 async def _best_of_async(
@@ -1061,6 +1086,12 @@ async def _best_of_async(
                 "```python\n" + fp.repro_script[:3000] + "\n```\n"
                 "Its current output:\n" + fp.repro_output[:800]
             )
+
+    # One classification for the whole family. Every attempt child used to
+    # re-classify the identical message — K identical model calls per run,
+    # about a second each — because the child path classifies unconditionally.
+    _FAMILY_CLS.set("")   # a fresh run classifies for itself
+    await _family_goal_type(message)
 
     strategy = os.environ.get(_STRATEGY_ENV, "auto").strip().lower()
     if strategy == "auto":
