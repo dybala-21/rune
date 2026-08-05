@@ -1796,6 +1796,49 @@ async def test_repair_evidence_is_passed_on_when_the_repro_separates(
 
 
 @pytest.mark.asyncio
+async def test_children_inherit_the_parent_classification(monkeypatch, tmp_path):
+    """One classification per family. Attempt children used to re-classify
+    the identical message — K identical model calls a run."""
+    import rune.agent.goal_classifier as gc
+
+    calls = []
+
+    async def fake_classify(message, **kw):
+        calls.append(message)
+        return gc.ClassificationResult(goal_type="code_modify",
+                                       confidence=0.9, tier=2,
+                                       is_complex_coding=True)
+    monkeypatch.setattr(best_of, "classify_goal", fake_classify, raising=False)
+    monkeypatch.setattr(gc, "classify_goal", fake_classify)
+    monkeypatch.delenv("RUNE_BESTOF_CLASSIFICATION", raising=False)
+    monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "race2")
+    spawned_envs = []
+
+    async def fake_attempt(index, message, model, provider, seed_from=None):
+        import os as _os
+        spawned_envs.append(_os.environ.get("RUNE_BESTOF_CLASSIFICATION", ""))
+        w = tmp_path / f"strat_w{index}"
+        w.mkdir(exist_ok=True)
+        (w / "fix.py").write_text("x")
+        return AttemptArtifact(index=index, workdir=str(w), stdout="",
+                               returncode=0, produced=["fix.py"])
+    monkeypatch.setattr(best_of, "_run_attempt_subprocess", fake_attempt)
+    monkeypatch.setattr(best_of, "make_verifier", _mk_verifier(pass_indices={0}))
+    monkeypatch.setattr(best_of, "_verifier_discriminates", AsyncMock(return_value=True))
+    monkeypatch.setattr(best_of, "_cleanup", lambda arts: None)
+    dest = tmp_path / "d_cls"
+    dest.mkdir()
+    monkeypatch.chdir(dest)
+
+    await _best_of_async(
+        "task", 3, None, "anthropic", report=lambda s, **kw: None, seed_cwd=True,
+    )
+    assert len(calls) == 1                      # parent classified exactly once
+    assert spawned_envs and all(e for e in spawned_envs)
+    assert gc.from_wire(spawned_envs[0]).is_complex_coding is True
+
+
+@pytest.mark.asyncio
 async def test_repair_env_opt_out(monkeypatch, tmp_path):
     monkeypatch.setenv("RUNE_BESTOF_STRATEGY", "sequential")
     monkeypatch.setenv("RUNE_BESTOF_REPAIR", "0")

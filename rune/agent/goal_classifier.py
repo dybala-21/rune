@@ -50,6 +50,39 @@ class ClassificationResult:
     intent_categories: frozenset[str] = field(default_factory=frozenset)
 
 
+def to_wire(c: ClassificationResult) -> str:
+    """Serialize for handing to a child process.
+
+    A best-of run spawns K child processes for the SAME message, and each
+    used to classify it again — identical question, identical answer, one
+    model call and about a second apiece. The parent classifies once and the
+    children reconstruct.
+    """
+    import json
+    return json.dumps({
+        "goal_type": c.goal_type, "confidence": c.confidence, "tier": c.tier,
+        "reason": c.reason, "is_continuation": c.is_continuation,
+        "is_domain_change": c.is_domain_change,
+        "is_complex_coding": c.is_complex_coding,
+        "is_multi_task": c.is_multi_task, "requires_code": c.requires_code,
+        "requires_execution": c.requires_execution,
+        "complexity": c.complexity,
+        "output_expectation": c.output_expectation,
+        "intent_categories": sorted(c.intent_categories),
+    })
+
+
+def from_wire(blob: str) -> ClassificationResult | None:
+    """The inverse of to_wire; None when the blob doesn't parse."""
+    import json
+    try:
+        d = json.loads(blob)
+        d["intent_categories"] = frozenset(d.get("intent_categories", []))
+        return ClassificationResult(**d)
+    except (ValueError, TypeError, KeyError):
+        return None
+
+
 # LLM classifier
 
 _CLASSIFICATION_CATEGORIES = """\
