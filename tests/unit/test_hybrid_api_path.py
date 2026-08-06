@@ -92,3 +92,62 @@ def test_json_prune_keeps_matching_records_whole():
     assert '"note": "meta"' in out or '"note":"meta"' in out.replace(" ", "")
 
     assert _prune_json_by_term("not json", "x") is None
+
+
+def test_response_body_capture_via_cdp(monkeypatch):
+    import asyncio
+
+    from rune.capabilities.browser import network as net
+
+    m = net.NetworkMonitor()
+
+    class _FakeCdp:
+        async def send(self, method, params=None):
+            assert method == "Network.getResponseBody"
+            return {"body": '{"schedule":[{"time":"19:30"}]}', "base64Encoded": False}
+
+    m._cdp = _FakeCdp()
+    _send(m, "https://x.test/schedulePage.do", method="POST", post_data="brchNo=1")
+    api = m.get_discovered_apis()[0]
+    rid = list(m._await_body.keys())[0]
+
+    async def run():
+        m._on_loading_finished({"requestId": rid})
+        await asyncio.sleep(0.01)
+
+    asyncio.run(run())
+    assert api.response_body == '{"schedule":[{"time":"19:30"}]}'
+    assert m._await_body == {}
+
+
+def test_discover_read_body_returns_pruned_json():
+    import asyncio
+
+    from rune.capabilities.browser import network as net
+    from rune.capabilities.browser.capabilities import (
+        BrowserDiscoverApisParams,
+        browser_discover_apis,
+    )
+
+    m = net.get_network_monitor()
+    m.clear()
+    m._active = True
+    try:
+        _send(m, "https://x.test/on/oh/schedulePage.do", method="POST", post_data="p=1")
+        m.get_discovered_apis()[0].response_body = (
+            '{"movieFormList":[{"brchNm":"코엑스","time":"19:30"},'
+            '{"brchNm":"송도","time":"20:00"}]}'
+        )
+        res = asyncio.run(browser_discover_apis(
+            BrowserDiscoverApisParams(readBody="schedulePage", jsonFilter="코엑스")
+        ))
+        assert res.success
+        assert "19:30" in res.output and "송도" not in res.output
+
+        missing = asyncio.run(browser_discover_apis(
+            BrowserDiscoverApisParams(readBody="nosuch")
+        ))
+        assert not missing.success
+    finally:
+        m.clear()
+        m._active = False

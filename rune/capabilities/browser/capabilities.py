@@ -111,6 +111,23 @@ class BrowserDiscoverApisParams(BaseModel):
         default="",
         description="URL pattern to filter (e.g., 'search', 'api/v1', 'hotel')",
     )
+    read_body: str = Field(
+        default="",
+        alias="readBody",
+        description=(
+            "URL substring of a captured call whose JSON response body to "
+            "read — no replay or parameters needed, the page's own request "
+            "already carried them"
+        ),
+    )
+    json_filter: str = Field(
+        default="",
+        alias="jsonFilter",
+        description=(
+            "With readBody: keep only JSON subtrees containing this keyword "
+            "(e.g. a branch name) so large payloads stay readable"
+        ),
+    )
 
 
 # Capability implementations
@@ -197,7 +214,8 @@ async def browser_observe(params: BrowserObserveParams) -> CapabilityResult:
         if hybrid_api_enabled() and _new_apis > 0:
             header += (
                 f"\n\U0001f4e1 {_new_apis} data API call(s) captured \u2014 "
-                "browser_discover_apis lists replayable web_fetch recipes."
+                "browser_discover_apis(readBody='<url part>') reads the "
+                "fetched JSON directly."
             )
 
         history_prefix = _compress_observe_history(title, len(elements))
@@ -434,8 +452,9 @@ async def browser_act(params: BrowserActParams) -> CapabilityResult:
         if hybrid_api_enabled() and _new_apis > 0:
             parts.append(
                 f"\U0001f4e1 {_new_apis} new data API call(s) captured by this "
-                "interaction \u2014 call browser_discover_apis for replayable "
-                "web_fetch recipes (usually faster than clicking on)."
+                "interaction \u2014 browser_discover_apis lists them; use "
+                "readBody='<url part>' to read the fetched JSON directly "
+                "(no more clicking needed)."
             )
 
         return CapabilityResult(
@@ -619,6 +638,39 @@ async def browser_discover_apis(params: BrowserDiscoverApisParams) -> Capability
             metadata={"count": 0},
         )
 
+    from rune.capabilities.browser.network import format_api_recipe, hybrid_api_enabled
+
+    # Read a captured response body — the highest-value path: the site's own
+    # click flow already supplied the parameters, so there is nothing to
+    # reconstruct or replay (network-level scraping).
+    if params.read_body and hybrid_api_enabled():
+        matches = [
+            a for a in monitor.get_discovered_apis(params.read_body)
+            if a.response_body
+        ]
+        if not matches:
+            return CapabilityResult(
+                success=False,
+                error=(
+                    f"No captured body matches '{params.read_body}'. "
+                    "List calls first (browser_discover_apis) — bodies exist "
+                    "only for JSON responses seen after the monitor attached."
+                ),
+            )
+        api = matches[-1]  # newest matching call
+        body = api.response_body
+        if params.json_filter:
+            from rune.capabilities.web import _prune_json_by_term
+
+            pruned = _prune_json_by_term(body, params.json_filter)
+            if pruned is not None:
+                body = f"[filtered by '{params.json_filter}'] {pruned}"
+        return CapabilityResult(
+            success=True,
+            output=f"{api.method} {api.url} [{api.status}]\n{body[:30_000]}",
+            metadata={"url": api.url, "chars": len(body)},
+        )
+
     apis = monitor.get_discovered_apis(params.filter)
     if not apis:
         hint = f" matching '{params.filter}'" if params.filter else ""
@@ -628,8 +680,6 @@ async def browser_discover_apis(params: BrowserDiscoverApisParams) -> Capability
             metadata={"count": 0},
         )
 
-    from rune.capabilities.browser.network import format_api_recipe, hybrid_api_enabled
-
     # Data-carrying calls first: JSON responses, then POSTs (booking/schedule
     # endpoints), then the rest — bounded so the recipe list stays cheap.
     ranked = sorted(
@@ -638,14 +688,19 @@ async def browser_discover_apis(params: BrowserDiscoverApisParams) -> Capability
     lines = [f"Discovered {len(apis)} API endpoint(s) (top {len(ranked)} shown):"]
     for api in ranked:
         json_tag = " [JSON]" if api.has_json_response else ""
-        lines.append(f"  {api.method} {api.url} [{api.status}]{json_tag}")
-        if hybrid_api_enabled():
+        body_tag = (
+            f" [body captured: {len(api.response_body)} chars]"
+            if api.response_body else ""
+        )
+        lines.append(f"  {api.method} {api.url} [{api.status}]{json_tag}{body_tag}")
+        if hybrid_api_enabled() and not api.response_body:
             lines.append(f"    replay: {format_api_recipe(api)}")
     lines.append("")
     lines.append(
-        "Replay these with web_fetch instead of clicking through the UI — "
-        "include method/body exactly as shown for POST endpoints. If the JSON "
-        "response is huge, add jsonFilter='<branch/product keyword>'."
+        "PREFER captured bodies: browser_discover_apis(readBody='<url part>', "
+        "jsonFilter='<keyword>') reads the data the page already fetched — "
+        "no parameters needed. Replay with web_fetch only when no body was "
+        "captured."
         if hybrid_api_enabled()
         else "Use web_fetch(url=...) to call these APIs directly."
     )
