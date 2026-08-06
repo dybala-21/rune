@@ -276,6 +276,34 @@ def _repo_scale_workspace(cwd: str = ".") -> bool:
         return False
 
 
+def _cap_handoff_facts(result: Any) -> str:
+    """Compact 'what was tried' facts from a cap-killed step's transcript.
+
+    The retry starts from the pristine seed (a contaminated-context retry
+    multiplies the per-step error rate ~7x, arXiv:2605.08563), so only
+    tool/target/outcome lines cross the boundary — never the trajectory.
+    """
+    msgs = getattr(result, "_messages", None) or []
+    pending: list[str] = []
+    lines: list[str] = []
+    for m in msgs:
+        if not isinstance(m, dict):
+            continue
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            for tc in m["tool_calls"]:
+                fn = tc.get("function") or {}
+                args = fn.get("arguments", "")
+                arg_str = args if isinstance(args, str) else str(args)
+                pending.append(f"{fn.get('name', '?')}({arg_str[:110]})")
+        elif m.get("role") == "tool":
+            label = pending.pop(0) if pending else "?"
+            content = " ".join(str(m.get("content", "")).split())
+            failed = content.lower().startswith(("error", "failed", "traceback"))
+            lines.append(f"- {label} → {'FAILED: ' if failed else 'ok: '}{content[:140]}")
+    lines.extend(f"- {label} → (cut off before result)" for label in pending)
+    return "\n".join(lines[:15])[:2000]
+
+
 def _compute_tool_rounds(
     classification: Any,
     executor_model: str,
@@ -1894,6 +1922,12 @@ class NativeAgentLoop(EventEmitter):
         _pending_advice: PendingAdvice | None = None
         _step_tool_calls: list[str] = []
 
+        # Cap→upshift restarts from THIS pristine copy of the seeded history:
+        # the retry keeps the conversation context but must never inherit the
+        # cut-off trajectory (see _cap_handoff_facts for why).
+        _seed_messages: list[Any] = [dict(m) if isinstance(m, dict) else m for m in messages]
+        _cap_upshift_pending = False
+
         for step in range(max_iterations):
             self._step = step + 1
             self._step_start_time = time.monotonic()
@@ -1909,13 +1943,18 @@ class NativeAgentLoop(EventEmitter):
             # full rigor. Checked here, not in one gate branch, so blocks
             # from every gate path (_finalize_gates, _auto_verify_gate,
             # Evidence Gate) count toward the upshift.
-            if _fast_lane_active and _gate_blocked_count >= FAST_LANE_UPSHIFT_BLOCKS:
+            if _fast_lane_active and (
+                _gate_blocked_count >= FAST_LANE_UPSHIFT_BLOCKS or _cap_upshift_pending
+            ):
                 _fast_lane_active = False
+                _was_cap_trigger = _cap_upshift_pending
                 log.info(
                     "fast_lane_upshift",
                     step=self._step,
+                    trigger="cap" if _was_cap_trigger else "gate_blocked",
                     gate_blocked=_gate_blocked_count,
                 )
+                _cap_upshift_pending = False
                 # The restored model gets the full block budget and a clean
                 # no-progress window (the lane's empty steps raised both).
                 # Bounded: the upshift fires once, so a run absorbs at most
@@ -1945,6 +1984,12 @@ class NativeAgentLoop(EventEmitter):
                     advisor_service.enabled,
                     repo_fix=_repo_fix,
                 )
+                if _was_cap_trigger:
+                    # Cap-killed retries are browser-shaped work: live web
+                    # tasks average 7.3 actions and hard ones 11+ (Mind2Web),
+                    # on top of search rounds — the default lane budget was
+                    # measured to die clicks short of the goal.
+                    _tool_rounds = max(_tool_rounds, 24)
                 agent = LiteLLMAgent(
                     model=model,
                     system_prompt=system_prompt,
@@ -2274,6 +2319,33 @@ class NativeAgentLoop(EventEmitter):
                 # -- update message history for next iteration --
                 with contextlib.suppress(Exception):
                     messages = result.all_messages()
+
+                # Fast-lane cap death: the model was still calling tools when
+                # the round budget cut it off — the surest sign the answer is
+                # incomplete. Retry ONCE at full rigor from the pristine seed
+                # plus extracted facts, never the cut-off trajectory itself.
+                if (
+                    _fast_lane_active
+                    and getattr(result, "tool_budget_exhausted", False)
+                    and os.environ.get("RUNE_CAP_UPSHIFT", "1") != "0"
+                ):
+                    _cap_upshift_pending = True
+                    # The verdict belongs to the retry; it re-arms if the
+                    # full lane caps again.
+                    trace.tool_budget_exhausted = False
+                    handoff = _cap_handoff_facts(result)
+                    messages = [dict(m) if isinstance(m, dict) else m for m in _seed_messages]
+                    if handoff:
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "[Budget-limited first attempt was cut off; retrying "
+                                "with a larger tool budget] Facts from that attempt — "
+                                "do not repeat approaches marked FAILED:\n" + handoff
+                            ),
+                        })
+                    log.info("cap_upshift_scheduled", step=self._step)
+                    continue
 
                 if rollover_phase >= 2 and 2 not in self._rollover_phase_done:
                     # Phase 2 (80%): Deterministic rollover - compact old messages
