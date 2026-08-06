@@ -392,7 +392,7 @@ async def web_fetch(params: WebFetchParams) -> CapabilityResult:
             max_redirects=5,
         ) as client:
             method = (params.method or "GET").upper()
-            if method == "POST" and os.environ.get("RUNE_HYBRID_API", "1") != "0":
+            if method == "POST" and os.environ.get("RUNE_HYBRID_API", "0") == "1":
                 headers["Content-Type"] = (
                     params.content_type or "application/x-www-form-urlencoded"
                 )

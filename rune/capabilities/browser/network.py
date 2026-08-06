@@ -48,10 +48,16 @@ class ApiRequest:
 
 
 def hybrid_api_enabled() -> bool:
-    """Gate for the hybrid API path (POST replay, recipes, late-API hints)."""
+    """Gate for the hybrid API path (POST replay, recipes, late-API hints).
+
+    OPT-IN (RUNE_HYBRID_API=1): the paired A/B on the discriminative
+    booking-SPA cell measured the directive hints steering the model into
+    API exploration that fails to converge within the round budget (ON 0/3
+    vs OFF 2/3), so the default stays off until the design converts.
+    """
     import os
 
-    return os.environ.get("RUNE_HYBRID_API", "1") != "0"
+    return os.environ.get("RUNE_HYBRID_API", "0") == "1"
 
 
 def format_api_recipe(api: ApiRequest) -> str:

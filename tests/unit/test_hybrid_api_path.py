@@ -1,4 +1,11 @@
-"""Hybrid API path: POST capture/replay recipes and late-API accounting."""
+"""Hybrid API path: POST capture/replay recipes and late-API accounting.
+
+The path is opt-in (measured harmful as a default); tests enable it.
+"""
+
+import os
+
+os.environ["RUNE_HYBRID_API"] = "1"
 
 from rune.capabilities.browser.network import (
     ApiRequest,
