@@ -15,14 +15,18 @@ import { WorkbenchPanel } from './components/WorkbenchPanel';
 import { CommandK, type Command } from './components/CommandK';
 import { WorkspaceChip } from './components/WorkspaceChip';
 import { InlineWorkspacePicker } from './components/InlineWorkspacePicker';
-import { normalizeToolName, inferWorkPhase, computeRunVerdict } from './utils/tooling';
+import { normalizeToolName, isBashToolName, inferWorkPhase, inferActivityMode, computeRunVerdict } from './utils/tooling';
 import { fetchConfig, fetchSessions, type ConfigInfo, type SessionInfo } from './api';
 
 type SidebarTab = 'chats' | 'settings';
 
 // Tools that mean the agent is working in a folder — the signal to ask for a
 // workspace if none is pinned (zero false positives, unlike text guessing).
-const WORKSPACE_TOOLS = new Set(['file.read', 'file.write', 'file.edit', 'file.delete', 'bash', 'code.analyze']);
+const WORKSPACE_TOOLS = new Set(['file.read', 'file.write', 'file.edit', 'file.delete', 'code.analyze']);
+
+function isWorkspaceTool(name: string): boolean {
+  return WORKSPACE_TOOLS.has(name) || isBashToolName(name);
+}
 
 export function App() {
   const agent = useAgent();
@@ -56,7 +60,7 @@ export function App() {
     if (name === 'file.read') return 'Reading files';
     if (name === 'file.edit') return 'Editing code';
     if (name === 'file.write') return 'Writing files';
-    if (name === 'bash') return 'Running command';
+    if (isBashToolName(name)) return 'Running command';
     if (name.startsWith('browser.')) return 'Browsing';
     if (name === 'web.search') return 'Searching web';
     if (name === 'web.fetch') return 'Fetching page';
@@ -113,7 +117,12 @@ export function App() {
       setWorkbenchDismissed(false);
       return;
     }
-    if (!workbenchDismissed && inferWorkPhase(agent.toolCalls) !== 'analyzing') {
+    // Open once real work is visible: edits/commands for coding runs, or a
+    // research-shaped run (searches/pages) that never touches files.
+    if (!workbenchDismissed && (
+      inferWorkPhase(agent.toolCalls) !== 'analyzing'
+      || inferActivityMode(agent.toolCalls) === 'research'
+    )) {
       setWorkbenchOpen(true);
     }
   }, [agent.toolCalls, isViewingHistory, workbenchDismissed]);
@@ -532,6 +541,13 @@ export function App() {
                     ? agent.sendMessage
                     : undefined
                 }
+                streamFooter={
+                  /* First coding activity with no pinned workspace → ask in
+                     the stream. The picker self-hides once a folder is set. */
+                  !isViewingHistory && agent.toolCalls.some(
+                    tc => isWorkspaceTool(normalizeToolName(tc.toolName)),
+                  ) ? <InlineWorkspacePicker /> : null
+                }
               />
 
               {!isViewingHistory && !workbenchOpen && agent.toolCalls.length > 0 &&
@@ -559,16 +575,6 @@ export function App() {
                 >
                   Workbench {'›'}
                 </button>
-              )}
-
-              {/* First coding activity with no pinned workspace → ask in place.
-                  The picker self-hides once a folder is set. */}
-              {!isViewingHistory && agent.toolCalls.some(
-                tc => WORKSPACE_TOOLS.has(normalizeToolName(tc.toolName)),
-              ) && (
-                <div style={{ padding: '0 20px 8px' }}>
-                  <InlineWorkspacePicker />
-                </div>
               )}
 
               {/* Input area */}
@@ -612,6 +618,13 @@ export function App() {
                   isRunning={agent.state === 'running'}
                   activitySummary={agent.activitySummary}
                   trust={agent.lastTrust}
+                  currentStep={agent.currentStepInfo}
+                  orchestration={agent.orchestration}
+                  awaiting={
+                    agent.state === 'waiting_approval' ? 'approval'
+                      : agent.state === 'waiting_question' ? 'question'
+                      : null
+                  }
                   connected={agent.connected}
                   onClose={() => { setWorkbenchOpen(false); setWorkbenchDismissed(true); }}
                 />

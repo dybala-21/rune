@@ -59,6 +59,8 @@ export function useSSE(): SseConnection {
         'step_start', 'thinking', 'tool_call', 'tool_result', 'text_delta',
         'approval_request', 'question', 'context_compaction', 'delegate_event',
         'command_result', 'goal_iteration',
+        'orchestration_started', 'orchestration_task_progress',
+        'orchestration_task_retry', 'orchestration_completed',
       ];
 
       for (const eventType of eventTypes) {

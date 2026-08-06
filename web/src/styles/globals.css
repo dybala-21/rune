@@ -441,8 +441,8 @@ a:focus-visible,
   }
 }
 
-/* Chat ⇄ workbench morph: the grid tracks animate so the chat column squeezes
-   to ~40% and the workbench fills ~60%. Content never repositions. */
+/* Chat ⇄ workbench morph: the grid tracks animate so the chat column keeps
+   ~2/3 and the workbench takes ~1/3 — a supervision sidebar, not a takeover. */
 .chat-workbench-grid {
   grid-template-columns: 1fr 0fr;
   /* Pin the single row to the grid's own height (minmax(0,…) lets children
@@ -456,7 +456,7 @@ a:focus-visible,
   min-width: 0;
 }
 .chat-workbench-grid[data-bench="open"] {
-  grid-template-columns: 2fr 3fr;
+  grid-template-columns: 2fr 1fr;
 }
 /* Narrow windows: the workbench overlays the chat instead of crushing the
    composer to an unusable width. */

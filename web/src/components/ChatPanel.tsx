@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type {
   ChatMessage,
   ToolCall,
@@ -44,6 +44,8 @@ interface ChatPanelProps {
   onRespondApproval: (decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) => void;
   /** Sends an empty-state suggestion; omit to render suggestions disabled. */
   onSuggest?: (text: string) => void;
+  /** Extra content rendered inside the scroll area, after the messages. */
+  streamFooter?: ReactNode;
 }
 
 export function ChatPanel({
@@ -61,6 +63,7 @@ export function ChatPanel({
   pendingApproval,
   onRespondApproval,
   onSuggest,
+  streamFooter,
 }: ChatPanelProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -252,6 +255,10 @@ export function ChatPanel({
             )}
           </>
         )}
+
+        {/* In-stream extras (e.g. the workspace picker) — rendered inside the
+            scroll area so they can never sit under the floating composer. */}
+        {streamFooter}
 
         <div ref={bottomRef} />
       </div>

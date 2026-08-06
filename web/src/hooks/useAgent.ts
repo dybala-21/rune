@@ -29,6 +29,11 @@ import type {
   DelegateEventData,
   CommandResultData,
   GoalIterationData,
+  OrchestrationStartedData,
+  OrchestrationTaskProgressData,
+  OrchestrationTaskRetryData,
+  OrchestrationCompletedData,
+  OrchestrationState,
   TrustInfo,
 } from '../types';
 
@@ -215,6 +220,9 @@ export function useAgent() {
   const [delegateEvents, setDelegateEvents] = useState<DelegateItem[]>(initialLiveState.delegateEvents);
   const [compactionEvents, setCompactionEvents] = useState<CompactionItem[]>(initialLiveState.compactionEvents);
   const [currentStepInfo, setCurrentStepInfo] = useState<StepInfo | null>(null);
+  const [orchestration, setOrchestration] = useState<OrchestrationState | null>(null);
+  // tool_call 핸들러가 스텝 번호를 동기적으로 읽어야 하므로 state와 별도로 ref 유지
+  const currentStepRef = useRef(0);
   const [savedDraft, setSavedDraft] = useState<SavedLiveDraftSummary>(
     summarizeSavedDraft(initialState.state, initialState.savedAt),
   );
@@ -339,12 +347,23 @@ export function useAgent() {
       setActivitySummary(null);
       setLastTrust(null);
       setCurrentStepInfo(null);
-      setMessages(prev => appendWithLimit(prev, {
-        id: nextId(),
-        role: 'system',
-        content: `Goal: ${data.goal}`,
-        timestamp: Date.now(),
-      }, MAX_MESSAGES));
+      setOrchestration(null);
+      currentStepRef.current = 0;
+      // "Goal:" marks runs that did NOT start from this chat (another surface,
+      // a proactive/scheduled run). When the goal is just the message the user
+      // typed here, the line would echo it right under their bubble — skip it.
+      setMessages(prev => {
+        const lastUser = [...prev].reverse().find(m => m.role === 'user');
+        if (lastUser && lastUser.content.trim().startsWith(data.goal.trim())) {
+          return prev;
+        }
+        return appendWithLimit(prev, {
+          id: nextId(),
+          role: 'system',
+          content: `Goal: ${data.goal}`,
+          timestamp: Date.now(),
+        }, MAX_MESSAGES);
+      });
     }));
 
     unsubs.push(sseOn('agent_complete', (raw) => {
@@ -478,6 +497,7 @@ export function useAgent() {
         toolName: data.toolName,
         args: data.args ?? {},
         timestamp: Date.now(),
+        step: currentStepRef.current,
       }, MAX_TOOL_CALLS));
     }));
 
@@ -529,7 +549,67 @@ export function useAgent() {
 
     unsubs.push(sseOn('step_start', (raw) => {
       const data = raw as StepStartData;
+      currentStepRef.current = data.stepNumber;
       setCurrentStepInfo({ stepNumber: data.stepNumber, tokens: data.tokens });
+    }));
+
+    unsubs.push(sseOn('orchestration_started', (raw) => {
+      const data = raw as OrchestrationStartedData;
+      setOrchestration({
+        description: data.description,
+        taskCount: data.taskCount,
+        completed: 0,
+        total: data.taskCount,
+        tasks: [],
+        done: false,
+      });
+    }));
+
+    unsubs.push(sseOn('orchestration_task_progress', (raw) => {
+      const data = raw as OrchestrationTaskProgressData;
+      setOrchestration(prev => {
+        const base = prev ?? {
+          description: '', taskCount: data.total, completed: 0,
+          total: data.total, tasks: [], done: false,
+        };
+        const tasks = [...base.tasks];
+        const idx = tasks.findIndex(t => t.taskId === data.taskId);
+        const entry = {
+          taskId: data.taskId,
+          description: data.description,
+          role: data.role,
+          success: data.success,
+          retries: idx !== -1 ? tasks[idx].retries : 0,
+          completedAt: Date.now(),
+        };
+        if (idx !== -1) tasks[idx] = entry; else tasks.push(entry);
+        return { ...base, completed: data.completed, total: data.total, tasks };
+      });
+    }));
+
+    unsubs.push(sseOn('orchestration_task_retry', (raw) => {
+      const data = raw as OrchestrationTaskRetryData;
+      setOrchestration(prev => {
+        if (!prev) return prev;
+        const tasks = [...prev.tasks];
+        const idx = tasks.findIndex(t => t.taskId === data.taskId);
+        if (idx !== -1) {
+          tasks[idx] = { ...tasks[idx], retries: data.attempt, success: undefined };
+        } else {
+          tasks.push({
+            taskId: data.taskId, description: '', role: '',
+            retries: data.attempt,
+          });
+        }
+        return { ...prev, tasks };
+      });
+    }));
+
+    unsubs.push(sseOn('orchestration_completed', (raw) => {
+      const data = raw as OrchestrationCompletedData;
+      setOrchestration(prev => prev
+        ? { ...prev, done: true, success: data.success, completed: data.completedCount }
+        : prev);
     }));
 
     unsubs.push(sseOn('context_compaction', (raw) => {
@@ -789,6 +869,7 @@ export function useAgent() {
     delegateEvents,
     compactionEvents,
     currentStepInfo,
+    orchestration,
     savedDraft,
     restoreSavedDraft,
     discardSavedDraft,

@@ -25,6 +25,10 @@ export type SseEventType =
   | 'delegate_event'
   | 'command_result'
   | 'goal_iteration'
+  | 'orchestration_started'
+  | 'orchestration_task_progress'
+  | 'orchestration_task_retry'
+  | 'orchestration_completed'
   | 'suggestion_created'
   | 'proactive_execution_started'
   | 'proactive_execution_completed'
@@ -76,6 +80,30 @@ export interface GoalIterationData {
   reason: string;
   evidence: number;
   tokens: number;
+}
+export interface OrchestrationStartedData { runId?: string; taskCount: number; description: string }
+export interface OrchestrationTaskProgressData {
+  runId?: string;
+  taskId: string;
+  completed: number;
+  total: number;
+  success: boolean;
+  description: string;
+  role: string;
+}
+export interface OrchestrationTaskRetryData {
+  runId?: string;
+  taskId: string;
+  failureType: string;
+  attempt: number;
+  error: string;
+}
+export interface OrchestrationCompletedData {
+  runId?: string;
+  success: boolean;
+  durationMs: number;
+  completedCount: number;
+  failedCount: number;
 }
 export interface SuggestionCreatedData {
   id: string;
@@ -136,6 +164,29 @@ export interface ToolCall {
   timestamp: number;
   completedAt?: number;
   durationMs?: number;
+  /** step_start 기준으로 이 호출이 속한 에이전트 스텝 번호 (진행 타임라인 그룹핑용) */
+  step?: number;
+}
+
+/** 위임 실행의 태스크 체크리스트 항목 (orchestration_* 이벤트에서 수집) */
+export interface OrchestrationTask {
+  taskId: string;
+  description: string;
+  role: string;
+  success?: boolean;
+  retries: number;
+  completedAt?: number;
+}
+
+/** 위임 실행 전체 상태 (진행 패널의 선행 체크리스트 데이터) */
+export interface OrchestrationState {
+  description: string;
+  taskCount: number;
+  completed: number;
+  total: number;
+  tasks: OrchestrationTask[];
+  done: boolean;
+  success?: boolean;
 }
 
 /** thinking 블록 (UI 표시용) */

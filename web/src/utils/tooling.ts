@@ -12,6 +12,12 @@ export function isBrowserToolName(name: string): boolean {
   return normalizeToolName(name).startsWith('browser.');
 }
 
+/** The shell tool is `bash_execute` on the wire; match any bash-family name. */
+export function isBashToolName(name: string): boolean {
+  const n = normalizeToolName(name);
+  return n === 'bash' || n.startsWith('bash.');
+}
+
 export type WorkPhase = 'analyzing' | 'implementing' | 'verifying';
 
 export function inferWorkPhase(toolCalls: ToolCall[]): WorkPhase {
@@ -23,7 +29,7 @@ export function inferWorkPhase(toolCalls: ToolCall[]): WorkPhase {
     if (name === 'file.write' || name === 'file.edit' || name === 'file.delete') {
       hasWrites = true;
     }
-    if (hasWrites && name === 'bash') {
+    if (hasWrites && isBashToolName(name)) {
       hasVerification = true;
     }
   }
@@ -31,6 +37,30 @@ export function inferWorkPhase(toolCalls: ToolCall[]): WorkPhase {
   if (hasVerification) return 'verifying';
   if (hasWrites) return 'implementing';
   return 'analyzing';
+}
+
+export type ActivityMode = 'coding' | 'research' | 'generic';
+
+/**
+ * What kind of work this run is, from the tool-call composition — structured
+ * data, not text guessing. Drives which evidence the progress pane shows
+ * (files/diff vs sources/queries). Stays 'generic' until enough signal
+ * accumulates so the pane doesn't flap early in a run.
+ */
+export function inferActivityMode(toolCalls: ToolCall[]): ActivityMode {
+  let coding = 0;
+  let research = 0;
+  for (const tc of toolCalls) {
+    const name = normalizeToolName(tc.toolName);
+    if (name === 'file.write' || name === 'file.edit' || name === 'file.delete' || isBashToolName(name)) {
+      coding++;
+    } else if (name === 'web.search' || name === 'web.fetch' || isBrowserToolName(name)) {
+      research++;
+    }
+  }
+  if (coding + research < 2) return 'generic';
+  if (coding >= research) return 'coding';
+  return 'research';
 }
 
 /**
@@ -59,7 +89,7 @@ export function computeActivitySummary(
     totalToolCalls: toolCalls.length,
     filesRead: toolCalls.filter(tc => isToolName(tc.toolName, 'file.read')).length,
     filesWritten: toolCalls.filter(tc => isToolName(tc.toolName, 'file.write') || isToolName(tc.toolName, 'file.edit')).length,
-    bashExecutions: toolCalls.filter(tc => isToolName(tc.toolName, 'bash')).length,
+    bashExecutions: toolCalls.filter(tc => isBashToolName(tc.toolName)).length,
     webSearches: toolCalls.filter(tc => isToolName(tc.toolName, 'web.search') || isToolName(tc.toolName, 'web.fetch')).length,
     browserActions: toolCalls.filter(tc => isBrowserToolName(tc.toolName)).length,
     totalDurationMs,
