@@ -1114,6 +1114,9 @@ class StreamResult:
         """Yield text deltas, auto-executing tool calls when encountered."""
         _max_tool_rounds = self._max_tool_rounds
         _tool_round = 0
+        # The cap kills the run without a final LLM turn, so the model cannot
+        # disclose it — the harness must. Read by the loop into the trace.
+        self.tool_budget_exhausted = False
         _force_tool = False  # tool_choice="required" flag for retry
         _output_recovery_count = 0  # max output tokens recovery attempts
         _MAX_OUTPUT_RECOVERY = 2
@@ -1632,6 +1635,7 @@ class StreamResult:
                 or _tool_round > _max_tool_rounds
             )
             if _tool_round > _max_tool_rounds:
+                self.tool_budget_exhausted = True
                 log.warning("stream_text_max_tool_rounds", rounds=_tool_round)
 
             # Always append assistant message WITH tool_calls and execute

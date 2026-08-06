@@ -507,6 +507,24 @@ def test_build_trust_payload_honest_failure():
     assert "won't claim a result I can't verify" in p["honestNote"]
 
 
+def test_build_trust_payload_budget_exhausted():
+    from types import SimpleNamespace
+
+    from rune.api.server import build_trust_payload
+    # A fast-lane run cut off at the tool-round cap completes "successfully"
+    # but may omit work that never ran — the payload must carry the fact so
+    # the UI can say "stopped at tool budget" instead of a clean Completed.
+    trace = SimpleNamespace(
+        reason="completed", evidence_gate=None, tool_budget_exhausted=True,
+    )
+    p = build_trust_payload(trace)
+    assert p["verified"] is True
+    assert p["budgetExhausted"] is True
+
+    trace2 = SimpleNamespace(reason="completed", evidence_gate=None)
+    assert build_trust_payload(trace2)["budgetExhausted"] is False
+
+
 def test_escalation_status_reports_config(client, monkeypatch):
     from rune.config import get_config
     cfg = get_config().llm

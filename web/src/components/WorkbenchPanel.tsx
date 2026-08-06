@@ -257,12 +257,13 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
   if (isRunning) petState = phase === 'verifying' ? 'thinking' : 'working';
   else if (verdictOk !== null) petState = verdictOk ? 'passed' : 'failed';
 
+  const hasCheck = Boolean(trust?.evidenceGate?.hasCheck);
   const footText = awaiting
     ? 'waiting for you'
     : isRunning
       ? `${PHASE_LABEL[phase]}…`
       : verdictOk !== null
-        ? verdictOk ? 'verified' : 'not verified'
+        ? verdictOk ? (hasCheck ? 'verified' : 'completed') : 'not verified'
         : 'ready';
   const footColor = awaiting
     ? 'var(--warning)'
@@ -501,13 +502,17 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
           <div style={{
             display: 'flex', alignItems: 'center', gap: 8,
             margin: '0 0 10px', padding: '8px 11px', borderRadius: 8,
-            border: `1px solid ${verdictOk ? 'var(--success)' : 'var(--warning)'}`,
-            background: verdictOk ? 'var(--success-subtle)' : 'var(--warning-subtle, var(--danger-subtle))',
+            border: `1px solid ${verdictOk ? (hasCheck ? 'var(--success)' : 'var(--border)') : 'var(--warning)'}`,
+            background: verdictOk
+              ? (hasCheck ? 'var(--success-subtle)' : 'var(--bg-secondary)')
+              : 'var(--warning-subtle, var(--danger-subtle))',
             fontSize: 12,
           }}>
             <span aria-hidden="true">{verdictOk ? '✓' : '⚠'}</span>
             <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>
-              {verdictOk ? 'Evidence Gate — verified' : 'Not marking this done'}
+              {verdictOk
+                ? hasCheck ? 'Evidence Gate — verified' : 'Completed — no checks ran'
+                : 'Not marking this done'}
             </span>
             <span style={{ marginLeft: 'auto', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
               {trust?.evidenceGate?.hasCheck

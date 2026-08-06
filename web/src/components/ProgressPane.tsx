@@ -254,6 +254,36 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
   }
   if (verdictOk === null) return null;
   if (verdictOk) {
+    // Green "Verified" is the claim that an Evidence Gate check actually ran
+    // and passed. A run that merely finished without any check gets a neutral
+    // band — completion is not verification. A cap-killed run turns the band
+    // amber: the answer may omit steps that never got to run.
+    if (!trust?.evidenceGate?.hasCheck) {
+      const capped = Boolean(trust?.budgetExhausted);
+      return band(
+        capped ? 'var(--warning)' : 'var(--border)',
+        capped ? 'var(--warning-subtle, var(--bg-secondary))' : 'var(--bg-secondary)',
+        (
+          <>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+              <span style={{ color: capped ? 'var(--warning)' : 'var(--text-muted)' }}>✓</span>
+              <span style={{ color: 'var(--text-primary)', fontSize: 12.5, fontWeight: 600 }}>
+                Completed
+              </span>
+              <span style={{ color: 'var(--text-muted)', fontSize: 11, marginLeft: 'auto' }}>
+                {capped ? 'stopped at tool budget' : 'no verification checks ran'}
+              </span>
+            </div>
+            {capped && (
+              <div style={{ color: 'var(--text-primary)', fontSize: 11.5, paddingLeft: 21 }}>
+                The tool-round budget ran out — some planned steps never executed,
+                so the answer may be incomplete.
+              </div>
+            )}
+          </>
+        ),
+      );
+    }
     return band('var(--success)', 'var(--success-subtle)', (
       <>
         <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
@@ -261,7 +291,7 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
           <span style={{ color: 'var(--text-primary)', fontSize: 12.5, fontWeight: 600 }}>
             Verified
           </span>
-          {trust?.evidenceGate && (trust.evidenceGate.verdictCounts?.pass ?? 0) > 0 && (
+          {(trust.evidenceGate.verdictCounts?.pass ?? 0) > 0 && (
             <span style={{ color: 'var(--text-muted)', fontSize: 11, marginLeft: 'auto' }}>
               {trust.evidenceGate.verdictCounts.pass} checks passed
             </span>
@@ -286,6 +316,11 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
         {trust?.honestNote && (
           <div style={{ color: 'var(--text-primary)', fontSize: 11.5, paddingLeft: 21 }}>
             {trust.honestNote}
+          </div>
+        )}
+        {trust?.budgetExhausted && (
+          <div style={{ color: 'var(--text-muted)', fontSize: 11, paddingLeft: 21 }}>
+            stopped at tool budget — some planned steps never executed
           </div>
         )}
         {trust?.escalationHint && (

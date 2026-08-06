@@ -39,6 +39,9 @@ export interface AgentStartData { goal: string }
 export interface TrustInfo {
   verified: boolean;
   reason: string;
+  /** A step hit the tool-round cap and was cut off without a final LLM turn —
+      the answer may silently omit work that never ran. */
+  budgetExhausted?: boolean;
   evidenceGate?: {
     hasCheck: boolean;
     lastVerdict: string;

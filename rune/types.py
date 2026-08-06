@@ -245,6 +245,9 @@ class CompletionTrace:
     # Evidence Gate decision history (None when the gate is disabled). Surfaced
     # here because structlog events are not captured in benchmark containers.
     evidence_gate: dict[str, Any] | None = None
+    # Some step hit the adapter's tool-round cap and was cut off without a
+    # final LLM turn — the answer may silently omit work that never ran.
+    tool_budget_exhausted: bool = False
 
 
 # LLM

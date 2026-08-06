@@ -33,7 +33,13 @@ def build_trust_payload(trace: Any) -> dict[str, Any]:
     drop it. Module-level so it's unit-testable outside create_app's closure."""
     reason = getattr(trace, "reason", "") or ""
     verified = reason == "completed"
-    out: dict[str, Any] = {"verified": verified, "reason": reason}
+    out: dict[str, Any] = {
+        "verified": verified,
+        "reason": reason,
+        # A step died at the tool-round cap without a final LLM turn — the
+        # answer may omit work that never ran; the UI must say so.
+        "budgetExhausted": bool(getattr(trace, "tool_budget_exhausted", False)),
+    }
     gate = getattr(trace, "evidence_gate", None)
     if isinstance(gate, dict):
         out["evidenceGate"] = {

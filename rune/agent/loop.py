@@ -2173,6 +2173,11 @@ class NativeAgentLoop(EventEmitter):
                 except Exception:
                     pass
 
+                # A step cut off at the tool-round cap never got a final LLM
+                # turn to disclose it; carry the fact to the trust surface.
+                if getattr(result, "tool_budget_exhausted", False):
+                    trace.tool_budget_exhausted = True
+
                 # -- update token budget from usage stats --
                 try:
                     usage = result.usage()
