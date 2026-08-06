@@ -290,17 +290,27 @@ async def browser_navigate(params: BrowserNavigateParams) -> CapabilityResult:
         title = await page.title()
         url = page.url
 
-        # Inline discovered JSON APIs — directive tone so weak models switch strategy
+        # Inline discovered JSON APIs — directive tone so weak models switch
+        # strategy. Recipes carry method/body so POST endpoints (the
+        # schedule/booking class) are actually replayable; more data APIs
+        # usually fire later on interaction, so point at browser_discover_apis.
+        from rune.capabilities.browser.network import format_api_recipe
+
         json_apis = monitor.get_json_apis()
         api_section = ""
         if json_apis:
             api_lines = [
                 "\n\u26a0\ufe0f SPA DETECTED \u2014 this site loads data via API. "
-                "STOP using browser_act. Call web_fetch on these URLs instead:"
+                "STOP using browser_act. Replay these calls with web_fetch instead:"
             ]
-            for api in json_apis[:10]:
-                api_lines.append(f"  web_fetch(url=\"{api.url}\")")
+            for api in json_apis[:8]:
+                api_lines.append(f"  {format_api_recipe(api)}")
+            api_lines.append(
+                "  (data APIs often fire only after clicks — after interacting, "
+                "call browser_discover_apis to catch new ones)"
+            )
             api_section = "\n".join(api_lines)
+            monitor.mark_reported()
 
         return CapabilityResult(
             success=True,

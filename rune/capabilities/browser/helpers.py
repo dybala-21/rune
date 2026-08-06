@@ -507,11 +507,18 @@ async def self_healing_find(page: Any, ref: str) -> Any | None:
 
     original_meta = store.get(ref)
 
-    # Phase 2: re-extract if page likely changed.
+    # Phase 2: re-extract unconditionally — a phase-1 miss is itself evidence
+    # the snapshot diverged (SPA re-renders keep the URL and can beat any
+    # freshness window; state divergence is the documented failure class,
+    # arXiv:2511.19477). One extract here costs ~100ms and no LLM round.
     current_url = page.url
+    from rune.capabilities.browser.network import hybrid_api_enabled
     elapsed = time.monotonic() - store.last_observe_time
-    if current_url != store.last_url or elapsed > 5.0:
-        log.debug("self_heal_re_extract", reason="url_change" if current_url != store.last_url else "stale")
+    if hybrid_api_enabled() or current_url != store.last_url or elapsed > 5.0:
+        log.debug(
+            "self_heal_re_extract",
+            reason="url_change" if current_url != store.last_url else "phase1_miss",
+        )
         await wait_for_dom_settle(page)
         await extract_interactive_elements(page)
         locator = await find_element_locator(page, ref)

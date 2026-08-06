@@ -37,6 +37,28 @@ class ApiRequest:
     status: int = 0
     content_type: str = ""
     has_json_response: bool = False
+    # Request body (truncated) — without it a discovered POST endpoint (the
+    # schedule/booking class) cannot be replayed via web_fetch.
+    post_data: str = ""
+    request_content_type: str = ""
+
+
+def hybrid_api_enabled() -> bool:
+    """Gate for the hybrid API path (POST replay, recipes, late-API hints)."""
+    import os
+
+    return os.environ.get("RUNE_HYBRID_API", "1") != "0"
+
+
+def format_api_recipe(api: ApiRequest) -> str:
+    """One replayable line for a captured API call — method, URL, body."""
+    if api.method != "GET" and api.post_data:
+        ct = api.request_content_type or "application/x-www-form-urlencoded"
+        return (
+            f'web_fetch(url="{api.url}", method="{api.method}", '
+            f'body="{api.post_data[:200]}", content_type="{ct}")'
+        )
+    return f'web_fetch(url="{api.url}")'
 
 
 class NetworkMonitor:
@@ -47,6 +69,7 @@ class NetworkMonitor:
         self._requests: deque[ApiRequest] = deque(maxlen=_MAX_ENTRIES)
         self._pending: dict[str, ApiRequest] = {}  # requestId -> ApiRequest
         self._active: bool = False
+        self._reported_count: int = 0
 
     @property
     def active(self) -> bool:
@@ -93,10 +116,15 @@ class NetworkMonitor:
             return
 
         request_id = params.get("requestId", "")
+        req_headers = request.get("headers", {}) or {}
         api = ApiRequest(
             url=url,
             method=request.get("method", "GET"),
             resource_type=resource_type,
+            post_data=str(request.get("postData", "") or "")[:500],
+            request_content_type=str(
+                req_headers.get("Content-Type") or req_headers.get("content-type") or ""
+            ),
         )
         self._pending[request_id] = api
 
@@ -131,10 +159,25 @@ class NetworkMonitor:
         """Return only requests that returned JSON responses."""
         return [r for r in self._requests if r.has_json_response]
 
+    def mark_reported(self) -> None:
+        """Remember how many requests the model has already been shown."""
+        self._reported_count = len(self._requests)
+
+    def unreported_interesting_count(self) -> int:
+        """JSON/POST calls captured since the last report — data-loading XHRs
+        (the schedule/booking class) fire on interaction, after the navigate-
+        time snapshot the model saw."""
+        skip = min(self._reported_count, len(self._requests))
+        return sum(
+            1 for i, r in enumerate(self._requests)
+            if i >= skip and (r.has_json_response or r.method != "GET")
+        )
+
     def clear(self) -> None:
         """Clear captured requests."""
         self._requests.clear()
         self._pending.clear()
+        self._reported_count = 0
 
 
 # Module-level singleton

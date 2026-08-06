@@ -189,6 +189,17 @@ async def browser_observe(params: BrowserObserveParams) -> CapabilityResult:
         if overlay_warning:
             header += overlay_warning
 
+        # Surface data APIs captured since the model last saw a report — the
+        # schedule/booking XHRs fire on interaction, and replaying them beats
+        # clicking on (hybrid API agents: arXiv:2410.16464).
+        from rune.capabilities.browser.network import get_network_monitor, hybrid_api_enabled
+        _new_apis = get_network_monitor().unreported_interesting_count()
+        if hybrid_api_enabled() and _new_apis > 0:
+            header += (
+                f"\n\U0001f4e1 {_new_apis} data API call(s) captured \u2014 "
+                "browser_discover_apis lists replayable web_fetch recipes."
+            )
+
         history_prefix = _compress_observe_history(title, len(elements))
 
         return CapabilityResult(
@@ -414,6 +425,19 @@ async def browser_act(params: BrowserActParams) -> CapabilityResult:
         if loop_warning:
             parts.append(loop_warning)
 
+        # Data-loading XHRs (the schedule/booking class) fire on interaction —
+        # exactly after clicks like this one. Surface the catch so the model
+        # can switch to the API path instead of more clicking.
+        from rune.capabilities.browser.network import get_network_monitor, hybrid_api_enabled
+        _monitor = get_network_monitor()
+        _new_apis = _monitor.unreported_interesting_count()
+        if hybrid_api_enabled() and _new_apis > 0:
+            parts.append(
+                f"\U0001f4e1 {_new_apis} new data API call(s) captured by this "
+                "interaction \u2014 call browser_discover_apis for replayable "
+                "web_fetch recipes (usually faster than clicking on)."
+            )
+
         return CapabilityResult(
             success=True,
             output="\n".join(parts),
@@ -604,12 +628,28 @@ async def browser_discover_apis(params: BrowserDiscoverApisParams) -> Capability
             metadata={"count": 0},
         )
 
-    lines = [f"Discovered {len(apis)} API endpoint(s):"]
-    for api in apis:
+    from rune.capabilities.browser.network import format_api_recipe, hybrid_api_enabled
+
+    # Data-carrying calls first: JSON responses, then POSTs (booking/schedule
+    # endpoints), then the rest — bounded so the recipe list stays cheap.
+    ranked = sorted(
+        apis, key=lambda a: (not a.has_json_response, a.method == "GET"),
+    )[:8]
+    lines = [f"Discovered {len(apis)} API endpoint(s) (top {len(ranked)} shown):"]
+    for api in ranked:
         json_tag = " [JSON]" if api.has_json_response else ""
         lines.append(f"  {api.method} {api.url} [{api.status}]{json_tag}")
+        if hybrid_api_enabled():
+            lines.append(f"    replay: {format_api_recipe(api)}")
     lines.append("")
-    lines.append("Use web_fetch(url=...) to call these APIs directly.")
+    lines.append(
+        "Replay these with web_fetch instead of clicking through the UI — "
+        "include method/body exactly as shown for POST endpoints. If the JSON "
+        "response is huge, add jsonFilter='<branch/product keyword>'."
+        if hybrid_api_enabled()
+        else "Use web_fetch(url=...) to call these APIs directly."
+    )
+    monitor.mark_reported()
 
     return CapabilityResult(
         success=True,
