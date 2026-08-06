@@ -448,8 +448,9 @@ def create_app() -> Any:
             # -- wire event callbacks ------------------------------------
 
             _run_start_time = time.monotonic()
-            # History records only the last step's text so intermediate
-            # commentary doesn't get replayed as the answer.
+            # Marks where the final step's text begins in `collected`. Both the
+            # user-facing answer and the recorded history slice from here, so a
+            # multi-pass run's intermediate commentary is never replayed.
             _step_text_start = [0]
 
             async def _on_step(step: int) -> None:
@@ -559,14 +560,18 @@ def create_app() -> Any:
                 context={"workspace_root": agent_ctx.workspace_root},
                 message_history=agent_ctx.messages if agent_ctx.messages else None,
             )
-            answer = "".join(collected)
+            # Full transcript feeds memory extraction; the user-facing answer is
+            # the LAST step's text only — a multi-pass run (e.g. after context
+            # compaction) otherwise concatenates every pass's narration and the
+            # final message shows duplicated summaries.
+            full_text = "".join(collected)
+            answer = "".join(collected[_step_text_start[0]:]) or full_text
             duration_ms = int((time.monotonic() - _run_start_time) * 1000)
 
             # 4b. Record the assistant turn for the next message's context.
             if conv_manager is not None and conv_id:
-                last_step_text = "".join(collected[_step_text_start[0]:]) or answer
                 await conv_wiring.record_assistant_turn(
-                    conv_manager, conv_id, loop, last_step_text,
+                    conv_manager, conv_id, loop, answer,
                     reason=trace.reason or "",
                 )
 
@@ -575,7 +580,7 @@ def create_app() -> Any:
                 await post_process_agent_result(PostProcessInput(
                     context=agent_ctx,
                     success=trace.reason == "completed",
-                    answer=answer,
+                    answer=full_text,
                     duration_ms=duration_ms,
                 ))
             except Exception as exc:
@@ -783,7 +788,10 @@ def create_app() -> Any:
                 yield json_encode(evt) + "\n"
 
             trace = run_task.result()
-            answer = "".join(collected)
+            # Same rule as the SSE path: memory sees the full transcript, the
+            # user-facing answer is the last step's text (multi-pass dedup).
+            full_text = "".join(collected)
+            answer = "".join(collected[_step_text_start[0]:]) or full_text
             duration_ms = int((time.monotonic() - _run_start_time) * 1000)
 
             # Post-process (memory persistence)
@@ -791,7 +799,7 @@ def create_app() -> Any:
                 await post_process_agent_result(PostProcessInput(
                     context=agent_ctx,
                     success=trace.reason == "completed",
-                    answer=answer,
+                    answer=full_text,
                     duration_ms=duration_ms,
                 ))
             except Exception as exc:
