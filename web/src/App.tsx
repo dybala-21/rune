@@ -15,17 +15,15 @@ import { WorkbenchPanel } from './components/WorkbenchPanel';
 import { CommandK, type Command } from './components/CommandK';
 import { WorkspaceChip } from './components/WorkspaceChip';
 import { InlineWorkspacePicker } from './components/InlineWorkspacePicker';
-import { normalizeToolName, isBashToolName, inferWorkPhase, inferActivityMode, computeRunVerdict } from './utils/tooling';
+import { normalizeToolName, isCodingToolName, inferWorkPhase, inferActivityMode, computeRunVerdict } from './utils/tooling';
 import { fetchConfig, fetchSessions, type ConfigInfo, type SessionInfo } from './api';
 
 type SidebarTab = 'chats' | 'settings';
 
 // Tools that mean the agent is working in a folder — the signal to ask for a
 // workspace if none is pinned (zero false positives, unlike text guessing).
-const WORKSPACE_TOOLS = new Set(['file.read', 'file.write', 'file.edit', 'file.delete', 'code.analyze']);
-
 function isWorkspaceTool(name: string): boolean {
-  return WORKSPACE_TOOLS.has(name) || isBashToolName(name);
+  return isCodingToolName(name) || name === 'code.analyze';
 }
 
 export function App() {
@@ -50,6 +48,11 @@ export function App() {
 
   const isViewingHistory = history.viewingSessionId !== null;
 
+  const touchedWorkspace = useMemo(
+    () => agent.toolCalls.some(tc => isWorkspaceTool(normalizeToolName(tc.toolName))),
+    [agent.toolCalls],
+  );
+
   // Derive current tool activity for StatusBar
   const currentActivity = useMemo(() => {
     if (agent.state !== 'running' || agent.toolCalls.length === 0) return null;
@@ -60,7 +63,7 @@ export function App() {
     if (name === 'file.read') return 'Reading files';
     if (name === 'file.edit') return 'Editing code';
     if (name === 'file.write') return 'Writing files';
-    if (isBashToolName(name)) return 'Running command';
+    if (name === 'bash') return 'Running command';
     if (name.startsWith('browser.')) return 'Browsing';
     if (name === 'web.search') return 'Searching web';
     if (name === 'web.fetch') return 'Fetching page';
@@ -117,15 +120,16 @@ export function App() {
       setWorkbenchDismissed(false);
       return;
     }
+    if (workbenchOpen || workbenchDismissed) return;
     // Open once real work is visible: edits/commands for coding runs, or a
     // research-shaped run (searches/pages) that never touches files.
-    if (!workbenchDismissed && (
+    if (
       inferWorkPhase(agent.toolCalls) !== 'analyzing'
       || inferActivityMode(agent.toolCalls) === 'research'
-    )) {
+    ) {
       setWorkbenchOpen(true);
     }
-  }, [agent.toolCalls, isViewingHistory, workbenchDismissed]);
+  }, [agent.toolCalls, isViewingHistory, workbenchOpen, workbenchDismissed]);
 
   // ⌘K opens the palette; ⌘J toggles the workbench; Esc aborts a live run
   // (the composer is blurred while running, so it can't catch Esc itself).
@@ -544,9 +548,7 @@ export function App() {
                 streamFooter={
                   /* First coding activity with no pinned workspace → ask in
                      the stream. The picker self-hides once a folder is set. */
-                  !isViewingHistory && agent.toolCalls.some(
-                    tc => isWorkspaceTool(normalizeToolName(tc.toolName)),
-                  ) ? <InlineWorkspacePicker /> : null
+                  !isViewingHistory && touchedWorkspace ? <InlineWorkspacePicker /> : null
                 }
               />
 

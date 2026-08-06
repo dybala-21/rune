@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { SseEventType } from '../types';
+import { SSE_EVENT_TYPES, type SseEventType } from '../types';
 import { ensureWebAuth, resetWebAuth, setClientId as setApiClientId } from '../api';
 
 export interface SseConnection {
@@ -53,17 +53,9 @@ export function useSSE(): SseConnection {
         } catch { /* ignore */ }
       });
 
-      // Register forwarding for all event types
-      const eventTypes: SseEventType[] = [
-        'agent_start', 'agent_complete', 'agent_error', 'agent_aborted',
-        'step_start', 'thinking', 'tool_call', 'tool_result', 'text_delta',
-        'approval_request', 'question', 'context_compaction', 'delegate_event',
-        'command_result', 'goal_iteration',
-        'orchestration_started', 'orchestration_task_progress',
-        'orchestration_task_retry', 'orchestration_completed',
-      ];
-
-      for (const eventType of eventTypes) {
+      // Register forwarding for every event type ('connected' is handled
+      // separately above with its own auth bookkeeping).
+      for (const eventType of SSE_EVENT_TYPES.filter(e => e !== 'connected')) {
         source.addEventListener(eventType, (e) => {
           try {
             const data = JSON.parse((e as MessageEvent).data);

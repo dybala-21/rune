@@ -1,6 +1,6 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ActivitySummary, OrchestrationState, StepInfo, ToolCall, TrustInfo } from '../types';
-import { normalizeToolName, isBashToolName, inferWorkPhase, inferActivityMode, computeRunVerdict, type WorkPhase } from '../utils/tooling';
+import { normalizeToolName, isCodingToolName, argString, inferWorkPhase, inferActivityMode, computeRunVerdict, type WorkPhase } from '../utils/tooling';
 import { PixelWolf, type WolfState } from './PixelWolf';
 import { fetchWorkspaceDiff, readWorkspaceFile } from '../api';
 import { TerminalPane } from './TerminalPane';
@@ -36,12 +36,6 @@ const PHASE_LABEL: Record<WorkPhase, string> = {
   verifying: 'verifying',
 };
 
-const CODING_FILE_TOOLS = new Set(['file.read', 'file.write', 'file.edit', 'file.delete']);
-
-function isCodingTool(name: string): boolean {
-  return CODING_FILE_TOOLS.has(name) || isBashToolName(name);
-}
-
 function fileVerb(name: string): string {
   switch (name) {
     case 'file.read': return 'read';
@@ -50,14 +44,6 @@ function fileVerb(name: string): string {
     case 'file.delete': return 'delete';
     default: return name;
   }
-}
-
-function argString(args: Record<string, unknown>, ...keys: string[]): string | null {
-  for (const k of keys) {
-    const v = args[k];
-    if (typeof v === 'string' && v.trim()) return v;
-  }
-  return null;
 }
 
 const DIFF_MAX_LINES = 6;
@@ -108,7 +94,7 @@ const CommandLine = memo(function CommandLine({ tc, onOpenFile }: { tc: ToolCall
   const name = normalizeToolName(tc.toolName);
   const pending = tc.result === undefined;
   const ok = tc.success !== false;
-  const isBash = isBashToolName(name);
+  const isBash = name === 'bash';
   const target = isBash
     ? argString(tc.args, 'command', 'cmd', 'script')
     : argString(tc.args, 'path', 'file_path', 'file', 'target');
@@ -181,15 +167,46 @@ function formatElapsed(ms: number): string {
   return `${Math.floor(s / 60)}m${s % 60}s`;
 }
 
+// Leaf component owns the 1s tick so the timer re-renders one text node, not
+// the whole panel (which would re-derive phase/mode/coding every second).
+function Elapsed({ startedAt }: { startedAt: number }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  return (
+    <span style={{
+      fontFamily: 'var(--font-mono)',
+      fontSize: 11,
+      color: 'var(--warning)',
+      fontVariantNumeric: 'tabular-nums',
+    }}>
+      {formatElapsed(now - startedAt)}
+    </span>
+  );
+}
+
 type BenchTab = 'progress' | 'activity' | 'diff' | 'file' | 'terminal';
+
+const TABS: Array<[BenchTab, string]> = [
+  ['progress', 'Progress'],
+  ['activity', 'Activity'],
+  ['diff', 'Diff'],
+  ['file', 'File'],
+  ['terminal', 'Terminal'],
+];
 
 export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, currentStep = null, orchestration = null, awaiting = null, connected = true, onClose }: WorkbenchPanelProps) {
   // Same run-verdict rule as the status pip and chat card (shared helper), so
   // the surfaces never disagree. null → no verdict to show yet.
   const verdictOk = computeRunVerdict(trust, activitySummary);
-  const phase = inferWorkPhase(toolCalls);
-  const mode = inferActivityMode(toolCalls);
-  const coding = toolCalls.filter(tc => isCodingTool(normalizeToolName(tc.toolName)));
+  const phase = useMemo(() => inferWorkPhase(toolCalls), [toolCalls]);
+  const mode = useMemo(() => inferActivityMode(toolCalls), [toolCalls]);
+  const coding = useMemo(
+    () => toolCalls.filter(tc => isCodingToolName(normalizeToolName(tc.toolName))),
+    [toolCalls],
+  );
 
   const [tab, setTab] = useState<BenchTab>('progress');
   const [diffText, setDiffText] = useState('');
@@ -244,34 +261,23 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
     if (el) el.scrollTop = el.scrollHeight;
   }, [coding.length, isRunning]);
 
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!isRunning) return;
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, [isRunning]);
   const startedAt = toolCalls.length > 0 ? toolCalls[0].timestamp : null;
-  const elapsed = isRunning && startedAt ? formatElapsed(now - startedAt) : null;
 
   let petState: WolfState = 'idle';
   if (isRunning) petState = phase === 'verifying' ? 'thinking' : 'working';
   else if (verdictOk !== null) petState = verdictOk ? 'passed' : 'failed';
 
   const hasCheck = Boolean(trust?.evidenceGate?.hasCheck);
-  const footText = awaiting
-    ? 'waiting for you'
+  // One cascade for the footer so text and color can never disagree.
+  const foot = awaiting
+    ? { text: 'waiting for you', color: 'var(--warning)' }
     : isRunning
-      ? `${PHASE_LABEL[phase]}…`
-      : verdictOk !== null
-        ? verdictOk ? (hasCheck ? 'verified' : 'completed') : 'not verified'
-        : 'ready';
-  const footColor = awaiting
-    ? 'var(--warning)'
-    : isRunning
-      ? 'var(--warning)'
-      : verdictOk !== null
-        ? verdictOk ? 'var(--success)' : 'var(--warning)'
-        : 'var(--text-muted)';
+      ? { text: `${PHASE_LABEL[phase]}…`, color: 'var(--warning)' }
+      : verdictOk === null
+        ? { text: 'ready', color: 'var(--text-muted)' }
+        : verdictOk
+          ? { text: hasCheck ? 'verified' : 'completed', color: 'var(--success)' }
+          : { text: 'not verified', color: 'var(--warning)' };
 
   return (
     <aside style={{
@@ -305,16 +311,7 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
         }}>
           {PHASE_LABEL[phase]}
         </span>
-        {elapsed && (
-          <span style={{
-            fontFamily: 'var(--font-mono)',
-            fontSize: 11,
-            color: 'var(--warning)',
-            fontVariantNumeric: 'tabular-nums',
-          }}>
-            {elapsed}
-          </span>
-        )}
+        {isRunning && startedAt !== null && <Elapsed startedAt={startedAt} />}
         <button
           onClick={onClose}
           title="Collapse workbench (⌘J)"
@@ -339,13 +336,7 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
         display: 'flex', gap: 2, padding: '6px 10px 0',
         borderBottom: '1px solid var(--border)',
       }}>
-        {([
-          ['progress', 'Progress'],
-          ['activity', 'Activity'],
-          ...(showDiffTab ? [['diff', 'Diff']] as const : []),
-          ['file', 'File'],
-          ['terminal', 'Terminal'],
-        ] as ReadonlyArray<readonly [BenchTab, string]>).map(([key, label]) => (
+        {TABS.filter(([key]) => key !== 'diff' || showDiffTab).map(([key, label]) => (
           <button
             key={key}
             type="button"
@@ -412,6 +403,7 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
       {tab === 'progress' && (
         <ProgressPane
           toolCalls={toolCalls}
+          mode={mode}
           isRunning={isRunning}
           currentStep={currentStep}
           trust={trust}
@@ -545,7 +537,7 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
         fontSize: 11,
         color: 'var(--text-muted)',
       }}>
-        <span style={{ color: footColor }}>{footText}</span>
+        <span style={{ color: foot.color }}>{foot.text}</span>
         {activitySummary && (
           <span>
             {activitySummary.filesWritten > 0 && `${activitySummary.filesWritten} edited  `}

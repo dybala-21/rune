@@ -3,17 +3,12 @@
 from rune.agent.loop import _cap_handoff_facts
 
 
-class _FakeResult:
-    def __init__(self, messages):
-        self._messages = messages
-
-
 def _call(name, args):
     return {"function": {"name": name, "arguments": args}}
 
 
 def test_handoff_pairs_calls_with_results_in_order():
-    r = _FakeResult([
+    r = [
         {"role": "user", "content": "goal"},
         {"role": "assistant", "tool_calls": [
             _call("web_search", '{"query": "megabox songdo"}'),
@@ -21,7 +16,7 @@ def test_handoff_pairs_calls_with_results_in_order():
         ]},
         {"role": "tool", "content": "Top results: ..."},
         {"role": "tool", "content": "Error: dynamic page, empty shell"},
-    ])
+    ]
     out = _cap_handoff_facts(r)
     lines = out.split("\n")
     assert lines[0].startswith('- web_search({"query": "megabox songdo"}) → ok: Top results')
@@ -29,9 +24,9 @@ def test_handoff_pairs_calls_with_results_in_order():
 
 
 def test_handoff_marks_calls_cut_off_without_results():
-    r = _FakeResult([
+    r = [
         {"role": "assistant", "tool_calls": [_call("browser_navigate", "{}")]},
-    ])
+    ]
     out = _cap_handoff_facts(r)
     assert out == "- browser_navigate({}) → (cut off before result)"
 
@@ -41,24 +36,24 @@ def test_handoff_bounds_size():
     for i in range(40):
         msgs.append({"role": "assistant", "tool_calls": [_call("web_search", f'{{"q": "{i}"}}' + "x" * 300)]})
         msgs.append({"role": "tool", "content": "r" * 500})
-    out = _cap_handoff_facts(_FakeResult(msgs))
+    out = _cap_handoff_facts(msgs)
     assert len(out) <= 2000
     assert len(out.split("\n")) <= 15
 
 
 def test_handoff_never_includes_raw_trajectory_text():
     # Assistant narration (the trajectory) must not cross the boundary.
-    r = _FakeResult([
+    r = [
         {"role": "assistant", "content": "I will now try the official site...",
          "tool_calls": [_call("web_fetch", "{}")]},
         {"role": "tool", "content": "shell html"},
         {"role": "assistant", "content": "Apologies, I could not retrieve it."},
-    ])
+    ]
     out = _cap_handoff_facts(r)
     assert "I will now" not in out
     assert "Apologies" not in out
 
 
 def test_handoff_empty_transcript():
-    assert _cap_handoff_facts(_FakeResult([])) == ""
-    assert _cap_handoff_facts(object()) == ""
+    assert _cap_handoff_facts([]) == ""
+    assert _cap_handoff_facts([None, "junk", 42]) == ""

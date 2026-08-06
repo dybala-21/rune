@@ -9,9 +9,13 @@ import type {
 import {
   normalizeToolName,
   isBrowserToolName,
-  isBashToolName,
-  inferActivityMode,
   computeRunVerdict,
+  passedChecks,
+  argString,
+  truncate,
+  basename,
+  hostOf,
+  type ActivityMode,
 } from '../utils/tooling';
 
 /**
@@ -25,6 +29,8 @@ import {
 
 interface ProgressPaneProps {
   toolCalls: ToolCall[];
+  /** Computed once by WorkbenchPanel and shared with the tab bar. */
+  mode: ActivityMode;
   isRunning: boolean;
   currentStep: StepInfo | null;
   trust?: TrustInfo | null;
@@ -33,31 +39,6 @@ interface ProgressPaneProps {
   /** The agent is blocked on the user — takes priority over every other band. */
   awaiting?: 'approval' | 'question' | null;
   onOpenFile?: (path: string) => void;
-}
-
-function argString(args: Record<string, unknown>, ...keys: string[]): string | null {
-  for (const k of keys) {
-    const v = args[k];
-    if (typeof v === 'string' && v.trim()) return v;
-  }
-  return null;
-}
-
-function basename(path: string): string {
-  const parts = path.replace(/\/+$/, '').split('/');
-  return parts[parts.length - 1] || path;
-}
-
-function hostOf(url: string): string {
-  try {
-    return new URL(url).host || url;
-  } catch {
-    return url;
-  }
-}
-
-function truncate(text: string, max: number): string {
-  return text.length > max ? text.slice(0, max) + '…' : text;
 }
 
 /** Last two path segments — enough to identify a file without the noise of a
@@ -71,11 +52,11 @@ function shortPath(path: string): string {
 function callLabel(tc: ToolCall): string {
   const name = normalizeToolName(tc.toolName);
   const path = argString(tc.args, 'path', 'file_path', 'file', 'target');
-  if (isBashToolName(name)) {
-    const cmd = argString(tc.args, 'command', 'cmd', 'script');
-    return cmd ? `run ${truncate(cmd, 40)}` : 'run command';
-  }
   switch (name) {
+    case 'bash': {
+      const cmd = argString(tc.args, 'command', 'cmd', 'script');
+      return cmd ? `run ${truncate(cmd, 40)}` : 'run command';
+    }
     case 'file.read': return path ? `read ${basename(path)}` : 'read file';
     case 'file.write': return path ? `write ${basename(path)}` : 'write file';
     case 'file.edit': return path ? `edit ${basename(path)}` : 'edit file';
@@ -100,30 +81,80 @@ function callLabel(tc: ToolCall): string {
 
 interface StepGroup {
   step: number;
-  calls: ToolCall[];
+  summary: string;
+  failedCount: number;
 }
 
-function groupBySteps(toolCalls: ToolCall[]): StepGroup[] {
-  const groups: StepGroup[] = [];
+interface Derived {
+  groups: StepGroup[];
+  /** path → verbs used on it, in first-touch order */
+  files: Array<[string, string[]]>;
+  queries: string[];
+  /** host+path → {sample url, hit count} — pagination collapses to ×N */
+  pages: Array<[string, { url: string; count: number }]>;
+  /** what the agent is doing right now (newest pending, else newest call) */
+  nowLabel: string | null;
+}
+
+/** Everything the pane renders, derived in a single pass over the calls. */
+function derive(toolCalls: ToolCall[]): Derived {
+  const groups: Array<StepGroup & { labels: Set<string>; extra: number }> = [];
+  const files = new Map<string, Set<string>>();
+  const queries: string[] = [];
+  const pages = new Map<string, { url: string; count: number }>();
+  let pendingLabel: string | null = null;
   for (const tc of toolCalls) {
-    const step = tc.step ?? 0;
-    const last = groups[groups.length - 1];
-    if (last && last.step === step) last.calls.push(tc);
-    else groups.push({ step, calls: [tc] });
-  }
-  return groups;
-}
+    const label = callLabel(tc);
+    if (tc.result === undefined) pendingLabel = label;
 
-/** Condense a step's calls to at most two labels plus a "+n" tail. */
-function stepSummary(calls: ToolCall[]): string {
-  const labels: string[] = [];
-  for (const tc of calls) {
-    const l = callLabel(tc);
-    if (!labels.includes(l)) labels.push(l);
+    const step = tc.step ?? 0;
+    let g = groups[groups.length - 1];
+    if (!g || g.step !== step) {
+      g = { step, summary: '', failedCount: 0, labels: new Set(), extra: 0 };
+      groups.push(g);
+    }
+    if (!g.labels.has(label)) {
+      if (g.labels.size < 2) g.labels.add(label);
+      else g.extra++;
+    }
+    if (tc.success === false) g.failedCount++;
+
+    const name = normalizeToolName(tc.toolName);
+    if (name.startsWith('file.')) {
+      const path = argString(tc.args, 'path', 'file_path', 'file', 'target');
+      if (path) {
+        if (!files.has(path)) files.set(path, new Set());
+        files.get(path)!.add(name.replace('file.', ''));
+      }
+    } else if (name === 'web.search') {
+      const q = argString(tc.args, 'query', 'q');
+      if (q && !queries.includes(q)) queries.push(q);
+    } else if (name === 'web.fetch' || isBrowserToolName(name)) {
+      const url = argString(tc.args, 'url');
+      if (url) {
+        let key = url;
+        try {
+          const u = new URL(url);
+          key = u.host + u.pathname;
+        } catch { /* non-URL string: group by the raw value */ }
+        const entry = pages.get(key);
+        if (entry) entry.count += 1;
+        else pages.set(key, { url, count: 1 });
+      }
+    }
   }
-  const shown = labels.slice(0, 2).join(' · ');
-  const extra = labels.length - 2;
-  return extra > 0 ? `${shown} +${extra}` : shown;
+  const last = toolCalls[toolCalls.length - 1];
+  return {
+    groups: groups.map(g => ({
+      step: g.step,
+      failedCount: g.failedCount,
+      summary: [...g.labels].join(' · ') + (g.extra > 0 ? ` +${g.extra}` : ''),
+    })),
+    files: [...files.entries()].map(([p, verbs]) => [p, [...verbs]]),
+    queries,
+    pages: [...pages.entries()],
+    nowLabel: pendingLabel ?? (last ? callLabel(last) : null),
+  };
 }
 
 type Glyph = 'done' | 'failed' | 'running' | 'pending';
@@ -162,11 +193,27 @@ function SectionTitle({ label, count }: { label: string; count?: number }) {
   );
 }
 
+const CAP_NOTE = 'stopped at tool budget';
+const CAP_DETAIL =
+  'The tool-round budget ran out — some planned steps never executed, so the answer may be incomplete.';
+
+/** One band shape for every terminal state, so the layout can't drift. */
+interface BandSpec {
+  color: string;
+  bg: string;
+  glyph: ReactNode;
+  title: string;
+  titleMono?: boolean;
+  note?: string;
+  details?: string[];
+  showEvidence?: boolean;
+}
+
 /**
  * The one-glance answer at the top of the pane. Blocked on the user: an amber
  * call to action. While running: what the agent is doing right now. Finished:
- * the run's verify-or-fail-honestly verdict as a full-width band, expandable
- * to the actual Evidence Gate output — the receipt, not just the claim.
+ * the run's verify-or-fail-honestly verdict, expandable to the actual
+ * Evidence Gate output — the receipt, not just the claim.
  */
 function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trust }: {
   isRunning: boolean;
@@ -178,217 +225,130 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
 }) {
   const [showEvidence, setShowEvidence] = useState(false);
   const evidence = trust?.evidenceGate?.lastEvidence?.trim() || null;
+  const capped = Boolean(trust?.budgetExhausted);
+  const passes = passedChecks(trust);
 
-  const evidenceDisclosure = evidence && (
-    <>
-      <button
-        type="button"
-        onClick={() => setShowEvidence(v => !v)}
-        style={{
-          alignSelf: 'flex-start',
-          background: 'none', border: 'none', padding: '0 0 0 21px', cursor: 'pointer',
-          color: 'var(--text-muted)', fontSize: 10.5, fontFamily: 'var(--font-mono)',
-        }}
-      >
-        {showEvidence ? '▾ hide evidence' : '▸ show evidence'}
-      </button>
-      {showEvidence && (
-        <pre style={{
-          margin: '2px 0 0 21px', padding: '6px 8px',
-          background: 'var(--bg-primary)', borderRadius: 6,
-          border: '1px solid var(--border-subtle, var(--border))',
-          color: 'var(--text-secondary, var(--text-primary))',
-          fontSize: 10.5, lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-          maxHeight: 140, overflow: 'auto',
-        }}>
-          {trust?.evidenceGate?.lastVerdict ? `verdict: ${trust.evidenceGate.lastVerdict}\n` : ''}{evidence}
-        </pre>
-      )}
-    </>
-  );
+  let spec: BandSpec | null = null;
+  if (awaiting) {
+    spec = {
+      color: 'var(--warning)', bg: 'var(--warning-subtle, var(--bg-secondary))',
+      glyph: <span style={{ color: 'var(--warning)' }}>◐</span>,
+      title: awaiting === 'approval' ? 'Waiting for your approval' : 'Waiting for your answer',
+      note: 'respond in the chat',
+    };
+  } else if (isRunning) {
+    spec = {
+      color: 'var(--border)', bg: 'var(--bg-secondary)',
+      glyph: <span className="spinner" style={{ width: 12, height: 12, flexShrink: 0 }} />,
+      title: nowLabel ?? 'working…',
+      titleMono: true,
+      note: stepNumber !== null ? `step ${stepNumber}` : undefined,
+    };
+  } else if (verdictOk === null) {
+    return null;
+  } else if (verdictOk && trust?.evidenceGate?.hasCheck) {
+    spec = {
+      color: 'var(--success)', bg: 'var(--success-subtle)',
+      glyph: <span style={{ color: 'var(--success)' }}>✓</span>,
+      title: 'Verified',
+      note: passes > 0 ? `${passes} checks passed` : undefined,
+      showEvidence: true,
+    };
+  } else if (verdictOk) {
+    // Completion is not verification — a run that finished without any
+    // Evidence Gate check gets a neutral band, amber when it was cut off
+    // at the tool budget (the answer may omit steps that never ran).
+    spec = {
+      color: capped ? 'var(--warning)' : 'var(--border)',
+      bg: capped ? 'var(--warning-subtle, var(--bg-secondary))' : 'var(--bg-secondary)',
+      glyph: <span style={{ color: capped ? 'var(--warning)' : 'var(--text-muted)' }}>✓</span>,
+      title: 'Completed',
+      note: capped ? CAP_NOTE : 'no verification checks ran',
+      details: capped ? [CAP_DETAIL] : undefined,
+    };
+  } else {
+    const honest = Boolean(trust && !trust.verified);
+    spec = {
+      color: honest ? 'var(--warning)' : 'var(--danger)',
+      bg: honest ? 'var(--warning-subtle, var(--danger-subtle))' : 'var(--danger-subtle)',
+      glyph: <span style={{ color: honest ? 'var(--warning)' : 'var(--danger)' }}>✗</span>,
+      title: honest ? 'Not verified — honest stop' : 'Failed',
+      details: [
+        ...(trust?.honestNote ? [trust.honestNote] : []),
+        ...(capped ? [CAP_DETAIL] : []),
+        ...(trust?.escalationHint ? [trust.escalationHint] : []),
+      ],
+      showEvidence: true,
+    };
+  }
 
-  const band = (color: string, bg: string, body: ReactNode) => (
+  return (
     <div style={{
       display: 'flex',
       flexDirection: 'column',
       gap: 3,
       padding: '9px 12px',
       borderRadius: 8,
-      border: `1px solid ${color}`,
-      background: bg,
+      border: `1px solid ${spec.color}`,
+      background: spec.bg,
     }}>
-      {body}
-    </div>
-  );
-
-  if (awaiting) {
-    return band('var(--warning)', 'var(--warning-subtle, var(--bg-secondary))', (
       <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-        <span style={{ color: 'var(--warning)' }}>◐</span>
-        <span style={{ color: 'var(--text-primary)', fontSize: 12.5, fontWeight: 600 }}>
-          {awaiting === 'approval' ? 'Waiting for your approval' : 'Waiting for your answer'}
-        </span>
-        <span style={{ color: 'var(--text-muted)', fontSize: 11, marginLeft: 'auto' }}>
-          respond in the chat
-        </span>
-      </div>
-    ));
-  }
-  if (isRunning) {
-    return band('var(--border)', 'var(--bg-secondary)', (
-      <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-        <span className="spinner" style={{ width: 12, height: 12, flexShrink: 0 }} />
+        {spec.glyph}
         <span style={{
-          color: 'var(--text-primary)', fontSize: 12.5, flex: 1,
-          fontFamily: 'var(--font-mono)', wordBreak: 'break-word',
+          color: 'var(--text-primary)', flex: 1, wordBreak: 'break-word',
+          fontSize: 12.5,
+          fontWeight: spec.titleMono ? undefined : 600,
+          fontFamily: spec.titleMono ? 'var(--font-mono)' : undefined,
         }}>
-          {nowLabel ?? 'working…'}
+          {spec.title}
         </span>
-        {stepNumber !== null && (
-          <span style={{ color: 'var(--text-muted)', fontSize: 10.5, flexShrink: 0 }}>
-            step {stepNumber}
+        {spec.note && (
+          <span style={{ color: 'var(--text-muted)', fontSize: 11, flexShrink: 0 }}>
+            {spec.note}
           </span>
         )}
       </div>
-    ));
-  }
-  if (verdictOk === null) return null;
-  if (verdictOk) {
-    // Green "Verified" is the claim that an Evidence Gate check actually ran
-    // and passed. A run that merely finished without any check gets a neutral
-    // band — completion is not verification. A cap-killed run turns the band
-    // amber: the answer may omit steps that never got to run.
-    if (!trust?.evidenceGate?.hasCheck) {
-      const capped = Boolean(trust?.budgetExhausted);
-      return band(
-        capped ? 'var(--warning)' : 'var(--border)',
-        capped ? 'var(--warning-subtle, var(--bg-secondary))' : 'var(--bg-secondary)',
-        (
-          <>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-              <span style={{ color: capped ? 'var(--warning)' : 'var(--text-muted)' }}>✓</span>
-              <span style={{ color: 'var(--text-primary)', fontSize: 12.5, fontWeight: 600 }}>
-                Completed
-              </span>
-              <span style={{ color: 'var(--text-muted)', fontSize: 11, marginLeft: 'auto' }}>
-                {capped ? 'stopped at tool budget' : 'no verification checks ran'}
-              </span>
-            </div>
-            {capped && (
-              <div style={{ color: 'var(--text-primary)', fontSize: 11.5, paddingLeft: 21 }}>
-                The tool-round budget ran out — some planned steps never executed,
-                so the answer may be incomplete.
-              </div>
-            )}
-          </>
-        ),
-      );
-    }
-    return band('var(--success)', 'var(--success-subtle)', (
-      <>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-          <span style={{ color: 'var(--success)' }}>✓</span>
-          <span style={{ color: 'var(--text-primary)', fontSize: 12.5, fontWeight: 600 }}>
-            Verified
-          </span>
-          {(trust.evidenceGate.verdictCounts?.pass ?? 0) > 0 && (
-            <span style={{ color: 'var(--text-muted)', fontSize: 11, marginLeft: 'auto' }}>
-              {trust.evidenceGate.verdictCounts.pass} checks passed
-            </span>
+      {spec.details?.map(d => (
+        <div key={d} style={{ color: 'var(--text-primary)', fontSize: 11.5, paddingLeft: 21 }}>
+          {d}
+        </div>
+      ))}
+      {spec.showEvidence && evidence && (
+        <>
+          <button
+            type="button"
+            onClick={() => setShowEvidence(v => !v)}
+            style={{
+              alignSelf: 'flex-start',
+              background: 'none', border: 'none', padding: '0 0 0 21px', cursor: 'pointer',
+              color: 'var(--text-muted)', fontSize: 10.5, fontFamily: 'var(--font-mono)',
+            }}
+          >
+            {showEvidence ? '▾ hide evidence' : '▸ show evidence'}
+          </button>
+          {showEvidence && (
+            <pre style={{
+              margin: '2px 0 0 21px', padding: '6px 8px',
+              background: 'var(--bg-primary)', borderRadius: 6,
+              border: '1px solid var(--border-subtle, var(--border))',
+              color: 'var(--text-secondary, var(--text-primary))',
+              fontSize: 10.5, lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+              maxHeight: 140, overflow: 'auto',
+            }}>
+              {trust?.evidenceGate?.lastVerdict ? `verdict: ${trust.evidenceGate.lastVerdict}\n` : ''}{evidence}
+            </pre>
           )}
-        </div>
-        {evidenceDisclosure}
-      </>
-    ));
-  }
-  const honest = Boolean(trust && !trust.verified);
-  return band(
-    honest ? 'var(--warning)' : 'var(--danger)',
-    honest ? 'var(--warning-subtle, var(--danger-subtle))' : 'var(--danger-subtle)',
-    (
-      <>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-          <span style={{ color: honest ? 'var(--warning)' : 'var(--danger)' }}>✗</span>
-          <span style={{ color: 'var(--text-primary)', fontSize: 12.5, fontWeight: 600 }}>
-            {honest ? 'Not verified — honest stop' : 'Failed'}
-          </span>
-        </div>
-        {trust?.honestNote && (
-          <div style={{ color: 'var(--text-primary)', fontSize: 11.5, paddingLeft: 21 }}>
-            {trust.honestNote}
-          </div>
-        )}
-        {trust?.budgetExhausted && (
-          <div style={{ color: 'var(--text-muted)', fontSize: 11, paddingLeft: 21 }}>
-            stopped at tool budget — some planned steps never executed
-          </div>
-        )}
-        {trust?.escalationHint && (
-          <div style={{ color: 'var(--text-muted)', fontSize: 11, paddingLeft: 21 }}>
-            {trust.escalationHint}
-          </div>
-        )}
-        {evidenceDisclosure}
-      </>
-    ),
+        </>
+      )}
+    </div>
   );
 }
 
 export const ProgressPane = memo(function ProgressPane({
-  toolCalls, isRunning, currentStep, trust, activitySummary, orchestration, awaiting = null, onOpenFile,
+  toolCalls, mode, isRunning, currentStep, trust, activitySummary, orchestration, awaiting = null, onOpenFile,
 }: ProgressPaneProps) {
-  const mode = inferActivityMode(toolCalls);
-  const groups = useMemo(() => groupBySteps(toolCalls), [toolCalls]);
   const verdictOk = computeRunVerdict(trust, activitySummary);
-
-  // What the agent is doing right now: the newest still-pending call, falling
-  // back to the newest call of any state.
-  const nowLabel = useMemo(() => {
-    if (toolCalls.length === 0) return null;
-    const pending = [...toolCalls].reverse().find(tc => tc.result === undefined);
-    return callLabel(pending ?? toolCalls[toolCalls.length - 1]);
-  }, [toolCalls]);
-
-  // Files the run touched, with the verbs it used on them, in first-touch order.
-  const files = useMemo(() => {
-    const map = new Map<string, Set<string>>();
-    for (const tc of toolCalls) {
-      const name = normalizeToolName(tc.toolName);
-      if (!name.startsWith('file.')) continue;
-      const path = argString(tc.args, 'path', 'file_path', 'file', 'target');
-      if (!path) continue;
-      if (!map.has(path)) map.set(path, new Set());
-      map.get(path)!.add(name.replace('file.', ''));
-    }
-    return [...map.entries()];
-  }, [toolCalls]);
-
-  // Sources consulted: searches, and fetched/browsed pages grouped by
-  // host+path — paginated fetches (same page, different query string) collapse
-  // into one row with a ×N count instead of reading as duplicates.
-  const sources = useMemo(() => {
-    const queries: string[] = [];
-    const pages = new Map<string, { url: string; count: number }>();
-    for (const tc of toolCalls) {
-      const name = normalizeToolName(tc.toolName);
-      if (name === 'web.search') {
-        const q = argString(tc.args, 'query', 'q');
-        if (q && !queries.includes(q)) queries.push(q);
-      } else if (name === 'web.fetch' || isBrowserToolName(name)) {
-        const url = argString(tc.args, 'url');
-        if (!url) continue;
-        let key = url;
-        try {
-          const u = new URL(url);
-          key = u.host + u.pathname;
-        } catch { /* non-URL string: group by the raw value */ }
-        const entry = pages.get(key);
-        if (entry) entry.count += 1;
-        else pages.set(key, { url, count: 1 });
-      }
-    }
-    return { queries, pages: [...pages.entries()] };
-  }, [toolCalls]);
+  const { groups, files, queries, pages, nowLabel } = useMemo(() => derive(toolCalls), [toolCalls]);
 
   const listRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -486,7 +446,6 @@ export const ProgressPane = memo(function ProgressPane({
             // A failed call inside a step the run recovered from is an
             // annotation, not a verdict — ✗ is reserved for the step the run
             // actually died on (last step of a not-verified/failed run).
-            const failedCalls = g.calls.filter(tc => tc.success === false).length;
             const runEndedHere = isLast && !isRunning && awaiting === null && verdictOk === false;
             const kind: Glyph = live
               ? (isRunning ? 'running' : 'pending')
@@ -520,16 +479,21 @@ export const ProgressPane = memo(function ProgressPane({
                   fontFamily: 'var(--font-mono)',
                   fontSize: 11.5,
                 }}>
-                  {stepSummary(g.calls)}
+                  {g.summary}
                 </span>
-                {failedCalls > 0 && (
+                {g.failedCount > 0 && (
                   <span style={{ color: 'var(--warning)', fontSize: 10.5, flexShrink: 0 }}>
-                    {failedCalls} failed
+                    {g.failedCount} failed
                   </span>
                 )}
               </div>
             );
           })}
+        </div>
+      )}
+      {isRunning && currentStep && (
+        <div style={{ color: 'var(--text-muted)', fontSize: 10.5, marginTop: 2 }}>
+          step {currentStep.stepNumber} in progress
         </div>
       )}
 
@@ -559,22 +523,22 @@ export const ProgressPane = memo(function ProgressPane({
                 }}>{shortPath(path)}</span>
               )}
               <span style={{ color: 'var(--text-muted)', fontSize: 10.5, flexShrink: 0 }}>
-                {[...verbs].join(' · ')}
+                {verbs.join(' · ')}
               </span>
             </div>
           ))}
         </>
       )}
-      {(mode !== 'coding' && (sources.queries.length > 0 || sources.pages.length > 0)) && (
+      {(mode !== 'coding' && (queries.length > 0 || pages.length > 0)) && (
         <>
-          <SectionTitle label="Sources" count={sources.queries.length + sources.pages.length} />
-          {sources.queries.map(q => (
+          <SectionTitle label="Sources" count={queries.length + pages.length} />
+          {queries.map(q => (
             <div key={`q-${q}`} style={rowStyle}>
               <span style={{ color: 'var(--text-muted)', flexShrink: 0, fontSize: 10.5 }}>search</span>
               <span style={{ color: 'var(--text-primary)', flex: 1 }}>{truncate(q, 80)}</span>
             </div>
           ))}
-          {sources.pages.map(([key, { url, count }]) => (
+          {pages.map(([key, { url, count }]) => (
             <div key={`u-${key}`} style={rowStyle}>
               <span style={{ color: 'var(--text-muted)', flexShrink: 0, fontSize: 10.5 }}>page</span>
               <span style={{

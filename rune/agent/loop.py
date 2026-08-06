@@ -276,15 +276,15 @@ def _repo_scale_workspace(cwd: str = ".") -> bool:
         return False
 
 
-def _cap_handoff_facts(result: Any) -> str:
+def _cap_handoff_facts(msgs: list[Any]) -> str:
     """Compact 'what was tried' facts from a cap-killed step's transcript.
 
     The retry starts from the pristine seed (a contaminated-context retry
     multiplies the per-step error rate ~7x, arXiv:2605.08563), so only
     tool/target/outcome lines cross the boundary — never the trajectory.
     """
-    msgs = getattr(result, "_messages", None) or []
     pending: list[str] = []
+    consumed = 0
     lines: list[str] = []
     for m in msgs:
         if not isinstance(m, dict):
@@ -296,11 +296,15 @@ def _cap_handoff_facts(result: Any) -> str:
                 arg_str = args if isinstance(args, str) else str(args)
                 pending.append(f"{fn.get('name', '?')}({arg_str[:110]})")
         elif m.get("role") == "tool":
-            label = pending.pop(0) if pending else "?"
-            content = " ".join(str(m.get("content", "")).split())
+            label = pending[consumed] if consumed < len(pending) else "?"
+            consumed += 1
+            # Slice before normalizing — tool outputs can be huge.
+            content = " ".join(str(m.get("content", ""))[:500].split())
             failed = content.lower().startswith(("error", "failed", "traceback"))
             lines.append(f"- {label} → {'FAILED: ' if failed else 'ok: '}{content[:140]}")
-    lines.extend(f"- {label} → (cut off before result)" for label in pending)
+    lines.extend(
+        f"- {label} → (cut off before result)" for label in pending[consumed:]
+    )
     return "\n".join(lines[:15])[:2000]
 
 
@@ -310,8 +314,14 @@ def _compute_tool_rounds(
     advisor_enabled: bool,
     fast_lane: bool = False,
     repo_fix: bool = False,
+    cap_retry: bool = False,
 ) -> int:
-    """Tool-round budget by task complexity and executor tier."""
+    """Tool-round budget by task complexity and executor tier.
+
+    cap_retry: the run is retrying after a fast-lane cap death — browser-shaped
+    work (live web tasks average 7.3 actions, hard ones 11+, Mind2Web), so it
+    gets the complex budget.
+    """
     override = _env_int("RUNE_TOOL_ROUNDS")
     if override is not None:
         return override
@@ -332,7 +342,7 @@ def _compute_tool_rounds(
     # cap has to leave room to localize inside a multi-thousand-line module,
     # understand the mechanism, edit, install, and run the tests. Runs that
     # die at the cap die mid-diagnosis and ship a half-formed guess.
-    is_complex = getattr(classification, "is_complex_coding", False) or repo_fix
+    is_complex = getattr(classification, "is_complex_coding", False) or repo_fix or cap_retry
     # Per-turn tool-round budget. Token budget and max_iterations bound runaway.
     if repo_fix:
         base = 40
@@ -1922,10 +1932,18 @@ class NativeAgentLoop(EventEmitter):
         _pending_advice: PendingAdvice | None = None
         _step_tool_calls: list[str] = []
 
-        # Cap→upshift restarts from THIS pristine copy of the seeded history:
-        # the retry keeps the conversation context but must never inherit the
-        # cut-off trajectory (see _cap_handoff_facts for why).
-        _seed_messages: list[Any] = [dict(m) if isinstance(m, dict) else m for m in messages]
+        # Cap→upshift restarts from a pristine copy of the seeded history: the
+        # retry keeps the conversation context but must never inherit the
+        # cut-off trajectory (see _cap_handoff_facts for why). Dict copies,
+        # not aliases — the adapter mutates message dicts in place. Snapshot
+        # only when the path can actually fire.
+        _cap_upshift_enabled = (
+            _fast_lane_active and os.environ.get("RUNE_CAP_UPSHIFT", "1") != "0"
+        )
+        _seed_messages: list[Any] | None = (
+            [dict(m) if isinstance(m, dict) else m for m in messages]
+            if _cap_upshift_enabled else None
+        )
         _cap_upshift_pending = False
 
         for step in range(max_iterations):
@@ -1983,13 +2001,8 @@ class NativeAgentLoop(EventEmitter):
                     model,
                     advisor_service.enabled,
                     repo_fix=_repo_fix,
+                    cap_retry=_was_cap_trigger,
                 )
-                if _was_cap_trigger:
-                    # Cap-killed retries are browser-shaped work: live web
-                    # tasks average 7.3 actions and hard ones 11+ (Mind2Web),
-                    # on top of search rounds — the default lane budget was
-                    # measured to die clicks short of the goal.
-                    _tool_rounds = max(_tool_rounds, 24)
                 agent = LiteLLMAgent(
                     model=model,
                     system_prompt=system_prompt,
@@ -2326,14 +2339,14 @@ class NativeAgentLoop(EventEmitter):
                 # plus extracted facts, never the cut-off trajectory itself.
                 if (
                     _fast_lane_active
+                    and _seed_messages is not None
                     and getattr(result, "tool_budget_exhausted", False)
-                    and os.environ.get("RUNE_CAP_UPSHIFT", "1") != "0"
                 ):
                     _cap_upshift_pending = True
                     # The verdict belongs to the retry; it re-arms if the
                     # full lane caps again.
                     trace.tool_budget_exhausted = False
-                    handoff = _cap_handoff_facts(result)
+                    handoff = _cap_handoff_facts(result.all_messages())
                     messages = [dict(m) if isinstance(m, dict) else m for m in _seed_messages]
                     if handoff:
                         messages.append({

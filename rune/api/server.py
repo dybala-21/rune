@@ -25,6 +25,40 @@ from rune.utils.logger import get_logger
 log = get_logger(__name__)
 
 
+def split_answer(collected: list[str], last_step_start: int) -> tuple[str, str]:
+    """(full transcript, user-facing answer) for a finished run.
+
+    The answer is the LAST step's text only — a multi-pass run (e.g. after
+    context compaction) otherwise concatenates every pass's narration and the
+    final message shows duplicated summaries. Memory extraction still gets the
+    full transcript. One helper so the rule can't drift between the SSE,
+    NDJSON, and interrupted-stream paths.
+    """
+    full = "".join(collected)
+    return full, ("".join(collected[last_step_start:]) or full)
+
+
+async def _post_process(
+    agent_ctx: Any, trace: Any, full_text: str, duration_ms: int, tag: str,
+) -> None:
+    """Memory persistence for a finished run; never lets a failure escape."""
+    try:
+        # Local import mirrors the handlers' pattern (avoids an import cycle).
+        from rune.agent.agent_context import (
+            PostProcessInput,
+            post_process_agent_result,
+        )
+
+        await post_process_agent_result(PostProcessInput(
+            context=agent_ctx,
+            success=trace.reason == "completed",
+            answer=full_text,
+            duration_ms=duration_ms,
+        ))
+    except Exception as exc:
+        log.warning(f"{tag}_post_process_failed", error=str(exc)[:100])
+
+
 def build_trust_payload(trace: Any) -> dict[str, Any]:
     """The 'why did it say done' data for the app's trust card: whether the run
     was verified, the Evidence Gate summary, and — when it did NOT complete —
@@ -353,9 +387,7 @@ def create_app() -> Any:
         """
         try:
             from rune.agent.agent_context import (
-                PostProcessInput,
                 PrepareContextOptions,
-                post_process_agent_result,
                 prepare_agent_context,
             )
             from rune.agent.loop import NativeAgentLoop
@@ -557,7 +589,15 @@ def create_app() -> Any:
 
             await _broadcast(
                 "agent_start",
-                {"runId": run_id, "goal": agent_ctx.goal},
+                {
+                    "runId": run_id,
+                    # Display the goal as typed — agent_ctx.goal may carry
+                    # @-reference expansions (whole file bodies) the UI must
+                    # never echo. sessionId lets the originating tab skip the
+                    # "Goal:" line while other surfaces still show it.
+                    "goal": agent_ctx.original_goal or agent_ctx.goal,
+                    "sessionId": session_id,
+                },
             )
 
             # 4. Run with context + conversation history
@@ -566,12 +606,7 @@ def create_app() -> Any:
                 context={"workspace_root": agent_ctx.workspace_root},
                 message_history=agent_ctx.messages if agent_ctx.messages else None,
             )
-            # Full transcript feeds memory extraction; the user-facing answer is
-            # the LAST step's text only — a multi-pass run (e.g. after context
-            # compaction) otherwise concatenates every pass's narration and the
-            # final message shows duplicated summaries.
-            full_text = "".join(collected)
-            answer = "".join(collected[_step_text_start[0]:]) or full_text
+            full_text, answer = split_answer(collected, _step_text_start[0])
             duration_ms = int((time.monotonic() - _run_start_time) * 1000)
 
             # 4b. Record the assistant turn for the next message's context.
@@ -582,15 +617,7 @@ def create_app() -> Any:
                 )
 
             # 5. Post-process (memory persistence)
-            try:
-                await post_process_agent_result(PostProcessInput(
-                    context=agent_ctx,
-                    success=trace.reason == "completed",
-                    answer=full_text,
-                    duration_ms=duration_ms,
-                ))
-            except Exception as exc:
-                log.warning("web_post_process_failed", error=str(exc)[:100])
+            await _post_process(agent_ctx, trace, full_text, duration_ms, "web")
 
             await _broadcast(
                 "agent_complete",
@@ -633,9 +660,7 @@ def create_app() -> Any:
         _step_text_start = [0]
         try:
             from rune.agent.agent_context import (
-                PostProcessInput,
                 PrepareContextOptions,
-                post_process_agent_result,
                 prepare_agent_context,
             )
             from rune.agent.loop import NativeAgentLoop
@@ -666,7 +691,11 @@ def create_app() -> Any:
                 json_encode(
                     {
                         "event": "agent_start",
-                        "data": {"runId": run_id, "goal": agent_ctx.goal},
+                        "data": {
+                            "runId": run_id,
+                            "goal": agent_ctx.original_goal or agent_ctx.goal,
+                            "sessionId": session_id,
+                        },
                     }
                 )
                 + "\n"
@@ -794,22 +823,11 @@ def create_app() -> Any:
                 yield json_encode(evt) + "\n"
 
             trace = run_task.result()
-            # Same rule as the SSE path: memory sees the full transcript, the
-            # user-facing answer is the last step's text (multi-pass dedup).
-            full_text = "".join(collected)
-            answer = "".join(collected[_step_text_start[0]:]) or full_text
+            full_text, answer = split_answer(collected, _step_text_start[0])
             duration_ms = int((time.monotonic() - _run_start_time) * 1000)
 
             # Post-process (memory persistence)
-            try:
-                await post_process_agent_result(PostProcessInput(
-                    context=agent_ctx,
-                    success=trace.reason == "completed",
-                    answer=full_text,
-                    duration_ms=duration_ms,
-                ))
-            except Exception as exc:
-                log.warning("ndjson_post_process_failed", error=str(exc)[:100])
+            await _post_process(agent_ctx, trace, full_text, duration_ms, "ndjson")
 
             yield (
                 json_encode(
@@ -842,9 +860,7 @@ def create_app() -> Any:
             _active_loops.pop(run_id, None)
             # Awaits are fine during aclose(); yields are not.
             if conv_manager is not None and conv_id and loop is not None:
-                last_step_text = (
-                    "".join(collected[_step_text_start[0]:]) or "".join(collected)
-                )
+                _, last_step_text = split_answer(collected, _step_text_start[0])
                 from rune.api import conversation_wiring as conv_wiring
 
                 await conv_wiring.record_assistant_turn(

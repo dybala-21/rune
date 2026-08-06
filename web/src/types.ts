@@ -8,34 +8,44 @@ export interface TokenUsage {
   cacheCreation?: number;
 }
 
-export type SseEventType =
-  | 'connected'
-  | 'agent_start'
-  | 'agent_complete'
-  | 'agent_error'
-  | 'agent_aborted'
-  | 'step_start'
-  | 'thinking'
-  | 'tool_call'
-  | 'tool_result'
-  | 'text_delta'
-  | 'approval_request'
-  | 'question'
-  | 'context_compaction'
-  | 'delegate_event'
-  | 'command_result'
-  | 'goal_iteration'
-  | 'orchestration_started'
-  | 'orchestration_task_progress'
-  | 'orchestration_task_retry'
-  | 'orchestration_completed'
-  | 'suggestion_created'
-  | 'proactive_execution_started'
-  | 'proactive_execution_completed'
-  | 'autonomy_level_changed';
+/** The one list of subscribable SSE events — useSSE iterates it, the type
+    derives from it, so a new event can't be typed without being wired. */
+export const SSE_EVENT_TYPES = [
+  'connected',
+  'agent_start',
+  'agent_complete',
+  'agent_error',
+  'agent_aborted',
+  'step_start',
+  'thinking',
+  'tool_call',
+  'tool_result',
+  'text_delta',
+  'approval_request',
+  'question',
+  'context_compaction',
+  'delegate_event',
+  'command_result',
+  'goal_iteration',
+  'orchestration_started',
+  'orchestration_task_progress',
+  'orchestration_task_retry',
+  'orchestration_completed',
+  'suggestion_created',
+  'proactive_execution_started',
+  'proactive_execution_completed',
+  'autonomy_level_changed',
+] as const;
+
+export type SseEventType = typeof SSE_EVENT_TYPES[number];
 
 export interface ConnectedData { clientId: string }
-export interface AgentStartData { goal: string }
+export interface AgentStartData {
+  goal: string;
+  /** Conversation that started the run — lets the originating tab skip the
+      "Goal:" echo line while other surfaces still show it. */
+  sessionId?: string | null;
+}
 export interface TrustInfo {
   verified: boolean;
   reason: string;
@@ -178,18 +188,14 @@ export interface OrchestrationTask {
   role: string;
   success?: boolean;
   retries: number;
-  completedAt?: number;
 }
 
 /** 위임 실행 전체 상태 (진행 패널의 선행 체크리스트 데이터) */
 export interface OrchestrationState {
   description: string;
-  taskCount: number;
   completed: number;
   total: number;
   tasks: OrchestrationTask[];
-  done: boolean;
-  success?: boolean;
 }
 
 /** thinking 블록 (UI 표시용) */

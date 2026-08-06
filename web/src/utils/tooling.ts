@@ -1,7 +1,13 @@
 import type { ActivitySummary, ToolCall, TrustInfo } from '../types';
 
+/**
+ * Canonical tool name: wire names use underscores (`file_read`), and the shell
+ * tool ships as `bash_execute` — canonicalize the whole bash family to `bash`
+ * here so every consumer can compare against one name.
+ */
 export function normalizeToolName(name: string): string {
-  return name.replace(/_/g, '.');
+  const n = name.replace(/_/g, '.');
+  return n === 'bash' || n.startsWith('bash.') ? 'bash' : n;
 }
 
 export function isToolName(name: string, canonicalName: string): boolean {
@@ -12,10 +18,45 @@ export function isBrowserToolName(name: string): boolean {
   return normalizeToolName(name).startsWith('browser.');
 }
 
-/** The shell tool is `bash_execute` on the wire; match any bash-family name. */
-export function isBashToolName(name: string): boolean {
-  const n = normalizeToolName(name);
-  return n === 'bash' || n.startsWith('bash.');
+/** File-mutation + shell tools — the "working in a folder" signal. */
+export function isCodingToolName(normalized: string): boolean {
+  return normalized === 'file.read' || normalized === 'file.write'
+    || normalized === 'file.edit' || normalized === 'file.delete'
+    || normalized === 'bash';
+}
+
+/** First non-empty string arg among the given keys — the one arg-key priority
+    convention (`path`/`file_path`/… , `command`/`cmd`/…) shared by every
+    tool-label surface. */
+export function argString(args: Record<string, unknown>, ...keys: string[]): string | null {
+  for (const k of keys) {
+    const v = args[k];
+    if (typeof v === 'string' && v.trim()) return v;
+  }
+  return null;
+}
+
+export function truncate(text: string, max: number): string {
+  return text.length > max ? text.slice(0, max) + '…' : text;
+}
+
+export function basename(path: string): string {
+  const parts = path.replace(/\/+$/, '').split('/');
+  return parts[parts.length - 1] || path;
+}
+
+export function hostOf(url: string): string {
+  try {
+    return new URL(url).host || url;
+  } catch {
+    return url;
+  }
+}
+
+/** Evidence Gate pass count; older payloads used the `passed` key. */
+export function passedChecks(trust: TrustInfo | null | undefined): number {
+  const counts = trust?.evidenceGate?.verdictCounts;
+  return (counts?.pass ?? counts?.passed ?? 0);
 }
 
 export type WorkPhase = 'analyzing' | 'implementing' | 'verifying';
@@ -29,7 +70,7 @@ export function inferWorkPhase(toolCalls: ToolCall[]): WorkPhase {
     if (name === 'file.write' || name === 'file.edit' || name === 'file.delete') {
       hasWrites = true;
     }
-    if (hasWrites && isBashToolName(name)) {
+    if (hasWrites && name === 'bash') {
       hasVerification = true;
     }
   }
@@ -52,7 +93,7 @@ export function inferActivityMode(toolCalls: ToolCall[]): ActivityMode {
   let research = 0;
   for (const tc of toolCalls) {
     const name = normalizeToolName(tc.toolName);
-    if (name === 'file.write' || name === 'file.edit' || name === 'file.delete' || isBashToolName(name)) {
+    if (name === 'file.write' || name === 'file.edit' || name === 'file.delete' || name === 'bash') {
       coding++;
     } else if (name === 'web.search' || name === 'web.fetch' || isBrowserToolName(name)) {
       research++;
@@ -89,7 +130,7 @@ export function computeActivitySummary(
     totalToolCalls: toolCalls.length,
     filesRead: toolCalls.filter(tc => isToolName(tc.toolName, 'file.read')).length,
     filesWritten: toolCalls.filter(tc => isToolName(tc.toolName, 'file.write') || isToolName(tc.toolName, 'file.edit')).length,
-    bashExecutions: toolCalls.filter(tc => isBashToolName(tc.toolName)).length,
+    bashExecutions: toolCalls.filter(tc => isToolName(tc.toolName, 'bash')).length,
     webSearches: toolCalls.filter(tc => isToolName(tc.toolName, 'web.search') || isToolName(tc.toolName, 'web.fetch')).length,
     browserActions: toolCalls.filter(tc => isBrowserToolName(tc.toolName)).length,
     totalDurationMs,
