@@ -29,12 +29,34 @@ import type {
   DelegateEventData,
   CommandResultData,
   GoalIterationData,
+  OrchestrationStartedData,
+  OrchestrationTaskProgressData,
+  OrchestrationTaskRetryData,
+  OrchestrationCompletedData,
+  OrchestrationState,
+  OrchestrationTask,
   TrustInfo,
 } from '../types';
 
 let idCounter = 0;
 function nextId(): string {
   return `msg-${++idCounter}-${Date.now()}`;
+}
+
+/** Replace-or-append a delegated task by id — the one merge rule for every
+    orchestration event. */
+function upsertTask(
+  tasks: OrchestrationTask[],
+  taskId: string,
+  patch: Partial<OrchestrationTask>,
+): OrchestrationTask[] {
+  const idx = tasks.findIndex(t => t.taskId === taskId);
+  if (idx === -1) {
+    return [...tasks, { taskId, description: '', role: '', retries: 0, ...patch }];
+  }
+  const next = [...tasks];
+  next[idx] = { ...next[idx], ...patch };
+  return next;
 }
 
 const LIVE_STATE_STORAGE_KEY = 'rune:web:live-state:v1';
@@ -215,6 +237,9 @@ export function useAgent() {
   const [delegateEvents, setDelegateEvents] = useState<DelegateItem[]>(initialLiveState.delegateEvents);
   const [compactionEvents, setCompactionEvents] = useState<CompactionItem[]>(initialLiveState.compactionEvents);
   const [currentStepInfo, setCurrentStepInfo] = useState<StepInfo | null>(null);
+  const [orchestration, setOrchestration] = useState<OrchestrationState | null>(null);
+  // tool_call 핸들러가 스텝 번호를 동기적으로 읽어야 하므로 state와 별도로 ref 유지
+  const currentStepRef = useRef(0);
   const [savedDraft, setSavedDraft] = useState<SavedLiveDraftSummary>(
     summarizeSavedDraft(initialState.state, initialState.savedAt),
   );
@@ -339,12 +364,25 @@ export function useAgent() {
       setActivitySummary(null);
       setLastTrust(null);
       setCurrentStepInfo(null);
-      setMessages(prev => appendWithLimit(prev, {
-        id: nextId(),
-        role: 'system',
-        content: `Goal: ${data.goal}`,
-        timestamp: Date.now(),
-      }, MAX_MESSAGES));
+      setOrchestration(null);
+      currentStepRef.current = 0;
+      // "Goal:" marks runs that did NOT start from this chat (another surface,
+      // a proactive/scheduled run). Suppress by session identity when the
+      // server sends it; fall back to comparing against the user's last
+      // message for older payloads without a sessionId.
+      const ownRun = Boolean(data.sessionId) && data.sessionId === api.getLiveSessionId();
+      setMessages(prev => {
+        const lastUser = ownRun ? null : [...prev].reverse().find(m => m.role === 'user');
+        if (ownRun || (lastUser && lastUser.content.trim().startsWith(data.goal.trim()))) {
+          return prev;
+        }
+        return appendWithLimit(prev, {
+          id: nextId(),
+          role: 'system',
+          content: `Goal: ${data.goal}`,
+          timestamp: Date.now(),
+        }, MAX_MESSAGES);
+      });
     }));
 
     unsubs.push(sseOn('agent_complete', (raw) => {
@@ -478,6 +516,7 @@ export function useAgent() {
         toolName: data.toolName,
         args: data.args ?? {},
         timestamp: Date.now(),
+        step: currentStepRef.current,
       }, MAX_TOOL_CALLS));
     }));
 
@@ -529,7 +568,51 @@ export function useAgent() {
 
     unsubs.push(sseOn('step_start', (raw) => {
       const data = raw as StepStartData;
+      currentStepRef.current = data.stepNumber;
       setCurrentStepInfo({ stepNumber: data.stepNumber, tokens: data.tokens });
+    }));
+
+    unsubs.push(sseOn('orchestration_started', (raw) => {
+      const data = raw as OrchestrationStartedData;
+      setOrchestration({
+        description: data.description,
+        completed: 0,
+        total: data.taskCount,
+        tasks: [],
+      });
+    }));
+
+    unsubs.push(sseOn('orchestration_task_progress', (raw) => {
+      const data = raw as OrchestrationTaskProgressData;
+      setOrchestration(prev => {
+        const base = prev ?? { description: '', completed: 0, total: data.total, tasks: [] };
+        return {
+          ...base,
+          completed: data.completed,
+          total: data.total,
+          tasks: upsertTask(base.tasks, data.taskId, {
+            description: data.description,
+            role: data.role,
+            success: data.success,
+          }),
+        };
+      });
+    }));
+
+    unsubs.push(sseOn('orchestration_task_retry', (raw) => {
+      const data = raw as OrchestrationTaskRetryData;
+      setOrchestration(prev => prev && {
+        ...prev,
+        tasks: upsertTask(prev.tasks, data.taskId, {
+          retries: data.attempt,
+          success: undefined,
+        }),
+      });
+    }));
+
+    unsubs.push(sseOn('orchestration_completed', (raw) => {
+      const data = raw as OrchestrationCompletedData;
+      setOrchestration(prev => prev && { ...prev, completed: data.completedCount });
     }));
 
     unsubs.push(sseOn('context_compaction', (raw) => {
@@ -789,6 +872,7 @@ export function useAgent() {
     delegateEvents,
     compactionEvents,
     currentStepInfo,
+    orchestration,
     savedDraft,
     restoreSavedDraft,
     discardSavedDraft,

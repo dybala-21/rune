@@ -66,7 +66,9 @@ export function InlineWorkspacePicker() {
       <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 10 }}>
         I'll read and edit files here. This pins the folder for the rest of the chat.
       </div>
-      <DirectoryCombobox recents={recents} onChoose={pick} autoFocus />
+      {/* No autoFocus: this card can mount mid-run (first workspace tool call),
+          and stealing focus from the composer eats the user's keystrokes. */}
+      <DirectoryCombobox recents={recents} onChoose={pick} />
       {error && <div style={{ color: 'var(--danger)', fontSize: 11.5, marginTop: 6 }}>{error}</div>}
     </div>
   );

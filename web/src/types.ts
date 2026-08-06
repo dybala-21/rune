@@ -8,33 +8,50 @@ export interface TokenUsage {
   cacheCreation?: number;
 }
 
-export type SseEventType =
-  | 'connected'
-  | 'agent_start'
-  | 'agent_complete'
-  | 'agent_error'
-  | 'agent_aborted'
-  | 'step_start'
-  | 'thinking'
-  | 'tool_call'
-  | 'tool_result'
-  | 'text_delta'
-  | 'approval_request'
-  | 'question'
-  | 'context_compaction'
-  | 'delegate_event'
-  | 'command_result'
-  | 'goal_iteration'
-  | 'suggestion_created'
-  | 'proactive_execution_started'
-  | 'proactive_execution_completed'
-  | 'autonomy_level_changed';
+/** The one list of subscribable SSE events — useSSE iterates it, the type
+    derives from it, so a new event can't be typed without being wired. */
+export const SSE_EVENT_TYPES = [
+  'connected',
+  'agent_start',
+  'agent_complete',
+  'agent_error',
+  'agent_aborted',
+  'step_start',
+  'thinking',
+  'tool_call',
+  'tool_result',
+  'text_delta',
+  'approval_request',
+  'question',
+  'context_compaction',
+  'delegate_event',
+  'command_result',
+  'goal_iteration',
+  'orchestration_started',
+  'orchestration_task_progress',
+  'orchestration_task_retry',
+  'orchestration_completed',
+  'suggestion_created',
+  'proactive_execution_started',
+  'proactive_execution_completed',
+  'autonomy_level_changed',
+] as const;
+
+export type SseEventType = typeof SSE_EVENT_TYPES[number];
 
 export interface ConnectedData { clientId: string }
-export interface AgentStartData { goal: string }
+export interface AgentStartData {
+  goal: string;
+  /** Conversation that started the run — lets the originating tab skip the
+      "Goal:" echo line while other surfaces still show it. */
+  sessionId?: string | null;
+}
 export interface TrustInfo {
   verified: boolean;
   reason: string;
+  /** A step hit the tool-round cap and was cut off without a final LLM turn —
+      the answer may silently omit work that never ran. */
+  budgetExhausted?: boolean;
   evidenceGate?: {
     hasCheck: boolean;
     lastVerdict: string;
@@ -76,6 +93,30 @@ export interface GoalIterationData {
   reason: string;
   evidence: number;
   tokens: number;
+}
+export interface OrchestrationStartedData { runId?: string; taskCount: number; description: string }
+export interface OrchestrationTaskProgressData {
+  runId?: string;
+  taskId: string;
+  completed: number;
+  total: number;
+  success: boolean;
+  description: string;
+  role: string;
+}
+export interface OrchestrationTaskRetryData {
+  runId?: string;
+  taskId: string;
+  failureType: string;
+  attempt: number;
+  error: string;
+}
+export interface OrchestrationCompletedData {
+  runId?: string;
+  success: boolean;
+  durationMs: number;
+  completedCount: number;
+  failedCount: number;
 }
 export interface SuggestionCreatedData {
   id: string;
@@ -136,6 +177,25 @@ export interface ToolCall {
   timestamp: number;
   completedAt?: number;
   durationMs?: number;
+  /** step_start 기준으로 이 호출이 속한 에이전트 스텝 번호 (진행 타임라인 그룹핑용) */
+  step?: number;
+}
+
+/** 위임 실행의 태스크 체크리스트 항목 (orchestration_* 이벤트에서 수집) */
+export interface OrchestrationTask {
+  taskId: string;
+  description: string;
+  role: string;
+  success?: boolean;
+  retries: number;
+}
+
+/** 위임 실행 전체 상태 (진행 패널의 선행 체크리스트 데이터) */
+export interface OrchestrationState {
+  description: string;
+  completed: number;
+  total: number;
+  tasks: OrchestrationTask[];
 }
 
 /** thinking 블록 (UI 표시용) */

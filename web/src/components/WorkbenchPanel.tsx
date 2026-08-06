@@ -1,13 +1,17 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react';
-import type { ActivitySummary, ToolCall, TrustInfo } from '../types';
-import { normalizeToolName, inferWorkPhase, computeRunVerdict, type WorkPhase } from '../utils/tooling';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ActivitySummary, OrchestrationState, StepInfo, ToolCall, TrustInfo } from '../types';
+import { normalizeToolName, isCodingToolName, argString, inferWorkPhase, inferActivityMode, computeRunVerdict, type WorkPhase } from '../utils/tooling';
 import { PixelWolf, type WolfState } from './PixelWolf';
 import { fetchWorkspaceDiff, readWorkspaceFile } from '../api';
 import { TerminalPane } from './TerminalPane';
+import { ProgressPane } from './ProgressPane';
 
 /**
- * Coding workbench panel: a command log of file edits / bash calls with a
- * verify status. Opened/closed by App based on inferWorkPhase.
+ * Right-side supervision panel. Progress (default tab) shows the run's step
+ * timeline, evidence, and verdict; Activity is the raw command log; Diff /
+ * File / Terminal are coding surfaces (Diff hides on research-shaped runs).
+ * Opened automatically by App once real work is visible — file edits for
+ * coding runs, searches/pages for research runs.
  */
 
 interface WorkbenchPanelProps {
@@ -17,6 +21,11 @@ interface WorkbenchPanelProps {
   /** The run's verify-or-fail verdict — the real Evidence Gate result, same
       data the chat trust card uses. Preferred over the activity heuristic. */
   trust?: TrustInfo | null;
+  currentStep?: StepInfo | null;
+  orchestration?: OrchestrationState | null;
+  /** The agent is blocked on the user (approval or question) — surfaced in the
+      status band and as an attention dot on the Progress tab. */
+  awaiting?: 'approval' | 'question' | null;
   connected?: boolean;
   onClose: () => void;
 }
@@ -27,8 +36,6 @@ const PHASE_LABEL: Record<WorkPhase, string> = {
   verifying: 'verifying',
 };
 
-const CODING_TOOLS = new Set(['file.read', 'file.write', 'file.edit', 'file.delete', 'bash']);
-
 function fileVerb(name: string): string {
   switch (name) {
     case 'file.read': return 'read';
@@ -37,14 +44,6 @@ function fileVerb(name: string): string {
     case 'file.delete': return 'delete';
     default: return name;
   }
-}
-
-function argString(args: Record<string, unknown>, ...keys: string[]): string | null {
-  for (const k of keys) {
-    const v = args[k];
-    if (typeof v === 'string' && v.trim()) return v;
-  }
-  return null;
 }
 
 const DIFF_MAX_LINES = 6;
@@ -168,16 +167,48 @@ function formatElapsed(ms: number): string {
   return `${Math.floor(s / 60)}m${s % 60}s`;
 }
 
-type BenchTab = 'activity' | 'diff' | 'file' | 'terminal';
+// Leaf component owns the 1s tick so the timer re-renders one text node, not
+// the whole panel (which would re-derive phase/mode/coding every second).
+function Elapsed({ startedAt }: { startedAt: number }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  return (
+    <span style={{
+      fontFamily: 'var(--font-mono)',
+      fontSize: 11,
+      color: 'var(--warning)',
+      fontVariantNumeric: 'tabular-nums',
+    }}>
+      {formatElapsed(now - startedAt)}
+    </span>
+  );
+}
 
-export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, connected = true, onClose }: WorkbenchPanelProps) {
+type BenchTab = 'progress' | 'activity' | 'diff' | 'file' | 'terminal';
+
+const TABS: Array<[BenchTab, string]> = [
+  ['progress', 'Progress'],
+  ['activity', 'Activity'],
+  ['diff', 'Diff'],
+  ['file', 'File'],
+  ['terminal', 'Terminal'],
+];
+
+export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, currentStep = null, orchestration = null, awaiting = null, connected = true, onClose }: WorkbenchPanelProps) {
   // Same run-verdict rule as the status pip and chat card (shared helper), so
   // the surfaces never disagree. null → no verdict to show yet.
   const verdictOk = computeRunVerdict(trust, activitySummary);
-  const phase = inferWorkPhase(toolCalls);
-  const coding = toolCalls.filter(tc => CODING_TOOLS.has(normalizeToolName(tc.toolName)));
+  const phase = useMemo(() => inferWorkPhase(toolCalls), [toolCalls]);
+  const mode = useMemo(() => inferActivityMode(toolCalls), [toolCalls]);
+  const coding = useMemo(
+    () => toolCalls.filter(tc => isCodingToolName(normalizeToolName(tc.toolName))),
+    [toolCalls],
+  );
 
-  const [tab, setTab] = useState<BenchTab>('activity');
+  const [tab, setTab] = useState<BenchTab>('progress');
   const [diffText, setDiffText] = useState('');
   const [diffLoading, setDiffLoading] = useState(false);
   const [filePath, setFilePath] = useState('');
@@ -206,16 +237,23 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
 
   useEffect(() => { if (tab === 'diff') loadDiff(); }, [tab, loadDiff]);
 
-  // Follow: while the agent works, snap back to the live Activity feed when a
+  // Follow: while the agent works, snap back to the live Progress view when a
   // new tool call lands, so a user parked on Diff/File isn't left behind.
   const [follow, setFollow] = useState(true);
-  const codingCount = coding.length;
+  const activityCount = toolCalls.length;
   useEffect(() => {
     // Don't yank the user out of an interactive terminal.
-    if (follow && isRunning && codingCount > 0) {
-      setTab(t => (t === 'terminal' ? t : 'activity'));
+    if (follow && isRunning && activityCount > 0) {
+      setTab(t => (t === 'terminal' ? t : 'progress'));
     }
-  }, [follow, isRunning, codingCount]);
+  }, [follow, isRunning, activityCount]);
+
+  // Diff is a coding surface; when the run turns out to be research work the
+  // tab disappears, so a user parked there falls back to Progress.
+  const showDiffTab = mode !== 'research';
+  useEffect(() => {
+    if (!showDiffTab) setTab(t => (t === 'diff' ? 'progress' : t));
+  }, [showDiffTab]);
 
   const logRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -223,29 +261,23 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
     if (el) el.scrollTop = el.scrollHeight;
   }, [coding.length, isRunning]);
 
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!isRunning) return;
-    const t = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(t);
-  }, [isRunning]);
-  const startedAt = coding.length > 0 ? coding[0].timestamp : null;
-  const elapsed = isRunning && startedAt ? formatElapsed(now - startedAt) : null;
+  const startedAt = toolCalls.length > 0 ? toolCalls[0].timestamp : null;
 
   let petState: WolfState = 'idle';
   if (isRunning) petState = phase === 'verifying' ? 'thinking' : 'working';
   else if (verdictOk !== null) petState = verdictOk ? 'passed' : 'failed';
 
-  const footText = isRunning
-    ? `${PHASE_LABEL[phase]}…`
-    : verdictOk !== null
-      ? verdictOk ? 'verified' : 'not verified'
-      : 'ready';
-  const footColor = isRunning
-    ? 'var(--warning)'
-    : verdictOk !== null
-      ? verdictOk ? 'var(--success)' : 'var(--warning)'
-      : 'var(--text-muted)';
+  const hasCheck = Boolean(trust?.evidenceGate?.hasCheck);
+  // One cascade for the footer so text and color can never disagree.
+  const foot = awaiting
+    ? { text: 'waiting for you', color: 'var(--warning)' }
+    : isRunning
+      ? { text: `${PHASE_LABEL[phase]}…`, color: 'var(--warning)' }
+      : verdictOk === null
+        ? { text: 'ready', color: 'var(--text-muted)' }
+        : verdictOk
+          ? { text: hasCheck ? 'verified' : 'completed', color: 'var(--success)' }
+          : { text: 'not verified', color: 'var(--warning)' };
 
   return (
     <aside style={{
@@ -279,16 +311,7 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
         }}>
           {PHASE_LABEL[phase]}
         </span>
-        {elapsed && (
-          <span style={{
-            fontFamily: 'var(--font-mono)',
-            fontSize: 11,
-            color: 'var(--warning)',
-            fontVariantNumeric: 'tabular-nums',
-          }}>
-            {elapsed}
-          </span>
-        )}
+        {isRunning && startedAt !== null && <Elapsed startedAt={startedAt} />}
         <button
           onClick={onClose}
           title="Collapse workbench (⌘J)"
@@ -313,7 +336,7 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
         display: 'flex', gap: 2, padding: '6px 10px 0',
         borderBottom: '1px solid var(--border)',
       }}>
-        {([['activity', 'Activity'], ['diff', 'Diff'], ['file', 'File'], ['terminal', 'Terminal']] as const).map(([key, label]) => (
+        {TABS.filter(([key]) => key !== 'diff' || showDiffTab).map(([key, label]) => (
           <button
             key={key}
             type="button"
@@ -327,6 +350,12 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
             }}
           >
             {label}
+            {key === 'progress' && awaiting && tab !== 'progress' && (
+              <span aria-label="needs your attention" style={{
+                display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
+                background: 'var(--warning)', marginLeft: 5, verticalAlign: 'middle',
+              }} />
+            )}
           </button>
         ))}
         {tab === 'diff' ? (
@@ -369,6 +398,21 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
           </button>
         )}
       </div>
+
+      {/* Progress view — checklist, step timeline, evidence, verdict */}
+      {tab === 'progress' && (
+        <ProgressPane
+          toolCalls={toolCalls}
+          mode={mode}
+          isRunning={isRunning}
+          currentStep={currentStep}
+          trust={trust}
+          activitySummary={activitySummary}
+          orchestration={orchestration}
+          awaiting={awaiting}
+          onOpenFile={openFile}
+        />
+      )}
 
       {/* Diff view */}
       {tab === 'diff' && (
@@ -450,13 +494,17 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
           <div style={{
             display: 'flex', alignItems: 'center', gap: 8,
             margin: '0 0 10px', padding: '8px 11px', borderRadius: 8,
-            border: `1px solid ${verdictOk ? 'var(--success)' : 'var(--warning)'}`,
-            background: verdictOk ? 'var(--success-subtle)' : 'var(--warning-subtle, var(--danger-subtle))',
+            border: `1px solid ${verdictOk ? (hasCheck ? 'var(--success)' : 'var(--border)') : 'var(--warning)'}`,
+            background: verdictOk
+              ? (hasCheck ? 'var(--success-subtle)' : 'var(--bg-secondary)')
+              : 'var(--warning-subtle, var(--danger-subtle))',
             fontSize: 12,
           }}>
             <span aria-hidden="true">{verdictOk ? '✓' : '⚠'}</span>
             <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>
-              {verdictOk ? 'Evidence Gate — verified' : 'Not marking this done'}
+              {verdictOk
+                ? hasCheck ? 'Evidence Gate — verified' : 'Completed — no checks ran'
+                : 'Not marking this done'}
             </span>
             <span style={{ marginLeft: 'auto', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
               {trust?.evidenceGate?.hasCheck
@@ -489,7 +537,7 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
         fontSize: 11,
         color: 'var(--text-muted)',
       }}>
-        <span style={{ color: footColor }}>{footText}</span>
+        <span style={{ color: foot.color }}>{foot.text}</span>
         {activitySummary && (
           <span>
             {activitySummary.filesWritten > 0 && `${activitySummary.filesWritten} edited  `}
