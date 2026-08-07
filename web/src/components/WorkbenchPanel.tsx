@@ -276,7 +276,14 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
       : verdictOk === null
         ? { text: 'ready', color: 'var(--text-muted)' }
         : verdictOk
-          ? { text: hasCheck ? 'verified' : 'completed', color: 'var(--success)' }
+          ? {
+              text: hasCheck
+                ? 'verified'
+                : trust?.testsPassedAfterEdit === true
+                  ? 'tests passing'
+                  : 'completed',
+              color: 'var(--success)',
+            }
           : { text: 'not verified', color: 'var(--warning)' };
 
   return (

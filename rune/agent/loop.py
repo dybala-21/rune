@@ -580,6 +580,10 @@ class NativeAgentLoop(EventEmitter):
         # R19: tool-call sequence counter (not step) to catch intra-step patterns
         self._last_code_write_step: int = 0
         self._last_verify_step: int = 0
+        # Tool-call sequence of the last verification command that both passed
+        # AND actually asserted something. Distinct from _last_verify_step,
+        # which any successful bash bumps — `ls` must never read as a test run.
+        self._last_test_pass_step: int = 0
         # Did the last test/verify command fail, and how many times we've held
         # back a finish because the code wasn't verified yet.
         self._last_verify_failed: bool = False
@@ -655,6 +659,7 @@ class NativeAgentLoop(EventEmitter):
         self._hard_failures.clear()
         self._last_code_write_step = 0
         self._last_verify_step = 0
+        self._last_test_pass_step = 0
         self._last_verify_failed = False
         self._unverified_completion_blocks = 0
         self._tool_call_seq = 0
@@ -1182,6 +1187,14 @@ class NativeAgentLoop(EventEmitter):
                     trace.evidence_gate = self._evidence_gate.summary()
                 except Exception:  # observability must never break the run
                     trace.evidence_gate = None
+            # Did the project's own tests go green after the last code change?
+            # Only meaningful once something was actually edited — claiming it
+            # for a run that changed nothing is the vacuous verification this
+            # codebase has already been bitten by.
+            if self._last_code_write_step > 0:
+                trace.tests_passed_after_edit = (
+                    self._last_test_pass_step > self._last_code_write_step
+                )
             await self.emit("completed", trace)
 
             # On a verified-successful run, distil the tool trace into a skill
@@ -1615,6 +1628,7 @@ class NativeAgentLoop(EventEmitter):
 
                         if assertions_ran(result.output or "") is not False:
                             self._last_verify_failed = False  # tests just passed
+                            self._last_test_pass_step = self._tool_call_seq
                         else:
                             log.info(
                                 "verification_asserted_nothing",

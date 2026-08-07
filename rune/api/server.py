@@ -89,6 +89,11 @@ def build_trust_payload(trace: Any) -> dict[str, Any]:
         # A step died at the tool-round cap without a final LLM turn — the
         # answer may omit work that never ran; the UI must say so.
         "budgetExhausted": bool(getattr(trace, "tool_budget_exhausted", False)),
+        # The project's tests after the last edit: true green, false not green,
+        # null when nothing was edited. Weaker than the Evidence Gate — the
+        # suite may have passed before the change — so the UI shows it as
+        # "tests passing", never as "verified".
+        "testsPassedAfterEdit": getattr(trace, "tests_passed_after_edit", None),
     }
     gate = getattr(trace, "evidence_gate", None)
     if isinstance(gate, dict):
