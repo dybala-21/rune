@@ -225,6 +225,18 @@ class NetworkMonitor:
             if i >= skip and (r.has_json_response or r.method != "GET")
         )
 
+    def unreported_json_bodies(self) -> list[ApiRequest]:
+        """Captured JSON responses the model has not been shown yet.
+
+        The data the page loaded in response to its own click — the answer
+        itself, not a pointer to where the answer might be.
+        """
+        skip = min(self._reported_count, len(self._requests))
+        return [
+            r for i, r in enumerate(self._requests)
+            if i >= skip and r.response_body
+        ]
+
     def clear(self) -> None:
         """Clear captured requests."""
         self._requests.clear()

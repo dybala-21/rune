@@ -158,3 +158,39 @@ def test_discover_read_body_returns_pruned_json():
     finally:
         m.clear()
         m._active = False
+
+
+def test_unreported_json_bodies_returns_only_new_captures():
+    """The act result inlines these, so 'new' must mean since the last report."""
+    from rune.capabilities.browser import network as net
+
+    m = net.NetworkMonitor()
+    _send(m, "https://x.test/first.json")
+    m.get_discovered_apis()[0].response_body = '{"a":1}'
+    assert [r.url for r in m.unreported_json_bodies()] == ["https://x.test/first.json"]
+
+    m.mark_reported()
+    assert m.unreported_json_bodies() == []
+
+    _send(m, "https://x.test/second.json")
+    assert m.unreported_json_bodies() == [], "a capture without a body is not shown"
+    m.get_discovered_apis()[-1].response_body = '{"b":2}'
+    assert [r.url for r in m.unreported_json_bodies()] == ["https://x.test/second.json"]
+
+    m.clear()
+    assert m.unreported_json_bodies() == []
+
+
+def test_act_inlines_the_body_instead_of_pointing_at_a_tool():
+    """The measured failure was hinting at another tool; hand over the data."""
+    import inspect
+
+    from rune.capabilities.browser import capabilities as caps
+
+    body = inspect.getsource(caps.browser_act)
+    assert "unreported_json_bodies()" in body
+    assert "its JSON response follows" in body
+    # The pointer survives only as the fallback when no body was captured.
+    inline_at = body.index("its JSON response follows")
+    pointer_at = body.index("browser_discover_apis lists them")
+    assert inline_at < pointer_at

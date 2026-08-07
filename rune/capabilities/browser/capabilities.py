@@ -437,14 +437,32 @@ async def browser_act(params: BrowserActParams) -> CapabilityResult:
         # can switch to the API path instead of more clicking.
         from rune.capabilities.browser.network import get_network_monitor, hybrid_api_enabled
         _monitor = get_network_monitor()
-        _new_apis = _monitor.unreported_interesting_count()
-        if hybrid_api_enabled() and _new_apis > 0:
-            parts.append(
-                f"\U0001f4e1 {_new_apis} new data API call(s) captured by this "
-                "interaction \u2014 browser_discover_apis lists them; use "
-                "readBody='<url part>' to read the fetched JSON directly "
-                "(no more clicking needed)."
-            )
+        if hybrid_api_enabled():
+            # Hand over the data the click actually loaded. Pointing at another
+            # tool measured badly: it reads as one more branch to explore, and
+            # runs burned their budget choosing between paths (0/3 vs 2/3).
+            _bodies = _monitor.unreported_json_bodies()
+            if _bodies:
+                _api = _bodies[-1]
+                _body = _api.response_body[:6000]
+                _cut = (
+                    "\n[response truncated — browser_discover_apis(readBody=…, "
+                    "jsonFilter='<keyword>') returns the matching records]"
+                    if len(_api.response_body) > len(_body) else ""
+                )
+                parts.append(
+                    f"\nThis interaction loaded {_api.method} {_api.url[:120]} — "
+                    f"its JSON response follows, so the answer may already be "
+                    f"here:\n{_body}{_cut}"
+                )
+                _monitor.mark_reported()
+            else:
+                _new_apis = _monitor.unreported_interesting_count()
+                if _new_apis > 0:
+                    parts.append(
+                        f"\U0001f4e1 {_new_apis} new data API call(s) captured "
+                        "by this interaction — browser_discover_apis lists them."
+                    )
 
         return CapabilityResult(
             success=True,
