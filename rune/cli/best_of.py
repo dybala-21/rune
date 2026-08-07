@@ -72,8 +72,7 @@ _FASTPATH_ENV = "RUNE_FASTPATH"
 # child so none of them asks the model the same question again. The value
 # lives in a per-run ContextVar, NOT in os.environ: the parent process may
 # run best-of more than once (the REPL does), and a process-global cache
-# would hand run two the classification of run one's message. CI caught
-# exactly that leak between tests.
+# would hand run two the classification of run one's message.
 CLASSIFICATION_ENV = "RUNE_BESTOF_CLASSIFICATION"
 
 from contextvars import ContextVar as _CtxVar
