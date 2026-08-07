@@ -84,6 +84,13 @@ class ApprovalConfig(BaseModel):
     auto_approve_medium: bool = False
     timeout_seconds: int = 300
     session_cache_max: int = 200
+    # Which outbound network calls need sign-off.
+    #   off    — none (bypass; also implied by profile "automation")
+    #   writes — non-GET web_fetch, i.e. requests that change server state
+    #   all    — every network tool, including reads and browser clicks
+    # Reads stay ungated by default: they have no undo problem, and asking
+    # for each one is the prompt fatigue that makes approvals meaningless.
+    network_approval: str = "writes"
 
 
 # Safety Configuration

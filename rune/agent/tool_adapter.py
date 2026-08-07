@@ -16,7 +16,7 @@ import time
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 from rune.agent.cognitive_cache import WEB_FETCH_DEFAULT_MAX_LENGTH, SessionToolCache
 from rune.capabilities.output_prefixes import (
@@ -503,6 +503,12 @@ def _build_typed_tool(
     # Mutable container so the inner async closure can read/write it.
     _consecutive_denials: list[int] = [0]
 
+    # Network sign-off already granted this run, keyed by method|host. Wrappers
+    # are rebuilt per run, so this never leaks across runs. Host-scoped rather
+    # than URL-scoped: re-asking for every endpoint on a site the user just
+    # approved is the prompt fatigue that makes confirmations worthless.
+    _approved_network: set[str] = set()
+
     async def _execute(params: dict[str, Any]) -> str | Any:
         current_step = opts.step_counter() if opts.step_counter else 0
 
@@ -629,6 +635,45 @@ def _build_typed_tool(
                     if opts.on_tool_end is not None:
                         await opts.on_tool_end(cap_name, err)
                     return f"{BLOCKED_PREFIX} Guardian requires approval: {guard_result.reason}"
+
+        # -- Network approval guard -------------------------------
+        # Guardian validates commands and paths; it has no notion of the
+        # network, so outbound writes had no gate at all. Same shape as the
+        # MCP write guard below.
+        net_request = _network_approval_request(cap_name, effective_params)
+        if net_request is not None and opts.approval_callback is None:
+            # No channel to ask on. Reads proceed (a strict-mode read is a
+            # preference, not a hazard); a write does not — it cannot be
+            # undone, so fail closed. Headless callers wire a callback (bench,
+            # worker) or set approval.network_approval=off.
+            if net_request.is_write:
+                err = CapabilityResult(
+                    success=False, error="No approval channel for a network write."
+                )
+                if opts.on_tool_end is not None:
+                    await opts.on_tool_end(cap_name, err)
+                return (
+                    f"{BLOCKED_PREFIX} {net_request.display} needs approval but "
+                    "this session has no approval channel."
+                )
+            net_request = None
+        if net_request is not None and opts.approval_callback is not None:
+            if net_request.cache_key not in _approved_network:
+                approved = await opts.approval_callback(
+                    net_request.display, net_request.reason
+                )
+                if not approved:
+                    err = CapabilityResult(
+                        success=False,
+                        error="User declined the network operation.",
+                    )
+                    if opts.on_tool_end is not None:
+                        await opts.on_tool_end(cap_name, err)
+                    return (
+                        f"{DENIED_PREFIX} User declined: {net_request.display}. "
+                        "Do NOT retry it; find another source or report the blocker."
+                    )
+                _approved_network.add(net_request.cache_key)
 
         # -- Feature 3: MCP write operation approval guard -------
         if cap_name.startswith("mcp.") and opts.approval_callback is not None:
@@ -1253,6 +1298,109 @@ async def resolve_bash_preflight(force: bool = False) -> BashPreflightSnapshot:
 
     _preflight_cache = snapshot
     return snapshot
+
+
+# Network approval helper
+
+# Reads: no state leaves the machine that wasn't already public.
+_NETWORK_READ_CAPS = frozenset({
+    "web_search", "browser_navigate", "browser_observe", "browser_extract",
+    "browser_find", "browser_screenshot", "browser_discover_apis",
+})
+# Interactions: a click can submit a form or place an order. Gated in "all"
+# mode only — the target is a UI ref, so there is no reliable signal for
+# "this click is the checkout button" to gate on by default.
+_NETWORK_ACT_CAPS = frozenset({
+    "browser_act", "browser_batch", "browser_workflow",
+})
+
+
+def _network_writes_possible() -> bool:
+    """Whether a non-GET web_fetch can actually reach the network.
+
+    The gate must agree with the executor: when writes are disabled there is
+    nothing to sign off on, and web_fetch refuses the call itself.
+    """
+    return os.environ.get("RUNE_HYBRID_API", "0") == "1"
+
+
+def _url_host(url: str) -> str:
+    try:
+        from urllib.parse import urlparse
+
+        return urlparse(url).netloc or url[:60]
+    except Exception:
+        return url[:60]
+
+
+class _NetworkApproval(NamedTuple):
+    display: str
+    reason: str
+    cache_key: str
+    is_write: bool = False
+
+
+def _network_approval_request(
+    cap_name: str, params: dict[str, Any]
+) -> _NetworkApproval | None:
+    """Sign-off needed for this network call? → (display, reason, cache key).
+
+    A network write leaves the machine and has no undo — no trash, no
+    checkpoint, no working-tree revert — so a POST is gated even though a
+    GET read is not. Mode comes from ``approval.network_approval``:
+    ``off`` (nothing, the bypass setting), ``writes`` (default: non-GET
+    fetches), ``all`` (every network tool, Claude-Code-style strict).
+    """
+    mode = "writes"
+    profile = "general"
+    try:
+        from rune.config.loader import get_config
+
+        approval_cfg = get_config().approval
+        mode = str(getattr(approval_cfg, "network_approval", "writes")).lower()
+        profile = str(getattr(approval_cfg, "profile", "general")).lower()
+    except Exception as exc:  # keep the default gate rather than opening it
+        log.debug("network_approval_config_read_failed", error=str(exc)[:100])
+
+    if mode == "off" or profile == "automation":
+        return None
+
+    if cap_name == "web_fetch":
+        method = str(params.get("method") or "GET").upper()
+        url = str(params.get("url") or "")
+        host = _url_host(url)
+        if method != "GET" and _network_writes_possible():
+            return _NetworkApproval(
+                f"{method} {url[:120]}",
+                f"Network write to {host} — this cannot be undone",
+                f"{method}|{host}",
+                is_write=True,
+            )
+        if mode == "all":
+            return _NetworkApproval(f"GET {url[:120]}", f"Fetch {host}", f"GET|{host}")
+        return None
+
+    if mode != "all":
+        return None
+
+    if cap_name in _NETWORK_READ_CAPS:
+        target = str(params.get("url") or params.get("query") or "")
+        return _NetworkApproval(
+            f"{cap_name} {target[:120]}".strip(),
+            f"Network read: {cap_name}",
+            f"{cap_name}|{_url_host(target) if target.startswith('http') else target[:60]}",
+        )
+
+    if cap_name in _NETWORK_ACT_CAPS:
+        action = str(params.get("action") or "")
+        selector = str(params.get("selector") or "")
+        return _NetworkApproval(
+            f"{cap_name} {action} {selector}".strip(),
+            f"Browser interaction: {action or cap_name}",
+            f"{cap_name}|{action}",
+        )
+
+    return None
 
 
 # Guardian validation helper

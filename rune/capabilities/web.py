@@ -392,12 +392,24 @@ async def web_fetch(params: WebFetchParams) -> CapabilityResult:
             max_redirects=5,
         ) as client:
             method = (params.method or "GET").upper()
-            if method == "POST" and os.environ.get("RUNE_HYBRID_API", "0") == "1":
+            if method != "GET":
+                # Never downgrade a write to a read: the caller would believe
+                # it submitted something it did not.
+                if os.environ.get("RUNE_HYBRID_API", "0") != "1":
+                    return CapabilityResult(
+                        success=False,
+                        error=(
+                            f"{method} requests are disabled "
+                            "(set RUNE_HYBRID_API=1 to enable API replay). "
+                            "Use a GET, or interact with the page directly."
+                        ),
+                        metadata={"status_code": 0, "skipped": True},
+                    )
                 headers["Content-Type"] = (
                     params.content_type or "application/x-www-form-urlencoded"
                 )
-                resp = await client.post(
-                    params.url, headers=headers, content=params.body or ""
+                resp = await client.request(
+                    method, params.url, headers=headers, content=params.body or ""
                 )
             else:
                 resp = await client.get(params.url, headers=headers)
