@@ -69,6 +69,14 @@ export function CommandPalette({ filter, onSelect, onClose }: Props) {
 
   useEffect(() => { setSelectedIdx(0); }, [filter, subMenu]);
 
+  // A filter that matches nothing is a typo or an ordinary message, not a
+  // command. Close so the composer stops swallowing Enter on an empty menu.
+  useEffect(() => {
+    if (subMenu === 'none' && commands.length > 0 && filtered.length === 0) {
+      onClose();
+    }
+  }, [subMenu, commands.length, filtered.length, onClose]);
+
   const handleSelect = useCallback((idx: number) => {
     if (subMenu === 'none') {
       const cmd = filtered[idx];
