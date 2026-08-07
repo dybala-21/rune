@@ -321,6 +321,8 @@ export async function unsetEnvVar(key: string, scope: 'user' | 'project'): Promi
 export interface ConfigInfo {
   proactiveEnabled: boolean;
   advisorEnabled: boolean;
+  /** bypass | standard | strict — shown when approvals are switched off. */
+  approvalMode?: string;
   gatewayChannels: string[];
   maxConcurrency: number;
   version: string;

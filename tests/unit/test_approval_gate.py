@@ -245,3 +245,16 @@ def test_bypass_also_skips_the_guardian_prompt(monkeypatch):
     monkeypatch.setenv("RUNE_APPROVAL_MODE", "bypass")
     asyncio.run(run(command="echo hi"))
     assert len(asked) == 1, "bypass mode must not ask"
+
+
+def test_config_endpoint_reports_the_approval_mode(monkeypatch):
+    """A session with its gates off must be able to say so in the UI."""
+    import asyncio
+
+    from rune.api.handlers.config import get_config_endpoint
+
+    monkeypatch.setenv("RUNE_APPROVAL_MODE", "bypass")
+    assert asyncio.run(get_config_endpoint()).approval_mode == "bypass"
+
+    monkeypatch.setenv("RUNE_APPROVAL_MODE", "standard")
+    assert asyncio.run(get_config_endpoint()).approval_mode == "standard"

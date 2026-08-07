@@ -38,6 +38,8 @@ class ConfigGetResponse(BaseModel):
     memory_tuning: dict[str, Any] | None = Field(None, alias="memoryTuning")
     safety_tuning: dict[str, Any] | None = Field(None, alias="safetyTuning")
     advisor_enabled: bool = Field(False, alias="advisorEnabled")
+    # Surfaced so a session with its safety prompts switched off says so.
+    approval_mode: str = Field("standard", alias="approvalMode")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -69,6 +71,7 @@ def _get_rune_config():
 async def get_config_endpoint() -> ConfigGetResponse:
     """Retrieve the current daemon configuration."""
     from rune.agent.advisor.runtime_toggle import is_advisor_enabled
+    from rune.agent.tool_adapter import approval_mode
     cfg = _get_rune_config()
     return ConfigGetResponse(
         proactiveEnabled=cfg.proactive.enabled,
@@ -76,6 +79,7 @@ async def get_config_endpoint() -> ConfigGetResponse:
         maxConcurrency=3,
         version=VERSION,
         advisorEnabled=is_advisor_enabled(),
+        approvalMode=approval_mode(),
         activeModel={
             "provider": cfg.llm.default_provider or "openai",
             "model": cfg.llm.default_model,
