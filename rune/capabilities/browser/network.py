@@ -179,7 +179,9 @@ class NetworkMonitor:
                 self._fetch_body(params.get("requestId", ""), api)
             )
         except RuntimeError:
-            pass  # no running loop (unit tests) — bodies just stay empty
+            # No running loop (unit tests) — bodies just stay empty.
+            log.debug("body_fetch_skipped_no_loop",
+                      request_id=params.get("requestId", ""))
 
     async def _fetch_body(self, request_id: str, api: ApiRequest) -> None:
         """Read the response body via CDP; failures leave the body empty."""
