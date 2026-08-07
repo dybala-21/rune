@@ -544,8 +544,12 @@ def register_web_capabilities(registry: CapabilityRegistry) -> None:
     registry.register(CapabilityDefinition(
         name="web_fetch",
         description=(
-            "Fetch a URL and convert to text. Supports method='POST' with "
-            "body/contentType to replay API calls found by browser_discover_apis."
+            "Fetch a URL and convert it to text. The first choice for reading a "
+            "page, a documented API endpoint, or a .json/.txt/.md file — reach "
+            "for the browser only when the page must be interacted with. "
+            "Supports method='POST' with body/contentType to replay API calls "
+            "found by browser_discover_apis, and jsonFilter to keep only the "
+            "matching records of a large JSON response."
         ),
         domain=Domain.NETWORK,
         risk_level=RiskLevel.LOW,

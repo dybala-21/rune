@@ -135,6 +135,7 @@ async def browser_observe(params: BrowserObserveParams) -> CapabilityResult:
     """Observe the current page via accessibility tree snapshot."""
     from rune.capabilities.browser.helpers import (
         extract_interactive_elements,
+        format_interactive_elements,
         wait_for_dom_settle,
     )
 
@@ -163,19 +164,7 @@ async def browser_observe(params: BrowserObserveParams) -> CapabilityResult:
             scored.sort(key=lambda x: x[0], reverse=True)
             elements = [meta for _, meta in scored]
 
-        # Append interactive element summary (capped at 50).
-        max_elements = 50
-        if elements:
-            shown = elements[:max_elements]
-            el_lines = [f"\n--- Interactive Elements ({len(shown)}/{len(elements)}) ---"]
-            for meta in shown:
-                parts = [f"[{meta.ref}]", meta.role]
-                if meta.name:
-                    parts.append(f'"{meta.name}"')
-                if meta.breadcrumb:
-                    parts.append(f"in({meta.breadcrumb})")
-                el_lines.append(" ".join(parts))
-            snapshot += "\n".join(el_lines)
+        snapshot += format_interactive_elements(elements)
 
         # Detect blocking overlays/dialogs.
         overlay_warning = ""
@@ -727,9 +716,17 @@ def register_browser_capabilities(registry: CapabilityRegistry) -> None:
     registry.register(CapabilityDefinition(
         name="browser_navigate",
         description=(
-            "Navigate to a URL in a headless background browser for data extraction. "
-            "The user CANNOT see this browser. Use browser_open instead when the user "
-            "wants to see, watch, or interact with the browser."
+            "Navigate to a URL in a headless background browser and return a "
+            "compact snapshot: page title, status, and the interactive elements "
+            "with their ref IDs — there is no need to call browser_observe right "
+            "after navigating. "
+            "Reach for the browser only when a page must be INTERACTED with "
+            "(clicking, filling forms, content that appears after a click). For "
+            "plain retrieval prefer web_search or web_fetch, and for a documented "
+            "API endpoint or a .json/.txt/.md URL call web_fetch directly — the "
+            "browser is far slower for those. "
+            "The user CANNOT see this browser. Use browser_open instead when the "
+            "user wants to see, watch, or interact with the browser."
         ),
         domain=Domain.BROWSER,
         risk_level=RiskLevel.MEDIUM,
@@ -754,7 +751,11 @@ def register_browser_capabilities(registry: CapabilityRegistry) -> None:
     ))
     registry.register(CapabilityDefinition(
         name="browser_observe",
-        description="Observe page content via accessibility tree",
+        description=(
+            "Re-read the current page: accessibility tree plus interactive "
+            "elements with ref IDs. Use it after an interaction changes the page, "
+            "since browser_navigate already returns a snapshot of its own."
+        ),
         domain=Domain.BROWSER,
         risk_level=RiskLevel.LOW,
         group="browser",

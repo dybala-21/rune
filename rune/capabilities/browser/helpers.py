@@ -434,6 +434,32 @@ def _build_selectors(role: str, name: str, node: dict) -> list[dict[str, Any]]:
     return selectors
 
 
+MAX_LISTED_ELEMENTS = 50
+
+
+def format_interactive_elements(
+    elements: list[ElementMeta], max_elements: int = MAX_LISTED_ELEMENTS
+) -> str:
+    """Render the ref-tagged element list the model acts on.
+
+    Shared by navigate and observe so a page reads the same either way — and
+    so navigate can return one, which spares the model an observe round just
+    to learn the refs.
+    """
+    if not elements:
+        return ""
+    shown = elements[:max_elements]
+    lines = [f"\n--- Interactive Elements ({len(shown)}/{len(elements)}) ---"]
+    for meta in shown:
+        parts = [f"[{meta.ref}]", meta.role]
+        if meta.name:
+            parts.append(f'"{meta.name}"')
+        if meta.breadcrumb:
+            parts.append(f"in({meta.breadcrumb})")
+        lines.append(" ".join(parts))
+    return "\n".join(lines)
+
+
 async def find_element_locator(page: Any, ref: str) -> Any | None:
     """Resolve an element ref to a Playwright Locator using multi-selector strategy.
 

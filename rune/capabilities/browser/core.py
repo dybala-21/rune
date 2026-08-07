@@ -263,6 +263,7 @@ async def browser_navigate(params: BrowserNavigateParams) -> CapabilityResult:
     from rune.capabilities.browser.helpers import (
         dismiss_blocking_overlays,
         extract_interactive_elements,
+        format_interactive_elements,
         wait_for_dom_settle,
     )
 
@@ -284,41 +285,47 @@ async def browser_navigate(params: BrowserNavigateParams) -> CapabilityResult:
 
         await wait_for_dom_settle(page)
         await dismiss_blocking_overlays(page)
-        await extract_interactive_elements(page)
+        elements = await extract_interactive_elements(page)
 
         status = response.status if response else 0
         title = await page.title()
         url = page.url
 
-        # Inline discovered JSON APIs — directive tone so weak models switch
-        # strategy. Recipes carry method/body so POST endpoints (the
-        # schedule/booking class) are actually replayable; more data APIs
-        # usually fire later on interaction, so point at browser_discover_apis.
-        from rune.capabilities.browser.network import format_api_recipe
+        # Note the data APIs this page used, without telling the model to
+        # abandon what it is doing: a paired A/B measured the directive
+        # version steering runs off a browsing path that converges and into
+        # API exploration that does not (0/3 vs 2/3). State the option, let
+        # the model choose. Gated with the rest of the hybrid path.
+        from rune.capabilities.browser.network import (
+            format_api_recipe,
+            hybrid_api_enabled,
+        )
 
-        json_apis = monitor.get_json_apis()
+        json_apis = monitor.get_json_apis() if hybrid_api_enabled() else []
         api_section = ""
         if json_apis:
-            api_lines = [
-                "\n\u26a0\ufe0f SPA DETECTED \u2014 this site loads data via API. "
-                "STOP using browser_act. Replay these calls with web_fetch instead:"
-            ]
-            for api in json_apis[:8]:
+            api_lines = ["\nData APIs this page called (readable with web_fetch):"]
+            for api in json_apis[:5]:
                 api_lines.append(f"  {format_api_recipe(api)}")
-            api_lines.append(
-                "  (data APIs often fire only after clicks — after interacting, "
-                "call browser_discover_apis to catch new ones)"
-            )
             api_section = "\n".join(api_lines)
             monitor.mark_reported()
 
+        # The refs are already extracted, so hand them over: an observe round
+        # that only re-reads what navigate just computed costs a model
+        # round-trip and buys nothing.
+        element_section = format_interactive_elements(elements)
+
         return CapabilityResult(
             success=True,
-            output=f"Navigated to: {url}\nTitle: {title}\nStatus: {status}{api_section}",
+            output=(
+                f"Navigated to: {url}\nTitle: {title}\nStatus: {status}"
+                f"{api_section}{element_section}"
+            ),
             metadata={
                 "url": url,
                 "title": title,
                 "status": status,
+                "interactive_count": len(elements),
             },
         )
 
@@ -337,6 +344,7 @@ async def browser_open(params: BrowserOpenParams) -> CapabilityResult:
     from rune.capabilities.browser.helpers import (
         dismiss_blocking_overlays,
         extract_interactive_elements,
+        format_interactive_elements,
         wait_for_dom_settle,
     )
 
@@ -368,7 +376,7 @@ async def browser_open(params: BrowserOpenParams) -> CapabilityResult:
 
         await wait_for_dom_settle(page)
         await dismiss_blocking_overlays(page)
-        await extract_interactive_elements(page)
+        elements = await extract_interactive_elements(page)
 
         status = response.status if response else 0
         title = await page.title()
@@ -376,12 +384,16 @@ async def browser_open(params: BrowserOpenParams) -> CapabilityResult:
 
         return CapabilityResult(
             success=True,
-            output=f"Opened in visible browser: {url}\nTitle: {title}\nStatus: {status}",
+            output=(
+                f"Opened in visible browser: {url}\nTitle: {title}\nStatus: {status}"
+                f"{format_interactive_elements(elements)}"
+            ),
             metadata={
                 "url": url,
                 "title": title,
                 "status": status,
                 "profile": _active_profile,
+                "interactive_count": len(elements),
             },
         )
 
