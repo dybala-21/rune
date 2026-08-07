@@ -1,4 +1,4 @@
-"""Network approval gate: writes need sign-off, reads don't, bypass is honored."""
+"""Approval gate: writes need sign-off, reads don't, one switch bypasses all."""
 
 import pytest
 
@@ -13,9 +13,9 @@ def approval_cfg(monkeypatch):
     # Writes are only gated when they can actually happen (same flag the
     # executor checks), so the write tests need the path enabled.
     monkeypatch.setenv("RUNE_HYBRID_API", "1")
+    monkeypatch.delenv("RUNE_APPROVAL_MODE", raising=False)
     cfg = get_config().approval
-    monkeypatch.setattr(cfg, "network_approval", "writes", raising=False)
-    monkeypatch.setattr(cfg, "profile", "general", raising=False)
+    monkeypatch.setattr(cfg, "mode", "standard", raising=False)
     return cfg
 
 
@@ -45,21 +45,21 @@ def test_get_fetch_and_reads_are_not_gated_by_default(approval_cfg):
     ) is None
 
 
-def test_bypass_modes_skip_every_gate(approval_cfg, monkeypatch):
+def test_bypass_skips_every_gate(approval_cfg, monkeypatch):
     post = {"url": "https://x.test/a.do", "method": "POST"}
 
-    monkeypatch.setattr(approval_cfg, "network_approval", "off", raising=False)
-    assert _network_approval_request("web_fetch", post) is None
-
-    # Automation profile is the headless bypass and overrides the mode.
-    monkeypatch.setattr(approval_cfg, "network_approval", "all", raising=False)
-    monkeypatch.setattr(approval_cfg, "profile", "automation", raising=False)
+    monkeypatch.setattr(approval_cfg, "mode", "bypass", raising=False)
     assert _network_approval_request("web_fetch", post) is None
     assert _network_approval_request("web_search", {"query": "q"}) is None
 
+    # Env wins over config, so a headless run opts out without editing files.
+    monkeypatch.setattr(approval_cfg, "mode", "strict", raising=False)
+    monkeypatch.setenv("RUNE_APPROVAL_MODE", "bypass")
+    assert _network_approval_request("web_fetch", post) is None
 
-def test_all_mode_gates_reads_and_clicks(approval_cfg, monkeypatch):
-    monkeypatch.setattr(approval_cfg, "network_approval", "all", raising=False)
+
+def test_strict_mode_gates_reads_and_clicks(approval_cfg, monkeypatch):
+    monkeypatch.setattr(approval_cfg, "mode", "strict", raising=False)
 
     get_req = _network_approval_request("web_fetch", {"url": "https://example.com/p"})
     assert get_req is not None and get_req.cache_key == "GET|example.com"
@@ -74,8 +74,8 @@ def test_all_mode_gates_reads_and_clicks(approval_cfg, monkeypatch):
 
 
 def test_unknown_capabilities_are_never_gated(approval_cfg, monkeypatch):
-    for mode in ("writes", "all"):
-        monkeypatch.setattr(approval_cfg, "network_approval", mode, raising=False)
+    for mode in ("standard", "strict"):
+        monkeypatch.setattr(approval_cfg, "mode", mode, raising=False)
         assert _network_approval_request("file_read", {"path": "a.py"}) is None
         assert _network_approval_request("bash_execute", {"command": "ls"}) is None
 
@@ -89,6 +89,7 @@ def test_config_failure_keeps_the_write_gate(monkeypatch):
     def _boom():
         raise RuntimeError("config unavailable")
 
+    monkeypatch.delenv("RUNE_APPROVAL_MODE", raising=False)
     monkeypatch.setattr(loader, "get_config", _boom)
     req = _network_approval_request(
         "web_fetch", {"url": "https://x.test/a.do", "method": "POST"}
@@ -189,3 +190,58 @@ def test_post_is_refused_rather_than_downgraded_to_get(monkeypatch):
     )))
     assert res.success is False
     assert "disabled" in (res.error or "")
+
+
+
+def test_approval_mode_resolution(monkeypatch):
+    """Env beats config; an unknown or unreadable value keeps the default."""
+    from rune.agent.tool_adapter import approval_mode
+    from rune.config.loader import get_config
+
+    cfg = get_config().approval
+    monkeypatch.delenv("RUNE_APPROVAL_MODE", raising=False)
+
+    monkeypatch.setattr(cfg, "mode", "strict", raising=False)
+    assert approval_mode() == "strict"
+
+    monkeypatch.setenv("RUNE_APPROVAL_MODE", "bypass")
+    assert approval_mode() == "bypass"
+
+    monkeypatch.setenv("RUNE_APPROVAL_MODE", "nonsense")
+    assert approval_mode() == "strict", "a bad env value falls back to config"
+
+    monkeypatch.delenv("RUNE_APPROVAL_MODE", raising=False)
+    monkeypatch.setattr(cfg, "mode", "nonsense", raising=False)
+    assert approval_mode() == "standard"
+
+
+def test_bypass_also_skips_the_guardian_prompt(monkeypatch):
+    """The old gap: risky shell commands had no way to stop asking."""
+    import asyncio
+
+    from rune.agent.tool_adapter import ToolAdapterOptions, build_tool_set
+
+    asked: list[str] = []
+
+    async def _cb(command: str, reason: str) -> bool:
+        asked.append(command)
+        return True
+
+    monkeypatch.setattr(
+        "rune.agent.tool_adapter._validate_with_guardian",
+        lambda cap, params: __import__(
+            "rune.agent.tool_adapter", fromlist=["_GuardianResult"]
+        )._GuardianResult(requires_approval=True, reason="risky"),
+    )
+    tools = build_tool_set(
+        ToolAdapterOptions(approval_callback=_cb, allowed_tools={"bash_execute"})
+    )
+    run = tools["bash_execute"].function
+
+    monkeypatch.setenv("RUNE_APPROVAL_MODE", "standard")
+    asyncio.run(run(command="echo hi"))
+    assert len(asked) == 1, "standard mode still asks"
+
+    monkeypatch.setenv("RUNE_APPROVAL_MODE", "bypass")
+    asyncio.run(run(command="echo hi"))
+    assert len(asked) == 1, "bypass mode must not ask"

@@ -84,13 +84,16 @@ class ApprovalConfig(BaseModel):
     auto_approve_medium: bool = False
     timeout_seconds: int = 300
     session_cache_max: int = 200
-    # Which outbound network calls need sign-off.
-    #   off    — none (bypass; also implied by profile "automation")
-    #   writes — non-GET web_fetch, i.e. requests that change server state
-    #   all    — every network tool, including reads and browser clicks
-    # Reads stay ungated by default: they have no undo problem, and asking
-    # for each one is the prompt fatigue that makes approvals meaningless.
-    network_approval: str = "writes"
+    # The one switch every approval site honors — risky shell commands, MCP
+    # writes, and outbound network calls alike. RUNE_APPROVAL_MODE overrides it
+    # for a single run.
+    #   bypass   — never ask (equivalent to skipping permissions entirely)
+    #   standard — ask only for what cannot be undone: risky commands, MCP
+    #              writes, network writes
+    #   strict   — also ask for network reads and browser interactions
+    # Reads are not gated by default: they carry no undo problem, and a prompt
+    # per read is the fatigue that makes the prompts that matter worthless.
+    mode: str = "standard"
 
 
 # Safety Configuration

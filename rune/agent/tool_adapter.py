@@ -603,6 +603,9 @@ def _build_typed_tool(
                 if opts.on_tool_end is not None:
                     await opts.on_tool_end(cap_name, err)
                 return f"[BLOCKED] {guard_result.reason}"
+            if guard_result.requires_approval and approval_mode() == "bypass":
+                log.info("approval_bypassed", capability=cap_name, gate="guardian")
+                guard_result = _GuardianResult()
             if guard_result.requires_approval:
                 if opts.approval_callback is not None:
                     approved = await opts.approval_callback(cap_name, guard_result.reason)
@@ -645,7 +648,7 @@ def _build_typed_tool(
             # No channel to ask on. Reads proceed (a strict-mode read is a
             # preference, not a hazard); a write does not — it cannot be
             # undone, so fail closed. Headless callers wire a callback (bench,
-            # worker) or set approval.network_approval=off.
+            # worker) or run with approval mode "bypass".
             if net_request.is_write:
                 err = CapabilityResult(
                     success=False, error="No approval channel for a network write."
@@ -676,7 +679,11 @@ def _build_typed_tool(
                 _approved_network.add(net_request.cache_key)
 
         # -- Feature 3: MCP write operation approval guard -------
-        if cap_name.startswith("mcp.") and opts.approval_callback is not None:
+        if (
+            cap_name.startswith("mcp.")
+            and opts.approval_callback is not None
+            and approval_mode() != "bypass"
+        ):
             if is_mcp_write_operation(cap_name):
                 parts = cap_name.split(".")
                 service_name = parts[1] if len(parts) > 1 else "unknown"
@@ -1315,6 +1322,30 @@ _NETWORK_ACT_CAPS = frozenset({
 })
 
 
+_APPROVAL_MODES = ("bypass", "standard", "strict")
+
+
+def approval_mode() -> str:
+    """The single switch every approval site honors.
+
+    ``bypass`` never asks, ``standard`` asks only for operations that cannot be
+    undone, ``strict`` also asks for network reads and browser interactions.
+    Env wins over config so a headless run can opt out without editing files;
+    an unreadable config keeps the default rather than opening the gates.
+    """
+    env = os.environ.get("RUNE_APPROVAL_MODE", "").strip().lower()
+    if env in _APPROVAL_MODES:
+        return env
+    try:
+        from rune.config.loader import get_config
+
+        mode = str(getattr(get_config().approval, "mode", "standard")).strip().lower()
+        return mode if mode in _APPROVAL_MODES else "standard"
+    except Exception as exc:
+        log.debug("approval_mode_config_read_failed", error=str(exc)[:100])
+        return "standard"
+
+
 def _network_writes_possible() -> bool:
     """Whether a non-GET web_fetch can actually reach the network.
 
@@ -1346,23 +1377,11 @@ def _network_approval_request(
     """Sign-off needed for this network call? → (display, reason, cache key).
 
     A network write leaves the machine and has no undo — no trash, no
-    checkpoint, no working-tree revert — so a POST is gated even though a
-    GET read is not. Mode comes from ``approval.network_approval``:
-    ``off`` (nothing, the bypass setting), ``writes`` (default: non-GET
-    fetches), ``all`` (every network tool, Claude-Code-style strict).
+    checkpoint, no working-tree revert — so a POST is gated even though a GET
+    read is not. Strictness comes from :func:`approval_mode`.
     """
-    mode = "writes"
-    profile = "general"
-    try:
-        from rune.config.loader import get_config
-
-        approval_cfg = get_config().approval
-        mode = str(getattr(approval_cfg, "network_approval", "writes")).lower()
-        profile = str(getattr(approval_cfg, "profile", "general")).lower()
-    except Exception as exc:  # keep the default gate rather than opening it
-        log.debug("network_approval_config_read_failed", error=str(exc)[:100])
-
-    if mode == "off" or profile == "automation":
+    mode = approval_mode()
+    if mode == "bypass":
         return None
 
     if cap_name == "web_fetch":
@@ -1376,11 +1395,11 @@ def _network_approval_request(
                 f"{method}|{host}",
                 is_write=True,
             )
-        if mode == "all":
+        if mode == "strict":
             return _NetworkApproval(f"GET {url[:120]}", f"Fetch {host}", f"GET|{host}")
         return None
 
-    if mode != "all":
+    if mode != "strict":
         return None
 
     if cap_name in _NETWORK_READ_CAPS:
