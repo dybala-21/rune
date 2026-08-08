@@ -1469,6 +1469,10 @@ class NativeAgentLoop(EventEmitter):
         - Token budget tracking from PydanticAI usage stats
         """
         trace = CompletionTrace()
+        # Start the run with no mechanical verdict carried over from a
+        # previous run in this process (the REPL runs many).
+        from rune.agent.litellm_adapter import consume_mech_check as _clear_mech
+        _clear_mech()
         failover = FailoverManager()
         cache = SessionToolCache(max_entries=COGNITIVE_CACHE_MAX)
         self._cognitive_cache = cache
@@ -4076,6 +4080,10 @@ class NativeAgentLoop(EventEmitter):
         from rune.capabilities.registry import get_capability_registry
 
         trace = CompletionTrace()
+        # Start the run with no mechanical verdict carried over from a
+        # previous run in this process (the REPL runs many).
+        from rune.agent.litellm_adapter import consume_mech_check as _clear_mech
+        _clear_mech()
         registry = get_capability_registry()
         available_caps = [t for t in tools if registry.get(t) is not None]
 

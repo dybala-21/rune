@@ -1126,8 +1126,11 @@ class StreamResult:
         _explore_rounds = 0
         _explore_stage = 0
         _force_edit_tool = False
-        # Verify-on-stop state (per stream_text call).
-        _MECH_CHECK.set("")
+        # Verify-on-stop state (per stream_text call). The mechanical verdict
+        # is NOT cleared here: a run is often several streams, and the one
+        # that ran the tests is rarely the one that talks last — clearing per
+        # stream let a text-only closing phase erase the evidence. The loop
+        # clears it once per run.
         self._vos_edited = False
         self._vos_edited_paths: set[str] = set()
         self._vos_nudges = 0
