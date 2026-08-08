@@ -82,6 +82,8 @@ class PostProcessInput:
     # From the loop's CompletionTrace, for crisp learning.
     reason: str = ""
     evidence_gate: dict[str, Any] | None = None
+    # "pass"/"fail"/"" — whether anything executable vouched for the work.
+    mech_check: str = ""
     # goal_type used as the rule domain, so learning matches injection.
     classification_hint: str | None = None
 
@@ -341,6 +343,7 @@ async def post_process_agent_result(inp: PostProcessInput) -> list[str]:
                     "success": inp.success,
                     "reason": inp.reason,
                     "evidence_gate": inp.evidence_gate,
+                    "mech_check": inp.mech_check,
                     "changed_files": inp.changed_files,
                 },
                 memory_manager=manager,

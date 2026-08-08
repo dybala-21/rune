@@ -3205,7 +3205,9 @@ class NativeAgentLoop(EventEmitter):
         # success, which is exactly the false-done the verified path already
         # refuses.
         from rune.agent.litellm_adapter import consume_mech_check
-        if consume_mech_check() == "fail" and trace.reason == "completed":
+        _mech = consume_mech_check()
+        trace.mech_check = _mech
+        if _mech == "fail" and trace.reason == "completed":
             trace.reason = "checks_failed"
             log.info("run_checks_failed", step=self._step)
 

@@ -461,6 +461,31 @@ def _select_crisp_signal(
     return ""
 
 
+def rule_eval_allowed(
+    success: bool, domain: str | None,
+    mech_check: str, evidence_gate: dict | None,
+) -> bool:
+    """Whether this outcome may be counted against the rules.
+
+    A success only counts when it is backed by the strongest evidence its
+    kind of task can have. For code-shaped domains that means an executed
+    check: a run that produced a confident answer and ran nothing has proven
+    nothing, and rules promoted on such runs are rules promoted on prose.
+    Non-code domains have no executable oracle, so completion remains their
+    best available signal — demanding more would starve their rules the way
+    the keyword gate starved everything. Failures always count; they carry
+    their own evidence.
+    """
+    if not success:
+        return True
+    if domain not in ("code_modify", "execution", "full"):
+        return True
+    if mech_check == "pass":
+        return True
+    eg = evidence_gate or {}
+    return isinstance(eg, dict) and eg.get("last_verdict") == "pass"
+
+
 async def save_agent_result_to_memory(
     goal: str,
     result: Any,
@@ -600,11 +625,17 @@ async def save_agent_result_to_memory(
                 update_rules_from_outcome,
             )
 
-            _keys = await semantic_relevant_rule_keys(goal, result_text[:300])
-            update_rules_from_outcome(
-                domain, success, goal=goal,
-                error_message=result_text[:300], relevant_keys=_keys,
-            )
+            _mech = str(result.get("mech_check", "") or "") \
+                if isinstance(result, dict) else ""
+            _eg = result.get("evidence_gate") if isinstance(result, dict) else None
+            if not rule_eval_allowed(success, domain, _mech, _eg):
+                log.debug("rule_eval_skipped_no_evidence", domain=domain)
+            else:
+                _keys = await semantic_relevant_rule_keys(goal, result_text[:300])
+                update_rules_from_outcome(
+                    domain, success, goal=goal,
+                    error_message=result_text[:300], relevant_keys=_keys,
+                )
         except Exception as exc:
             # Rule feedback must never block episode saving — but a feedback
             # loop that fails silently is how ten runs evaluated nothing

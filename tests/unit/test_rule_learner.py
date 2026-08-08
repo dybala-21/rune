@@ -378,3 +378,45 @@ class TestQuarantinedRulesCanBeEvaluated:
             "code_modify", False, goal="verify the deploy",
             relevant_keys=set())
         assert n == 0
+
+
+class TestEvidenceGatedPromotion:
+    """A confident answer that ran nothing must not promote code rules.
+
+    Measured: on a kept home, false-done code runs (exit 0, nothing
+    mechanically verified end-to-end) counted as successes and promoted two
+    quarantined rules. The gate requires the strongest evidence the task's
+    kind can have — an executed check for code-shaped domains, completion
+    itself for domains that have no executable oracle. Failures always
+    count either way.
+    """
+
+    def test_code_success_without_any_check_is_not_counted(self):
+        from rune.agent.memory_bridge import rule_eval_allowed
+        assert not rule_eval_allowed(True, "code_modify", "", None)
+
+    def test_code_success_backed_by_the_mech_check_counts(self):
+        from rune.agent.memory_bridge import rule_eval_allowed
+        assert rule_eval_allowed(True, "code_modify", "pass", None)
+
+    def test_code_success_backed_by_the_evidence_gate_counts(self):
+        from rune.agent.memory_bridge import rule_eval_allowed
+        assert rule_eval_allowed(True, "execution", "",
+                                 {"last_verdict": "pass"})
+
+    def test_an_office_task_needs_no_executable_oracle(self):
+        # Demanding one would starve non-code rules the way the keyword
+        # gate starved everything.
+        from rune.agent.memory_bridge import rule_eval_allowed
+        assert rule_eval_allowed(True, "chat", "", None)
+        assert rule_eval_allowed(True, "research", "", None)
+
+    def test_failures_always_count(self):
+        from rune.agent.memory_bridge import rule_eval_allowed
+        assert rule_eval_allowed(False, "code_modify", "", None)
+
+    def test_a_failed_gate_verdict_does_not_back_a_success(self):
+        from rune.agent.memory_bridge import rule_eval_allowed
+        assert not rule_eval_allowed(True, "code_modify", "",
+                                     {"last_verdict": "fail"})
+

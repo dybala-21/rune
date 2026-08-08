@@ -528,6 +528,7 @@ def _handle_non_interactive(
                     answer="".join(output_parts),
                     reason=trace.reason,
                     evidence_gate=trace.evidence_gate,
+                    mech_check=getattr(trace, "mech_check", ""),
                     classification_hint=goal_type,
                     changed_files=loop.files_written,
                 ))
@@ -750,6 +751,7 @@ def _simple_repl(model: str | None = None, provider: str | None = None) -> None:
                 answer=answer,
                 reason=trace.reason,
                 evidence_gate=trace.evidence_gate,
+                mech_check=getattr(trace, "mech_check", ""),
                 changed_files=run_loop.files_written,
             ))
 
