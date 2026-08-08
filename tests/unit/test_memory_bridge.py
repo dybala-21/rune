@@ -18,6 +18,14 @@ from rune.agent.memory_bridge import (
 from rune.types import Domain
 
 
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path, monkeypatch):
+    """Keep the through-save tests out of the real ~/.rune — the save path
+    reads and writes pending-outcome state, and a developer's real pendings
+    must not leak an LLM call into a unit test."""
+    monkeypatch.setenv("RUNE_HOME", str(tmp_path))
+
+
 class TestEpisodeFilesAreAuthoritative:
     """The episode records the files the agent's tools actually wrote
     (result['changed_files']) — never paths guessed from free text, so env/model
@@ -56,6 +64,68 @@ class TestEpisodeFilesAreAuthoritative:
         ep = await self._save(result)
         assert ep is not None
         assert ep.files_touched in ("", "[]")
+
+
+class TestDeferredRuleTruth:
+    """A completion-only success is held for the user's verdict, not
+    counted; evidence-backed and failed outcomes still count at once."""
+
+    class _FakeMgr:
+        async def save_episode(self, ep):
+            pass
+
+    @pytest.fixture
+    def updates(self, monkeypatch):
+        calls: list[bool] = []
+        import rune.memory.rule_learner as rl
+        monkeypatch.setattr(
+            rl, "update_rules_from_outcome",
+            lambda domain, task_success, **kw: calls.append(task_success) or 0,
+        )
+        monkeypatch.setattr(
+            rl, "semantic_relevant_rule_keys",
+            _async_none, raising=False,
+        )
+        return calls
+
+    @pytest.mark.asyncio
+    async def test_weak_success_is_deferred(self, updates):
+        result = {"output": "요약 작성 완료", "success": True,
+                  "reason": "completed"}
+        await save_agent_result_to_memory(
+            "회의록 요약해줘", result, self._FakeMgr(),
+            classification_hint="chat",
+        )
+        from rune.memory import pending_outcomes as po
+        assert len(po._load()) == 1
+        assert updates == []
+
+    @pytest.mark.asyncio
+    async def test_mech_checked_success_counts_immediately(self, updates):
+        result = {"output": "done", "success": True, "reason": "completed",
+                  "mech_check": "pass"}
+        await save_agent_result_to_memory(
+            "summarise notes", result, self._FakeMgr(),
+            classification_hint="chat",
+        )
+        from rune.memory import pending_outcomes as po
+        assert po._load() == []
+        assert updates == [True]
+
+    @pytest.mark.asyncio
+    async def test_failure_counts_immediately(self, updates):
+        result = {"output": "boom", "success": False, "reason": "error"}
+        await save_agent_result_to_memory(
+            "summarise notes", result, self._FakeMgr(),
+            classification_hint="chat",
+        )
+        from rune.memory import pending_outcomes as po
+        assert po._load() == []
+        assert updates == [False]
+
+
+async def _async_none(*args, **kwargs):
+    return None
 
 
 class TestSelectCrispSignal:

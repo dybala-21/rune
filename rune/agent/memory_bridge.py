@@ -619,7 +619,22 @@ async def save_agent_result_to_memory(
             except Exception:
                 domain = None
         domain = domain or "code_modify"
+        # Settle outcomes waiting on the user's verdict: this run's opening
+        # message is the first reaction any earlier weak-evidence "success"
+        # ever gets. Runs at save time, after the answer is out, so the
+        # user is never waiting on it.
         try:
+            from rune.memory.pending_outcomes import resolve_pendings
+
+            await resolve_pendings(goal)
+        except Exception as exc:
+            log.debug("pending_resolution_failed", error=str(exc)[:120])
+
+        try:
+            from rune.memory.pending_outcomes import (
+                deferred_truth_enabled,
+                record_pending,
+            )
             from rune.memory.rule_learner import (
                 semantic_relevant_rule_keys,
                 update_rules_from_outcome,
@@ -632,10 +647,21 @@ async def save_agent_result_to_memory(
                 log.debug("rule_eval_skipped_no_evidence", domain=domain)
             else:
                 _keys = await semantic_relevant_rule_keys(goal, result_text[:300])
-                update_rules_from_outcome(
-                    domain, success, goal=goal,
-                    error_message=result_text[:300], relevant_keys=_keys,
+                _executed_evidence = _mech == "pass" or (
+                    isinstance(_eg, dict) and _eg.get("last_verdict") == "pass"
                 )
+                if success and not _executed_evidence and deferred_truth_enabled():
+                    # Admitted without an executed check — only non-code
+                    # domains get here. The user's next message settles it.
+                    record_pending(
+                        domain, goal,
+                        error_message=result_text[:300], relevant_keys=_keys,
+                    )
+                else:
+                    update_rules_from_outcome(
+                        domain, success, goal=goal,
+                        error_message=result_text[:300], relevant_keys=_keys,
+                    )
         except Exception as exc:
             # Rule feedback must never block episode saving — but a feedback
             # loop that fails silently is how ten runs evaluated nothing
