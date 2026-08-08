@@ -720,11 +720,52 @@ async def get_relevant_rules(
     return out[:limit]
 
 
+async def semantic_relevant_rule_keys(
+    goal: str, error_message: str = ""
+) -> set[str] | None:
+    """Rule keys semantically relevant to this task, or None when unknowable.
+
+    The outcome evaluator's keyword gate compares English snake_case rule
+    keys against the task's own words, so for a user working in any other
+    language nothing ever overlapped: measured on a kept home, five repeat
+    runs left every rule at eval_count 0, and a rule that is never evaluated
+    can never earn its way to injection. Retrieval hit this same wall and
+    grew a semantic path; evaluation gets the same one, over ALL rules —
+    including quarantined ones, which are exactly the ones that need
+    evaluations to prove themselves.
+    """
+    if not goal:
+        return None
+    try:
+        from rune.memory.markdown_store import parse_learned_md
+        from rune.utils.env import env_float
+
+        rules = [f for f in parse_learned_md()
+                 if f.get("category", "").startswith("rule:")]
+        if not rules:
+            return set()
+        from rune.memory.manager import get_memory_manager
+
+        threshold = env_float(_RULE_SIM_THRESHOLD_ENV, _DEFAULT_RULE_SIM_THRESHOLD)
+        context = f"{goal} {error_message}".strip()
+        texts = [context] + [f"{r['key']}: {r['value']}" for r in rules]
+        vecs = await get_memory_manager().embed_batch(texts)
+        gvec, rvecs = vecs[0], vecs[1:]
+        return {
+            r["key"] for r, rv in zip(rules, rvecs, strict=False)
+            if _cosine(gvec, rv) >= threshold
+        }
+    except Exception as exc:  # embeddings unavailable -> caller falls back
+        log.debug("rule_semantic_eval_skipped", error=str(exc)[:120])
+        return None
+
+
 def update_rules_from_outcome(
     domain: str,
     task_success: bool,
     goal: str = "",
     error_message: str = "",
+    relevant_keys: set[str] | None = None,
 ) -> int:
     """Update confidence of domain rules based on task outcome.
 
@@ -746,10 +787,15 @@ def update_rules_from_outcome(
         if entry.get("source") not in ("rule_learner", "crisp_failure", "contrastive_distill"):
             continue
 
-        # Relevance check: rule keywords vs task context.
+        # Relevance check. When the caller supplies semantically-matched keys
+        # (language-neutral, same mechanism retrieval uses) they decide;
+        # keyword overlap remains the offline fallback.
         human_key = entry.get("human_key", "")
-        rule_words = {w for w in human_key.lower().split("_") if len(w) > 3}
-        has_overlap = bool(rule_words) and any(w in context for w in rule_words)
+        if relevant_keys is not None:
+            has_overlap = human_key in relevant_keys
+        else:
+            rule_words = {w for w in human_key.lower().split("_") if len(w) > 3}
+            has_overlap = bool(rule_words) and any(w in context for w in rule_words)
         in_domain = entry.get("category") == category
 
         # Injection is cross-domain (semantic similarity, get_relevant_rules), so
@@ -760,7 +806,9 @@ def update_rules_from_outcome(
         # with no positive overlap is never touched (avoids over-demotion).
         if not in_domain and not has_overlap:
             continue
-        if in_domain and rule_words and context and not has_overlap:
+        if in_domain and context and not has_overlap and (
+            relevant_keys is not None or rule_words
+        ):
             continue
 
         conf = entry.get("confidence", _INITIAL_CONFIDENCE)

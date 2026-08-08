@@ -318,3 +318,63 @@ class TestDecayDeletes:
         decay_unused_rules()
         assert "rule:code_modify:zzz" not in saved["meta"]
         assert "zzz" in removed
+
+
+class TestQuarantinedRulesCanBeEvaluated:
+    """A rule that is never evaluated can never earn injection.
+
+    Rules are deliberately born below the injection threshold and must climb
+    through outcome evaluations. The evaluator's relevance gate compared
+    English snake_case keys against the task's own words, so for a task in
+    any other language nothing ever matched — measured: five repeat runs on
+    a kept home left every rule at eval_count 0. The caller now supplies
+    semantically-matched keys (the same mechanism retrieval already uses),
+    with keyword overlap kept as the offline fallback.
+    """
+
+    def _wire(self, tmp_path, monkeypatch, entries):
+        import json
+        store = dict(entries)
+        monkeypatch.setattr("rune.memory.rule_learner.load_fact_meta",
+                            lambda: json.loads(json.dumps(store)))
+        saved = {}
+        def _save(d):
+            saved.clear()
+            saved.update(d)
+        monkeypatch.setattr("rune.memory.rule_learner.save_fact_meta", _save)
+        return saved
+
+    def test_semantic_keys_reach_a_rule_the_keywords_cannot(self, tmp_path, monkeypatch):
+        from rune.memory import rule_learner as rl
+        key = "rule:code_modify:abc123"
+        saved = self._wire(tmp_path, monkeypatch, {key: {
+            "category": "rule:code_modify", "human_key": "python_availability",
+            "confidence": rl._INITIAL_CONFIDENCE, "eval_count": 0,
+            "source": "rule_learner",
+        }})
+
+        # Korean goal, English rule key: the keyword gate can never match.
+        n = rl.update_rules_from_outcome(
+            "code_modify", True, goal="스크립트 실행 오류 고쳐줘")
+        assert n == 0
+
+        # The semantic caller says the rule IS about this task.
+        n = rl.update_rules_from_outcome(
+            "code_modify", True, goal="스크립트 실행 오류 고쳐줘",
+            relevant_keys={"python_availability"})
+        assert n == 1
+        assert saved[key]["eval_count"] == 1
+        assert saved[key]["confidence"] > rl._INITIAL_CONFIDENCE
+
+    def test_semantic_verdict_can_also_exclude(self, tmp_path, monkeypatch):
+        from rune.memory import rule_learner as rl
+        self._wire(tmp_path, monkeypatch, {"rule:code_modify:x": {
+            "category": "rule:code_modify", "human_key": "verify_before_edit",
+            "confidence": 0.5, "eval_count": 0, "source": "rule_learner",
+        }})
+        # Keyword overlap WOULD match ("verify" in goal), but the semantic
+        # caller judged it irrelevant — its verdict wins.
+        n = rl.update_rules_from_outcome(
+            "code_modify", False, goal="verify the deploy",
+            relevant_keys=set())
+        assert n == 0

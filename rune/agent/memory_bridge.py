@@ -595,11 +595,21 @@ async def save_agent_result_to_memory(
                 domain = None
         domain = domain or "code_modify"
         try:
-            from rune.memory.rule_learner import update_rules_from_outcome
+            from rune.memory.rule_learner import (
+                semantic_relevant_rule_keys,
+                update_rules_from_outcome,
+            )
 
-            update_rules_from_outcome(domain, success, goal=goal, error_message=result_text[:300])
-        except Exception:
-            pass  # Rule feedback must never block episode saving
+            _keys = await semantic_relevant_rule_keys(goal, result_text[:300])
+            update_rules_from_outcome(
+                domain, success, goal=goal,
+                error_message=result_text[:300], relevant_keys=_keys,
+            )
+        except Exception as exc:
+            # Rule feedback must never block episode saving — but a feedback
+            # loop that fails silently is how ten runs evaluated nothing
+            # without anyone knowing.
+            log.debug("rule_outcome_update_failed", error=str(exc)[:120])
 
         # Rule Learner (conservative path): repeated-failure learning triggers
         # only on a failed loop and needs the same pattern to recur.
