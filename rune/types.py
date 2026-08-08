@@ -245,6 +245,11 @@ class CompletionTrace:
     # Evidence Gate decision history (None when the gate is disabled). Surfaced
     # here because structlog events are not captured in benchmark containers.
     evidence_gate: dict[str, Any] | None = None
+    # Verdict of the last mechanical check the run saw ("pass"/"fail"/"").
+    # reason says how the run ended; this says whether anything executable
+    # ever vouched for the work. Declared, not injected: the class is
+    # slots-based, which the integration suite noticed before anyone did.
+    mech_check: str = ""
     # Some step hit the adapter's tool-round cap and was cut off without a
     # final LLM turn — the answer may silently omit work that never ran.
     tool_budget_exhausted: bool = False
