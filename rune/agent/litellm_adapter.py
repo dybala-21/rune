@@ -2048,12 +2048,16 @@ class StreamResult:
         ledger = self._ledger()
         if ledger is None:
             return ""
-        # Only paths this run positively saw to be missing. Classifying a
-        # file as an input is NOT enough on its own: an input the agent read
-        # with a shell command never reaches the read ledger, and removing
-        # it because of that would destroy the very file the task depends
-        # on — the failure this whole area exists to prevent.
-        candidates = set(ledger.refused) | set(ledger.known_absent)
+        # Only paths this run positively saw to be missing — and of those,
+        # only the ones whose creation would be fabrication. Checking whether
+        # an OUTPUT already exists is the normal first step of producing it,
+        # and its later appearance is the task succeeding, not a guard being
+        # circumvented: a signed report was once trashed here moments after
+        # the agent generated it correctly, because it had probed for the
+        # file first. is_phantom carries the role distinction already.
+        candidates = set(ledger.refused) | {
+            k for k in ledger.known_absent if ledger.is_phantom(k)
+        }
         if not candidates:
             return ""
         notes: list[str] = []

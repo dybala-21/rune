@@ -614,3 +614,43 @@ async def test_classification_started_once_not_per_round(monkeypatch, tmp_path):
 
     assert len(calls) == 1
 
+
+class TestAnOutputMayAppear:
+    """Probing for an output and then producing it is not circumvention.
+
+    Measured: asked to regenerate report.csv, the agent sensibly read the
+    path first (absent — noted known_absent), then produced it correctly
+    through the project's own signing tool via the shell. The revert swept
+    everything in known_absent with no role check, trashed the finished
+    report, and the agent invented a policy explanation for the loss. An
+    output the request asks for is SUPPOSED to appear.
+    """
+
+    def test_a_produced_output_survives_the_revert(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        led = ArtifactLedger.for_request(
+            "data.json이 갱신됐어. report.csv 다시 만들어줘", root=str(tmp_path))
+        led.roles.update({"data.json": "input", "report.csv": "output"})
+        led.record_read(str(tmp_path / "report.csv"), False)   # probe: absent
+        (tmp_path / "report.csv").write_text("body\n# sig=abc\n")  # tool made it
+
+        res = _result(tmp_path, [], [])
+        res._artifact_ledger = led
+        note = res._revert_circumvented_writes()
+        assert note == ""
+        assert (tmp_path / "report.csv").exists()
+
+    def test_a_refused_phantom_input_is_still_reverted(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        led = ArtifactLedger.for_request(
+            "fix the bug in BUGREPORT.md", root=str(tmp_path))
+        led.roles.update({"BUGREPORT.md": "input"})
+        led.record_read(str(tmp_path / "BUGREPORT.md"), False)
+        (tmp_path / "BUGREPORT.md").write_text("invented\n")   # shell route
+
+        res = _result(tmp_path, [], [])
+        res._artifact_ledger = led
+        note = res._revert_circumvented_writes()
+        assert note != ""
+        assert not (tmp_path / "BUGREPORT.md").exists()
+
