@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import litellm
 
-import rune.agent.litellm_adapter  # noqa: F401  (enables litellm.drop_params)
 from rune.agent.model_traits import (
     _TEMPERATURE_REJECTED,
     is_temperature_error,
@@ -17,7 +16,13 @@ from rune.agent.model_traits import (
 )
 
 
-def test_import_enables_drop_params():
+def test_adapter_accessor_enables_drop_params():
+    # litellm loads lazily; the adapter's accessor is what configures it,
+    # and every request path must reach litellm through that accessor —
+    # a plain `import litellm` sets nothing.
+    from rune.agent.litellm_adapter import litellm as configured
+
+    assert configured is litellm
     assert litellm.drop_params is True
 
 

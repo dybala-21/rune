@@ -188,7 +188,10 @@ class LLMClient:
 
         Returns the raw LiteLLM response dict.
         """
-        import litellm
+        # Through the adapter's lazy accessor so drop_params and the debug
+        # suppression are set before any request goes out — a plain
+        # `import litellm` configures nothing.
+        from rune.agent.litellm_adapter import litellm
 
         resolved_model = model or self.resolve_model(tier, provider)
 
@@ -224,9 +227,8 @@ class LLMClient:
         if prefix and not resolved_model.startswith(prefix):
             resolved_model = f"{prefix}{resolved_model}"
 
-        # Clamp to model's hard output cap
-        # importing the adapter sets litellm.drop_params; the traits table +
-        # the retry below handle models it gets wrong (see model_traits).
+        # Clamp to model's hard output cap; the traits table + the retry
+        # below handle models litellm's DB gets wrong (see model_traits).
         from rune.agent.litellm_adapter import _clamp_max_tokens
         from rune.agent.model_traits import (
             is_temperature_error,

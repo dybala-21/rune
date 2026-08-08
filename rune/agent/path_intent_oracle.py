@@ -177,9 +177,7 @@ async def _call_path_intent_oracle(
     """
     import json
 
-    import litellm
-
-    from rune.agent.litellm_adapter import _resolve_litellm_model
+    from rune.agent.litellm_adapter import _resolve_litellm_model, litellm
 
     fallback: list[str] = []
 
