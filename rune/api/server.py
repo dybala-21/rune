@@ -59,6 +59,22 @@ async def _post_process(
         log.warning(f"{tag}_post_process_failed", error=str(exc)[:100])
 
 
+# How long an approval card stays actionable before the run gives up.
+_APPROVAL_TIMEOUT_MS = 120_000
+
+# Clients send the decision the UI offered — approve_once / approve_always /
+# deny (see ApprovalRequestModel). Plain "approve" is accepted for older
+# callers. Anything else, including an empty payload, denies.
+_APPROVE_DECISIONS = frozenset({"approve", "approve_once", "approve_always"})
+
+
+def approval_granted(result: dict[str, Any] | None) -> bool:
+    """Whether an approval response allows the operation to proceed."""
+    if not result:
+        return False
+    return str(result.get("decision", "")).strip().lower() in _APPROVE_DECISIONS
+
+
 def build_trust_payload(trace: Any) -> dict[str, Any]:
     """The 'why did it say done' data for the app's trust card: whether the run
     was verified, the Evidence Gate summary, and — when it did NOT complete —
@@ -73,6 +89,11 @@ def build_trust_payload(trace: Any) -> dict[str, Any]:
         # A step died at the tool-round cap without a final LLM turn — the
         # answer may omit work that never ran; the UI must say so.
         "budgetExhausted": bool(getattr(trace, "tool_budget_exhausted", False)),
+        # The project's tests after the last edit: true green, false not green,
+        # null when nothing was edited. Weaker than the Evidence Gate — the
+        # suite may have passed before the change — so the UI shows it as
+        # "tests passing", never as "verified".
+        "testsPassedAfterEdit": getattr(trace, "tests_passed_after_edit", None),
     }
     gate = getattr(trace, "evidence_gate", None)
     if isinstance(gate, dict):
@@ -428,7 +449,7 @@ def create_app() -> Any:
             _active_loops[run_id] = loop
 
             # 2. Wire approval callback (SSE/WS ↔ future)
-            async def _web_approval_callback(command: str, risk_level: str) -> bool:
+            async def _web_approval_callback(command: str, reason: str) -> bool:
                 approval_id = f"approval:{run_id}:{int(time.monotonic() * 1000)}"
                 approval_future: asyncio.Future[dict[str, Any]] = (
                     asyncio.get_running_loop().create_future()
@@ -439,13 +460,19 @@ def create_app() -> Any:
                     {
                         "id": approval_id,
                         "command": command,
-                        "riskLevel": risk_level,
+                        # Callers pass a reason, not a level — the card shows it
+                        # as text and hides the level chip when it is empty.
+                        "riskLevel": "",
+                        "reason": reason,
+                        "timeoutMs": _APPROVAL_TIMEOUT_MS,
                         "runId": run_id,
                     },
                 )
                 try:
-                    result = await asyncio.wait_for(approval_future, timeout=120.0)
-                    return result.get("decision") == "approve"
+                    result = await asyncio.wait_for(
+                        approval_future, timeout=_APPROVAL_TIMEOUT_MS / 1000
+                    )
+                    return approval_granted(result)
                 except TimeoutError:
                     return False
                 finally:

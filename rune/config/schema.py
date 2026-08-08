@@ -84,6 +84,16 @@ class ApprovalConfig(BaseModel):
     auto_approve_medium: bool = False
     timeout_seconds: int = 300
     session_cache_max: int = 200
+    # The one switch every approval site honors — risky shell commands, MCP
+    # writes, and outbound network calls alike. RUNE_APPROVAL_MODE overrides it
+    # for a single run.
+    #   bypass   — never ask (equivalent to skipping permissions entirely)
+    #   standard — ask only for what cannot be undone: risky commands, MCP
+    #              writes, network writes
+    #   strict   — also ask for network reads and browser interactions
+    # Reads are not gated by default: they carry no undo problem, and a prompt
+    # per read is the fatigue that makes the prompts that matter worthless.
+    mode: str = "standard"
 
 
 # Safety Configuration

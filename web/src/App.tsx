@@ -256,6 +256,7 @@ export function App() {
         currentStepInfo={!isViewingHistory ? agent.currentStepInfo : undefined}
         currentActivity={currentActivity}
         activeModel={configInfo?.activeModel ?? null}
+        approvalMode={configInfo?.approvalMode}
         lastRunSuccess={runVerdict}
         onOpenPalette={() => setPaletteOpen(true)}
         trailing={!isViewingHistory ? <WorkspaceChip /> : null}

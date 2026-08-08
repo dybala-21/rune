@@ -52,6 +52,10 @@ export interface TrustInfo {
   /** A step hit the tool-round cap and was cut off without a final LLM turn —
       the answer may silently omit work that never ran. */
   budgetExhausted?: boolean;
+  /** Project tests after the last code change: green, not green, or null when
+      nothing was edited. Weaker than an Evidence Gate check — the suite may
+      have passed before the change too — so it never reads as "verified". */
+  testsPassedAfterEdit?: boolean | null;
   evidenceGate?: {
     hasCheck: boolean;
     lastVerdict: string;

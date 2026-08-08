@@ -37,6 +37,38 @@ class ApiRequest:
     status: int = 0
     content_type: str = ""
     has_json_response: bool = False
+    # Request body (truncated) — without it a discovered POST endpoint (the
+    # schedule/booking class) cannot be replayed via web_fetch.
+    post_data: str = ""
+    request_content_type: str = ""
+    # Captured response body (JSON responses only, truncated). Reading the
+    # body the site already fetched needs no replay and no parameters — the
+    # page's own click flow supplied them (network-level scraping).
+    response_body: str = ""
+
+
+def hybrid_api_enabled() -> bool:
+    """Gate for the hybrid API path (POST replay, recipes, late-API hints).
+
+    OPT-IN (RUNE_HYBRID_API=1): the paired A/B on the discriminative
+    booking-SPA cell measured the directive hints steering the model into
+    API exploration that fails to converge within the round budget (ON 0/3
+    vs OFF 2/3), so the default stays off until the design converts.
+    """
+    import os
+
+    return os.environ.get("RUNE_HYBRID_API", "0") == "1"
+
+
+def format_api_recipe(api: ApiRequest) -> str:
+    """One replayable line for a captured API call — method, URL, body."""
+    if api.method != "GET" and api.post_data:
+        ct = api.request_content_type or "application/x-www-form-urlencoded"
+        return (
+            f'web_fetch(url="{api.url}", method="{api.method}", '
+            f'body="{api.post_data[:200]}", content_type="{ct}")'
+        )
+    return f'web_fetch(url="{api.url}")'
 
 
 class NetworkMonitor:
@@ -47,6 +79,9 @@ class NetworkMonitor:
         self._requests: deque[ApiRequest] = deque(maxlen=_MAX_ENTRIES)
         self._pending: dict[str, ApiRequest] = {}  # requestId -> ApiRequest
         self._active: bool = False
+        self._reported_count: int = 0
+        # requestId → ApiRequest, awaiting body capture on loadingFinished.
+        self._await_body: dict[str, ApiRequest] = {}
 
     @property
     def active(self) -> bool:
@@ -60,6 +95,7 @@ class NetworkMonitor:
             self._cdp = await page.context.new_cdp_session(page)
             self._cdp.on("Network.requestWillBeSent", self._on_request)
             self._cdp.on("Network.responseReceived", self._on_response)
+            self._cdp.on("Network.loadingFinished", self._on_loading_finished)
             await self._cdp.send("Network.enable")
             self._active = True
             log.debug("network_monitor_attached")
@@ -93,10 +129,15 @@ class NetworkMonitor:
             return
 
         request_id = params.get("requestId", "")
+        req_headers = request.get("headers", {}) or {}
         api = ApiRequest(
             url=url,
             method=request.get("method", "GET"),
             resource_type=resource_type,
+            post_data=str(request.get("postData", "") or "")[:500],
+            request_content_type=str(
+                req_headers.get("Content-Type") or req_headers.get("content-type") or ""
+            ),
         )
         self._pending[request_id] = api
 
@@ -112,12 +153,53 @@ class NetworkMonitor:
         api.content_type = response.get("mimeType", "")
         api.has_json_response = "json" in api.content_type.lower()
 
+        # Body becomes readable at loadingFinished; only JSON payloads are
+        # worth the fetch (the data the page's own click flow requested).
+        if api.has_json_response and hybrid_api_enabled():
+            self._await_body[request_id] = api
+
         self._requests.append(api)
         log.debug(
             "network_api_captured",
             method=api.method, url=api.url[:100],
             status=api.status, json=api.has_json_response,
         )
+
+    _BODY_MAX_CHARS = 30_000
+
+    def _on_loading_finished(self, params: dict) -> None:
+        """Schedule the async body read for a finished JSON response."""
+        api = self._await_body.pop(params.get("requestId", ""), None)
+        if api is None or self._cdp is None:
+            return
+        import asyncio
+
+        try:
+            asyncio.get_running_loop().create_task(
+                self._fetch_body(params.get("requestId", ""), api)
+            )
+        except RuntimeError:
+            # No running loop (unit tests) — bodies just stay empty.
+            log.debug("body_fetch_skipped_no_loop",
+                      request_id=params.get("requestId", ""))
+
+    async def _fetch_body(self, request_id: str, api: ApiRequest) -> None:
+        """Read the response body via CDP; failures leave the body empty."""
+        try:
+            result = await self._cdp.send(
+                "Network.getResponseBody", {"requestId": request_id}
+            )
+            body = result.get("body", "")
+            if result.get("base64Encoded"):
+                import base64
+
+                body = base64.b64decode(body).decode("utf-8", errors="replace")
+            api.response_body = body[: self._BODY_MAX_CHARS]
+            log.debug(
+                "network_body_captured", url=api.url[:100], chars=len(api.response_body)
+            )
+        except Exception as exc:
+            log.debug("network_body_fetch_failed", error=str(exc)[:100])
 
     def get_discovered_apis(self, filter_pattern: str = "") -> list[ApiRequest]:
         """Return captured API requests, optionally filtered by URL pattern."""
@@ -131,10 +213,38 @@ class NetworkMonitor:
         """Return only requests that returned JSON responses."""
         return [r for r in self._requests if r.has_json_response]
 
+    def mark_reported(self) -> None:
+        """Remember how many requests the model has already been shown."""
+        self._reported_count = len(self._requests)
+
+    def unreported_interesting_count(self) -> int:
+        """JSON/POST calls captured since the last report — data-loading XHRs
+        (the schedule/booking class) fire on interaction, after the navigate-
+        time snapshot the model saw."""
+        skip = min(self._reported_count, len(self._requests))
+        return sum(
+            1 for i, r in enumerate(self._requests)
+            if i >= skip and (r.has_json_response or r.method != "GET")
+        )
+
+    def unreported_json_bodies(self) -> list[ApiRequest]:
+        """Captured JSON responses the model has not been shown yet.
+
+        The data the page loaded in response to its own click — the answer
+        itself, not a pointer to where the answer might be.
+        """
+        skip = min(self._reported_count, len(self._requests))
+        return [
+            r for i, r in enumerate(self._requests)
+            if i >= skip and r.response_body
+        ]
+
     def clear(self) -> None:
         """Clear captured requests."""
         self._requests.clear()
         self._pending.clear()
+        self._await_body.clear()
+        self._reported_count = 0
 
 
 # Module-level singleton

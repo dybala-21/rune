@@ -226,9 +226,14 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       el.style.height = Math.min(el.scrollHeight, 160) + 'px';
 
       const val = el.value;
-      if (val.startsWith('/')) {
+      // A slash command is a single bare token — "/clear", "/goal". Anything
+      // with a separator is a path ("/Users/me/project cleanup please"), and
+      // opening the palette for it used to swallow Enter with no menu on
+      // screen, leaving the message unsendable.
+      const cmd = /^\/([\w-]*)$/.exec(val);
+      if (cmd) {
         setShowCommands(true);
-        setCmdFilter(val.slice(1));
+        setCmdFilter(cmd[1]);
       } else {
         setShowCommands(false);
       }

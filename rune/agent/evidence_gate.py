@@ -196,7 +196,7 @@ async def run_evidence_check(script: str, cwd: str) -> tuple[str, str]:
     # getpgid had a race — a check that finishes instantly ("echo; exit 0")
     # can exit before the lookup runs, the lookup raises, and the fallback
     # kills only the dead shell while the server it backgrounded keeps the
-    # port. CI hit exactly that window.
+    # port.
     _pgid: int | None = proc.pid
 
     def _kill_group() -> None:

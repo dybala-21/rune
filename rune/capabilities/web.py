@@ -142,6 +142,27 @@ class WebFetchParams(BaseModel):
     url: str = Field(description="URL to fetch")
     selector: str | None = Field(default=None, description="CSS selector to extract")
     max_length: int = Field(default=50_000, alias="maxLength")
+    # Replay support for APIs discovered via browser network monitoring —
+    # data-loading endpoints on dynamic sites are frequently POST.
+    method: str = Field(default="GET", description="HTTP method (GET or POST)")
+    body: str | None = Field(
+        default=None,
+        description="Request body for POST (as captured by browser_discover_apis)",
+    )
+    content_type: str | None = Field(
+        default=None,
+        alias="contentType",
+        description="Request body content type (default form-urlencoded)",
+    )
+    json_filter: str | None = Field(
+        default=None,
+        alias="jsonFilter",
+        description=(
+            "For large JSON responses: keep only array elements / subtrees "
+            "containing this keyword (e.g. a branch or product name), so the "
+            "relevant records survive truncation"
+        ),
+    )
 
 
 # HTML helpers
@@ -298,6 +319,46 @@ def _is_path_wipe_redirect(original_url: str, final_url: str) -> bool:
     return True
 
 
+def _json_contains(node: Any, term: str) -> bool:
+    if isinstance(node, dict):
+        return any(_json_contains(v, term) for v in node.values())
+    if isinstance(node, list):
+        return any(_json_contains(x, term) for x in node)
+    return term in str(node).lower()
+
+
+def _prune_json_by_term(text: str, term: str) -> str | None:
+    """Keep only the JSON subtrees containing *term* (case-insensitive).
+
+    List elements that match are kept WHOLE — the point is preserving all
+    fields of the matching records (e.g. a branch's showtimes), not just the
+    matching strings. Returns None when the text isn't valid JSON.
+    """
+    import json as _json
+
+    try:
+        data = _json.loads(text)
+    except Exception:
+        return None
+    t = term.lower()
+
+    def prune(node: Any) -> Any:
+        if isinstance(node, list):
+            return [x for x in node if _json_contains(x, t)]
+        if isinstance(node, dict):
+            out: dict[str, Any] = {}
+            for k, v in node.items():
+                if isinstance(v, (dict, list)):
+                    if _json_contains(v, t):
+                        out[k] = prune(v)
+                else:
+                    out[k] = v
+            return out
+        return node
+
+    return _json.dumps(prune(data), ensure_ascii=False)
+
+
 async def web_fetch(params: WebFetchParams) -> CapabilityResult:
     """Fetch a URL and convert HTML to clean text.
 
@@ -330,7 +391,28 @@ async def web_fetch(params: WebFetchParams) -> CapabilityResult:
             follow_redirects=True,
             max_redirects=5,
         ) as client:
-            resp = await client.get(params.url, headers=headers)
+            method = (params.method or "GET").upper()
+            if method != "GET":
+                # Never downgrade a write to a read: the caller would believe
+                # it submitted something it did not.
+                if os.environ.get("RUNE_HYBRID_API", "0") != "1":
+                    return CapabilityResult(
+                        success=False,
+                        error=(
+                            f"{method} requests are disabled "
+                            "(set RUNE_HYBRID_API=1 to enable API replay). "
+                            "Use a GET, or interact with the page directly."
+                        ),
+                        metadata={"status_code": 0, "skipped": True},
+                    )
+                headers["Content-Type"] = (
+                    params.content_type or "application/x-www-form-urlencoded"
+                )
+                resp = await client.request(
+                    method, params.url, headers=headers, content=params.body or ""
+                )
+            else:
+                resp = await client.get(params.url, headers=headers)
             resp.raise_for_status()
 
         content_type = resp.headers.get("content-type", "")
@@ -381,11 +463,28 @@ async def web_fetch(params: WebFetchParams) -> CapabilityResult:
                 metadata={"status_code": resp.status_code, "js_rendered": True},
             )
 
+        # Large JSON: blind truncation drops the relevant records (a schedule
+        # API can return every branch in one 500KB payload). Prune to the
+        # subtrees matching the caller's keyword before truncating.
+        filter_note = ""
+        if params.json_filter and "json" in content_type.lower():
+            pruned = _prune_json_by_term(text, params.json_filter)
+            if pruned is not None:
+                text = pruned
+                filter_note = f"[filtered by '{params.json_filter}'] "
+
         # Truncate if too long
         truncated = False
         if len(text) > params.max_length:
             text = text[: params.max_length]
             truncated = True
+            if "json" in content_type.lower() and not params.json_filter:
+                text += (
+                    "\n\n[TRUNCATED JSON — retry with "
+                    'jsonFilter="<keyword>" to keep only the relevant records]'
+                )
+        if filter_note:
+            text = filter_note + text
 
         # Success: reset failure count for this domain
         if domain:
@@ -444,7 +543,14 @@ def register_web_capabilities(registry: CapabilityRegistry) -> None:
     ))
     registry.register(CapabilityDefinition(
         name="web_fetch",
-        description="Fetch a URL and convert to text",
+        description=(
+            "Fetch a URL and convert it to text. The first choice for reading a "
+            "page, a documented API endpoint, or a .json/.txt/.md file — reach "
+            "for the browser only when the page must be interacted with. "
+            "Supports method='POST' with body/contentType to replay API calls "
+            "found by browser_discover_apis, and jsonFilter to keep only the "
+            "matching records of a large JSON response."
+        ),
         domain=Domain.NETWORK,
         risk_level=RiskLevel.LOW,
         group="web",

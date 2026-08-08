@@ -1046,18 +1046,20 @@ function InlineApprovalCard({
           <circle cx="8" cy="11" r="0.5" fill={riskColor} />
         </svg>
         <span style={{ fontWeight: 600, fontSize: 13 }}>{APPROVAL_COPY.title}</span>
-        <span style={{
-          fontSize: 10,
-          padding: '2px 8px',
-          borderRadius: 'var(--radius-sm)',
-          background: riskColor + '18',
-          color: riskColor,
-          fontWeight: 600,
-          textTransform: 'uppercase',
-          letterSpacing: '0.5px',
-        }}>
-          {approval.riskLevel}
-        </span>
+        {approval.riskLevel && (
+          <span style={{
+            fontSize: 10,
+            padding: '2px 8px',
+            borderRadius: 'var(--radius-sm)',
+            background: riskColor + '18',
+            color: riskColor,
+            fontWeight: 600,
+            textTransform: 'uppercase',
+            letterSpacing: '0.5px',
+          }}>
+            {approval.riskLevel}
+          </span>
+        )}
         <span style={{
           marginLeft: 'auto',
           fontSize: 12,

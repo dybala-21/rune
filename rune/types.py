@@ -248,6 +248,11 @@ class CompletionTrace:
     # Some step hit the adapter's tool-round cap and was cut off without a
     # final LLM turn — the answer may silently omit work that never ran.
     tool_budget_exhausted: bool = False
+    # The project's own tests ran green after the last code change (the
+    # default require-test-pass guard). Weaker than the Evidence Gate: the
+    # suite may have passed before the change too, so this is "tests passing",
+    # never "verified". None when the guard did not apply to this task.
+    tests_passed_after_edit: bool | None = None
 
 
 # LLM

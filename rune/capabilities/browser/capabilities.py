@@ -17,6 +17,10 @@ from rune.capabilities.browser.core import (
     browser_navigate,
     browser_open,
 )
+from rune.capabilities.browser.discover import (
+    BrowserDiscoverApisParams,
+    browser_discover_apis,
+)
 from rune.capabilities.registry import CapabilityRegistry
 from rune.capabilities.types import CapabilityDefinition
 from rune.types import CapabilityResult, Domain, RiskLevel
@@ -106,18 +110,12 @@ class BrowserFindParams(BaseModel):
     text: str = Field(description="Text to search for on the page")
 
 
-class BrowserDiscoverApisParams(BaseModel):
-    filter: str = Field(
-        default="",
-        description="URL pattern to filter (e.g., 'search', 'api/v1', 'hotel')",
-    )
-
-
 # Capability implementations
 async def browser_observe(params: BrowserObserveParams) -> CapabilityResult:
     """Observe the current page via accessibility tree snapshot."""
     from rune.capabilities.browser.helpers import (
         extract_interactive_elements,
+        format_interactive_elements,
         wait_for_dom_settle,
     )
 
@@ -146,19 +144,7 @@ async def browser_observe(params: BrowserObserveParams) -> CapabilityResult:
             scored.sort(key=lambda x: x[0], reverse=True)
             elements = [meta for _, meta in scored]
 
-        # Append interactive element summary (capped at 50).
-        max_elements = 50
-        if elements:
-            shown = elements[:max_elements]
-            el_lines = [f"\n--- Interactive Elements ({len(shown)}/{len(elements)}) ---"]
-            for meta in shown:
-                parts = [f"[{meta.ref}]", meta.role]
-                if meta.name:
-                    parts.append(f'"{meta.name}"')
-                if meta.breadcrumb:
-                    parts.append(f"in({meta.breadcrumb})")
-                el_lines.append(" ".join(parts))
-            snapshot += "\n".join(el_lines)
+        snapshot += format_interactive_elements(elements)
 
         # Detect blocking overlays/dialogs.
         overlay_warning = ""
@@ -188,6 +174,18 @@ async def browser_observe(params: BrowserObserveParams) -> CapabilityResult:
         header = f"URL: {url}\nTitle: {title}"
         if overlay_warning:
             header += overlay_warning
+
+        # Surface data APIs captured since the model last saw a report — the
+        # schedule/booking XHRs fire on interaction, and replaying them beats
+        # clicking on (hybrid API agents: arXiv:2410.16464).
+        from rune.capabilities.browser.network import get_network_monitor, hybrid_api_enabled
+        _new_apis = get_network_monitor().unreported_interesting_count()
+        if hybrid_api_enabled() and _new_apis > 0:
+            header += (
+                f"\n\U0001f4e1 {_new_apis} data API call(s) captured \u2014 "
+                "browser_discover_apis(readBody='<url part>') reads the "
+                "fetched JSON directly."
+            )
 
         history_prefix = _compress_observe_history(title, len(elements))
 
@@ -414,6 +412,38 @@ async def browser_act(params: BrowserActParams) -> CapabilityResult:
         if loop_warning:
             parts.append(loop_warning)
 
+        # Data-loading XHRs (the schedule/booking class) fire on interaction —
+        # exactly after clicks like this one. Surface the catch so the model
+        # can switch to the API path instead of more clicking.
+        from rune.capabilities.browser.network import get_network_monitor, hybrid_api_enabled
+        _monitor = get_network_monitor()
+        if hybrid_api_enabled():
+            # Hand over the data the click actually loaded. Pointing at another
+            # tool measured badly: it reads as one more branch to explore, and
+            # runs burned their budget choosing between paths (0/3 vs 2/3).
+            _bodies = _monitor.unreported_json_bodies()
+            if _bodies:
+                _api = _bodies[-1]
+                _body = _api.response_body[:6000]
+                _cut = (
+                    "\n[response truncated — browser_discover_apis(readBody=…, "
+                    "jsonFilter='<keyword>') returns the matching records]"
+                    if len(_api.response_body) > len(_body) else ""
+                )
+                parts.append(
+                    f"\nThis interaction loaded {_api.method} {_api.url[:120]} — "
+                    f"its JSON response follows, so the answer may already be "
+                    f"here:\n{_body}{_cut}"
+                )
+                _monitor.mark_reported()
+            else:
+                _new_apis = _monitor.unreported_interesting_count()
+                if _new_apis > 0:
+                    parts.append(
+                        f"\U0001f4e1 {_new_apis} new data API call(s) captured "
+                        "by this interaction — browser_discover_apis lists them."
+                    )
+
         return CapabilityResult(
             success=True,
             output="\n".join(parts),
@@ -578,46 +608,6 @@ async def browser_find(params: BrowserFindParams) -> CapabilityResult:
         )
 
 
-async def browser_discover_apis(params: BrowserDiscoverApisParams) -> CapabilityResult:
-    """List API endpoints discovered via CDP network monitoring.
-
-    After browser_navigate loads a page, this tool shows the XHR/fetch
-    requests the site made. Use web_fetch to call these APIs directly
-    instead of clicking through the UI.
-    """
-    from rune.capabilities.browser.network import get_network_monitor
-
-    monitor = get_network_monitor()
-    if not monitor.active:
-        return CapabilityResult(
-            success=True,
-            output="Network monitor not active. Navigate to a page first with browser_navigate.",
-            metadata={"count": 0},
-        )
-
-    apis = monitor.get_discovered_apis(params.filter)
-    if not apis:
-        hint = f" matching '{params.filter}'" if params.filter else ""
-        return CapabilityResult(
-            success=True,
-            output=f"No API endpoints discovered{hint}. Try interacting with the page (scroll, click) to trigger more requests.",
-            metadata={"count": 0},
-        )
-
-    lines = [f"Discovered {len(apis)} API endpoint(s):"]
-    for api in apis:
-        json_tag = " [JSON]" if api.has_json_response else ""
-        lines.append(f"  {api.method} {api.url} [{api.status}]{json_tag}")
-    lines.append("")
-    lines.append("Use web_fetch(url=...) to call these APIs directly.")
-
-    return CapabilityResult(
-        success=True,
-        output="\n".join(lines),
-        metadata={"count": len(apis)},
-    )
-
-# Registration
 def register_browser_capabilities(registry: CapabilityRegistry) -> None:
     """Register all browser capabilities."""
     from rune.capabilities.browser.extended import (
@@ -632,9 +622,17 @@ def register_browser_capabilities(registry: CapabilityRegistry) -> None:
     registry.register(CapabilityDefinition(
         name="browser_navigate",
         description=(
-            "Navigate to a URL in a headless background browser for data extraction. "
-            "The user CANNOT see this browser. Use browser_open instead when the user "
-            "wants to see, watch, or interact with the browser."
+            "Navigate to a URL in a headless background browser and return a "
+            "compact snapshot: page title, status, and the interactive elements "
+            "with their ref IDs — there is no need to call browser_observe right "
+            "after navigating. "
+            "Reach for the browser only when a page must be INTERACTED with "
+            "(clicking, filling forms, content that appears after a click). For "
+            "plain retrieval prefer web_search or web_fetch, and for a documented "
+            "API endpoint or a .json/.txt/.md URL call web_fetch directly — the "
+            "browser is far slower for those. "
+            "The user CANNOT see this browser. Use browser_open instead when the "
+            "user wants to see, watch, or interact with the browser."
         ),
         domain=Domain.BROWSER,
         risk_level=RiskLevel.MEDIUM,
@@ -659,7 +657,11 @@ def register_browser_capabilities(registry: CapabilityRegistry) -> None:
     ))
     registry.register(CapabilityDefinition(
         name="browser_observe",
-        description="Observe page content via accessibility tree",
+        description=(
+            "Re-read the current page: accessibility tree plus interactive "
+            "elements with ref IDs. Use it after an interaction changes the page, "
+            "since browser_navigate already returns a snapshot of its own."
+        ),
         domain=Domain.BROWSER,
         risk_level=RiskLevel.LOW,
         group="browser",

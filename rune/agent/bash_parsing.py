@@ -22,6 +22,45 @@ LOAD_TEST_COMMAND_HEADS: frozenset[str] = frozenset({
 
 _SHELL_SEPARATORS = frozenset({";", "|", "&", "\n"})
 
+# "Run this binary inside the project environment" wrappers. They say nothing
+# about what the command does, so classification has to look past them —
+# `uv run pytest` is a test run exactly like `pytest` is. Without this, the
+# completion guard sees no passing test on any uv/poetry project and refuses
+# to finish work whose tests are green.
+_RUNNER_PREFIXES: frozenset[tuple[str, ...]] = frozenset({
+    ("uv", "run"),
+    ("uvx",),
+    ("poetry", "run"),
+    ("pdm", "run"),
+    ("pipenv", "run"),
+    ("hatch", "run"),
+    ("rye", "run"),
+    ("npx",),
+    ("bunx",),
+    ("pnpm", "exec"),
+    ("yarn", "exec"),
+    ("pnpm", "dlx"),
+    ("yarn", "dlx"),
+})
+_MAX_RUNNER_PREFIX_LEN = max(len(p) for p in _RUNNER_PREFIXES)
+
+
+def strip_runner_prefix(tokens: tuple[str, ...]) -> tuple[str, ...]:
+    """Drop leading environment-runner wrappers (``uv run``, ``npx``, …).
+
+    Applied repeatedly so nested wrappers collapse too. Never strips the whole
+    command: a bare ``uv run`` keeps its tokens.
+    """
+    changed = True
+    while changed and tokens:
+        changed = False
+        for size in range(_MAX_RUNNER_PREFIX_LEN, 0, -1):
+            if len(tokens) > size and tokens[:size] in _RUNNER_PREFIXES:
+                tokens = tokens[size:]
+                changed = True
+                break
+    return tokens
+
 
 # Shell splitting / tokenization
 
@@ -173,7 +212,8 @@ def _parsed_tokens(command: str) -> tuple[tuple[str, ...], ...]:
 
 def is_verification_command(command: str) -> bool:
     """Detect test / build / check / lint commands."""
-    for tokens in _parsed_tokens(command):
+    for raw_tokens in _parsed_tokens(command):
+        tokens = strip_runner_prefix(raw_tokens)
         first = tokens[0] if len(tokens) > 0 else ""
         second = tokens[1] if len(tokens) > 1 else ""
         third = tokens[2] if len(tokens) > 2 else ""
@@ -189,6 +229,8 @@ def is_verification_command(command: str) -> bool:
         if first == "npm" and second == "run" and third in ("test", "build"):
             return True
         if first in ("pnpm", "yarn") and second in ("test", "build"):
+            return True
+        if first in ("pnpm", "yarn") and second == "run" and third in ("test", "build"):
             return True
         if first == "make" and second in ("test", "build", "check"):
             return True

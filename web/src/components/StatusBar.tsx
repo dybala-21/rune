@@ -18,6 +18,8 @@ interface StatusBarProps {
   currentStepInfo?: StepInfo | null;
   /** Current tool activity label */
   currentActivity?: string | null;
+  /** Approval mode; a chip appears when it is anything but the default. */
+  approvalMode?: string;
   activeModel?: {
     provider: string;
     model: string;
@@ -52,6 +54,7 @@ export function StatusBar({
   currentStepInfo,
   currentActivity,
   activeModel,
+  approvalMode,
   lastRunSuccess = null,
   onOpenPalette,
   onToggleWorkbench,
@@ -284,6 +287,28 @@ export function StatusBar({
           </svg>
           Workbench
         </button>
+      )}
+
+      {/* Safety prompts are off — the run can write to the network or run a
+          risky command without asking, so say so where the model is shown. */}
+      {approvalMode === 'bypass' && (
+        <span
+          title="Approvals bypassed — RUNE will not ask before risky commands, MCP writes, or network writes"
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 5,
+            padding: '2px 8px',
+            borderRadius: 'var(--radius-sm)',
+            border: '1px solid var(--warning)',
+            color: 'var(--warning)',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 11,
+          }}
+        >
+          <span aria-hidden="true">○</span>
+          approvals off
+        </span>
       )}
 
       {/* Command palette */}

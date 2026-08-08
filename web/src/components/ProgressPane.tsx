@@ -254,16 +254,33 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
       note: passes > 0 ? `${passes} checks passed` : undefined,
       showEvidence: true,
     };
+  } else if (verdictOk && trust?.testsPassedAfterEdit === true && !capped) {
+    // A rung below Verified: the project's own tests went green after the
+    // edit, but nothing checked the task's success criteria — and a suite
+    // that passed before the change would look identical.
+    spec = {
+      color: 'var(--success)', bg: 'var(--success-subtle)',
+      glyph: <span style={{ color: 'var(--success)' }}>✓</span>,
+      title: 'Tests passing',
+      note: 'project tests, not a task check',
+    };
   } else if (verdictOk) {
     // Completion is not verification — a run that finished without any
     // Evidence Gate check gets a neutral band, amber when it was cut off
-    // at the tool budget (the answer may omit steps that never ran).
+    // at the tool budget (the answer may omit steps that never ran), and
+    // amber too when code was edited and its tests never went green.
+    const testsRed = trust?.testsPassedAfterEdit === false;
+    const warn = capped || testsRed;
     spec = {
-      color: capped ? 'var(--warning)' : 'var(--border)',
-      bg: capped ? 'var(--warning-subtle, var(--bg-secondary))' : 'var(--bg-secondary)',
-      glyph: <span style={{ color: capped ? 'var(--warning)' : 'var(--text-muted)' }}>✓</span>,
+      color: warn ? 'var(--warning)' : 'var(--border)',
+      bg: warn ? 'var(--warning-subtle, var(--bg-secondary))' : 'var(--bg-secondary)',
+      glyph: <span style={{ color: warn ? 'var(--warning)' : 'var(--text-muted)' }}>✓</span>,
       title: 'Completed',
-      note: capped ? CAP_NOTE : 'no verification checks ran',
+      note: capped
+        ? CAP_NOTE
+        : testsRed
+          ? 'tests not green after the last edit'
+          : 'no verification checks ran',
       details: capped ? [CAP_DETAIL] : undefined,
     };
   } else {
