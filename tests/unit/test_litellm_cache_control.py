@@ -9,21 +9,21 @@ from __future__ import annotations
 from rune.agent.litellm_adapter import (
     _apply_anthropic_cache_control,
     _apply_anthropic_message_cache,
-    _is_anthropic_model,
 )
+from rune.agent.model_traits import traits
 
 
-class TestIsAnthropicModel:
+class TestAnthropicWireTrait:
     def test_claude_models(self):
-        assert _is_anthropic_model("claude-opus-4-6")
-        assert _is_anthropic_model("anthropic/claude-sonnet-4-5")
-        assert _is_anthropic_model("Claude-3-Haiku")  # case insensitive
+        assert traits("claude-opus-4-6").anthropic_wire
+        assert traits("anthropic/claude-sonnet-4-5").anthropic_wire
+        assert traits("Claude-3-Haiku").anthropic_wire  # case insensitive
 
     def test_non_anthropic_models(self):
-        assert not _is_anthropic_model("gpt-5.4")
-        assert not _is_anthropic_model("openai/gpt-5.4")
-        assert not _is_anthropic_model("gemini/gemini-2.5-pro")
-        assert not _is_anthropic_model("ollama/qwen2.5-coder:7b")
+        assert not traits("gpt-5.4").anthropic_wire
+        assert not traits("openai/gpt-5.4").anthropic_wire
+        assert not traits("gemini/gemini-2.5-pro").anthropic_wire
+        assert not traits("ollama/qwen2.5-coder:7b").anthropic_wire
 
 
 class TestApplyAnthropicCacheControl:

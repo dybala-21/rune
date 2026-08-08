@@ -225,13 +225,13 @@ class LLMClient:
             resolved_model = f"{prefix}{resolved_model}"
 
         # Clamp to model's hard output cap
-        # importing the adapter sets litellm.drop_params; _TEMPERATURE_REJECTED +
-        # the retry below handle models it gets wrong (see litellm_adapter).
-        from rune.agent.litellm_adapter import (
-            _TEMPERATURE_REJECTED,
-            _clamp_max_tokens,
-            _is_temperature_error,
-            _note_temperature_rejected,
+        # importing the adapter sets litellm.drop_params; the traits table +
+        # the retry below handle models it gets wrong (see model_traits).
+        from rune.agent.litellm_adapter import _clamp_max_tokens
+        from rune.agent.model_traits import (
+            is_temperature_error,
+            note_temperature_rejected,
+            traits,
         )
         effective_max_tokens = _clamp_max_tokens(resolved_model, max_tokens)
 
@@ -242,7 +242,7 @@ class LLMClient:
             "timeout": timeout,
             **provider_extra,
         }
-        if resolved_model not in _TEMPERATURE_REJECTED:
+        if traits(resolved_model).temperature:
             kwargs["temperature"] = temperature
         if tools:
             kwargs["tools"] = tools
@@ -251,8 +251,8 @@ class LLMClient:
             response = await litellm.acompletion(**kwargs)
         except litellm.BadRequestError as e:
             # model rejected temperature; drop it and retry, remember for next time
-            if "temperature" in kwargs and _is_temperature_error(e):
-                _note_temperature_rejected(resolved_model)
+            if "temperature" in kwargs and is_temperature_error(e):
+                note_temperature_rejected(resolved_model)
                 kwargs.pop("temperature", None)
                 log.warning("temperature_unsupported_retry", model=resolved_model)
                 response = await litellm.acompletion(**kwargs)

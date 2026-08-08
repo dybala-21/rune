@@ -2,7 +2,7 @@
 
 drop_params lets litellm strip it for the models it knows (gpt-5, o-series); the
 retry path catches the ones it doesn't (gpt-5.5, claude-opus-4-8 reject it but
-litellm reports it supported). See litellm_adapter.
+litellm reports it supported). See model_traits.
 """
 
 from __future__ import annotations
@@ -10,7 +10,11 @@ from __future__ import annotations
 import litellm
 
 import rune.agent.litellm_adapter  # noqa: F401  (enables litellm.drop_params)
-from rune.agent.litellm_adapter import _TEMPERATURE_REJECTED, _is_temperature_error
+from rune.agent.model_traits import (
+    _TEMPERATURE_REJECTED,
+    is_temperature_error,
+    traits,
+)
 
 
 def test_import_enables_drop_params():
@@ -31,22 +35,24 @@ def test_litellm_drops_temperature_for_restricted_models():
 
 def test_detects_temperature_errors():
     # real messages from the live APIs
-    assert _is_temperature_error(Exception(
+    assert is_temperature_error(Exception(
         "OpenAIException - Unsupported value: 'temperature' does not support 0 "
         "with this model. Only the default (1) value is supported."))
-    assert _is_temperature_error(Exception(
+    assert is_temperature_error(Exception(
         "AnthropicException - `temperature` is deprecated for this model."))
 
 
 def test_ignores_unrelated_errors():
-    assert not _is_temperature_error(Exception("rate_limit_exceeded"))
-    assert not _is_temperature_error(Exception("invalid x-api-key"))
-    assert not _is_temperature_error(Exception("context_length_exceeded"))
+    assert not is_temperature_error(Exception("rate_limit_exceeded"))
+    assert not is_temperature_error(Exception("invalid x-api-key"))
+    assert not is_temperature_error(Exception("context_length_exceeded"))
 
 
-def test_learned_set_membership():
+def test_learned_rejection_flips_the_trait():
     _TEMPERATURE_REJECTED.discard("probe-model")
-    assert "probe-model" not in _TEMPERATURE_REJECTED
+    assert traits("probe-model").temperature
     _TEMPERATURE_REJECTED.add("probe-model")
-    assert "probe-model" in _TEMPERATURE_REJECTED
-    _TEMPERATURE_REJECTED.discard("probe-model")
+    try:
+        assert not traits("probe-model").temperature
+    finally:
+        _TEMPERATURE_REJECTED.discard("probe-model")
