@@ -114,6 +114,16 @@ async def file_read(params: FileReadParams) -> CapabilityResult:
     for i, line in enumerate(lines):
         numbered += f"{start_num + i:6d}\t{line}"
 
+    # Tabular files carry a whole-file profile regardless of the window
+    # read: duplicate rows the model would silently double-count live
+    # outside whatever offset/limit it asked for.
+    from rune.capabilities.table_profile import profile_table
+    profile = profile_table(text, file_path.name)
+    if profile:
+        if not numbered.endswith("\n"):
+            numbered += "\n"
+        numbered += profile
+
     return CapabilityResult(
         success=True,
         output=numbered,
