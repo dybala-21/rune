@@ -265,9 +265,36 @@ async def test_quality_issue_is_not_a_crisp_signal_through_save(
 
 
 @pytest.mark.asyncio
-async def test_crisp_learning_off_by_default_through_save(isolated_home, monkeypatch):
-    """Without RUNE_CRISP_LEARNING the save path performs no crisp learning."""
+async def test_crisp_learning_on_by_default_through_save(isolated_home, monkeypatch):
+    """With the flag unset, a crisp signal learns a rule — default is on."""
     monkeypatch.delenv("RUNE_CRISP_LEARNING", raising=False)
+    _patch_llm(monkeypatch, "match_expected: ensure output equals the expected value")
+
+    from rune.agent.memory_bridge import save_agent_result_to_memory
+    from rune.memory.state import load_fact_meta
+
+    await save_agent_result_to_memory(
+        goal="write a function that returns 3",
+        result={
+            "output": "done",
+            "success": True,
+            "reason": "completed",
+            "evidence_gate": {
+                "last_verdict": "fail",
+                "last_evidence": "expected return 3 but got 5",
+            },
+        },
+        memory_manager=_StubManager(),
+    )
+    assert any(
+        v.get("source") == "crisp_failure" for v in load_fact_meta().values()
+    )
+
+
+@pytest.mark.asyncio
+async def test_crisp_learning_opt_out_through_save(isolated_home, monkeypatch):
+    """RUNE_CRISP_LEARNING=0 keeps the save path free of crisp learning."""
+    monkeypatch.setenv("RUNE_CRISP_LEARNING", "0")
     _patch_llm(monkeypatch, "x: y")
 
     from rune.agent.memory_bridge import save_agent_result_to_memory
