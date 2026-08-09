@@ -49,3 +49,24 @@ jobs:
         run: uv sync --extra dev
       - name: Run tests
         run: uv run pytest tests/ -q --tb=short
+
+  # Fresh install with no dev extras, then import. lint and test both run
+  # on `uv sync --extra dev`, so a runtime dependency missing from the base
+  # install — the break a user hits first — would pass CI unseen.
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Fresh install, no dev extras
+        run: uv sync
+      - name: Import and run the entry point
+        run: |
+          uv run python -c "import rune.cli.main, rune.agent.loop; print('imports ok')"
+          uv run python -m rune.cli.main --version
+
