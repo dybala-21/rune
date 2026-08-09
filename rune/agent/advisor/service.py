@@ -301,10 +301,8 @@ class AdvisorService:
         """Single-shot LiteLLM call. Non-streaming, no tools, bounded
         output, per-provider timeout. One implementation for every
         provider LiteLLM supports."""
-        import litellm
-
         payload = build_payload(request)
-        from rune.agent.litellm_adapter import _resolve_litellm_model
+        from rune.agent.litellm_adapter import _resolve_litellm_model, litellm
 
         raw_model = f"{self._config.provider}/{self._config.model}"
         resolved_model, extra = _resolve_litellm_model(raw_model)

@@ -198,9 +198,7 @@ async def classify_roles(
     import asyncio
     import json as _json
 
-    import litellm
-
-    from rune.agent.litellm_adapter import _resolve_litellm_model
+    from rune.agent.litellm_adapter import _resolve_litellm_model, litellm
 
     if not names:
         return {}

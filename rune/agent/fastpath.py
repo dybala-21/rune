@@ -49,9 +49,7 @@ class FastPathResult:
 async def _complete(model: str | None, provider: str | None, prompt: str,
                     n: int = 1) -> list[str]:
     """n independent completions for one prompt; failures return fewer."""
-    import litellm
-
-    from rune.agent.litellm_adapter import _resolve_litellm_model
+    from rune.agent.litellm_adapter import _resolve_litellm_model, litellm
 
     resolved, extra = _resolve_litellm_model(
         f"{provider}:{model}" if provider and model else (model or "")

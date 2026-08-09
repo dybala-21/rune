@@ -58,6 +58,11 @@ def __getattr__(name: str) -> Any:
 
 
 from rune.agent.message_utils import validate_tool_pairs
+from rune.agent.model_traits import (
+    is_temperature_error,
+    note_temperature_rejected,
+    traits,
+)
 from rune.agent.obs_cap import mask_stale_tool_messages
 from rune.capabilities.output_prefixes import looks_like_failure_output
 from rune.utils.env import env_flag as _env_flag
@@ -678,24 +683,6 @@ _PROVIDER_EXTRA: dict[str, dict[str, str]] = {
 }
 
 
-# Backstop for models litellm's DB has wrong: it reports temperature as
-# supported but the API rejects it (e.g. gpt-5.5). drop_params can't catch those,
-# so we learn them from the error and skip temperature next time this process.
-_TEMPERATURE_REJECTED: set[str] = set()
-
-
-def _note_temperature_rejected(model: str) -> None:
-    _TEMPERATURE_REJECTED.add(model)
-
-
-def _is_temperature_error(exc: Exception) -> bool:
-    """Whether a BadRequest is about temperature (unsupported/invalid/deprecated)."""
-    m = str(exc).lower()
-    return "temperature" in m and (
-        "support" in m or "deprecat" in m or "invalid" in m
-    )
-
-
 def _vertex_active() -> bool:
     """True when GOOGLE_APPLICATION_CREDENTIALS points to an existing file."""
     import os as _os
@@ -763,28 +750,6 @@ def _clamp_max_tokens(model: str, max_tokens: int) -> int:
     return min(max_tokens, cap)
 
 
-def _is_anthropic_model(model: str) -> bool:
-    """Check if the model is an Anthropic Claude model."""
-    return "claude" in model.lower() or "anthropic" in model.lower()
-
-
-def _supports_speed(model: str) -> bool:
-    """Whether *model* accepts the `speed` parameter.
-
-    It is not a hint the API ignores when unavailable — an unsupported model
-    rejects the whole request:
-
-        claude-haiku-4-5 does not support the `speed` parameter.
-        This feature is only available on supported models.
-
-    Measured: with the flag on and haiku selected, every round failed with
-    that 400 and the run finished in a third of the usual time having done
-    nothing. Wall-clock alone reads like a large speed-up, which is why the
-    check belongs here rather than in whoever sets the flag.
-    """
-    return _is_anthropic_model(model) and "opus" in model.lower()
-
-
 def _apply_anthropic_cache_control(model: str, messages: list[Any]) -> list[Any]:
     """Add cache_control breakpoint(s) to the system message for Anthropic.
 
@@ -825,7 +790,7 @@ def _apply_anthropic_cache_control(model: str, messages: list[Any]) -> list[Any]
     if not content:
         return messages
 
-    is_anthropic = _is_anthropic_model(model)
+    is_anthropic = traits(model).anthropic_wire
 
     if isinstance(content, str):
         has_boundary = SYSTEM_CACHE_BOUNDARY in content
@@ -905,7 +870,7 @@ def _apply_anthropic_message_cache(model: str, messages: list[Any]) -> list[Any]
     """
     if os.environ.get(_MSG_CACHE_ENV, "1") == "0":
         return messages
-    if not _is_anthropic_model(model) or not messages:
+    if not traits(model).anthropic_wire or not messages:
         return messages
     last = messages[-1]
     if not isinstance(last, dict):
@@ -944,7 +909,7 @@ def _ensure_anthropic_user_tail(model: str, messages: list[Any]) -> list[Any]:
     guidance was injected as a system message after a text-only assistant reply.
     A minimal user turn restores a valid sequence. Other providers are untouched.
     """
-    if not _is_anthropic_model(model):
+    if not traits(model).anthropic_wire:
         return messages
     if not messages:
         return messages
@@ -1219,9 +1184,10 @@ class StreamResult:
                 "stream_options": {"include_usage": True},
                 "temperature": self._temperature,
             }
-            if self._model in _TEMPERATURE_REJECTED:
+            _traits = traits(self._model)
+            if not _traits.temperature:
                 _acompletion_kwargs.pop("temperature", None)
-            if _env_flag(_FAST_MODE_ENV) and _supports_speed(self._model):
+            if _env_flag(_FAST_MODE_ENV) and _traits.speed_param:
                 _acompletion_kwargs["speed"] = "fast"
             if self._extra_headers:
                 _acompletion_kwargs["extra_headers"] = dict(self._extra_headers)
@@ -1263,8 +1229,8 @@ class StreamResult:
             except _ll.BadRequestError as _e:
                 # Model rejected temperature and litellm didn't strip it; drop it
                 # and retry once, remembering for next time.
-                if "temperature" in _acompletion_kwargs and _is_temperature_error(_e):
-                    _note_temperature_rejected(self._model)
+                if "temperature" in _acompletion_kwargs and is_temperature_error(_e):
+                    note_temperature_rejected(self._model)
                     _acompletion_kwargs.pop("temperature", None)
                     log.warning("temperature_unsupported_retry", model=self._model)
                     self._stream = await _ll.acompletion(**_acompletion_kwargs)
