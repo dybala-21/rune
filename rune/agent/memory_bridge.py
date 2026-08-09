@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -19,7 +20,6 @@ from rune.skills.lifecycle import SkillState
 from rune.skills.registry import get_skill_registry
 from rune.skills.types import Skill
 from rune.types import Domain, Intent
-from rune.utils.env import env_flag as _env_flag
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -679,9 +679,11 @@ async def save_agent_result_to_memory(
             except Exception:
                 pass  # Rule learning must never block episode saving
 
-        # Crisp single-failure learning (gated by RUNE_CRISP_LEARNING);
-        # signal chosen by _select_crisp_signal.
-        if _env_flag("RUNE_CRISP_LEARNING"):
+        # Crisp single-failure learning: on unless RUNE_CRISP_LEARNING=0.
+        # Signal chosen by _select_crisp_signal. On by default because a
+        # wrongly-learned rule has two ways back out: outcome demotion,
+        # and the user's-verdict hold in pending_outcomes.
+        if os.environ.get("RUNE_CRISP_LEARNING", "1") != "0":
             try:
                 from rune.memory.rule_learner import learn_from_crisp_failure
 
