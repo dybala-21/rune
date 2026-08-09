@@ -313,6 +313,29 @@ def _defer_memory_work() -> None:
         pass
 
 
+def _exit_code_for_reason(reason: str) -> int:
+    """Map how a run ended to the exit code a script will read as the claim.
+
+    0 belongs to completed runs alone. 1 = the work is there but never
+    passed its checks (a failing last check, or delivery under gate
+    warnings — "treat it as unverified" must not exit as done). 3 = the
+    run itself said it could not do this (abstained). 130 = cancelled.
+    4 = every other way of stopping short (budget, stall, iteration cap)
+    — not 2, which click already means "bad usage". An empty reason
+    stays 0: paths that never carry a trace reason are not this
+    mapping's to judge.
+    """
+    if not reason:
+        return 0
+    return {
+        "completed": 0,
+        "checks_failed": 1,
+        "completed_gate_warnings": 1,
+        "task_blocked": 3,
+        "cancelled": 130,
+    }.get(reason, 4)
+
+
 def _handle_non_interactive(
     message: str,
     model: str | None = None,
@@ -562,13 +585,16 @@ def _handle_non_interactive(
 
     _exit_code = 0
 
+    # The exit code is the claim: scripts and benches read 0 as "done as
+    # asked". Only a completed run may say that. An abstention, a burned
+    # budget, or a failing last check used to exit 0 all the same — a run
+    # that honestly gave up on the inside still looked like a success from
+    # the outside.
     async def _run_and_grade() -> None:
         nonlocal _exit_code
         trace = await _run()
-        # A run whose last mechanical check failed exits nonzero: scripts and
-        # benches read the exit code as the claim, and this one is not "done".
-        if trace is not None and getattr(trace, "reason", "") == "checks_failed":
-            _exit_code = 1
+        if trace is not None:
+            _exit_code = _exit_code_for_reason(getattr(trace, "reason", ""))
 
     try:
         asyncio.run(_run_and_grade())
