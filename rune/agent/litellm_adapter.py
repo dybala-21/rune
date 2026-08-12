@@ -1592,6 +1592,9 @@ class StreamResult:
                 # A bulk command changed directories the run never looked at
                 # again. Show it what is there — once, and without asking for
                 # anything. What that means for the work is its own call.
+                # Only runs that stop of their own accord get here: one cut
+                # off at the round cap makes no further call, so there would
+                # be nobody to read the listing.
                 from rune.agent.reobservation import repeated_mutation_dirs
 
                 _reobs = set(getattr(self, "_reobs_dirs", set())) | \
@@ -1901,9 +1904,9 @@ class StreamResult:
                         _MECH_CHECK.set(
                             "fail" if _looks_like_tool_failure(res) else "pass"
                         )
-                    # A glob delete says nothing about what it left, and a
-                    # file deleted one at a time says nothing about the rest.
-                    # Remember where the run struck, so the end can look.
+                    # Neither a glob delete nor a file removed one at a time
+                    # says anything about what is left. Remember where the
+                    # run struck, so the end of it can look.
                     if not _looks_like_tool_failure(res):
                         if fn == "bash_execute":
                             from rune.agent.reobservation import bulk_targets

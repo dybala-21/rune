@@ -1,36 +1,24 @@
 """Look at what a bulk command left behind, before calling the work done.
 
-One `rm` over a glob can touch seventy files, and nothing in the transcript
-says how many of them went. The command returns no output on success, the
-next thing the model writes is a summary, and the summary is written from
-memory of what was intended rather than from what is on disk. Asked to clear
-forty object files and thirty logs with a single sweep, a run cleared the
-logs, never touched `build/`, and reported both done — three times out of
-three, twice inventing a `rm build/*.o` it had never issued.
+A sweep reports nothing about what survived it: `rm` over a glob prints no
+output, and the summary that follows is written from what the run meant to
+do. Asked to clear forty object files and thirty logs, runs cleared the logs,
+never touched `build/`, and called both done — some inventing a `rm
+build/*.o` they never issued.
 
-The missing piece is not judgment. Given the same transcript with a fresh
-listing of the two directories appended, the same model resumed the cleanup
-three times out of three. It knew what remained to be done as soon as it
-could see what remained. So the fix is an observation, not an instruction:
-after a run mutates directories in bulk and stops, list those directories
-once and hand the listing over without comment. A listing cannot be wrong,
-and it argues for nothing — which matters, because the neighbouring failure
-is a run that deletes more than it was asked to, and a nudge phrased as
-"there are still files here" would push straight into it.
+The missing piece is observation, not judgment: shown a fresh listing of the
+directories it swept, the same model resumes the cleanup. So the listing is
+handed over without comment. It cannot be wrong and it argues for nothing,
+which matters because the neighbouring failure is a run that deletes past
+its brief, and "there are still files here" would push straight into it.
+Measured on gbench2 H6, 36 pairs: 6/36 -> 20/36, and no fired run ever lost
+a file it was meant to keep.
 
-Scoping this to shell globs would have missed the case it was built for.
-Told to clear seventy files "in one go", the run reached for `find | xargs
-rm` exactly as expected — and RUNE's own approval gate refused it, as it
-refuses every piped delete that nobody is there to approve. What followed
-was twenty-nine single-file deletions and a done claim with forty-two files
-still in place. The bulk operation was real; only its route was not. So the
-trigger counts what a directory actually absorbed, whichever tool did it,
-and a directory that took a run of single-file removals is treated the same
-as one swept by a glob.
-
-A handful of deletions is not a sweep, and one file's removal reports its
-own result, so repetition has to reach a threshold before anything is
-listed.
+The trigger counts what a directory absorbed, whichever tool did it. Scoping
+it to shell globs would have measured nothing: the approval gate refuses
+`find | xargs rm` when nobody is there to approve it, so the sweep arrives
+as a run of single-file deletions instead. Those need a threshold — a
+handful of removals is not a sweep, and each one reported its own result.
 """
 
 from __future__ import annotations
@@ -75,12 +63,10 @@ def _argv(segment: str) -> list[str]:
 def _many(token: str) -> bool:
     """Does one token stand for more than one file?
 
-    Globs are the obvious form and brace expansion is the one that gets
-    missed: `rm logs/app_{1..30}.log` removes thirty files without a `*`
-    anywhere, and runs reach for it exactly when the count is known. The
-    bare `{}` of `find -exec rm {} +` is not that — it is a placeholder for
-    one path at a time — so a brace only counts when something separates
-    its ends.
+    Globs are the obvious form; brace expansion is the one that gets missed,
+    and `rm logs/app_{1..30}.log` takes thirty files without a `*` anywhere.
+    The bare `{}` of `find -exec rm {} +` is a placeholder for one path at a
+    time, so a brace counts only when something separates its ends.
     """
     if any(c in token for c in _GLOB_CHARS):
         return True
@@ -106,10 +92,8 @@ def _is_bulk(argv: list[str]) -> bool:
     if name == "find":
         if "-delete" in argv:
             return True
-        # The command `find` runs is the token straight after -exec. Asking
-        # only whether a deleter appears somewhere in the line calls
-        # `find . -exec grep rm {} +` a deletion, which searches and removes
-        # nothing.
+        # What -exec runs is the token straight after it; anything looser
+        # reads `find . -exec grep rm {} +` as a deletion.
         return any(Path(b).name in _DELETERS
                    for a, b in zip(argv, argv[1:], strict=False)
                    if a in _EXEC_FLAGS)
@@ -146,12 +130,11 @@ def _operands(argv: list[str]) -> list[str]:
 def _target_dir(operand: str, base: Path) -> Path | None:
     """The directory an operand lived in, as it exists now.
 
-    A glob stands for the directory holding it. A path that is gone — the
+    A pattern stands for the directory holding it. A path that is gone — the
     usual outcome of `rm -r` — resolves to the nearest parent still there,
     which is where its absence shows.
     """
-    raw = str(Path(operand).parent) if any(c in operand for c in _GLOB_CHARS) \
-        else operand
+    raw = str(Path(operand).parent) if _many(operand) else operand
     try:
         p = (base / Path(raw).expanduser()).resolve()
     except OSError:
@@ -220,6 +203,12 @@ def repeated_mutation_dirs(counts: Mapping[str, int]) -> set[str]:
 
 
 def _entries(d: Path) -> list[str] | None:
+    """Names directly in *d*, or None if it cannot be read.
+
+    Dot entries stay out: the trash a guarded delete writes to lives in
+    `.rune-trash`, and listing what was rescued alongside what survived
+    reads as though nothing had been removed at all.
+    """
     try:
         return sorted(p.name + ("/" if p.is_dir() else "")
                       for p in d.iterdir() if not p.name.startswith("."))
