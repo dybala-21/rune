@@ -92,6 +92,8 @@ _WRITE_EXEC_TOOLS = _STOP_BATCH_FAILURE_TOOLS
 # draws a steering nudge, then (near cap exhaustion) a forced file_edit —
 # otherwise a weak model can explore until the cap and end with no edit.
 _EDIT_TOOLS: frozenset[str] = frozenset({"file_write", "file_edit", "file_delete"})
+# How many bulk-mutated directories to name in the log line.
+_REOBS_LOG_DIRS = 4
 _EXPLORE_BUDGET_ENV = "RUNE_EXPLORE_BUDGET"  # rounds; 0 disables
 _EXPLORE_FORCE_EDIT_ENV = "RUNE_EXPLORE_FORCE_EDIT"  # "0" disables the forced call
 
@@ -1112,6 +1114,11 @@ class StreamResult:
         self._tamper_blocks = 0
         self._postconditions = []
         self._postcondition_nudges = 0
+        # Directories changed wholesale — by one shell glob, or by a run of
+        # single-file removals — whose result nothing has looked at since.
+        self._reobs_dirs: set[str] = set()
+        self._reobs_removed: dict[str, int] = {}
+        self._reobs_nudges = 0
         self._policy.reset()
 
         # Input-versus-output classification rides along with the first
@@ -1581,6 +1588,38 @@ class StreamResult:
                     self._collected_text = ""
                     log.info("unresolved_artifact_nudge", missing=_missing)
                     continue
+
+                # A bulk command changed directories the run never looked at
+                # again. Show it what is there — once, and without asking for
+                # anything. What that means for the work is its own call.
+                # Only runs that stop of their own accord get here: one cut
+                # off at the round cap makes no further call, so there would
+                # be nobody to read the listing.
+                from rune.agent.reobservation import repeated_mutation_dirs
+
+                _reobs = set(getattr(self, "_reobs_dirs", set())) | \
+                    repeated_mutation_dirs(getattr(self, "_reobs_removed", {}))
+                if (
+                    _reobs
+                    and getattr(self, "_reobs_nudges", 0) == 0
+                    and _tool_round < _max_tool_rounds - 1
+                ):
+                    from rune.agent.reobservation import observation_note
+
+                    self._reobs_nudges = 1
+                    _note = observation_note(_reobs, os.getcwd())
+                    if _note:
+                        if text_this_turn:
+                            self._messages.append({
+                                "role": "assistant", "content": text_this_turn,
+                            })
+                        self._messages.append({
+                            "role": "user", "content": _note,
+                        })
+                        self._collected_text = ""
+                        log.info("reobservation_nudge",
+                                 dirs=sorted(_reobs)[:_REOBS_LOG_DIRS])
+                        continue
                 if text_this_turn:
                     self._messages.append({
                         "role": "assistant",
@@ -1865,6 +1904,32 @@ class StreamResult:
                         _MECH_CHECK.set(
                             "fail" if _looks_like_tool_failure(res) else "pass"
                         )
+                    # Neither a glob delete nor a file removed one at a time
+                    # says anything about what is left. Remember where the
+                    # run struck, so the end of it can look.
+                    if not _looks_like_tool_failure(res):
+                        if fn == "bash_execute":
+                            from rune.agent.reobservation import bulk_targets
+
+                            _bulk = bulk_targets(
+                                str(args.get("command", "")), os.getcwd()
+                            )
+                            if _bulk:
+                                if not hasattr(self, "_reobs_dirs"):
+                                    self._reobs_dirs = set()
+                                self._reobs_dirs |= _bulk
+                        elif fn == "file_delete":
+                            from rune.agent.reobservation import mutation_dir
+
+                            _md = mutation_dir(
+                                str(args.get("path", "")), os.getcwd()
+                            )
+                            if _md:
+                                if not hasattr(self, "_reobs_removed"):
+                                    self._reobs_removed = {}
+                                self._reobs_removed[_md] = (
+                                    self._reobs_removed.get(_md, 0) + 1
+                                )
                     if is_write_exec and not _looks_like_tool_failure(res):
                         self._action_ok = True  # a real action succeeded
                         # Verify-on-stop bookkeeping: edits arm the reminder,
