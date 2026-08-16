@@ -301,13 +301,30 @@ def parse_command(command: str) -> ParsedCommand:
 
 # rm -rf Risk Classification
 
+# Any rm and the first thing it is pointed at, flags kept separately: what
+# the command targets and whether it recurses are two different questions,
+# and the old pattern answered them with one match. Its second alternative
+# was `-[a-zA-Z]*f[a-zA-Z]*r?`, where the trailing r is optional, so `rm -f`
+# read as a recursive delete. Every bounded sweep — `rm -f cache/*.bin`, the
+# ordinary way to clear forty files — was scored as recursion and denied for
+# want of a sandbox, while `find … -delete` destroyed the same files at
+# score zero. Agents met the denial one file at a time until the
+# consecutive-call block cut them off, and the work ended half done.
 _RM_RF_RE = re.compile(
-    r"rm\s+(-[a-zA-Z]*r[a-zA-Z]*f?|-[a-zA-Z]*f[a-zA-Z]*r?|--recursive)\s+(\S+)"
+    r"\brm\s+((?:-[a-zA-Z-]+\s+)*)([^\s;|&]+)"
 )
+_RECURSIVE_FLAG_RE = re.compile(r"(?:^|\s)(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?:\s|$)")
 
 
 def classify_rm_rf_risk(command: str) -> Literal["critical", "high"] | None:
-    """Classify the risk of an rm -rf command based on its target path."""
+    """How dangerous this deletion is, by what it targets and whether it recurses.
+
+    A critical target is critical however it is spelled — dropping `-r` does
+    not make `rm /etc/passwd` safe, and that case now counts where it did
+    not before. Recursion into anything else stays high. A delete that is
+    neither is left to the ordinary pattern checks, which is what a bounded
+    glob in the working directory has always been when written without `-f`.
+    """
     match = _RM_RF_RE.search(command)
     if not match:
         return None
@@ -331,7 +348,7 @@ def classify_rm_rf_risk(command: str) -> Literal["critical", "high"] | None:
         if resolved == dot_path or resolved.startswith(dot_path + "/"):
             return "critical"
 
-    return "high"
+    return "high" if _RECURSIVE_FLAG_RE.search(" " + match.group(1)) else None
 
 
 # Command Normalization (all encoding bypass handling)
