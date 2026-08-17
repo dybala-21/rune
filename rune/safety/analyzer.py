@@ -12,6 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from rune.utils.logger import get_logger
+
+log = get_logger(__name__)
+
 # Types
 
 FindingType = Literal["critical", "high", "medium", "low", "info"]
@@ -352,7 +356,10 @@ def _classify_one_rm(flags: str, target: str) -> Literal["critical", "high"] | N
     expanded = expanded.replace("$HOME", home).replace("${HOME}", home)
     try:
         resolved = str(Path(expanded).resolve())
-    except (OSError, ValueError):
+    except (OSError, ValueError) as exc:
+        # A target that will not resolve is a target nobody can vouch for,
+        # so it counts as recursive-grade until someone looks.
+        log.debug("rm_target_unresolvable", target=raw_path, error=str(exc))
         return "high"
 
     if resolved == "/" or resolved == home:
