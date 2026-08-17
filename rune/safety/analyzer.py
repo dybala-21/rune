@@ -325,19 +325,35 @@ def classify_rm_rf_risk(command: str) -> Literal["critical", "high"] | None:
     neither is left to the ordinary pattern checks, which is what a bounded
     glob in the working directory has always been when written without `-f`.
     """
-    match = _RM_RF_RE.search(command)
-    if not match:
-        return None
+    worst: Literal["critical", "high"] | None = None
+    for match in _RM_RF_RE.finditer(command):
+        risk = _classify_one_rm(match.group(1), match.group(2))
+        if risk == "critical":
+            return risk
+        if risk == "high":
+            worst = risk
+    return worst
 
+
+def _classify_one_rm(flags: str, target: str) -> Literal["critical", "high"] | None:
+    """One `rm` and one target, judged on its own.
+
+    Every deletion in the command gets asked, not just the first. A command
+    is as dangerous as its worst part, and `rm a.txt && rm -rf /etc` opens
+    with a deletion that is beneath notice.
+    """
     # Quotes come off both ends. Stripping only the trailing ones left
     # `rm -rf '/etc'` resolving to a relative path named `'/etc'`, which is
     # nowhere near /etc, so the target that decides critical was never seen.
-    raw_path = re.sub(r"""^["'(]+|["';)]+$""", "", match.group(2))
+    raw_path = re.sub(r"""^["'(]+|["';)]+$""", "", target)
     home = os.environ.get("HOME", "/home")
 
     expanded = raw_path.replace("~", home, 1) if raw_path.startswith("~") else raw_path
     expanded = expanded.replace("$HOME", home).replace("${HOME}", home)
-    resolved = str(Path(expanded).resolve())
+    try:
+        resolved = str(Path(expanded).resolve())
+    except (OSError, ValueError):
+        return "high"
 
     if resolved == "/" or resolved == home:
         return "critical"
@@ -351,7 +367,7 @@ def classify_rm_rf_risk(command: str) -> Literal["critical", "high"] | None:
         if resolved == dot_path or resolved.startswith(dot_path + "/"):
             return "critical"
 
-    return "high" if _RECURSIVE_FLAG_RE.search(" " + match.group(1)) else None
+    return "high" if _RECURSIVE_FLAG_RE.search(" " + flags) else None
 
 
 # Command Normalization (all encoding bypass handling)

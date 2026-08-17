@@ -89,3 +89,35 @@ class TestAPipeCannotLowerTheRisk:
         piped = analyze_command(cmd + " | cat").risk_score
         assert piped >= plain
         assert classify_rm_rf_risk(cmd + " | cat") == classify_rm_rf_risk(cmd)
+
+
+class TestEveryDeletionInTheCommand:
+    """A command is as dangerous as its worst part, not its first.
+
+    Widening the pattern to catch `rm` without flags introduced this: the
+    search stopped at the opening deletion, and `rm a.txt && rm -rf /etc`
+    read as harmless. Caught by fuzzing with a benign call to the same
+    binary in front — every rm is asked now, and the worst answer stands.
+    """
+
+    @pytest.mark.parametrize("cmd", [
+        "rm a.txt && rm -rf /etc",
+        "rm notes.md ; rm -rf ~",
+        "rm tmp.log && rm -rf /",
+        "echo cleaning && rm x.txt && rm -rf $HOME",
+        "rm -rf build && rm -rf /etc",
+        "rm -rf /etc && rm -rf build",
+    ])
+    def test_a_harmless_delete_first_hides_nothing(self, cmd):
+        assert classify_rm_rf_risk(cmd) == "critical"
+
+    def test_the_worst_of_several_non_critical_ones_wins(self):
+        assert classify_rm_rf_risk("rm a.txt && rm -rf build") == "high"
+
+    def test_several_harmless_ones_stay_harmless(self):
+        assert classify_rm_rf_risk("rm a.txt && rm b.txt") is None
+
+    def test_an_unresolvable_target_is_not_waved_through(self):
+        # Path.resolve() can raise on a pathological target; erring toward
+        # high is the only safe way to be wrong here.
+        assert classify_rm_rf_risk("rm -rf " + "\x00bad") == "high"
