@@ -329,7 +329,10 @@ def classify_rm_rf_risk(command: str) -> Literal["critical", "high"] | None:
     if not match:
         return None
 
-    raw_path = re.sub(r"""["';)]+$""", "", match.group(2))
+    # Quotes come off both ends. Stripping only the trailing ones left
+    # `rm -rf '/etc'` resolving to a relative path named `'/etc'`, which is
+    # nowhere near /etc, so the target that decides critical was never seen.
+    raw_path = re.sub(r"""^["'(]+|["';)]+$""", "", match.group(2))
     home = os.environ.get("HOME", "/home")
 
     expanded = raw_path.replace("~", home, 1) if raw_path.startswith("~") else raw_path
@@ -357,7 +360,13 @@ _ANSI_C_RE = re.compile(r"\$'([^']*)'")
 _HEX_ESCAPE_RE = re.compile(r"\\x([0-9a-fA-F]{2})")
 _OCTAL_ESCAPE_RE = re.compile(r"\\([0-7]{1,3})")
 _WHITESPACE_RE = re.compile(r"\s+")
-_LINE_CONTINUATION_RE = re.compile(r"\\$")
+_IFS_RE = re.compile(r"\$\{IFS\}|\$IFS")
+# A continuation is a backslash and the newline it swallows, wherever it
+# falls. Matching only `\\$` caught the one at the very end of the string and
+# missed every one in the middle — and since whitespace was collapsed first,
+# `rm \<newline> -rf /etc` arrived as `rm \ -rf /etc`, where the stray
+# backslash stops `rm\s+-` from matching and the command reads as safe.
+_LINE_CONTINUATION_RE = re.compile(r"\\[ \t]*\r?\n|\\$")
 
 
 def normalize_command(command: str) -> str:
@@ -384,14 +393,19 @@ def normalize_command(command: str) -> str:
     normalized = normalized.replace("$HOME", home).replace("${HOME}", home)
     normalized = re.sub(r"~(?=/|$)", home, normalized)
 
+    # Remove line continuations first: collapsing whitespace ahead of them
+    # turns `\<newline>` into `\ ` and leaves the backslash sitting between
+    # the command and its flags.
+    normalized = _LINE_CONTINUATION_RE.sub(" ", normalized)
+
+    # IFS stands in for a space, in both spellings. Handling only `$IFS`
+    # left `${IFS}` intact, and `crontab${IFS}-r` — or `rm${IFS}-rf${IFS}/` —
+    # matched nothing at all, so the command read as safe. Substituted before
+    # the whitespace pass so the spaces it leaves are collapsed with the rest.
+    normalized = _IFS_RE.sub(" ", normalized)
+
     # Normalize whitespace
     normalized = _WHITESPACE_RE.sub(" ", normalized)
-
-    # Remove line continuation escapes
-    normalized = _LINE_CONTINUATION_RE.sub("", normalized)
-
-    # IFS variable substitution
-    normalized = normalized.replace("$IFS", " ")
 
     return normalized.strip()
 

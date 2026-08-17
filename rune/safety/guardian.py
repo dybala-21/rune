@@ -273,7 +273,15 @@ class Guardian:
                             )
                     break  # one match per rule is enough
 
-        if worst_result is not None:
+        # A rule match reports what that rule saw, which is not the same as
+        # what the command is worth. Returning it here ended the assessment
+        # before the score and the protected paths were consulted, and the
+        # rule that most often won was the mildest one in the list: append
+        # `| head -3` to anything and "File read via bash" (low) decided the
+        # verdict. `rm -rf build` went from denied to allowed that way, and
+        # so did `sudo rm -rf /var`. Only critical is worth short-circuiting
+        # — nothing below can outrank it.
+        if worst_result is not None and worst_result.risk_level == "critical":
             return worst_result
 
         # Bash command referencing protected/blocked paths
@@ -289,16 +297,22 @@ class Guardian:
 
         # Medium risk score (30-49)
         if effective.risk_score >= 30:
-            return ValidationResult(
+            by_score = ValidationResult(
                 allowed=True,
                 risk_level="medium",
                 reason=", ".join(f.description for f in effective.findings),
             )
+        else:
+            by_score = ValidationResult(
+                allowed=True,
+                risk_level="low" if effective.risk_score >= 15 else "safe",
+            )
 
-        return ValidationResult(
-            allowed=True,
-            risk_level="low" if effective.risk_score >= 15 else "safe",
-        )
+        # Whichever of the two saw more, decides.
+        if worst_result is not None and risk_to_number(
+                worst_result.risk_level) >= risk_to_number(by_score.risk_level):
+            return worst_result
+        return by_score
 
     def set_approval_callback(self, callback: Callable[[str], Awaitable[bool]]) -> None:
         """Register a callback for interactive approval workflows."""
