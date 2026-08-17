@@ -43,6 +43,9 @@ dependencies = [
     # Code Intelligence
     "tree-sitter>=0.25.2",
     "tree-sitter-python>=0.25.0",
+    # Shell grammar — the safety layer reads what a command would actually
+    # run rather than pattern-matching the text of it.
+    "tree-sitter-bash>=0.25.0",
     # File System
     "watchfiles>=1.1.1",
     # Logging

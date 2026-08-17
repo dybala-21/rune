@@ -14,6 +14,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 from rune.safety.analyzer import analyze_command, classify_rm_rf_risk, normalize_command
+from rune.utils.logger import get_logger
+
+log = get_logger(__name__)
 
 # Types
 
@@ -196,6 +199,47 @@ class Guardian:
         return p.replace("~", self._home, 1) if p.startswith("~") else p
 
     def validate(self, command: str, _context: str | None = None) -> ValidationResult:
+        """Validate a bash command, then let the parse raise the answer.
+
+        The pattern checks decide on their own and keep every allow they
+        would have given. The parse is consulted afterwards for one thing —
+        a deletion the patterns could not see, because it sat behind a `cd`,
+        a wrapper, or a second command on the same line — and it can only
+        move the verdict up. A misread tree cannot open a hole that way; it
+        can only refuse something it should not have, which is measurable
+        and measured. Wrapping every return path is the point: the invariant
+        has to hold whichever branch answered.
+        """
+        base = self._validate_patterns(command, _context)
+        from rune.safety.shell_ast import worst_deletion
+
+        seen = worst_deletion(command)
+        if seen is None or risk_to_number(seen) <= risk_to_number(base.risk_level):
+            return base
+        log.debug("shell_ast_escalation", from_level=base.risk_level, to=seen)
+        if seen == "critical":
+            return ValidationResult(
+                allowed=False,
+                risk_level="critical",
+                reason="Recursive deletion targeting system or critical path",
+            )
+        # Everything except the level comes from the base result, and that is
+        # not tidiness. Setting requires_approval here invented approval
+        # prompts that had never been asked for: the tool adapter calls the
+        # approval callback on that flag alone, and a run with no one at the
+        # keyboard blocks on input() until something kills it — measured, on
+        # a cleanup task, hung for eight minutes at 0% CPU. The layer raises
+        # the reading. It does not decide how the run is supervised.
+        return ValidationResult(
+            allowed=base.allowed,
+            risk_level="high",
+            reason=base.reason or "Recursive deletion seen in the parsed command",
+            suggestions=base.suggestions,
+            requires_approval=base.requires_approval,
+        )
+
+    def _validate_patterns(self, command: str,
+                           _context: str | None = None) -> ValidationResult:
         """Validate a bash command for safety risks.
 
         Uses dual-pass analysis: original command + normalized (decoded) command.
