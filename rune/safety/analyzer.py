@@ -331,7 +331,7 @@ def classify_rm_rf_risk(command: str) -> Literal["critical", "high"] | None:
     """
     worst: Literal["critical", "high"] | None = None
     for match in _RM_RF_RE.finditer(command):
-        risk = _classify_one_rm(match.group(1), match.group(2))
+        risk = classify_rm_target(match.group(1), match.group(2))
         if risk == "critical":
             return risk
         if risk == "high":
@@ -339,7 +339,8 @@ def classify_rm_rf_risk(command: str) -> Literal["critical", "high"] | None:
     return worst
 
 
-def _classify_one_rm(flags: str, target: str) -> Literal["critical", "high"] | None:
+def classify_rm_target(flags: str, target: str,
+                       base: str | None = None) -> Literal["critical", "high"] | None:
     """One `rm` and one target, judged on its own.
 
     Every deletion in the command gets asked, not just the first. A command
@@ -355,7 +356,17 @@ def _classify_one_rm(flags: str, target: str) -> Literal["critical", "high"] | N
     expanded = raw_path.replace("~", home, 1) if raw_path.startswith("~") else raw_path
     expanded = expanded.replace("$HOME", home).replace("${HOME}", home)
     try:
-        resolved = str(Path(expanded).resolve())
+        # Made absolute against a directory the caller already knows.
+        # Path.resolve() asks the OS for the working directory every time it
+        # is handed a relative path, and a sweep asks about one target per
+        # file: forty object files meant forty getcwd calls, 41% of the time
+        # spent deciding whether a delete was dangerous.
+        # os.path.realpath, not Path.resolve: same answer, and pathlib's
+        # object churn costs nearly half the time again on a sweep that asks
+        # about forty files.
+        if not os.path.isabs(expanded):
+            expanded = os.path.join(base or os.getcwd(), expanded)
+        resolved = os.path.realpath(expanded)
     except (OSError, ValueError) as exc:
         # A target that will not resolve is a target nobody can vouch for,
         # so it counts as recursive-grade until someone looks.

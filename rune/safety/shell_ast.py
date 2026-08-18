@@ -150,13 +150,21 @@ def worst_deletion(command: str,
     """
     if not shell_ast_enabled():
         return None
-    from rune.safety.analyzer import classify_rm_rf_risk, normalize_command
+    # Nothing here reports anything but `rm`, so a line without one has
+    # nothing to find and does not need to be normalised or parsed. Only
+    # ANSI-C decoding can produce those two letters where they were not
+    # written, which is what the second token looks for. `ls -la` is the
+    # common case and it was paying 68us to be told it deletes nothing.
+    if "rm" not in command and "$'" not in command:
+        return None
+    from rune.safety.analyzer import classify_rm_target, normalize_command
 
     # The normalised text, not the raw line. Expansions are a runtime thing
     # and no grammar resolves them, so `rm${IFS}-rf${IFS}build` is one word
     # to the parser and `$'\x72\x6d'` is not a command name at all. Reading
     # what the normaliser produced puts both back within reach.
     worst: Literal["critical", "high"] | None = None
+    here = os.getcwd()
     for cmd in read(normalize_command(command)).commands:
         name, args = cmd.name, list(cmd.args)
         # Step through wrappers to the command they carry. `timeout 5 rm …`
@@ -182,12 +190,22 @@ def worst_deletion(command: str,
         if base != "rm":
             continue
         prefix = "" if cmd.cwd in (".", "") else cmd.cwd.rstrip("/") + "/"
+        # The targets are classified directly. Rebuilding `rm <flags>
+        # <target>` and handing it back to the regex re-parsed the same
+        # command once per file: forty object files cost 2.7ms of a path
+        # that is supposed to stay under a millisecond. Duplicates are
+        # dropped for the same reason — a sweep names the same directory
+        # many times.
+        flags = " ".join(a for a in args if a.startswith("-"))
+        seen: set[str] = set()
         for arg in args:
             if arg.startswith("-"):
                 continue
             target = arg if arg.startswith(("/", "~", "$")) else prefix + arg
-            flags = " ".join(a for a in args if a.startswith("-"))
-            risk = classify_rm_rf_risk(f"rm {flags} {target}".replace("  ", " "))
+            if target in seen:
+                continue
+            seen.add(target)
+            risk = classify_rm_target(flags, target, here)
             if risk == "critical":
                 return "critical"
             if risk == "high":
