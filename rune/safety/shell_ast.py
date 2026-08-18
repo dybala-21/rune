@@ -63,12 +63,6 @@ class SimpleCommand:
     cwd: str
 
 
-@dataclass(frozen=True)
-class ShellReading:
-    commands: tuple[SimpleCommand, ...]
-    understood: bool
-
-
 @lru_cache(maxsize=1)
 def _parser():
     """The bash parser, or None when it is not installed.
@@ -97,17 +91,25 @@ def _unquote(word: str) -> str:
     return word
 
 
-def read(command: str) -> ShellReading:
-    """The commands a line would run, in order, with cd applied."""
+def read(command: str) -> tuple[SimpleCommand, ...]:
+    """The commands a line would run, in order, with cd applied.
+
+    A line the grammar cannot read yields nothing, which leaves the pattern
+    checks to answer alone. That is reported to the log and acted on nowhere:
+    treating an unreadable line as dangerous would be the fail-closed choice,
+    and it is not made here because its cost has not been measured. Do not
+    add it without measuring — in a run with nobody watching, a refusal and a
+    hang are the same thing.
+    """
     parser = _parser()
     if parser is None or not command.strip():
-        return ShellReading((), False)
+        return ()
     src = command.encode()
     try:
         tree = parser.parse(src)
     except Exception:                        # pragma: no cover - defensive
         log.debug("shell_ast_parse_failed")
-        return ShellReading((), False)
+        return ()
 
     out: list[SimpleCommand] = []
     cwd = "."
@@ -136,8 +138,10 @@ def read(command: str) -> ShellReading:
         for child in node.children:
             visit(child, depth)
 
+    if tree.root_node.has_error:
+        log.debug("shell_ast_incomplete_parse", commands=len(out))
     visit(tree.root_node, 0)
-    return ShellReading(tuple(out), not tree.root_node.has_error)
+    return tuple(out)
 
 
 def worst_deletion(command: str,
@@ -165,7 +169,7 @@ def worst_deletion(command: str,
     # what the normaliser produced puts both back within reach.
     worst: Literal["critical", "high"] | None = None
     here = os.getcwd()
-    for cmd in read(normalize_command(command)).commands:
+    for cmd in read(normalize_command(command)):
         name, args = cmd.name, list(cmd.args)
         # Step through wrappers to the command they carry. `timeout 5 rm …`
         # puts an operand of its own in the way, so anything that is not a

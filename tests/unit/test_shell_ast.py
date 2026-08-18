@@ -43,22 +43,25 @@ class TestWhatOnlyAParseCanSee:
 
 class TestReading:
     def test_a_chain_becomes_its_commands(self):
-        cmds = read("rm a.txt && ls -la | head -3").commands
+        cmds = read("rm a.txt && ls -la | head -3")
         assert [c.name for c in cmds] == ["rm", "ls", "head"]
 
     def test_cd_is_recorded_not_reported(self):
-        cmds = read("cd /tmp && rm -rf build").commands
+        cmds = read("cd /tmp && rm -rf build")
         assert [c.name for c in cmds] == ["rm"]
         assert cmds[0].cwd == "/tmp"
 
     def test_quotes_come_off_in_pairs(self):
         # Taking quote characters off each end independently leaves
         # `"rm -rf 'build'"` unbalanced and unparseable.
-        cmds = read("""bash -c "rm -rf 'build'" """).commands
+        cmds = read("""bash -c "rm -rf 'build'" """)
         assert cmds[0].args[-1] == "rm -rf 'build'"
 
-    def test_a_broken_line_is_reported_as_not_understood(self):
-        assert read("rm -rf 'unterminated").understood is False
+    def test_a_line_the_grammar_cannot_read_yields_nothing_dangerous(self):
+        # The pattern checks answer alone here. Escalating on an unreadable
+        # line is the fail-closed choice and is deliberately not made: its
+        # cost has not been measured.
+        assert worst_deletion("rm -rf 'unterminated") is None
 
     def test_it_can_be_switched_off(self, monkeypatch):
         monkeypatch.setenv("RUNE_SHELL_AST", "0")
