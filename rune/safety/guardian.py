@@ -186,6 +186,53 @@ def risk_to_number(risk: RiskLevel) -> int:
     return _RISK_NUMERIC.get(risk, 0)
 
 
+def _milder(a: ValidationResult, b: ValidationResult) -> bool:
+    """Is *a* a softer answer than *b* on any axis that matters?"""
+    return (risk_to_number(a.risk_level) < risk_to_number(b.risk_level)
+            or (a.allowed and not b.allowed)
+            or (b.requires_approval and not a.requires_approval))
+
+
+def _raised(base: ValidationResult, level: RiskLevel) -> ValidationResult:
+    """*base*, or a copy of it read as more dangerous — never less.
+
+    Two shapes can leave here and both are at least as strict as what came
+    in: base itself, or base with a higher level, blocked outright once that
+    level is critical. Nothing milder is constructible, and that is the whole
+    safety argument for consulting a parser at all — a tree that misreads a
+    command cannot open a hole it has no way to describe.
+
+    Everything but the level is copied, and that is not tidiness. Setting
+    requires_approval here once invented approval prompts nobody had asked
+    for: the tool adapter calls the approval callback on that flag alone, and
+    a run with no one at the keyboard blocks on input() until something kills
+    it — measured, on a cleanup task, hung for eight minutes at 0% CPU. This
+    raises the reading. It does not decide how the run is supervised.
+
+    The check at the end costs three comparisons and should never fire. It is
+    there because the property it guards is the one thing this design cannot
+    be wrong about, and because the last three defects on this path were all
+    found by widening what was compared.
+    """
+    if risk_to_number(level) <= risk_to_number(base.risk_level):
+        return base
+    out = ValidationResult(
+        allowed=base.allowed and level != "critical",
+        risk_level=level,
+        reason=(base.reason if level != "critical" else
+                "Recursive deletion targeting system or critical path")
+        or "Deletion seen in the parsed command",
+        suggestions=base.suggestions,
+        requires_approval=base.requires_approval,
+    )
+    if _milder(out, base):      # unreachable by construction
+        log.error("guardian_escalation_would_soften",
+                  base=base.risk_level, raised=level)
+        return base
+    log.debug("guardian_escalation", from_level=base.risk_level, to=level)
+    return out
+
+
 # Guardian
 
 class Guardian:
@@ -205,38 +252,17 @@ class Guardian:
         would have given. The parse is consulted afterwards for one thing —
         a deletion the patterns could not see, because it sat behind a `cd`,
         a wrapper, or a second command on the same line — and it can only
-        move the verdict up. A misread tree cannot open a hole that way; it
-        can only refuse something it should not have, which is measurable
-        and measured. Wrapping every return path is the point: the invariant
-        has to hold whichever branch answered.
+        move the verdict up. Every return path goes through `_raised`, which
+        is the only place an escalation is constructed and cannot produce a
+        milder answer than the one it was given.
         """
         base = self._validate_patterns(command, _context)
         from rune.safety.shell_ast import worst_deletion
 
         seen = worst_deletion(command)
-        if seen is None or risk_to_number(seen) <= risk_to_number(base.risk_level):
+        if seen is None:
             return base
-        log.debug("shell_ast_escalation", from_level=base.risk_level, to=seen)
-        if seen == "critical":
-            return ValidationResult(
-                allowed=False,
-                risk_level="critical",
-                reason="Recursive deletion targeting system or critical path",
-            )
-        # Everything except the level comes from the base result, and that is
-        # not tidiness. Setting requires_approval here invented approval
-        # prompts that had never been asked for: the tool adapter calls the
-        # approval callback on that flag alone, and a run with no one at the
-        # keyboard blocks on input() until something kills it — measured, on
-        # a cleanup task, hung for eight minutes at 0% CPU. The layer raises
-        # the reading. It does not decide how the run is supervised.
-        return ValidationResult(
-            allowed=base.allowed,
-            risk_level="high",
-            reason=base.reason or "Recursive deletion seen in the parsed command",
-            suggestions=base.suggestions,
-            requires_approval=base.requires_approval,
-        )
+        return _raised(base, seen)
 
     def _validate_patterns(self, command: str,
                            _context: str | None = None) -> ValidationResult:
@@ -416,8 +442,11 @@ class Guardian:
                 f.write(json_encode(entry) + "\n")
             # Restrict file permissions (owner read/write only)
             audit_file.chmod(0o600)
-        except OSError:
-            pass
+        except OSError as exc:
+            # An audit line that cannot be written must not stop the check it
+            # was recording, but it must not vanish either — a silent audit
+            # is indistinguishable from one that had nothing to say.
+            log.debug("guardian_audit_write_failed", error=str(exc))
 
     def is_command_safe(self, command: str) -> bool:
         """Quick boolean check -- True if command is safe to execute without approval."""
@@ -457,8 +486,12 @@ class Guardian:
             p = Path(normalized)
             if p.exists():
                 real_path = str(p.resolve(strict=True))
-        except OSError:
-            pass
+        except OSError as exc:
+            # The unresolved path is checked instead, which is the stricter
+            # of the two readings — a symlink that cannot be followed is not
+            # a reason to stop looking at where it was pointed.
+            log.debug("guardian_symlink_unresolvable", path=normalized,
+                      error=str(exc))
 
         # -- critical root paths -----------------------------------------------
         for crp in _CRITICAL_ROOT_PATHS:
@@ -532,8 +565,12 @@ class Guardian:
             p = Path(normalized)
             if p.exists():
                 real_path = str(p.resolve(strict=True))
-        except OSError:
-            pass
+        except OSError as exc:
+            # The unresolved path is checked instead, which is the stricter
+            # of the two readings — a symlink that cannot be followed is not
+            # a reason to stop looking at where it was pointed.
+            log.debug("guardian_symlink_unresolvable", path=normalized,
+                      error=str(exc))
 
         for bp in READ_BLOCKED_PATHS:
             expanded_bp = self._expand(bp)

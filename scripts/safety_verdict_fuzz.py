@@ -117,11 +117,16 @@ for base in BASES:
             variant = f2(f1(base)) if l1 != l2 else f1(base)
         except Exception:
             continue
-        if not runnable(variant):
-            continue
         vd, vr = verdict(variant)
         checked += 1
         if ORDER[vd] < ORDER[bd] or risk_to_number(vr) < risk_to_number(br):
+            # Validity is asked here and not before. Composing rewritings
+            # blindly produces strings no shell will run — `env ( rm -rf
+            # build )` — and asking bash about every one of 28,000 variants
+            # costs more than the whole rest of the run. Only a variant that
+            # looks like a weakening has to be real.
+            if not runnable(variant):
+                continue
             weak += 1
             print(f"WEAKER [{label:18}] {bd}/{br} -> {vd}/{vr}\n"
                   f"        base    = {base!r}\n        variant = {variant!r}")

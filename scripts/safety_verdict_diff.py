@@ -70,6 +70,10 @@ TRANSFORMS = [
 # Commands agents really ran, if the corpus is next to this script. They
 # matter more than anything constructed: a verdict that changes on one of
 # these is a task that stops working.
+#
+# The file is pure data — one command per line, no comment syntax, because a
+# shell command may itself begin with '#' and seven of these do. Its
+# provenance and how to widen it are in this module's docstring.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _CORPUS = os.path.join(_HERE, "safety_verdict_corpus.txt")
 def verdict(command):
