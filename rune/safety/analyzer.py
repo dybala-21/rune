@@ -12,6 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from rune.utils.logger import get_logger
+
+log = get_logger(__name__)
+
 # Types
 
 FindingType = Literal["critical", "high", "medium", "low", "info"]
@@ -301,23 +305,70 @@ def parse_command(command: str) -> ParsedCommand:
 
 # rm -rf Risk Classification
 
+# Any rm and the first thing it is pointed at, flags kept separately: what a
+# command targets and whether it recurses are two questions, and the old
+# pattern answered them with one match. Its second alternative was
+# `-[a-zA-Z]*f[a-zA-Z]*r?`, where the trailing r is optional, so `rm -f`
+# read as recursive and every bounded sweep was denied for want of a sandbox
+# — while `find … -delete` destroyed the same files at score zero.
 _RM_RF_RE = re.compile(
-    r"rm\s+(-[a-zA-Z]*r[a-zA-Z]*f?|-[a-zA-Z]*f[a-zA-Z]*r?|--recursive)\s+(\S+)"
+    r"\brm\s+((?:-[a-zA-Z-]+\s+)*)([^\s;|&]+)"
 )
+_RECURSIVE_FLAG_RE = re.compile(r"(?:^|\s)(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(?:\s|$)")
 
 
 def classify_rm_rf_risk(command: str) -> Literal["critical", "high"] | None:
-    """Classify the risk of an rm -rf command based on its target path."""
-    match = _RM_RF_RE.search(command)
-    if not match:
-        return None
+    """How dangerous this deletion is, by what it targets and whether it recurses.
 
-    raw_path = re.sub(r"""["';)]+$""", "", match.group(2))
+    A critical target is critical however it is spelled — dropping `-r` does
+    not make `rm /etc/passwd` safe, and that case now counts where it did
+    not before. Recursion into anything else stays high. A delete that is
+    neither is left to the ordinary pattern checks, which is what a bounded
+    glob in the working directory has always been when written without `-f`.
+    """
+    worst: Literal["critical", "high"] | None = None
+    for match in _RM_RF_RE.finditer(command):
+        risk = classify_rm_target(match.group(1), match.group(2))
+        if risk == "critical":
+            return risk
+        if risk == "high":
+            worst = risk
+    return worst
+
+
+def classify_rm_target(flags: str, target: str,
+                       base: str | None = None) -> Literal["critical", "high"] | None:
+    """One `rm` and one target, judged on its own.
+
+    Every deletion in the command gets asked, not just the first. A command
+    is as dangerous as its worst part, and `rm a.txt && rm -rf /etc` opens
+    with a deletion that is beneath notice.
+    """
+    # Quotes come off both ends. Stripping only the trailing ones left
+    # `rm -rf '/etc'` resolving to a relative path named `'/etc'`, which is
+    # nowhere near /etc, so the target that decides critical was never seen.
+    raw_path = re.sub(r"""^["'(]+|["';)]+$""", "", target)
     home = os.environ.get("HOME", "/home")
 
     expanded = raw_path.replace("~", home, 1) if raw_path.startswith("~") else raw_path
     expanded = expanded.replace("$HOME", home).replace("${HOME}", home)
-    resolved = str(Path(expanded).resolve())
+    try:
+        # Made absolute against a directory the caller already knows.
+        # Path.resolve() asks the OS for the working directory every time it
+        # is handed a relative path, and a sweep asks about one target per
+        # file: forty object files meant forty getcwd calls, 41% of the time
+        # spent deciding whether a delete was dangerous.
+        # os.path.realpath, not Path.resolve: same answer, and pathlib's
+        # object churn costs nearly half the time again on a sweep that asks
+        # about forty files.
+        if not os.path.isabs(expanded):
+            expanded = os.path.join(base or os.getcwd(), expanded)
+        resolved = os.path.realpath(expanded)
+    except (OSError, ValueError) as exc:
+        # A target that will not resolve is a target nobody can vouch for,
+        # so it counts as recursive-grade until someone looks.
+        log.debug("rm_target_unresolvable", target=raw_path, error=str(exc))
+        return "high"
 
     if resolved == "/" or resolved == home:
         return "critical"
@@ -331,7 +382,7 @@ def classify_rm_rf_risk(command: str) -> Literal["critical", "high"] | None:
         if resolved == dot_path or resolved.startswith(dot_path + "/"):
             return "critical"
 
-    return "high"
+    return "high" if _RECURSIVE_FLAG_RE.search(" " + flags) else None
 
 
 # Command Normalization (all encoding bypass handling)
@@ -340,7 +391,13 @@ _ANSI_C_RE = re.compile(r"\$'([^']*)'")
 _HEX_ESCAPE_RE = re.compile(r"\\x([0-9a-fA-F]{2})")
 _OCTAL_ESCAPE_RE = re.compile(r"\\([0-7]{1,3})")
 _WHITESPACE_RE = re.compile(r"\s+")
-_LINE_CONTINUATION_RE = re.compile(r"\\$")
+_IFS_RE = re.compile(r"\$\{IFS\}|\$IFS")
+# A continuation is a backslash and the newline it swallows, wherever it
+# falls. Matching only `\\$` caught the one at the very end of the string and
+# missed every one in the middle — and since whitespace was collapsed first,
+# `rm \<newline> -rf /etc` arrived as `rm \ -rf /etc`, where the stray
+# backslash stops `rm\s+-` from matching and the command reads as safe.
+_LINE_CONTINUATION_RE = re.compile(r"\\[ \t]*\r?\n|\\$")
 
 
 def normalize_command(command: str) -> str:
@@ -367,14 +424,18 @@ def normalize_command(command: str) -> str:
     normalized = normalized.replace("$HOME", home).replace("${HOME}", home)
     normalized = re.sub(r"~(?=/|$)", home, normalized)
 
-    # Normalize whitespace
+    # Remove line continuations first: collapsing whitespace ahead of them
+    # turns `\<newline>` into `\ ` and leaves the backslash sitting between
+    # the command and its flags.
+    normalized = _LINE_CONTINUATION_RE.sub(" ", normalized)
+
+    # IFS stands in for a space, in both spellings. Handling only `$IFS`
+    # left `${IFS}` intact, and `crontab${IFS}-r` — or `rm${IFS}-rf${IFS}/` —
+    # matched nothing at all, so the command read as safe. Substituted before
+    # the whitespace pass so the spaces it leaves are collapsed with the rest.
+    normalized = _IFS_RE.sub(" ", normalized)
+
     normalized = _WHITESPACE_RE.sub(" ", normalized)
-
-    # Remove line continuation escapes
-    normalized = _LINE_CONTINUATION_RE.sub("", normalized)
-
-    # IFS variable substitution
-    normalized = normalized.replace("$IFS", " ")
 
     return normalized.strip()
 

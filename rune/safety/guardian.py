@@ -14,6 +14,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 from rune.safety.analyzer import analyze_command, classify_rm_rf_risk, normalize_command
+from rune.utils.logger import get_logger
+
+log = get_logger(__name__)
 
 # Types
 
@@ -183,6 +186,53 @@ def risk_to_number(risk: RiskLevel) -> int:
     return _RISK_NUMERIC.get(risk, 0)
 
 
+def _milder(a: ValidationResult, b: ValidationResult) -> bool:
+    """Is *a* a softer answer than *b* on any axis that matters?"""
+    return (risk_to_number(a.risk_level) < risk_to_number(b.risk_level)
+            or (a.allowed and not b.allowed)
+            or (b.requires_approval and not a.requires_approval))
+
+
+def _raised(base: ValidationResult, level: RiskLevel) -> ValidationResult:
+    """*base*, or a copy of it read as more dangerous — never less.
+
+    Two shapes can leave here and both are at least as strict as what came
+    in: base itself, or base with a higher level, blocked outright once that
+    level is critical. Nothing milder is constructible, and that is the whole
+    safety argument for consulting a parser at all — a tree that misreads a
+    command cannot open a hole it has no way to describe.
+
+    Everything but the level is copied, and that is not tidiness. Setting
+    requires_approval here once invented approval prompts nobody had asked
+    for: the tool adapter calls the approval callback on that flag alone, and
+    a run with no one at the keyboard blocks on input() until something kills
+    it — measured, on a cleanup task, hung for eight minutes at 0% CPU. This
+    raises the reading. It does not decide how the run is supervised.
+
+    The check at the end costs three comparisons and should never fire. It is
+    there because the property it guards is the one thing this design cannot
+    be wrong about, and because the last three defects on this path were all
+    found by widening what was compared.
+    """
+    if risk_to_number(level) <= risk_to_number(base.risk_level):
+        return base
+    out = ValidationResult(
+        allowed=base.allowed and level != "critical",
+        risk_level=level,
+        reason=(base.reason if level != "critical" else
+                "Recursive deletion targeting system or critical path")
+        or "Deletion seen in the parsed command",
+        suggestions=base.suggestions,
+        requires_approval=base.requires_approval,
+    )
+    if _milder(out, base):      # unreachable by construction
+        log.error("guardian_escalation_would_soften",
+                  base=base.risk_level, raised=level)
+        return base
+    log.debug("guardian_escalation", from_level=base.risk_level, to=level)
+    return out
+
+
 # Guardian
 
 class Guardian:
@@ -196,6 +246,26 @@ class Guardian:
         return p.replace("~", self._home, 1) if p.startswith("~") else p
 
     def validate(self, command: str, _context: str | None = None) -> ValidationResult:
+        """Validate a bash command, then let the parse raise the answer.
+
+        The pattern checks decide on their own and keep every allow they
+        would have given. The parse is consulted afterwards for one thing —
+        a deletion the patterns could not see, because it sat behind a `cd`,
+        a wrapper, or a second command on the same line — and it can only
+        move the verdict up. Every return path goes through `_raised`, which
+        is the only place an escalation is constructed and cannot produce a
+        milder answer than the one it was given.
+        """
+        base = self._validate_patterns(command, _context)
+        from rune.safety.shell_ast import worst_deletion
+
+        seen = worst_deletion(command)
+        if seen is None:
+            return base
+        return _raised(base, seen)
+
+    def _validate_patterns(self, command: str,
+                           _context: str | None = None) -> ValidationResult:
         """Validate a bash command for safety risks.
 
         Uses dual-pass analysis: original command + normalized (decoded) command.
@@ -273,7 +343,15 @@ class Guardian:
                             )
                     break  # one match per rule is enough
 
-        if worst_result is not None:
+        # A rule match reports what that rule saw, which is not the same as
+        # what the command is worth. Returning it here ended the assessment
+        # before the score and the protected paths were consulted, and the
+        # rule that most often won was the mildest one in the list: append
+        # `| head -3` to anything and "File read via bash" (low) decided the
+        # verdict. `rm -rf build` went from denied to allowed that way, and
+        # so did `sudo rm -rf /var`. Only critical is worth short-circuiting
+        # — nothing below can outrank it.
+        if worst_result is not None and worst_result.risk_level == "critical":
             return worst_result
 
         # Bash command referencing protected/blocked paths
@@ -289,16 +367,22 @@ class Guardian:
 
         # Medium risk score (30-49)
         if effective.risk_score >= 30:
-            return ValidationResult(
+            by_score = ValidationResult(
                 allowed=True,
                 risk_level="medium",
                 reason=", ".join(f.description for f in effective.findings),
             )
+        else:
+            by_score = ValidationResult(
+                allowed=True,
+                risk_level="low" if effective.risk_score >= 15 else "safe",
+            )
 
-        return ValidationResult(
-            allowed=True,
-            risk_level="low" if effective.risk_score >= 15 else "safe",
-        )
+        # Whichever of the two saw more, decides.
+        if worst_result is not None and risk_to_number(
+                worst_result.risk_level) >= risk_to_number(by_score.risk_level):
+            return worst_result
+        return by_score
 
     def set_approval_callback(self, callback: Callable[[str], Awaitable[bool]]) -> None:
         """Register a callback for interactive approval workflows."""
@@ -358,8 +442,11 @@ class Guardian:
                 f.write(json_encode(entry) + "\n")
             # Restrict file permissions (owner read/write only)
             audit_file.chmod(0o600)
-        except OSError:
-            pass
+        except OSError as exc:
+            # An audit line that cannot be written must not stop the check it
+            # was recording, but it must not vanish either — a silent audit
+            # is indistinguishable from one that had nothing to say.
+            log.debug("guardian_audit_write_failed", error=str(exc))
 
     def is_command_safe(self, command: str) -> bool:
         """Quick boolean check -- True if command is safe to execute without approval."""
@@ -399,8 +486,12 @@ class Guardian:
             p = Path(normalized)
             if p.exists():
                 real_path = str(p.resolve(strict=True))
-        except OSError:
-            pass
+        except OSError as exc:
+            # The unresolved path is checked instead, which is the stricter
+            # of the two readings — a symlink that cannot be followed is not
+            # a reason to stop looking at where it was pointed.
+            log.debug("guardian_symlink_unresolvable", path=normalized,
+                      error=str(exc))
 
         # -- critical root paths -----------------------------------------------
         for crp in _CRITICAL_ROOT_PATHS:
@@ -474,8 +565,12 @@ class Guardian:
             p = Path(normalized)
             if p.exists():
                 real_path = str(p.resolve(strict=True))
-        except OSError:
-            pass
+        except OSError as exc:
+            # The unresolved path is checked instead, which is the stricter
+            # of the two readings — a symlink that cannot be followed is not
+            # a reason to stop looking at where it was pointed.
+            log.debug("guardian_symlink_unresolvable", path=normalized,
+                      error=str(exc))
 
         for bp in READ_BLOCKED_PATHS:
             expanded_bp = self._expand(bp)

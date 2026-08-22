@@ -70,3 +70,33 @@ jobs:
           uv run python -c "import rune.cli.main, rune.agent.loop; print('imports ok')"
           uv run python -m rune.cli.main --version
 
+  # A safety change that softens a verdict is the one failure this repo
+  # cannot notice by reading the diff. Both checks below found real bugs
+  # before they were jobs: the fuzzer caught two bypasses that made
+  # `rm -rf /etc` read as safe, and the differ is the only thing that
+  # answers "is anything more permissive than the branch we came from".
+  safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install dependencies
+        run: uv sync
+      - name: No rewriting of a dangerous command reads as milder
+        run: |
+          uv run python scripts/safety_verdict_fuzz.py | tee fuzz.out
+          grep -q ", 0 weakened the verdict" fuzz.out
+      - name: Nothing is more permissive than the base branch
+        if: github.event_name == 'pull_request'
+        run: |
+          git worktree add /tmp/base ${{ github.event.pull_request.base.sha }}
+          uv run python scripts/safety_verdict_diff.py . > /tmp/head.json
+          uv run python scripts/safety_verdict_diff.py /tmp/base > /tmp/base.json
+          uv run python scripts/safety_verdict_gate.py /tmp/base.json /tmp/head.json
