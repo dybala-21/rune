@@ -305,15 +305,12 @@ def parse_command(command: str) -> ParsedCommand:
 
 # rm -rf Risk Classification
 
-# Any rm and the first thing it is pointed at, flags kept separately: what
-# the command targets and whether it recurses are two different questions,
-# and the old pattern answered them with one match. Its second alternative
-# was `-[a-zA-Z]*f[a-zA-Z]*r?`, where the trailing r is optional, so `rm -f`
-# read as a recursive delete. Every bounded sweep — `rm -f cache/*.bin`, the
-# ordinary way to clear forty files — was scored as recursion and denied for
-# want of a sandbox, while `find … -delete` destroyed the same files at
-# score zero. Agents met the denial one file at a time until the
-# consecutive-call block cut them off, and the work ended half done.
+# Any rm and the first thing it is pointed at, flags kept separately: what a
+# command targets and whether it recurses are two questions, and the old
+# pattern answered them with one match. Its second alternative was
+# `-[a-zA-Z]*f[a-zA-Z]*r?`, where the trailing r is optional, so `rm -f`
+# read as recursive and every bounded sweep was denied for want of a sandbox
+# — while `find … -delete` destroyed the same files at score zero.
 _RM_RF_RE = re.compile(
     r"\brm\s+((?:-[a-zA-Z-]+\s+)*)([^\s;|&]+)"
 )
@@ -438,7 +435,6 @@ def normalize_command(command: str) -> str:
     # the whitespace pass so the spaces it leaves are collapsed with the rest.
     normalized = _IFS_RE.sub(" ", normalized)
 
-    # Normalize whitespace
     normalized = _WHITESPACE_RE.sub(" ", normalized)
 
     return normalized.strip()
