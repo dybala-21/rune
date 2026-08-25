@@ -39,11 +39,16 @@ class ProviderModels(BaseModel):
             fast="gpt-5-mini",
         )
     )
+    # One model for every tier: local installs usually hold a single model,
+    # and qwen3-coder:30b (MoE, 3B active) is the one the cleanup instrument
+    # was actually run through end-to-end — 18GB, fits a 48GB machine with
+    # room for context, ~25-40s a task. codellama/llama3.2 predate native
+    # tool calling and are two generations gone.
     ollama: ModelsByTier = Field(
         default_factory=lambda: ModelsByTier(
-            best="llama3.2",
-            coding="codellama",
-            fast="llama3.2",
+            best="qwen3-coder:30b",
+            coding="qwen3-coder:30b",
+            fast="qwen3-coder:30b",
         )
     )
 
