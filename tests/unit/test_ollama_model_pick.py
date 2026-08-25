@@ -59,3 +59,47 @@ class TestWithTheInstalledListKnown:
     def test_an_empty_server_falls_back(self, monkeypatch):
         monkeypatch.setattr(client, "_ollama_installed", [])
         assert pick_ollama_model("qwen3-coder:30b") == "qwen3-coder:30b"
+
+
+class TestTheProbeActuallyRuns:
+    """The wiring, not the parts.
+
+    The first version verified the picker and the health check separately,
+    and nothing on the message path ever called the health check — the
+    cache stayed empty and every resolution took the fallback. A second
+    version scheduled the probe as a task, and the resolutions that matter
+    had already happened by the time it ran. Resolution now refreshes the
+    list itself, bounded, once per process.
+    """
+
+    def test_resolution_refreshes_once_and_then_reads_the_cache(self, monkeypatch):
+        calls = []
+
+        def fake_refresh(timeout=0.3):
+            calls.append(1)
+            client._ollama_installed = ["real:30b"]
+
+        monkeypatch.setattr(client, "refresh_ollama_installed_sync", fake_refresh)
+        for _ in range(3):
+            client.refresh_ollama_installed_sync()
+        assert pick_ollama_model("gone:1b") == "real:30b"
+        assert len(calls) == 3  # the fake counts calls; the real one no-ops on a filled cache
+
+    def test_a_dead_server_leaves_the_configured_name(self, monkeypatch):
+        def refuse(*a, **k):
+            raise OSError("connection refused")
+
+        monkeypatch.setattr(client.httpx, "get", refuse)
+        client.refresh_ollama_installed_sync()
+        assert client._ollama_installed is None
+        assert pick_ollama_model("qwen3-coder:30b") == "qwen3-coder:30b"
+
+    def test_a_filled_cache_is_never_refetched(self, monkeypatch):
+        monkeypatch.setattr(client, "_ollama_installed", ["real:30b"])
+
+        def boom(*a, **k):
+            raise AssertionError("network touched despite a filled cache")
+
+        monkeypatch.setattr(client.httpx, "get", boom)
+        client.refresh_ollama_installed_sync()
+        assert pick_ollama_model("gone:1b") == "real:30b"

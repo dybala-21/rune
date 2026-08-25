@@ -77,6 +77,33 @@ async def _check_ollama(timeout: float = _DEFAULT_TIMEOUT) -> bool:
         return False
 
 
+def refresh_ollama_installed_sync(timeout: float = 0.3) -> None:
+    """Fill the installed list right now, bounded, for sync callers.
+
+    The agent loop builds its model profile from config directly and never
+    passes through resolve_model, so the async probe cannot help it — the
+    profile is built exactly once per run, before any task would get a turn.
+    One bounded localhost round-trip at that moment costs single-digit
+    milliseconds when the server is up and at most *timeout* when it is not,
+    in which case the configured name was the only answer anyway.
+    """
+    global _ollama_installed
+    if _ollama_installed is not None:
+        return
+    try:
+        resp = httpx.get("http://localhost:11434/api/tags", timeout=timeout)
+        if resp.status_code == 200:
+            models = resp.json().get("models", [])
+            _ollama_installed = [
+                m["name"] for m in sorted(
+                    models, key=lambda m: m.get("modified_at", ""),
+                    reverse=True)
+                if "name" in m
+            ]
+    except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError):
+        log.debug("ollama_sync_probe_failed")
+
+
 def pick_ollama_model(configured: str) -> str:
     """The configured model if it is installed, else one that is.
 
@@ -210,8 +237,14 @@ class LLMClient:
         resolved = getattr(tier_models, tier, tier_models.best)
 
         # The configured name is only a guess about what the local server
-        # holds; when the server has told us, what is installed wins.
+        # holds; when the server has told us, what is installed wins. The
+        # refresh is a no-op once the list is known, so only the first
+        # resolution in a process pays the bounded localhost round-trip —
+        # a scheduled-task version of this left the first few resolutions
+        # answering from the guess, and they went to a model that was not
+        # there.
         if provider == Provider.OLLAMA:
+            refresh_ollama_installed_sync()
             return pick_ollama_model(resolved)
         return resolved
 
