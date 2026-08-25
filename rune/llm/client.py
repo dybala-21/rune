@@ -47,14 +47,52 @@ async def _check_dns(hostname: str, timeout: float = _DEFAULT_TIMEOUT) -> bool:
         return False
 
 
+# What the local server actually has installed, newest first, refreshed as a
+# by-product of every health check. Configured model names go stale — the
+# shipped defaults sat unusable for months because the names predated tool
+# calling — so the name in config is a recommendation and a last resort,
+# and the installed list is the truth when it is known.
+_ollama_installed: list[str] | None = None
+
+
 async def _check_ollama(timeout: float = _DEFAULT_TIMEOUT) -> bool:
     """Check Ollama availability via HTTP GET /api/tags."""
+    global _ollama_installed
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.get("http://localhost:11434/api/tags")
+            if resp.status_code == 200:
+                try:
+                    models = resp.json().get("models", [])
+                    _ollama_installed = [
+                        m["name"] for m in sorted(
+                            models, key=lambda m: m.get("modified_at", ""),
+                            reverse=True)
+                        if "name" in m
+                    ]
+                except (ValueError, KeyError, TypeError):
+                    log.debug("ollama_tags_unparseable")
             return resp.status_code == 200
     except (httpx.HTTPError, OSError):
         return False
+
+
+def pick_ollama_model(configured: str) -> str:
+    """The configured model if it is installed, else one that is.
+
+    Embedding models never drive the agent loop, so they are passed over.
+    With no health check yet, or an empty server, the configured name stands
+    — it doubles as the recommendation of what to pull.
+    """
+    installed = _ollama_installed
+    if not installed:
+        return configured
+    if configured in installed:
+        return configured
+    for name in installed:
+        if "embed" not in name.lower():
+            return name
+    return configured
 
 
 def loop_model_string(provider: str, model: str) -> str:
@@ -169,8 +207,13 @@ class LLMClient:
 
         models_config = config.llm.models
         tier_models = getattr(models_config, provider.value, models_config.ollama)
+        resolved = getattr(tier_models, tier, tier_models.best)
 
-        return getattr(tier_models, tier, tier_models.best)
+        # The configured name is only a guess about what the local server
+        # holds; when the server has told us, what is installed wins.
+        if provider == Provider.OLLAMA:
+            return pick_ollama_model(resolved)
+        return resolved
 
     async def completion(
         self,
