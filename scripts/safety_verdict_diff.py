@@ -9,7 +9,6 @@ a stricter verdict is usually the point. Compare `requires_approval` too —
 it is part of the verdict, and a prompt in a run with nobody watching is a
 hang, which is how one regression reached a live bench.
 
-Every verdict on this branch against the same verdict on main.
 
 The question is one-directional: did anything get MORE permissive? A
 stricter verdict is the point of the change; a milder one is a regression,

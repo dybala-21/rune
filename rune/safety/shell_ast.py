@@ -21,9 +21,9 @@ normaliser's job. And it does not try to be the shell — where the grammar
 reports an error, this contributes nothing and the existing checks stand
 alone, which is the same answer they would have given anyway.
 
-Precedent for the shape: layered command defences put a fast structural
-filter first and let later stages escalate but never override an earlier
-block (CASCADE, arXiv 2604.17125).
+The shape follows CASCADE, arXiv 2604.17125: a fast structural filter
+first, with later stages allowed to escalate but never to override an
+earlier block.
 """
 
 from __future__ import annotations

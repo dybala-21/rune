@@ -102,6 +102,17 @@ def build_profiles_from_config() -> list[LLMProfile]:
         else:
             models = getattr(llm.models, provider, None)
             model_name = models.best if models else "gpt-5.2"
+            if provider == "ollama":
+                # A configured local model name is a guess that goes stale;
+                # what the server actually holds decides. Asked here because
+                # this is the one place the agent loop picks its model — it
+                # does not pass through resolve_model.
+                from rune.llm.client import (
+                    pick_ollama_model,
+                    refresh_ollama_installed_sync,
+                )
+                refresh_ollama_installed_sync()
+                model_name = pick_ollama_model(model_name)
 
         primary = LLMProfile(
             name=f"{provider}:{model_name}",

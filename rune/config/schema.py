@@ -39,11 +39,17 @@ class ProviderModels(BaseModel):
             fast="gpt-5-mini",
         )
     )
+    # A recommendation and a last resort, not the routing decision. At run
+    # time the client asks the local server what is installed and prefers
+    # that, so these names only matter on a machine with nothing pulled yet
+    # — where qwen3-coder:30b is the model the agent loop has been verified
+    # against end to end. One name for every tier, since a local install
+    # usually holds exactly one.
     ollama: ModelsByTier = Field(
         default_factory=lambda: ModelsByTier(
-            best="llama3.2",
-            coding="codellama",
-            fast="llama3.2",
+            best="qwen3-coder:30b",
+            coding="qwen3-coder:30b",
+            fast="qwen3-coder:30b",
         )
     )
 
