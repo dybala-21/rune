@@ -401,7 +401,17 @@ class RuneDaemon:
             self._api_server_task = None
             log.info("subsystem_shutdown", name="api_server")
 
-        # 10. Stop channel adapters
+        # 10. Stop the gateway (cancels sender workers, unsubscribes) then the
+        # adapters. Gateway first, so no message is dispatched into an adapter
+        # that is mid-teardown.
+        try:
+            from rune.daemon.gateway import get_gateway
+            gw = get_gateway()
+            if gw is not None:
+                await gw.stop()
+        except Exception as exc:
+            log.warning("gateway_shutdown_failed", error=str(exc))
+
         if self._channel_registry is not None:
             try:
                 await self._channel_registry.stop_all()
@@ -1016,14 +1026,24 @@ class RuneDaemon:
             else:
                 log.debug("channel_adapters_none_discovered")
 
-            # Register gateway singleton so cron/proactive can route notifications
+            # Register the gateway singleton and — the part that was missing —
+            # start it. start() is what points each adapter's on_message at
+            # the gateway; without it the daemon opened the channels (start_all
+            # above) but wired nothing to them, so every inbound Telegram /
+            # Discord / Slack message hit `_on_message is None` and was
+            # dropped. Only outbound cron/proactive notifications worked.
+            # The gateway runs its own self-contained agent path (no scheduler
+            # needed) and records episodes, so channel use now feeds the
+            # self-improving loop like the CLI and TUI already do.
             try:
                 from rune.daemon.gateway import ChannelGateway, set_gateway
                 gw = ChannelGateway(self._channel_registry)
                 set_gateway(gw)
-                log.debug("gateway_singleton_registered")
-            except Exception:
-                pass
+                if discovered:
+                    await gw.start()
+                log.debug("gateway_singleton_registered", started=bool(discovered))
+            except Exception as exc:
+                log.warning("gateway_start_failed", error=str(exc))
         except Exception as exc:
             log.warning("channel_adapters_init_failed", error=str(exc))
 

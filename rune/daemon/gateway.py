@@ -151,6 +151,12 @@ class ChannelGateway:
         "_pending_approvals",
         "_listeners",
         "_delivery_manager",
+        # Was set in __init__ but never declared, so with __slots__ (no
+        # __dict__) constructing the gateway raised AttributeError before it
+        # could do anything. The daemon swallowed that in a bare except, which
+        # is why the whole inbound channel path looked merely "not started"
+        # rather than un-constructable.
+        "_conv_manager",
     )
 
     def __init__(
