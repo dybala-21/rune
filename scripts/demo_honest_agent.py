@@ -109,8 +109,22 @@ def seed() -> str:
 
 
 async def naive(cwd: str) -> tuple[bool, int, int]:
-    """Verification OFF: trust the self-report, ship whatever it made."""
-    os.environ["RUNE_REQUIRE_TEST_PASS"] = "0"
+    """Verification OFF: trust the self-report, ship whatever it made.
+
+    This arm stands in for an ordinary unverified agent loop, and RUNE keeps
+    growing default-on checks that refuse to let one exist: verify-on-stop
+    runs the covering tests itself, postconditions and re-observation hold
+    the finish line, the requirement gate second-guesses the claim. Turning
+    off only the test-pass requirement left all of that running, and the
+    "naive" arm honestly declined to say done — a fine property in the
+    product and a broken premise in a comparison. Every honesty switch goes
+    off here, and B's contrast is exactly this stack.
+    """
+    for flag in ("RUNE_REQUIRE_TEST_PASS", "RUNE_VERIFY_ON_STOP",
+                 "RUNE_VOS_EXEC", "RUNE_POSTCONDITIONS", "RUNE_REOBSERVE",
+                 "RUNE_ARTIFACT_PROVENANCE", "RUNE_AUTO_VERIFY",
+                 "RUNE_REQUIREMENT_GATE", "RUNE_VERIFY_FRESHNESS"):
+        os.environ[flag] = "0"
     from rune.agent.loop import NativeAgentLoop
     os.chdir(cwd)
     trace = await NativeAgentLoop().run(TASK, context={"workspace_root": cwd})
@@ -121,7 +135,11 @@ async def naive(cwd: str) -> tuple[bool, int, int]:
 
 async def rune(cwd: str) -> tuple[str, int, int, bool]:
     """Verification ON + escalate-or-fail-honestly."""
-    os.environ["RUNE_REQUIRE_TEST_PASS"] = "1"
+    for flag in ("RUNE_REQUIRE_TEST_PASS", "RUNE_VERIFY_ON_STOP",
+                 "RUNE_VOS_EXEC", "RUNE_POSTCONDITIONS", "RUNE_REOBSERVE",
+                 "RUNE_ARTIFACT_PROVENANCE", "RUNE_AUTO_VERIFY",
+                 "RUNE_REQUIREMENT_GATE", "RUNE_VERIFY_FRESHNESS"):
+        os.environ[flag] = "1"
     from rune.agent.goal_loop import GoalLoop, GoalLoopConfig, GoalSpec
     from rune.agent.goal_runtime import GoalRuntime
     from rune.agent.goal_validate import make_validate_fn
