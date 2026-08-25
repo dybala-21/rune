@@ -7,6 +7,7 @@ for real-time messaging and Block Kit formatting.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 from typing import Any
 
@@ -71,8 +72,9 @@ class SlackResponseFormatter(ResponseFormatter):
 class SlackAdapter(ChannelAdapter):
     """Channel adapter for Slack via slack-sdk Socket Mode."""
 
-    def __init__(self, bot_token: str, app_token: str) -> None:
-        super().__init__()
+    def __init__(self, bot_token: str, app_token: str, *,
+                 allowed_users: list[str] | None = None) -> None:
+        super().__init__(allowed_users=allowed_users)
         self._bot_token = bot_token
         self._app_token = app_token
         self._web_client: Any = None
@@ -221,11 +223,22 @@ class SlackAdapter(ChannelAdapter):
         if self._on_message is None:
             return
 
+        # Authorization — an open bot token otherwise lets any workspace
+        # member drive the agent. Matches telegram's inbound gate.
+        sender_id = event.get("user", "")
+        if not self.check_authorization(sender_id):
+            log.warning("slack_unauthorized_user", user_id=sender_id)
+            with contextlib.suppress(Exception):
+                await self._web_client.chat_postMessage(
+                    channel=event.get("channel", ""),
+                    text="⛔ This bot only responds to approved users.")
+            return
+
         attachments = self._extract_attachments(event)
 
         incoming = IncomingMessage(
             channel_id=event.get("channel", ""),
-            sender_id=event.get("user", ""),
+            sender_id=sender_id,
             text=event.get("text", ""),
             attachments=attachments,
             reply_to=event.get("thread_ts"),

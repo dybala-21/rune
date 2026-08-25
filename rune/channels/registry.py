@@ -122,7 +122,11 @@ def auto_discover_channels() -> list[str]:
         try:
             from rune.channels.discord import DiscordAdapter
 
-            adapter = DiscordAdapter(token=discord_token)
+            d_allowed_raw = os.environ.get("RUNE_DISCORD_ALLOWED_USERS", "")
+            d_allowed = [u.strip() for u in d_allowed_raw.split(",")
+                         if u.strip()] or None
+            adapter = DiscordAdapter(token=discord_token,
+                                     allowed_users=d_allowed)
             registry.register(adapter)
             discovered.append(adapter.name)
         except Exception as exc:
@@ -134,8 +138,12 @@ def auto_discover_channels() -> list[str]:
         try:
             from rune.channels.slack import SlackAdapter
 
+            s_allowed_raw = os.environ.get("RUNE_SLACK_ALLOWED_USERS", "")
+            s_allowed = [u.strip() for u in s_allowed_raw.split(",")
+                         if u.strip()] or None
             adapter = SlackAdapter(
-                bot_token=slack_bot_token, app_token=slack_app_token
+                bot_token=slack_bot_token, app_token=slack_app_token,
+                allowed_users=s_allowed,
             )
             registry.register(adapter)
             discovered.append(adapter.name)

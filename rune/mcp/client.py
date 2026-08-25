@@ -77,6 +77,19 @@ LIST_TOOLS_TIMEOUT = 15.0
 CALL_TOOL_TIMEOUT = 60.0
 CLOSE_TIMEOUT = 5.0
 
+# The MCP revision the client advertises in initialize. Servers echo their
+# own version back and we negotiate nothing version-specific, so a server
+# on a different revision still works; 2024-11-05 is the broadest baseline.
+_MCP_PROTOCOL_VERSION = "2024-11-05"
+
+
+def _rune_version() -> str:
+    try:
+        from rune import __version__
+        return __version__
+    except Exception:
+        return "0"
+
 # ============================================================================
 # Sensitive env filtering
 # ============================================================================
@@ -161,12 +174,38 @@ class MCPClient:
         else:
             raise ValueError(f"Unsupported transport: {transport}")
 
+        # The transport is up; the gate flips here so the handshake requests
+        # below can run through _request. The MCP spec requires an
+        # initialize / notifications/initialized exchange before any other
+        # request — without it a conformant server rejects or hangs on the
+        # first tools/list, which is why "connect any MCP server" was
+        # unreliable against the real ecosystem.
         self._connected = True
+        try:
+            await asyncio.wait_for(self._handshake(), timeout=timeout)
+        except Exception:
+            self._connected = False
+            raise
+
         log.info(
             "mcp_connected",
             server=self._server_name,
             transport=transport,
         )
+
+    async def _handshake(self) -> None:
+        """Perform the MCP initialize / initialized exchange."""
+        result = await self._request("initialize", {
+            "protocolVersion": _MCP_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "rune", "version": _rune_version()},
+        })
+        server_version = (result or {}).get("protocolVersion")
+        # We negotiate nothing version-specific, so whatever the server
+        # answers with is accepted; it is logged for diagnosis only.
+        log.info("mcp_initialized", server=self._server_name,
+                 protocol=server_version)
+        await self._notify("notifications/initialized", {})
 
     async def disconnect(self) -> None:
         """Close the MCP connection."""
@@ -371,6 +410,27 @@ class MCPClient:
             return await self._send_streamable_http(message)
         else:
             raise ValueError(f"Unsupported transport: {transport}")
+
+    async def _notify(self, method: str, params: dict[str, Any]) -> None:
+        """Send a JSON-RPC notification — no id, no response awaited.
+
+        Notifications (initialized, cancelled, …) have no id and MUST NOT
+        get a reply, so they cannot go through _request, which allocates an
+        id and waits. Only stdio needs an explicit write; the HTTP/SSE
+        transports carry notifications in the same POST as any message.
+        """
+        message = {"jsonrpc": "2.0", "method": method, "params": params}
+        transport = self._config.transport
+        if transport == "stdio":
+            if self._process is None or self._process.stdin is None:
+                raise ConnectionError("MCP stdio process not available")
+            payload = json_encode(message) + "\n"
+            self._process.stdin.write(payload.encode("utf-8"))
+            await self._process.stdin.drain()
+        elif transport == "sse":
+            await self._send_sse(message)
+        else:
+            await self._send_streamable_http(message)
 
     async def _send_stdio(
         self,
