@@ -164,7 +164,7 @@ rune --message "..." --provider ollama --model qwen3-coder:30b
 
 It picks results by running your tests and reports how many passed, so you can see how much the check covers. When it still can't pass them, it says so and suggests `/escalate` to a stronger model instead of shipping broken code.
 
-On by default for Ollama endpoints (disable with `RUNE_GUIDED_TOOLS=0`). The 0→100% conversion numbers are from one 7B over small samples; on newer agent-trained models (qwen3-coder:30b) guided decoding measures as pass-neutral but ~3x faster per task. Gains depend on the model and task.
+On by default for Ollama endpoints; set `RUNE_GUIDED_TOOLS=0` to turn it off. The 0→100% conversion numbers are from one 7B over small samples. On newer agent-trained models such as qwen3-coder:30b it does not change the pass rate but roughly triples task speed — gains depend on the model and task.
 
 See it for yourself: `scripts/demo_honest_agent.py` runs the same task two ways on the same local model. An unverified agent reports success on code that fails the tests; RUNE runs the tests, ships only what passes, and escalates when it cannot. Trust is bounded by your tests, and the demo says so.
 
