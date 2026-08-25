@@ -10,6 +10,7 @@ Supports three real-time protocols:
 """
 
 import asyncio
+import contextlib
 import json
 import os
 import time
@@ -245,9 +246,42 @@ def create_app() -> Any:
     _active_tasks: dict[str, asyncio.Task[Any]] = {}
 
     @asynccontextmanager
+    def _on_proactive_suggestion(suggestions: list[Any]) -> None:
+        """Push engine suggestions to the web timeline, display-only.
+
+        The engine already runs and emits these; the bridge decides whether
+        to auto-execute (off by default). This path only shows them, so the
+        user sees "RUNE noticed X" and chooses — the alert-and-suggest,
+        defer-execution stance the proactivity research settled on. Without
+        it the whole proactive engine is invisible in the web UI.
+        """
+        for s in suggestions:
+            conf = getattr(s, "confidence", 0.0)
+            priority = ("high" if conf >= 0.8
+                        else "medium" if conf >= 0.6 else "low")
+            _sse_manager.broadcast("suggestion_created", {
+                "id": getattr(s, "id", ""),
+                "type": getattr(s, "type", "insight"),
+                "title": getattr(s, "title", ""),
+                "description": getattr(s, "description", ""),
+                "priority": priority,
+                "confidence": conf,
+                "source": getattr(s, "source", ""),
+            })
+
     async def lifespan(app: FastAPI):  # type: ignore[arg-type]
         log.info("api_server_started")
+        _proactive_engine = None
+        try:
+            from rune.proactive.engine import get_proactive_engine
+            _proactive_engine = get_proactive_engine()
+            _proactive_engine.on("suggestion", _on_proactive_suggestion)
+        except Exception as exc:
+            log.debug("proactive_sse_subscribe_failed", error=str(exc))
         yield
+        if _proactive_engine is not None:
+            with contextlib.suppress(Exception):
+                _proactive_engine.off("suggestion", _on_proactive_suggestion)
         for task in list(_active_tasks.values()):
             task.cancel()
         if _active_tasks:
