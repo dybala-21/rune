@@ -249,11 +249,10 @@ def create_app() -> Any:
     def _on_proactive_suggestion(suggestions: list[Any]) -> None:
         """Push engine suggestions to the web timeline, display-only.
 
-        The engine already runs and emits these; the bridge decides whether
-        to auto-execute (off by default). This path only shows them, so the
-        user sees "RUNE noticed X" and chooses — the alert-and-suggest,
-        defer-execution stance the proactivity research settled on. Without
-        it the whole proactive engine is invisible in the web UI.
+        The engine already emits these; the bridge decides whether to
+        auto-execute, off by default. This path only shows them, so the user
+        sees them and chooses — the alert-and-suggest, defer-execution stance
+        the proactivity work settled on.
         """
         for s in suggestions:
             conf = getattr(s, "confidence", 0.0)

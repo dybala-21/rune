@@ -1026,15 +1026,9 @@ class RuneDaemon:
             else:
                 log.debug("channel_adapters_none_discovered")
 
-            # Register the gateway singleton and — the part that was missing —
-            # start it. start() is what points each adapter's on_message at
-            # the gateway; without it the daemon opened the channels (start_all
-            # above) but wired nothing to them, so every inbound Telegram /
-            # Discord / Slack message hit `_on_message is None` and was
-            # dropped. Only outbound cron/proactive notifications worked.
-            # The gateway runs its own self-contained agent path (no scheduler
-            # needed) and records episodes, so channel use now feeds the
-            # self-improving loop like the CLI and TUI already do.
+            # start() is what points each adapter's on_message at the gateway.
+            # start_all above opened the channels; without this, nothing was
+            # wired to them and every inbound message was dropped.
             try:
                 from rune.daemon.gateway import ChannelGateway, set_gateway
                 gw = ChannelGateway(self._channel_registry)

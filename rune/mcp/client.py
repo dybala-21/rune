@@ -174,12 +174,10 @@ class MCPClient:
         else:
             raise ValueError(f"Unsupported transport: {transport}")
 
-        # The transport is up; the gate flips here so the handshake requests
-        # below can run through _request. The MCP spec requires an
-        # initialize / notifications/initialized exchange before any other
-        # request — without it a conformant server rejects or hangs on the
-        # first tools/list, which is why "connect any MCP server" was
-        # unreliable against the real ecosystem.
+        # The gate flips before the handshake so its requests can go through
+        # _request. The MCP spec requires initialize / notifications/initialized
+        # before any other request; a conformant server rejects or hangs on a
+        # tools/list that skips it.
         self._connected = True
         try:
             await asyncio.wait_for(self._handshake(), timeout=timeout)
