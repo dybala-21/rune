@@ -30,6 +30,10 @@ interface ChatPanelProps {
   toolCalls: ToolCall[];
   thinkingBlocks: ThinkingBlock[];
   isRunning: boolean;
+  /** Re-run the last turn (Regenerate on the latest assistant message). */
+  onRegenerate?: () => void;
+  /** Resend an edited user message as a new turn. */
+  onEditResend?: (text: string) => void;
   activitySummary: ActivitySummary | null;
   delegateEvents: DelegateItem[];
   compactionEvents: CompactionItem[];
@@ -55,6 +59,8 @@ export function ChatPanel({
   toolCalls,
   thinkingBlocks,
   isRunning,
+  onRegenerate,
+  onEditResend,
   activitySummary,
   delegateEvents,
   compactionEvents,
@@ -210,6 +216,16 @@ export function ChatPanel({
                     isRunning
                     && item.item.role === 'assistant'
                     && item.item.id === lastAssistantId
+                  }
+                  onRegenerate={
+                    !isRunning
+                    && item.item.role === 'assistant'
+                    && item.item.id === lastAssistantId
+                      ? onRegenerate
+                      : undefined
+                  }
+                  onEdit={
+                    !isRunning && item.item.role === 'user' ? onEditResend : undefined
                   }
                 />
               </div>

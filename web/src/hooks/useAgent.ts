@@ -771,6 +771,17 @@ export function useAgent() {
     });
   }, []);
 
+  // Re-run the most recent user turn (the Regenerate action, same as /retry).
+  const regenerate = useCallback(() => {
+    const lastUser = [...messagesRef.current].reverse().find(m => m.role === 'user');
+    if (!lastUser) return;
+    beginLiveSession();
+    setMessages(prev => appendWithLimit(prev, {
+      id: nextId(), role: 'user', content: lastUser.content, timestamp: Date.now(),
+    }, MAX_MESSAGES));
+    postToServer(lastUser.content);
+  }, [beginLiveSession, postToServer]);
+
   // Client-side slash commands; everything else goes to the server and
   // answers over the command_result SSE event.
   const handleClientCommand = useCallback((text: string): boolean => {
@@ -950,6 +961,7 @@ export function useAgent() {
     discardSavedDraft,
     resetLiveConversation,
     sendMessage,
+    regenerate,
     abort,
     respondApproval,
     respondQuestion,

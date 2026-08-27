@@ -8,12 +8,18 @@ interface MessageBubbleProps {
   message: ChatMessage;
   /** True while this assistant message is still streaming in. */
   streaming?: boolean;
+  /** Re-run the last turn; passed only to the latest assistant message. */
+  onRegenerate?: () => void;
+  /** Resend an edited version of this user message as a new turn. */
+  onEdit?: (text: string) => void;
 }
 
 // memo: only the streaming message's ref changes, so other bubbles skip re-parsing markdown.
-export const MessageBubble = memo(function MessageBubble({ message, streaming = false }: MessageBubbleProps) {
+export const MessageBubble = memo(function MessageBubble({ message, streaming = false, onRegenerate, onEdit }: MessageBubbleProps) {
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(message.content);
 
   if (!message.content?.trim()) return null;
 
@@ -38,12 +44,55 @@ export const MessageBubble = memo(function MessageBubble({ message, streaming = 
   }
 
   if (isUser) {
+    if (editing) {
+      const submit = () => {
+        const text = draft.trim();
+        setEditing(false);
+        if (text) onEdit?.(text);
+      };
+      return (
+        <div className="slide-up" style={{ display: 'flex', justifyContent: 'flex-end', padding: '6px 0' }}>
+          <div style={{ maxWidth: '75%', width: '100%', display: 'flex', flexDirection: 'column', gap: 6 }}>
+            <textarea
+              autoFocus
+              value={draft}
+              onChange={e => setDraft(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
+                if (e.key === 'Escape') { setEditing(false); setDraft(message.content); }
+              }}
+              rows={Math.min(8, draft.split('\n').length + 1)}
+              style={{
+                width: '100%', resize: 'vertical', padding: '10px 14px',
+                borderRadius: 'var(--radius-lg)', background: 'var(--bg-secondary)',
+                border: '1px solid var(--accent)', color: 'var(--text-primary)',
+                fontSize: 15, lineHeight: 1.6, fontFamily: 'inherit',
+              }}
+            />
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button className="msg-action-btn" onClick={() => { setEditing(false); setDraft(message.content); }}>Cancel</button>
+              <button className="msg-action-btn msg-action-btn--primary" onClick={submit}>Send</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
     return (
-      <div className="slide-up" style={{
+      <div className="slide-up msg-hover" style={{
         display: 'flex',
         justifyContent: 'flex-end',
+        alignItems: 'center',
+        gap: 6,
         padding: '6px 0',
       }}>
+        {onEdit && (
+          <button
+            className="msg-action-btn msg-edit-btn"
+            onClick={() => { setDraft(message.content); setEditing(true); }}
+            aria-label="Edit and resend"
+            title="Edit & resend"
+          >Edit</button>
+        )}
         <div style={{
           maxWidth: '75%',
           padding: '10px 16px',
@@ -101,6 +150,11 @@ export const MessageBubble = memo(function MessageBubble({ message, streaming = 
           {!streaming && (
             <div className="msg-actions" style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 10 }}>
               <CopyButton text={message.content} />
+              {onRegenerate && (
+                <button className="msg-action-btn" onClick={onRegenerate} title="Re-run the last turn">
+                  ↻ Regenerate
+                </button>
+              )}
               {message.timestamp > 0 && (
                 <span style={{
                   fontFamily: 'var(--font-mono)',

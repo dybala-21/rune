@@ -536,6 +536,16 @@ export function App() {
                 toolCalls={displayToolCalls}
                 thinkingBlocks={displayThinkingBlocks}
                 isRunning={!isViewingHistory && agent.state === 'running'}
+                onRegenerate={
+                  !isViewingHistory && agent.connected && agent.state === 'idle'
+                    ? agent.regenerate
+                    : undefined
+                }
+                onEditResend={
+                  !isViewingHistory && agent.connected && agent.state === 'idle'
+                    ? agent.sendMessage
+                    : undefined
+                }
                 activitySummary={displayActivitySummary}
                 delegateEvents={displayDelegateEvents}
                 compactionEvents={displayCompactionEvents}

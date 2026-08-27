@@ -583,3 +583,19 @@ a:focus-visible,
   display: inline-flex; align-items: center; justify-content: center;
 }
 .theme-toggle:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+/* ---- Message actions (regenerate / edit) ---- */
+.msg-action-btn {
+  background: transparent; border: 1px solid var(--border);
+  color: var(--text-muted); border-radius: var(--radius-sm);
+  padding: 2px 8px; font-size: 11px; cursor: pointer;
+  font-family: var(--font-mono);
+}
+.msg-action-btn:hover { color: var(--text-primary); background: var(--bg-hover); }
+.msg-action-btn--primary {
+  border-color: var(--accent); color: var(--accent);
+}
+.msg-action-btn--primary:hover { background: var(--accent-subtle); color: var(--accent-hover); }
+/* Edit affordance only appears on hover, so it stays quiet until wanted. */
+.msg-edit-btn { opacity: 0; transition: opacity 0.12s; }
+.msg-hover:hover .msg-edit-btn { opacity: 1; }
