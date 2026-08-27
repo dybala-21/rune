@@ -35,7 +35,7 @@ You are a structured data extractor. Given a task summary and result from \
 an AI assistant session, extract the following in JSON format:
 
 {
-  "commitments": ["things the user said they need to do, with deadlines if mentioned"],
+  "commitments": ["ONLY things the USER personally said THEY will do later, with deadlines if mentioned. NOT the task the assistant was asked to perform, NOT coding instructions, NOT test/spec requirements, NOT anything phrased as an imperative to the assistant (Implement X, Make Y pass, Fix Z). If the session is the assistant doing an assigned task, commitments is empty."],
   "lessons": ["reusable insights - what worked, what failed, how it was fixed"],
   "entities": ["people, projects, services, files mentioned"],
   "decisions": ["key choices or conclusions made"],
