@@ -4,6 +4,7 @@ import { normalizeToolName, isCodingToolName, argString, inferWorkPhase, inferAc
 import { PixelWolf, type WolfState } from './PixelWolf';
 import { fetchWorkspaceDiff, readWorkspaceFile } from '../api';
 import { HighlightedCode } from './Code';
+import { Markdown } from './Markdown';
 import { langFromPath } from '../utils/highlight';
 // Terminal pulls in xterm (~330 KB). Load it only when the tab is opened.
 const TerminalPane = lazy(() => import('./TerminalPane').then(m => ({ default: m.TerminalPane })));
@@ -218,6 +219,7 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
   const [fileContent, setFileContent] = useState('');
   const [fileError, setFileError] = useState('');
   const [fileLoaded, setFileLoaded] = useState(false);
+  const [filePreview, setFilePreview] = useState(true);
 
   const loadDiff = useCallback(() => {
     setDiffLoading(true);
@@ -482,12 +484,21 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
               border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
               padding: '5px 10px', fontSize: 11.5, cursor: 'pointer',
             }}>Open</button>
+            {langFromPath(filePath) === 'markdown' && fileContent && (
+              <button type="button" onClick={() => setFilePreview(p => !p)} style={{
+                background: 'var(--bg-tertiary)', color: 'var(--text-secondary)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                padding: '5px 10px', fontSize: 11.5, cursor: 'pointer',
+              }}>{filePreview ? 'Raw' : 'Preview'}</button>
+            )}
           </form>
           <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
             {fileError
               ? <div style={{ padding: 14, color: 'var(--danger)', fontFamily: 'var(--font-mono)', fontSize: 11.5 }}>{fileError}</div>
               : fileContent
-                ? <HighlightedCode code={fileContent} lang={langFromPath(filePath)} lineNumbers />
+                ? (langFromPath(filePath) === 'markdown' && filePreview
+                    ? <div style={{ padding: '16px 18px', fontSize: 14, lineHeight: 1.7, color: 'var(--text-primary)' }}><Markdown content={fileContent} /></div>
+                    : <HighlightedCode code={fileContent} lang={langFromPath(filePath)} lineNumbers />)
                 : fileLoaded
                   ? <div style={{ padding: 14, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 11.5 }}>(empty file)</div>
                   : <div style={{ padding: 14, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 11.5 }}>Open a file from the Activity tab or enter a path.</div>}
