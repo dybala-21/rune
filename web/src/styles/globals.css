@@ -599,3 +599,30 @@ a:focus-visible,
 /* Edit affordance only appears on hover, so it stays quiet until wanted. */
 .msg-edit-btn { opacity: 0; transition: opacity 0.12s; }
 .msg-hover:hover .msg-edit-btn { opacity: 1; }
+
+/* ---- Markdown tables & blockquotes ---- */
+.md-table-scroll { overflow-x: auto; margin: 12px 0; }
+.md-table {
+  border-collapse: collapse; width: auto; min-width: 50%;
+  font-size: 13.5px; line-height: 1.5;
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.md-table th, .md-table td {
+  padding: 7px 14px; border: 1px solid var(--border-subtle);
+  vertical-align: top;
+}
+.md-table thead th {
+  background: var(--bg-tertiary); color: var(--text-primary);
+  font-weight: 600; white-space: nowrap;
+}
+.md-table tbody tr:nth-child(even) { background: var(--bg-secondary); }
+.md-table tbody td { color: var(--text-secondary); }
+.md-quote {
+  margin: 10px 0; padding: 6px 14px;
+  border-left: 3px solid var(--accent);
+  background: var(--accent-subtle);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  color: var(--text-secondary);
+}
+.md-quote > div { margin: 2px 0; }

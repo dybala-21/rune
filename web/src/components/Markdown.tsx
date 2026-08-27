@@ -71,6 +71,40 @@ function RichContent({ text }: { text: string }) {
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
 
+    // GitHub-style table: a row of cells, then a |---|---| separator.
+    if (line.includes('|') && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+      flushList();
+      const header = splitCells(line);
+      const aligns = splitCells(lines[i + 1]).map(cellAlign);
+      const rows: string[][] = [];
+      let j = i + 2;
+      while (j < lines.length && lines[j].includes('|') && lines[j].trim() !== '') {
+        rows.push(splitCells(lines[j]));
+        j++;
+      }
+      elements.push(<MdTable key={elemKey++} header={header} aligns={aligns} rows={rows} />);
+      i = j - 1;
+      continue;
+    }
+
+    // Blockquote: one or more consecutive '>' lines.
+    if (/^\s*>\s?/.test(line)) {
+      flushList();
+      const quote: string[] = [];
+      let j = i;
+      while (j < lines.length && /^\s*>\s?/.test(lines[j])) {
+        quote.push(lines[j].replace(/^\s*>\s?/, ''));
+        j++;
+      }
+      elements.push(
+        <blockquote key={elemKey++} className="md-quote">
+          {quote.map((q, qi) => <div key={qi}><InlineFormatted text={q} /></div>)}
+        </blockquote>,
+      );
+      i = j - 1;
+      continue;
+    }
+
     const headerMatch = line.match(/^(#{1,3})\s+(.+)/);
     if (headerMatch) {
       flushList();
@@ -140,5 +174,57 @@ function InlineFormatted({ text }: { text: string }) {
         return <span key={i}>{part}</span>;
       })}
     </>
+  );
+}
+
+type Align = 'left' | 'center' | 'right';
+
+// A row of only dashes/colons/pipes marks the header separator of a GFM table.
+function isTableSeparator(line: string): boolean {
+  return line.includes('-')
+    && /^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$/.test(line);
+}
+
+function splitCells(line: string): string[] {
+  let s = line.trim();
+  if (s.startsWith('|')) s = s.slice(1);
+  if (s.endsWith('|')) s = s.slice(0, -1);
+  return s.split('|').map(c => c.trim());
+}
+
+function cellAlign(sep: string): Align {
+  const l = sep.startsWith(':');
+  const r = sep.endsWith(':');
+  if (l && r) return 'center';
+  if (r) return 'right';
+  return 'left';
+}
+
+function MdTable({ header, aligns, rows }: { header: string[]; aligns: Align[]; rows: string[][] }) {
+  return (
+    <div className="md-table-scroll">
+      <table className="md-table">
+        <thead>
+          <tr>
+            {header.map((h, i) => (
+              <th key={i} style={{ textAlign: aligns[i] ?? 'left' }}>
+                <InlineFormatted text={h} />
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, ri) => (
+            <tr key={ri}>
+              {r.map((c, ci) => (
+                <td key={ci} style={{ textAlign: aligns[ci] ?? 'left' }}>
+                  <InlineFormatted text={c} />
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
