@@ -532,3 +532,54 @@ a:focus-visible,
   to   { opacity: 1; transform: translateY(0); }
 }
 @media (prefers-reduced-motion: reduce) { .toast { animation: none; } }
+
+/* ---- Light theme ---- */
+:root { color-scheme: dark; }
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg-primary: #FFFFFF;
+  --bg-secondary: #F6F7F9;
+  --bg-tertiary: #EDEFF3;
+  --bg-hover: #E3E7EC;
+  --bg-surface: #FFFFFF;
+  --border: rgba(0, 0, 0, 0.12);
+  --border-subtle: rgba(0, 0, 0, 0.07);
+  --text-primary: #1A1D22;
+  --text-secondary: #4C555F;
+  --text-muted: #838B95;
+  --accent: #2F7D9A;
+  --accent-hover: #246079;
+  --accent-subtle: rgba(47, 125, 154, 0.12);
+  --success: #3F8A5E;
+  --success-subtle: rgba(63, 138, 94, 0.13);
+  --warning: #B0742A;
+  --warning-subtle: rgba(176, 116, 42, 0.13);
+  --danger: #B0524A;
+  --danger-subtle: rgba(176, 82, 74, 0.13);
+  --code-bg: #F4F5F7;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.08);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.10);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.14);
+  --shadow-glow: 0 8px 24px rgba(0, 0, 0, 0.14);
+  /* Syntax colours retuned for a light background */
+  --syntax-comment: #7A828C;
+  --syntax-string:  #397D4F;
+  --syntax-number:  #9A5B18;
+  --syntax-keyword: #8B3D8F;
+  --syntax-boolean: #9A5B18;
+  --syntax-function: #2F6F9A;
+  /* Tool category colours darkened for contrast on white */
+  --tool-file: #2f6fd0;
+  --tool-bash: #8a3fd0;
+  --tool-web: #17916a;
+  --tool-browser: #cc6314;
+  --tool-memory: #c74d8a;
+  --tool-think: #5a5a63;
+}
+.theme-toggle {
+  background: transparent; border: 1px solid var(--border);
+  color: var(--text-secondary); border-radius: var(--radius-sm);
+  width: 28px; height: 28px; cursor: pointer; font-size: 14px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.theme-toggle:hover { background: var(--bg-hover); color: var(--text-primary); }

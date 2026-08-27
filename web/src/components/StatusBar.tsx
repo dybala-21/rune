@@ -1,3 +1,4 @@
+import { ThemeToggle } from './ThemeToggle';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { AgentState, StepInfo, TokenUsage as TokenUsageType } from '../types';
 import { TokenUsage } from './TokenUsage';
@@ -288,6 +289,8 @@ export function StatusBar({
           Workbench
         </button>
       )}
+
+      <ThemeToggle />
 
       {/* Safety prompts are off — the run can write to the network or run a
           risky command without asking, so say so where the model is shown. */}
