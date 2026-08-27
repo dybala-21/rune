@@ -710,7 +710,20 @@ class MemoryStore:
     def save_commitment(
         self, episode_id: str, text: str, deadline: str | None = None,
     ) -> None:
-        """Save a detected commitment linked to an episode."""
+        """Save a detected commitment linked to an episode.
+
+        Consolidation re-extracts commitments every turn from overlapping
+        conversation context, so the same one arrives again and again. Skip
+        an insert when an identical commitment is already open, so a repeated
+        extraction does not pile up duplicate rows.
+        """
+        existing = self.conn.execute(
+            """SELECT 1 FROM episode_commitments
+               WHERE commitment_text = ? AND status = 'open' LIMIT 1""",
+            (text,),
+        ).fetchone()
+        if existing:
+            return
         self.conn.execute(
             """INSERT INTO episode_commitments
                (episode_id, commitment_text, deadline)
