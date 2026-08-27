@@ -248,6 +248,9 @@ export function useAgent() {
 
   // 현재 step의 텍스트를 보관 (교체 방식 — step.text는 delta가 아니라 해당 step 전체 텍스트)
   const pendingTextRef = useRef('');
+  // Trailing-debounced localStorage persistence (see the effect below).
+  const pendingPersistRef = useRef<PersistedLiveState | null>(null);
+  const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 현재 run의 assistant 메시지 ID (하나의 run에 하나의 assistant 메시지만 유지)
   const assistantMsgIdRef = useRef<string | null>(null);
 
@@ -333,12 +336,23 @@ export function useAgent() {
     setCurrentStepInfo(null);
     setSavedDraft(EMPTY_SAVED_DRAFT);
     setDraftDecisionPending(false);
+    // Drop any debounced write in flight, or it would restore the cleared
+    // conversation 400ms after this immediate reset.
+    if (persistTimerRef.current) {
+      clearTimeout(persistTimerRef.current);
+      persistTimerRef.current = null;
+    }
+    pendingPersistRef.current = null;
     persistLiveState(createEmptyLiveState());
   }, []);
 
+  // Serializing the whole live state (up to 1200 msgs + 3000 tool calls) on
+  // every streamed token would stringify megabytes many times a second. Hold
+  // the latest snapshot and write it on a trailing debounce; a pending write is
+  // flushed on unmount so the final state is never lost.
   useEffect(() => {
     if (draftDecisionPending) return;
-    persistLiveState({
+    pendingPersistRef.current = {
       version: 1,
       messages: trimTail(messages, MAX_MESSAGES),
       toolCalls: trimTail(toolCalls, MAX_TOOL_CALLS),
@@ -347,8 +361,21 @@ export function useAgent() {
       activitySummary,
       delegateEvents: trimTail(delegateEvents, MAX_DELEGATE_EVENTS),
       compactionEvents: trimTail(compactionEvents, MAX_COMPACTION_EVENTS),
-    });
+    };
+    if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
+    persistTimerRef.current = setTimeout(() => {
+      persistTimerRef.current = null;
+      if (pendingPersistRef.current) {
+        persistLiveState(pendingPersistRef.current);
+        pendingPersistRef.current = null;
+      }
+    }, 400);
   }, [messages, toolCalls, thinkingBlocks, tokenUsage, activitySummary, delegateEvents, compactionEvents, draftDecisionPending]);
+
+  useEffect(() => () => {
+    if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
+    if (pendingPersistRef.current) persistLiveState(pendingPersistRef.current);
+  }, []);
 
   // sseOn (addEventListener)은 useCallback([], [])로 항상 동일 참조.
   // flushTextDelta도 useCallback([], [])로 안정.

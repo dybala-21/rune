@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useAgent } from './hooks/useAgent';
 import { useSessionHistory } from './hooks/useSessionHistory';
 import { ChatPanel } from './components/ChatPanel';
@@ -6,11 +6,13 @@ import { SessionSidebar } from './components/SessionSidebar';
 import { SettingsSidebar } from './components/SettingsSidebar';
 import { StatusBar } from './components/StatusBar';
 import { InputArea, type InputAreaHandle } from './components/InputArea';
-import { SkillsPanel } from './components/SkillsPanel';
-import { EnvPanel } from './components/EnvPanel';
-import { CronPanel } from './components/CronPanel';
-import { MCPPanel } from './components/MCPPanel';
-import { MarkdownPanel } from './components/MarkdownPanel';
+// Config panels are overlays, closed on first paint. Loading them on open
+// keeps their code (and MCP/Skills/Cron weight) out of the initial bundle.
+const SkillsPanel = lazy(() => import('./components/SkillsPanel').then(m => ({ default: m.SkillsPanel })));
+const EnvPanel = lazy(() => import('./components/EnvPanel').then(m => ({ default: m.EnvPanel })));
+const CronPanel = lazy(() => import('./components/CronPanel').then(m => ({ default: m.CronPanel })));
+const MCPPanel = lazy(() => import('./components/MCPPanel').then(m => ({ default: m.MCPPanel })));
+const MarkdownPanel = lazy(() => import('./components/MarkdownPanel').then(m => ({ default: m.MarkdownPanel })));
 import { WorkbenchPanel } from './components/WorkbenchPanel';
 import { CommandK, type Command } from './components/CommandK';
 import { WorkspaceChip } from './components/WorkspaceChip';
@@ -637,25 +639,27 @@ export function App() {
         </div>
       </div>
 
-      {/* Panel overlays */}
-      {skillsPanelOpen && (
-        <SkillsPanel
-          onClose={() => setSkillsPanelOpen(false)}
-          initialSkillName={skillsPanelInitial}
-        />
-      )}
-      {envPanelOpen && (
-        <EnvPanel onClose={() => setEnvPanelOpen(false)} />
-      )}
-      {cronPanelOpen && (
-        <CronPanel onClose={() => setCronPanelOpen(false)} />
-      )}
-      {mcpPanelOpen && (
-        <MCPPanel onClose={() => setMcpPanelOpen(false)} />
-      )}
-      {markdownPanelOpen && (
-        <MarkdownPanel onClose={() => setMarkdownPanelOpen(false)} />
-      )}
+      {/* Panel overlays — lazy-loaded, so nothing paints until the chunk lands */}
+      <Suspense fallback={null}>
+        {skillsPanelOpen && (
+          <SkillsPanel
+            onClose={() => setSkillsPanelOpen(false)}
+            initialSkillName={skillsPanelInitial}
+          />
+        )}
+        {envPanelOpen && (
+          <EnvPanel onClose={() => setEnvPanelOpen(false)} />
+        )}
+        {cronPanelOpen && (
+          <CronPanel onClose={() => setCronPanelOpen(false)} />
+        )}
+        {mcpPanelOpen && (
+          <MCPPanel onClose={() => setMcpPanelOpen(false)} />
+        )}
+        {markdownPanelOpen && (
+          <MarkdownPanel onClose={() => setMarkdownPanelOpen(false)} />
+        )}
+      </Suspense>
 
       <CommandK
         open={paletteOpen}

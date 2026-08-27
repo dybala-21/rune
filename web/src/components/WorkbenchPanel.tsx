@@ -1,9 +1,10 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ActivitySummary, OrchestrationState, StepInfo, ToolCall, TrustInfo } from '../types';
 import { normalizeToolName, isCodingToolName, argString, inferWorkPhase, inferActivityMode, computeRunVerdict, type WorkPhase } from '../utils/tooling';
 import { PixelWolf, type WolfState } from './PixelWolf';
 import { fetchWorkspaceDiff, readWorkspaceFile } from '../api';
-import { TerminalPane } from './TerminalPane';
+// Terminal pulls in xterm (~330 KB). Load it only when the tab is opened.
+const TerminalPane = lazy(() => import('./TerminalPane').then(m => ({ default: m.TerminalPane })));
 import { ProgressPane } from './ProgressPane';
 
 /**
@@ -442,7 +443,11 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
       )}
 
       {/* Terminal — mounted only when selected so no PTY opens otherwise */}
-      {tab === 'terminal' && <TerminalPane />}
+      {tab === 'terminal' && (
+        <Suspense fallback={<div className="wb-loading">Loading terminal…</div>}>
+          <TerminalPane />
+        </Suspense>
+      )}
 
       {/* File view */}
       {tab === 'file' && (

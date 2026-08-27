@@ -14,5 +14,16 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: true,
+    rollupOptions: {
+      output: {
+        // Split slow-changing vendor code into its own long-cached chunks so
+        // the app chunk stays small and a code change doesn't re-download React
+        // or the terminal emulator.
+        manualChunks: {
+          'vendor-react': ['react', 'react-dom'],
+          'vendor-xterm': ['@xterm/xterm', '@xterm/addon-fit'],
+        },
+      },
+    },
   },
 });
