@@ -371,7 +371,9 @@ export function useAgent() {
       // a proactive/scheduled run). Suppress by session identity when the
       // server sends it; fall back to comparing against the user's last
       // message for older payloads without a sessionId.
-      const ownRun = Boolean(data.sessionId) && data.sessionId === api.getLiveSessionId();
+      const ownRun =
+        (Boolean(data.sessionId) && data.sessionId === api.getLiveSessionId()) ||
+        (Boolean(data.runId) && data.runId === api.getCurrentRunId());
       setMessages(prev => {
         const lastUser = ownRun ? null : [...prev].reverse().find(m => m.role === 'user');
         if (ownRun || (lastUser && lastUser.content.trim().startsWith(data.goal.trim()))) {
