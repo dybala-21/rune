@@ -396,21 +396,28 @@ export function useAgent() {
       const conf = typeof d.confidence === 'number' ? d.confidence : 0.5;
       const intensity: ProactiveSuggestion['intensity'] =
         conf >= 0.8 ? 'intervene' : conf >= 0.6 ? 'suggest' : 'nudge';
-      setMessages(prev => appendWithLimit(prev, {
-        id: nextId(),
-        role: 'system',
-        content: d.title || d.description || 'RUNE has a suggestion',
-        timestamp: Date.now(),
-        suggestion: {
-          id: d.id || nextId(),
-          headline: d.title || '',
-          body: d.description || '',
-          actions: [],
-          confidence: conf,
-          intensity,
+      const suggestionId = d.id || nextId();
+      setMessages(prev => {
+        // The engine re-emits the same open suggestion on every heartbeat.
+        // Without this, each tick appended another identical card and buried
+        // the conversation. One card per suggestion id.
+        if (prev.some(m => m.suggestion?.id === suggestionId)) return prev;
+        return appendWithLimit(prev, {
+          id: nextId(),
+          role: 'system',
+          content: d.title || d.description || 'RUNE has a suggestion',
           timestamp: Date.now(),
-        },
-      }, MAX_MESSAGES));
+          suggestion: {
+            id: suggestionId,
+            headline: d.title || '',
+            body: d.description || '',
+            actions: [],
+            confidence: conf,
+            intensity,
+            timestamp: Date.now(),
+          },
+        }, MAX_MESSAGES);
+      });
     }));
 
     unsubs.push(sseOn('agent_complete', (raw) => {

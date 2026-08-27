@@ -244,8 +244,10 @@ def create_app() -> Any:
 
     # Active tasks - declared early so the lifespan can reference them.
     _active_tasks: dict[str, asyncio.Task[Any]] = {}
+    # Suggestion ids already broadcast, so the engine re-emitting the same
+    # open suggestion each heartbeat does not re-send it.
+    _broadcast_suggestion_ids: set[str] = set()
 
-    @asynccontextmanager
     def _on_proactive_suggestion(suggestions: list[Any]) -> None:
         """Push engine suggestions to the web timeline, display-only.
 
@@ -253,8 +255,17 @@ def create_app() -> Any:
         auto-execute, off by default. This path only shows them, so the user
         sees them and chooses — the alert-and-suggest, defer-execution stance
         the proactivity work settled on.
+
+        The engine re-emits the same open suggestion every heartbeat, so we
+        broadcast each id at most once per server; the frontend dedups too,
+        but a client connecting later would otherwise get the whole backlog.
         """
         for s in suggestions:
+            sid = getattr(s, "id", "")
+            if sid and sid in _broadcast_suggestion_ids:
+                continue
+            if sid:
+                _broadcast_suggestion_ids.add(sid)
             conf = getattr(s, "confidence", 0.0)
             priority = ("high" if conf >= 0.8
                         else "medium" if conf >= 0.6 else "low")
@@ -268,6 +279,7 @@ def create_app() -> Any:
                 "source": getattr(s, "source", ""),
             })
 
+    @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[arg-type]
         log.info("api_server_started")
         _proactive_engine = None

@@ -536,6 +536,12 @@ class ProactiveEngine:
                 for c in open_commits:
                     candidates.append(
                         Suggestion(
+                            # Stable id per commitment row: the suggestion is
+                            # regenerated every heartbeat, and dedup at every
+                            # layer (engine _seen_ids, SSE broadcast, the web
+                            # timeline) keys on the id. A fresh uuid each tick
+                            # would re-surface the same commitment every turn.
+                            id=f"commitment-{c['id']}",
                             type="followup",
                             title="Open commitment",
                             description=f"Pending: {c['text'][:100]}",
