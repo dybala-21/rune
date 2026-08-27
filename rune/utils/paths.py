@@ -89,6 +89,22 @@ def rune_data() -> Path:
     return d
 
 
+def user_workspace() -> Path:
+    """Default directory for files the assistant produces for the user.
+
+    When a conversation has no workspace pinned, the app served agent would
+    otherwise resolve relative paths against the daemon's launch directory
+    (the install dir, or wherever it was started) and drop deliverables
+    there. A general assistant should write into the user's own space, so
+    unpinned turns default here. ``RUNE_WORKSPACE`` overrides the location.
+    """
+    override = os.environ.get("RUNE_WORKSPACE", "").strip()
+    d = (Path(os.path.expandvars(os.path.expanduser(override)))
+         if override else _HOME / "RUNE")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def conversations_db_path() -> Path:
     """Canonical conversation DB shared by every entry point (CLI/TUI/daemon/API).
 

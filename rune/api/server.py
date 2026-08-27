@@ -476,13 +476,19 @@ def create_app() -> Any:
             # Workspace pinned to this conversation (picker in the app);
             # an @path in the message still overrides for the turn.
             workspace = await conv_wiring.get_workspace(conv_id or "")
+            # Unpinned turns would otherwise resolve relative paths against the
+            # daemon's launch dir and drop the user's files into the install
+            # directory; fall back to the user workspace. pinned_cwd stays None
+            # so an @path in the message can still override for the turn.
+            from rune.utils.paths import user_workspace
+            turn_cwd = workspace or str(user_workspace())
 
             # 1. Prepare agent context (loads prior turns as history)
             agent_ctx = await prepare_agent_context(
                 PrepareContextOptions(
                     goal=goal,
                     channel="web",
-                    cwd=workspace or "",
+                    cwd=turn_cwd,
                     pinned_cwd=workspace,
                     attachments=attachments or [],
                     conversation_id=conv_id or "",
@@ -1343,7 +1349,9 @@ def create_app() -> Any:
         )
         _active_tasks[run_id] = task
         task.add_done_callback(lambda _t, _rid=run_id: _active_tasks.pop(_rid, None))
-        return {"ok": True}
+        # Hand back the run id so a caller can tell its own run's SSE events
+        # (which carry runId) apart from a concurrent turn on the same session.
+        return {"ok": True, "runId": run_id}
 
     @app.post("/api/voice/transcribe", dependencies=[Depends(auth)])
     async def api_voice_transcribe(request: Request) -> dict[str, Any]:
