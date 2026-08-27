@@ -3,6 +3,8 @@ import type { ActivitySummary, OrchestrationState, StepInfo, ToolCall, TrustInfo
 import { normalizeToolName, isCodingToolName, argString, inferWorkPhase, inferActivityMode, computeRunVerdict, type WorkPhase } from '../utils/tooling';
 import { PixelWolf, type WolfState } from './PixelWolf';
 import { fetchWorkspaceDiff, readWorkspaceFile } from '../api';
+import { HighlightedCode } from './Code';
+import { langFromPath } from '../utils/highlight';
 // Terminal pulls in xterm (~330 KB). Load it only when the tab is opened.
 const TerminalPane = lazy(() => import('./TerminalPane').then(m => ({ default: m.TerminalPane })));
 import { ProgressPane } from './ProgressPane';
@@ -428,15 +430,24 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
           flex: 1, overflow: 'auto', padding: 14,
           fontFamily: 'var(--font-mono)', fontSize: 11.5, lineHeight: 1.6,
         }}>
-          {diffText ? diffText.replace(/^```diff\n|\n```$/g, '').split('\n').map((l, i) => (
-            <div key={i} style={{
-              whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-              color: l.startsWith('+') ? 'var(--success)'
-                : l.startsWith('-') ? 'var(--danger)'
-                : l.startsWith('@@') ? 'var(--accent)'
-                : 'var(--text-muted)',
-            }}>{l || '\u00A0'}</div>
-          )) : (
+          {diffText ? diffText.replace(/^```diff\n|\n```$/g, '').split('\n').map((l, i) => {
+            const added = l.startsWith('+');
+            const removed = l.startsWith('-');
+            const hunk = l.startsWith('@@');
+            return (
+              <div key={i} style={{
+                whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+                margin: '0 -14px', padding: '0 14px',
+                background: added ? 'var(--success-subtle)'
+                  : removed ? 'var(--danger-subtle)'
+                  : hunk ? 'var(--accent-subtle)' : 'transparent',
+                color: added ? 'var(--success)'
+                  : removed ? 'var(--danger)'
+                  : hunk ? 'var(--accent)'
+                  : 'var(--text-muted)',
+              }}>{l || '\u00A0'}</div>
+            );
+          }) : (
             <div style={{ color: 'var(--text-muted)' }}>{diffLoading ? 'Loading diff…' : 'No diff yet.'}</div>
           )}
         </div>
@@ -472,18 +483,14 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
               padding: '5px 10px', fontSize: 11.5, cursor: 'pointer',
             }}>Open</button>
           </form>
-          <div style={{
-            flex: 1, overflow: 'auto', padding: 14,
-            fontFamily: 'var(--font-mono)', fontSize: 11.5, lineHeight: 1.6,
-            whiteSpace: 'pre-wrap', wordBreak: 'break-all', color: 'var(--text-primary)',
-          }}>
+          <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
             {fileError
-              ? <span style={{ color: 'var(--danger)' }}>{fileError}</span>
+              ? <div style={{ padding: 14, color: 'var(--danger)', fontFamily: 'var(--font-mono)', fontSize: 11.5 }}>{fileError}</div>
               : fileContent
-                ? fileContent
+                ? <HighlightedCode code={fileContent} lang={langFromPath(filePath)} lineNumbers />
                 : fileLoaded
-                  ? <span style={{ color: 'var(--text-muted)' }}>(empty file)</span>
-                  : <span style={{ color: 'var(--text-muted)' }}>Open a file from the Activity tab or enter a path.</span>}
+                  ? <div style={{ padding: 14, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 11.5 }}>(empty file)</div>
+                  : <div style={{ padding: 14, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 11.5 }}>Open a file from the Activity tab or enter a path.</div>}
           </div>
         </div>
       )}

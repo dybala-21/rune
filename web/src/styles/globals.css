@@ -474,3 +474,35 @@ a:focus-visible,
 @media (prefers-reduced-motion: reduce) {
   .chat-workbench-grid { transition: none; }
 }
+
+/* ---- Syntax highlighting (dependency-free tokenizer) ---- */
+:root {
+  --syntax-comment: #6A717C;
+  --syntax-string:  #8FB99A;
+  --syntax-number:  #D9A566;
+  --syntax-keyword: #B48EAD;
+  --syntax-boolean: #D9A566;
+  --syntax-function: #6EA9C4;
+}
+.code-hl-scroll { overflow-x: auto; }
+.code-hl-row { display: flex; align-items: stretch; min-width: max-content; }
+.code-hl-gutter {
+  margin: 0; padding: 12px 10px; border: none; background: transparent;
+  color: var(--text-muted); opacity: 0.5; text-align: right;
+  user-select: none; -webkit-user-select: none;
+  font-family: var(--font-mono); font-size: 13px; line-height: 1.5;
+  border-right: 1px solid var(--border-subtle);
+}
+.code-hl-body {
+  margin: 0; padding: 12px 14px; border: none; background: transparent;
+  white-space: pre; flex: 1;
+  font-family: var(--font-mono); font-size: 13px; line-height: 1.5;
+  color: var(--text-primary);
+}
+.code-hl-body code { background: transparent; padding: 0; color: inherit; }
+.tok-comment  { color: var(--syntax-comment); font-style: italic; }
+.tok-string   { color: var(--syntax-string); }
+.tok-number   { color: var(--syntax-number); }
+.tok-keyword  { color: var(--syntax-keyword); }
+.tok-boolean  { color: var(--syntax-boolean); }
+.tok-function { color: var(--syntax-function); }

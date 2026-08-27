@@ -1,6 +1,7 @@
 import { memo, useState } from 'react';
 import type { ChatMessage } from '../types';
 import { PixelWolf } from './PixelWolf';
+import { HighlightedCode } from './Code';
 
 interface MessageBubbleProps {
   message: ChatMessage;
@@ -199,20 +200,9 @@ function RenderedContent({ content }: { content: string }) {
                 </span>
                 <CopyButton text={code} />
               </div>
-              <pre style={{
-                padding: '12px 14px',
-                background: 'var(--code-bg)',
-                fontSize: 13,
-                overflow: 'auto',
-                whiteSpace: 'pre',
-                margin: 0,
-                border: 'none',
-                borderRadius: 0,
-                color: 'var(--text-primary)',
-                lineHeight: 1.5,
-              }}>
-                <code style={{ background: 'transparent', padding: 0, color: 'inherit' }}>{code}</code>
-              </pre>
+              <div style={{ background: 'var(--code-bg)' }}>
+                <HighlightedCode code={code} lang={lang} lineNumbers={code.includes('\n')} />
+              </div>
             </div>
           );
         }
