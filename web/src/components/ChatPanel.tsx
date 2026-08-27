@@ -155,6 +155,15 @@ export function ChatPanel({
 
   const isEmpty = timeline.length === 0;
 
+  // Render only the most recent slice so a long run does not put thousands of
+  // DOM nodes in the scroll container; older entries stay in state (search,
+  // export) and reveal on request. Rendering the tail keeps stick-to-bottom.
+  const RENDER_STEP = 400;
+  const [renderCap, setRenderCap] = useState(RENDER_STEP);
+  useEffect(() => { setRenderCap(RENDER_STEP); }, [conversationKey]);
+  const hiddenCount = Math.max(0, grouped.length - renderCap);
+  const visible = hiddenCount > 0 ? grouped.slice(grouped.length - renderCap) : grouped;
+
   return (
     <div ref={scrollContainerRef} style={{
       flex: 1,
@@ -176,7 +185,17 @@ export function ChatPanel({
       }}>
         {isEmpty && <EmptyState onSuggest={onSuggest} />}
 
-        {grouped.map((entry, idx) => {
+        {hiddenCount > 0 && (
+          <button
+            className="msg-action-btn"
+            onClick={() => setRenderCap(c => c + RENDER_STEP * 4)}
+            style={{ alignSelf: 'center', margin: '4px 0 12px' }}
+          >
+            Show earlier ({hiddenCount} hidden)
+          </button>
+        )}
+
+        {visible.map((entry, idx) => {
           if (entry.type === 'group') {
             return (
               <ToolGroup
@@ -189,7 +208,7 @@ export function ChatPanel({
           }
           const item = entry.item;
           if (item.type === 'message') {
-            const prevItem = idx > 0 ? grouped[idx - 1] : null;
+            const prevItem = idx > 0 ? visible[idx - 1] : null;
             const needsGap = prevItem && (prevItem.type === 'group' || (prevItem.type === 'single' && prevItem.item.type !== 'message'));
             if (item.item.trust) {
               return (
