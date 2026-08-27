@@ -26,17 +26,23 @@ from rune.utils.logger import get_logger
 log = get_logger(__name__)
 
 
-def split_answer(collected: list[str], last_step_start: int) -> tuple[str, str]:
+def split_answer(collected: list[str], step_starts: list[int]) -> tuple[str, str]:
     """(full transcript, user-facing answer) for a finished run.
 
-    The answer is the LAST step's text only — a multi-pass run (e.g. after
-    context compaction) otherwise concatenates every pass's narration and the
-    final message shows duplicated summaries. Memory extraction still gets the
-    full transcript. One helper so the rule can't drift between the SSE,
-    NDJSON, and interrupted-stream paths.
+    The answer is the narration of the last step that produced any text. A
+    multi-pass run otherwise concatenates every pass's narration and the final
+    message shows duplicated summaries. Crucially, a trailing step with no text
+    of its own — a tool-only round, or a re-observe/verify gate that ends the
+    run silently — must not blank the answer or fall back to dumping the whole
+    (duplicated) transcript, so walk back to the last step that actually spoke.
+    Memory extraction still gets the full transcript. One helper so the rule
+    can't drift between the SSE, NDJSON, and interrupted-stream paths.
     """
     full = "".join(collected)
-    return full, ("".join(collected[last_step_start:]) or full)
+    for start in reversed(step_starts):
+        if "".join(collected[start:]).strip():
+            return full, "".join(collected[start:])
+    return full, full
 
 
 async def _post_process(
@@ -564,14 +570,13 @@ def create_app() -> Any:
             # -- wire event callbacks ------------------------------------
 
             _run_start_time = time.monotonic()
-            # Marks where the final step's text begins in `collected`. Both the
-            # user-facing answer and the recorded history slice from here, so a
+            # Offsets in `collected` where each step's text begins. split_answer
+            # slices the answer from the last step that produced text, so a
             # multi-pass run's intermediate commentary is never replayed.
-            _step_text_start = [0]
+            _step_starts = [0]
 
             async def _on_step(step: int) -> None:
-                if len(collected) > _step_text_start[0]:
-                    _step_text_start[0] = len(collected)
+                _step_starts.append(len(collected))
                 await _broadcast(
                     "step_start",
                     {"stepNumber": step, "tokens": 0, "runId": run_id},
@@ -684,7 +689,7 @@ def create_app() -> Any:
                 context={"workspace_root": agent_ctx.workspace_root},
                 message_history=agent_ctx.messages if agent_ctx.messages else None,
             )
-            full_text, answer = split_answer(collected, _step_text_start[0])
+            full_text, answer = split_answer(collected, _step_starts)
             duration_ms = int((time.monotonic() - _run_start_time) * 1000)
 
             # 4b. Record the assistant turn for the next message's context.
@@ -735,7 +740,7 @@ def create_app() -> Any:
         conv_id: str | None = None
         loop = None
         collected: list[str] = []
-        _step_text_start = [0]
+        _step_starts = [0]
         try:
             from rune.agent.agent_context import (
                 PrepareContextOptions,
@@ -824,8 +829,7 @@ def create_app() -> Any:
             loop.set_ask_user_callback(_ndjson_ask_user_cb)
 
             async def _on_step(step: int) -> None:
-                if len(collected) > _step_text_start[0]:
-                    _step_text_start[0] = len(collected)
+                _step_starts.append(len(collected))
                 await event_queue.put(
                     {
                         "event": "step_start",
@@ -901,7 +905,7 @@ def create_app() -> Any:
                 yield json_encode(evt) + "\n"
 
             trace = run_task.result()
-            full_text, answer = split_answer(collected, _step_text_start[0])
+            full_text, answer = split_answer(collected, _step_starts)
             duration_ms = int((time.monotonic() - _run_start_time) * 1000)
 
             # Post-process (memory persistence)
@@ -938,7 +942,7 @@ def create_app() -> Any:
             _active_loops.pop(run_id, None)
             # Awaits are fine during aclose(); yields are not.
             if conv_manager is not None and conv_id and loop is not None:
-                _, last_step_text = split_answer(collected, _step_text_start[0])
+                _, last_step_text = split_answer(collected, _step_starts)
                 from rune.api import conversation_wiring as conv_wiring
 
                 await conv_wiring.record_assistant_turn(
