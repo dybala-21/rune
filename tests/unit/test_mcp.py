@@ -661,12 +661,20 @@ class TestMCPClientStreamableHTTP:
             name="http", transport="streamable-http", url="https://example.com/mcp"
         )
         client = MCPClient("http", cfg)
+        # The handshake reaches a real URL and fails; the exact exception
+        # depends on the transport (HTTP status, connection, timeout). Catch
+        # broadly by hand rather than pytest.raises(Exception) — the point is
+        # only that connect refused rather than returning green, which is the
+        # contract the pre-handshake code broke.
+        raised = False
         try:
-            with pytest.raises(Exception):
-                await client.connect(timeout=5)
+            await client.connect(timeout=5)
         except ImportError:
             pytest.skip("httpx not installed")
+        except Exception:
+            raised = True
         finally:
+            assert raised, "connect should fail against an unreachable server"
             assert not client.connected
             await client.disconnect()
 
