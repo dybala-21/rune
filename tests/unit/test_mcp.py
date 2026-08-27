@@ -651,19 +651,31 @@ class TestMCPClientStreamableHTTP:
             await client.connect()
 
     @pytest.mark.asyncio
-    async def test_connect_requires_httpx(self):
+    async def test_connect_handshakes_and_fails_on_a_dead_server(self):
+        # connect() now performs the MCP initialize handshake, so it can no
+        # longer "succeed" against a server it never reached. A fake URL
+        # must leave the client not-connected. (The old test asserted the
+        # opposite — it pinned the pre-handshake behaviour where connect
+        # returned green without talking to the server.)
         cfg = MCPServerConfig(
             name="http", transport="streamable-http", url="https://example.com/mcp"
         )
         client = MCPClient("http", cfg)
-        # This will either succeed (httpx installed) or raise ImportError
-        # In test env httpx should be available
+        # The handshake reaches a real URL and fails; the exact exception
+        # depends on the transport (HTTP status, connection, timeout). Catch
+        # broadly by hand rather than pytest.raises(Exception) — the point is
+        # only that connect refused rather than returning green, which is the
+        # contract the pre-handshake code broke.
+        raised = False
         try:
-            await client.connect()
-            assert client.connected
+            await client.connect(timeout=5)
         except ImportError:
             pytest.skip("httpx not installed")
+        except Exception:
+            raised = True
         finally:
+            assert raised, "connect should fail against an unreachable server"
+            assert not client.connected
             await client.disconnect()
 
 

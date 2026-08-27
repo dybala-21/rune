@@ -11,6 +11,7 @@ import type {
 } from '../types';
 import { MessageBubble } from './MessageBubble';
 import { TrustCard } from './TrustCard';
+import { ProactiveCard } from './ProactiveCard';
 import { ToolCallCard, getToolColor } from './ToolCallCard';
 import { ThinkingBlockView } from './ThinkingBlock';
 import { normalizeToolName, inferWorkPhase } from '../utils/tooling';
@@ -116,7 +117,7 @@ export function ChatPanel({
   // Rebuilt only when a source list changes, not on every streaming re-render.
   const timeline = useMemo<TimelineItem[]>(() => [
     ...messages
-      .filter(m => m.content?.trim() || m.trust)
+      .filter(m => m.content?.trim() || m.trust || m.suggestion)
       .map(m => ({ type: 'message' as const, item: m, ts: m.timestamp })),
     ...toolCalls
       .filter(t => t.toolName?.trim())
@@ -191,6 +192,13 @@ export function ChatPanel({
                     trust={item.item.trust}
                     onEscalate={onSuggest ? () => onSuggest('/escalate') : undefined}
                   />
+                </div>
+              );
+            }
+            if (item.item.suggestion) {
+              return (
+                <div key={item.item.id} style={{ marginTop: needsGap ? 12 : 0 }}>
+                  <ProactiveCard suggestion={item.item.suggestion} />
                 </div>
               );
             }

@@ -141,7 +141,7 @@ async def skill_create(params: SkillCreateParams) -> CapabilityResult:
         from rune.skills.registry import get_skill_registry
 
         registry = get_skill_registry()
-        existing = registry.get_skill(params.name)
+        existing = registry.get(params.name)
         if existing:
             return CapabilityResult(
                 success=False,
@@ -171,11 +171,10 @@ async def skill_create(params: SkillCreateParams) -> CapabilityResult:
         from rune.skills.registry import get_skill_registry
 
         registry = get_skill_registry()
-        loaded_result = await registry.load_skill_from_path(
-            str(skill_dir),
-            "project" if params.scope == "project" else "user",
-        )
-        loaded = bool(loaded_result)
+        # load_skills scans a directory for SKILL.md and registers what it
+        # finds; the freshly written skill_dir is exactly that. The old code
+        # called load_skill_from_path, which the registry never defined.
+        loaded = registry.load_skills(skill_dir) > 0
     except Exception as exc:
         log.warning("skill_hot_reload_failed", name=params.name, error=str(exc))
 
@@ -217,20 +216,25 @@ async def skill_promote(params: SkillPromoteParams) -> CapabilityResult:
     log.info("skill_promote", name=params.name, force=params.force)
 
     try:
+        from rune.skills.lifecycle import SkillState, get_state, set_state
         from rune.skills.registry import get_skill_registry
 
         registry = get_skill_registry()
-        promoted = await registry.promote_skill(params.name, force=params.force)
-
-        if not promoted:
+        # The registry never had promote_skill. Promotion is a lifecycle
+        # state transition, which lifecycle.set_state owns; do it here on the
+        # loaded skill rather than on a method that did not exist.
+        skill = registry.get(params.name)
+        if skill is None:
             return CapabilityResult(
                 success=False,
                 error=f'Skill "{params.name}" not found.',
             )
 
-        prev_lifecycle = getattr(promoted, "previous_lifecycle", "unknown")
-        current_lifecycle = "active"
-        changed = getattr(promoted, "changed", True)
+        prev_lifecycle = get_state(skill)
+        current_lifecycle = SkillState.ACTIVE
+        changed = prev_lifecycle != SkillState.ACTIVE
+        if changed:
+            set_state(skill, SkillState.ACTIVE)
 
         return CapabilityResult(
             success=True,

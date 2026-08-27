@@ -54,8 +54,9 @@ class DiscordResponseFormatter(ResponseFormatter):
 class DiscordAdapter(ChannelAdapter):
     """Channel adapter for Discord via discord.py."""
 
-    def __init__(self, token: str) -> None:
-        super().__init__()
+    def __init__(self, token: str, *,
+                 allowed_users: list[str] | None = None) -> None:
+        super().__init__(allowed_users=allowed_users)
         self._token = token
         self._client: Any = None
         self._run_task: asyncio.Task[None] | None = None
@@ -208,6 +209,18 @@ class DiscordAdapter(ChannelAdapter):
         if self._on_message is None:
             return
 
+        # Authorization: without this an open bot token lets anyone in the
+        # server drive the agent. Telegram already gates here; Discord and
+        # Slack did not, so allowed_users was accepted and never enforced.
+        sender_id = str(message.author.id)
+        if not self.check_authorization(sender_id):
+            log.warning("discord_unauthorized_user", user_id=sender_id,
+                        username=str(getattr(message.author, "name", "unknown")))
+            with contextlib.suppress(Exception):
+                await message.channel.send(
+                    "⛔ This bot only responds to approved users.")
+            return
+
         attachments = [
             {
                 "type": "file",
@@ -221,7 +234,7 @@ class DiscordAdapter(ChannelAdapter):
 
         incoming = IncomingMessage(
             channel_id=str(message.channel.id),
-            sender_id=str(message.author.id),
+            sender_id=sender_id,
             text=message.content,
             attachments=attachments,
             reply_to=str(message.reference.message_id)

@@ -36,6 +36,7 @@ import type {
   OrchestrationState,
   OrchestrationTask,
   TrustInfo,
+  ProactiveSuggestion,
 } from '../types';
 
 let idCounter = 0;
@@ -383,6 +384,33 @@ export function useAgent() {
           timestamp: Date.now(),
         }, MAX_MESSAGES);
       });
+    }));
+
+    unsubs.push(sseOn('suggestion_created', (raw) => {
+      // RUNE noticed something on its own. Display only — the user replies in
+      // the chat, nothing auto-runs. Confidence maps to how loud the card is.
+      const d = raw as {
+        id?: string; type?: string; title?: string; description?: string;
+        confidence?: number; source?: string;
+      };
+      const conf = typeof d.confidence === 'number' ? d.confidence : 0.5;
+      const intensity: ProactiveSuggestion['intensity'] =
+        conf >= 0.8 ? 'intervene' : conf >= 0.6 ? 'suggest' : 'nudge';
+      setMessages(prev => appendWithLimit(prev, {
+        id: nextId(),
+        role: 'system',
+        content: d.title || d.description || 'RUNE has a suggestion',
+        timestamp: Date.now(),
+        suggestion: {
+          id: d.id || nextId(),
+          headline: d.title || '',
+          body: d.description || '',
+          actions: [],
+          confidence: conf,
+          intensity,
+          timestamp: Date.now(),
+        },
+      }, MAX_MESSAGES));
     }));
 
     unsubs.push(sseOn('agent_complete', (raw) => {

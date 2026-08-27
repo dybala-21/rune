@@ -168,8 +168,8 @@ def _auto_detect_stt() -> STTProvider | None:
     # 1. Deepgram (best quality, Korean, $0.004/min)
     if os.environ.get("DEEPGRAM_API_KEY"):
         try:
-            from rune.voice.providers.deepgram import DeepgramSTTProvider
-            return DeepgramSTTProvider(api_key=os.environ["DEEPGRAM_API_KEY"])
+            from rune.voice.providers.deepgram import DeepgramProvider
+            return DeepgramProvider(api_key=os.environ["DEEPGRAM_API_KEY"])
         except Exception as exc:
             log.debug("stt_detect_skip", provider="deepgram", error=str(exc)[:80])
 
@@ -191,8 +191,8 @@ def _auto_detect_stt() -> STTProvider | None:
 
     # 4. Sherpa-ONNX (fully local, no API key)
     try:
-        from rune.voice.providers.sherpa_onnx import SherpaOnnxSTTProvider
-        return SherpaOnnxSTTProvider()
+        from rune.voice.providers.sherpa_onnx import SherpaOnnxProvider
+        return SherpaOnnxProvider()
     except Exception as exc:
         log.debug("stt_detect_skip", provider="sherpa_onnx", error=str(exc)[:80])
 

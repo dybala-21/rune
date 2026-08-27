@@ -151,6 +151,9 @@ class ChannelGateway:
         "_pending_approvals",
         "_listeners",
         "_delivery_manager",
+        # Set in __init__ but missing here, so with __slots__ the constructor
+        # raised AttributeError — the gateway could not be built at all.
+        "_conv_manager",
     )
 
     def __init__(

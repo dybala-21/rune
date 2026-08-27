@@ -158,6 +158,8 @@ export interface ChatMessage {
   level?: 'info' | 'error';
   /** Attached to a 'trust' message: the verify-or-fail-honestly verdict. */
   trust?: TrustInfo;
+  /** Attached to a proactive message: what RUNE noticed on its own. */
+  suggestion?: ProactiveSuggestion;
 }
 
 /** 프로액티브 제안 (RUNE이 먼저 말을 걸 때) */
