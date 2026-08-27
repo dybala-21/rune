@@ -2,6 +2,7 @@ import { memo, useState } from 'react';
 import type { ChatMessage } from '../types';
 import { PixelWolf } from './PixelWolf';
 import { HighlightedCode } from './Code';
+import { toast } from '../utils/toast';
 
 interface MessageBubbleProps {
   message: ChatMessage;
@@ -135,7 +136,7 @@ function CopyButton({ text }: { text: string }) {
     navigator.clipboard.writeText(text).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    });
+    }).catch(() => toast.error('Copy failed'));
   };
 
   return (

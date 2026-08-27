@@ -506,3 +506,29 @@ a:focus-visible,
 .tok-keyword  { color: var(--syntax-keyword); }
 .tok-boolean  { color: var(--syntax-boolean); }
 .tok-function { color: var(--syntax-function); }
+
+/* ---- Toasts ---- */
+.toaster {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+  z-index: 1000; display: flex; flex-direction: column; gap: 8px;
+  align-items: center; pointer-events: none;
+}
+.toast {
+  pointer-events: auto; display: flex; align-items: center; gap: 8px;
+  max-width: 440px; padding: 9px 14px; cursor: pointer;
+  font-family: var(--font-sans); font-size: 13px; text-align: left;
+  color: var(--text-primary); background: var(--bg-tertiary);
+  border: 1px solid var(--border); border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  animation: toast-in 0.18s ease-out;
+}
+.toast-glyph { font-size: 12px; line-height: 1; }
+.toast-success .toast-glyph { color: var(--success); }
+.toast-error   .toast-glyph { color: var(--danger); }
+.toast-info    .toast-glyph { color: var(--accent); }
+.toast-error { border-color: var(--danger-subtle); }
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) { .toast { animation: none; } }

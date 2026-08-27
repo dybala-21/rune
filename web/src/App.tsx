@@ -17,6 +17,7 @@ import { WorkbenchPanel } from './components/WorkbenchPanel';
 import { CommandK, type Command } from './components/CommandK';
 import { WorkspaceChip } from './components/WorkspaceChip';
 import { InlineWorkspacePicker } from './components/InlineWorkspacePicker';
+import { Toaster } from './components/Toaster';
 import { normalizeToolName, isCodingToolName, inferWorkPhase, inferActivityMode, computeRunVerdict } from './utils/tooling';
 import { fetchConfig, fetchSessions, type ConfigInfo, type SessionInfo } from './api';
 
@@ -666,6 +667,7 @@ export function App() {
         commands={paletteCommands}
         onClose={() => setPaletteOpen(false)}
       />
+      <Toaster />
     </div>
   );
 }

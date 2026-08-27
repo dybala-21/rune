@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { toast } from '../utils/toast';
 import { useSSE } from './useSSE';
 import * as api from '../api';
 import { computeActivitySummary } from '../utils/tooling';
@@ -457,6 +458,13 @@ export function useAgent() {
       setPendingQuestion(null);
       setCurrentStepInfo(null);
       if (data.usage) setTokenUsage(data.usage);
+
+      // Notify when the run finishes while the tab is in the background — the
+      // one moment a toast earns its keep, since the user has looked away.
+      if (typeof document !== 'undefined' && document.hidden) {
+        const ok = data.success !== false;
+        toast[ok ? 'success' : 'error'](ok ? 'RUNE finished the task' : 'RUNE stopped — needs a look');
+      }
 
       // Compute activity summary from tool calls
       setToolCalls(prev => {
