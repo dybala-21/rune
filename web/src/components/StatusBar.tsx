@@ -271,8 +271,8 @@ export function StatusBar({
       {onToggleWorkbench && (
         <button
           onClick={onToggleWorkbench}
-          title="Toggle workbench: files, diff, terminal (⌘J)"
-          aria-label="Toggle workbench"
+          title="Toggle Work panel: files, diff, terminal (⌘J)"
+          aria-label="Toggle Work panel"
           aria-pressed={workbenchOpen}
           style={{
             display: 'flex', alignItems: 'center', gap: 5, padding: '3px 8px',
@@ -286,7 +286,7 @@ export function StatusBar({
             <rect x="1.5" y="2.5" width="11" height="9" rx="1" />
             <path d="M8.5 2.5v9" />
           </svg>
-          Workbench
+          Work
         </button>
       )}
 

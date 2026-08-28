@@ -570,7 +570,7 @@ export function App() {
                 inferWorkPhase(agent.toolCalls) !== 'analyzing' && (
                 <button
                   onClick={() => { setWorkbenchDismissed(false); setWorkbenchOpen(true); }}
-                  title="Show the coding workbench (⌘J)"
+                  title="Show the Work panel (⌘J)"
                   style={{
                     position: 'absolute',
                     top: 12,
@@ -589,7 +589,7 @@ export function App() {
                     cursor: 'pointer',
                   }}
                 >
-                  Workbench {'›'}
+                  Work {'›'}
                 </button>
               )}
 

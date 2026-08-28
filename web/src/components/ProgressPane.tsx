@@ -207,6 +207,7 @@ interface BandSpec {
   note?: string;
   details?: string[];
   showEvidence?: boolean;
+  live?: boolean;
 }
 
 /**
@@ -237,12 +238,14 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
       note: 'respond in the chat',
     };
   } else if (isRunning) {
+    // The one thing to draw the eye while a run is live: what it's doing now.
     spec = {
-      color: 'var(--border)', bg: 'var(--bg-secondary)',
+      color: 'var(--accent)', bg: 'var(--accent-subtle)',
       glyph: <span className="spinner" style={{ width: 12, height: 12, flexShrink: 0 }} />,
       title: nowLabel ?? 'working…',
       titleMono: true,
       note: stepNumber !== null ? `step ${stepNumber}` : undefined,
+      live: true,
     };
   } else if (verdictOk === null) {
     return null;
@@ -311,6 +314,16 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
         {spec.glyph}
+        {spec.live && (
+          <span style={{
+            fontSize: 9, fontWeight: 700, letterSpacing: '0.1em',
+            color: 'var(--accent)', background: 'var(--accent-subtle)',
+            padding: '1px 5px', borderRadius: 4, flexShrink: 0,
+            fontFamily: 'var(--font-mono)',
+          }}>
+            NOW
+          </span>
+        )}
         <span style={{
           color: 'var(--text-primary)', flex: 1, wordBreak: 'break-word',
           fontSize: 12.5,
@@ -471,9 +484,10 @@ export const ProgressPane = memo(function ProgressPane({
               <div key={`${g.step}-${i}`} style={{
                 ...rowStyle,
                 position: 'relative',
-                paddingLeft: 0,
-                background: live ? 'var(--bg-secondary)' : undefined,
+                paddingLeft: live ? 8 : 0,
+                background: live ? 'var(--accent-subtle)' : undefined,
                 borderRadius: live ? 6 : undefined,
+                borderLeft: live ? '2px solid var(--accent)' : undefined,
               }}>
                 <span style={{
                   position: 'relative', zIndex: 1,
