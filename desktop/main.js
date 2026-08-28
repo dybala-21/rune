@@ -14,6 +14,11 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 
+const ICON_PATH = path.join(__dirname, 'build', 'icon.png');
+// Name in the macOS menu bar and dock — a dev run (`electron .`) shows
+// "Electron" without this; packaging uses productName.
+app.setName('RUNE');
+
 const PORT = Number(process.env.RUNE_API_PORT || 18789);
 const ORIGIN = `http://127.0.0.1:${PORT}`;
 // In dev, point at the Vite dev server (RUNE_UI_URL=http://localhost:5173) and
@@ -143,6 +148,7 @@ function createWindow() {
     minHeight: 480,
     backgroundColor: '#0E1116', // basalt, so no white flash
     title: 'RUNE',
+    icon: ICON_PATH,
     autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -225,6 +231,10 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   app.whenReady().then(async () => {
+    // Dev run: set the dock icon explicitly (packaging bakes it from build/).
+    if (process.platform === 'darwin' && app.dock) {
+      try { app.dock.setIcon(ICON_PATH); } catch { /* non-fatal */ }
+    }
     hardenSession();
     await ensureDaemon();
     try {
