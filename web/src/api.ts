@@ -184,6 +184,16 @@ export async function setEscalation(provider: string, model: string): Promise<{ 
   return rpc('escalation.set', { provider, model });
 }
 
+/** Available models grouped by provider, for the model picker. */
+export async function fetchModels(): Promise<Record<string, string[]>> {
+  return rpc('models.list');
+}
+
+/** Switch the model new runs use. */
+export async function setActiveModel(provider: string, model: string): Promise<{ provider: string; model: string }> {
+  return rpc('model.set', { provider, model });
+}
+
 export function sendMessage(text: string, attachments?: MessageAttachment[]) {
   return post<{ ok: boolean; runId?: string }>(
     '/api/message', { text, attachments, sessionId: liveSessionId() },

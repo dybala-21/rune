@@ -1,3 +1,4 @@
+import { ModelPicker } from './ModelPicker';
 import { ThemeToggle } from './ThemeToggle';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { AgentState, StepInfo, TokenUsage as TokenUsageType } from '../types';
@@ -190,34 +191,7 @@ export function StatusBar({
         </div>
       )}
 
-      {activeModel && (
-        <div
-          title={`Active model (${activeModel.source}): ${activeModel.provider}:${activeModel.model}`}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-            padding: '4px 10px',
-            background: 'var(--bg-tertiary)',
-            border: '1px solid var(--border)',
-            borderRadius: '999px',
-            color: 'var(--text-secondary)',
-            fontSize: 11,
-            minWidth: 0,
-            maxWidth: 320,
-          }}
-        >
-          <span style={{ color: 'var(--text-muted)' }}>Model</span>
-          <span style={{
-            fontFamily: 'var(--font-mono)',
-            whiteSpace: 'nowrap',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-          }}>
-            {activeModel.provider}:{activeModel.model}
-          </span>
-        </div>
-      )}
+      {activeModel && <ModelPicker active={activeModel} />}
 
       {/* Token usage compact */}
       {tokenUsage && (

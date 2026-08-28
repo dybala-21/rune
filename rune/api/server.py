@@ -1967,6 +1967,23 @@ def create_app() -> Any:
                     providers.setdefault(prov, []).append(model)
                 return _ok(providers)
 
+            elif method == "model.set":
+                # Switch the model new runs use. Set both active_* (what the
+                # resolver runs) and default_* (what config.get reports and the
+                # status bar shows) so the picker and the run agree.
+                from rune.config import get_config as _gc
+
+                _prov = str(params.get("provider", "")).strip()
+                _model = str(params.get("model", "")).strip()
+                if not _prov or not _model:
+                    return _err("invalid", "provider and model required")
+                _lcfg = _gc().llm
+                _lcfg.active_provider = _prov
+                _lcfg.active_model = _model
+                _lcfg.default_provider = _prov
+                _lcfg.default_model = _model
+                return _ok({"provider": _prov, "model": _model})
+
             # Markdown file editor (HEARTBEAT.md, MEMORY.md, learned.md, user-profile.md)
             elif method == "markdown.list":
                 from rune.utils.paths import rune_home
