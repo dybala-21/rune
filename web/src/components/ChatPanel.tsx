@@ -121,10 +121,40 @@ export function ChatPanel({
     | { type: 'compaction'; item: CompactionItem };
 
   // Rebuilt only when a source list changes, not on every streaming re-render.
+  const lastAssistantId = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'assistant') return messages[i].id;
+    }
+    return null;
+  }, [messages]);
+
+  // The answer currently streaming = the last assistant message that comes
+  // after the last user turn. Only this one is pinned; a previous turn's answer
+  // (before a newer user message) must keep its real position.
+  const streamingAnswerId = useMemo(() => {
+    if (!isRunning) return null;
+    let lastUserIdx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') { lastUserIdx = i; break; }
+    }
+    for (let i = messages.length - 1; i > lastUserIdx; i--) {
+      if (messages[i].role === 'assistant') return messages[i].id;
+    }
+    return null;
+  }, [messages, isRunning]);
+
   const timeline = useMemo<TimelineItem[]>(() => [
     ...messages
       .filter(m => m.content?.trim() || m.trust || m.suggestion)
-      .map(m => ({ type: 'message' as const, item: m, ts: m.timestamp })),
+      // Pin the streaming answer to the end: it is created at the first token
+      // (an early timestamp) but its tools arrive after, so without this it
+      // renders above them and then jumps to the bottom when the run finishes.
+      // Keeping it last throughout gives a stable "tools, then answer" order.
+      .map(m => ({
+        type: 'message' as const,
+        item: m,
+        ts: m.id === streamingAnswerId ? Number.MAX_SAFE_INTEGER : m.timestamp,
+      })),
     ...toolCalls
       .filter(t => t.toolName?.trim())
       .map(t => ({ type: 'tool' as const, item: t, ts: t.timestamp })),
@@ -137,7 +167,8 @@ export function ChatPanel({
     ...compactionEvents
       .filter(c => c.message?.trim())
       .map(c => ({ type: 'compaction' as const, item: c, ts: c.timestamp })),
-  ].sort((a, b) => a.ts - b.ts), [messages, toolCalls, thinkingBlocks, delegateEvents, compactionEvents]);
+  ].sort((a, b) => a.ts - b.ts),
+  [messages, toolCalls, thinkingBlocks, delegateEvents, compactionEvents, streamingAnswerId]);
 
   const grouped = useMemo(() => groupConsecutiveTools(timeline), [timeline]);
 
@@ -145,13 +176,6 @@ export function ChatPanel({
     if (!isRunning || toolCalls.length === 0) return null;
     return toolCalls[toolCalls.length - 1].id;
   }, [isRunning, toolCalls]);
-
-  const lastAssistantId = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === 'assistant') return messages[i].id;
-    }
-    return null;
-  }, [messages]);
 
   const isEmpty = timeline.length === 0;
 
