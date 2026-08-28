@@ -137,7 +137,7 @@ class TestModelSortKey:
 class TestModelLists:
     def test_fallback_openai_has_entries(self):
         assert len(FALLBACK_OPENAI_MODELS) >= 10
-        assert FALLBACK_OPENAI_MODELS[0].id == "gpt-5.4"
+        assert FALLBACK_OPENAI_MODELS[0].id == "gpt-5.6-sol"
         assert all(m.provider == "openai" for m in FALLBACK_OPENAI_MODELS)
 
     def test_anthropic_models_have_entries(self):

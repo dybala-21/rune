@@ -1194,7 +1194,18 @@ class StreamResult:
             _traits = traits(self._model)
             if not _traits.temperature:
                 _acompletion_kwargs.pop("temperature", None)
-            if _env_flag(_FAST_MODE_ENV) and _traits.speed_param:
+            # Reasoning depth for models that accept it; litellm passes it to
+            # OpenAI and maps it to Claude's adaptive thinking. Only for models
+            # whose traits say so — others reject or ignore it.
+            _effort: str | None = None
+            if _traits.reasoning_effort:
+                from rune.config import get_config
+                _effort = get_config().llm.reasoning_effort
+                if _effort:
+                    _acompletion_kwargs["reasoning_effort"] = _effort
+            # Fast mode and deep reasoning pull opposite ways; don't ask for
+            # speed:fast when the user asked for high effort.
+            if _env_flag(_FAST_MODE_ENV) and _traits.speed_param and _effort != "high":
                 _acompletion_kwargs["speed"] = "fast"
             if self._extra_headers:
                 _acompletion_kwargs["extra_headers"] = dict(self._extra_headers)

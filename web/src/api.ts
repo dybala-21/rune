@@ -194,6 +194,11 @@ export async function setActiveModel(provider: string, model: string): Promise<{
   return rpc('model.set', { provider, model });
 }
 
+/** Set reasoning depth for reasoning-capable models ('' clears to default). */
+export async function setReasoningEffort(effort: '' | 'low' | 'medium' | 'high'): Promise<{ reasoningEffort: string | null }> {
+  return rpc('reasoning.set', { effort });
+}
+
 export function sendMessage(text: string, attachments?: MessageAttachment[]) {
   return post<{ ok: boolean; runId?: string }>(
     '/api/message', { text, attachments, sessionId: liveSessionId() },
@@ -354,6 +359,9 @@ export interface ConfigInfo {
     model: string;
     source: 'active' | 'default';
   };
+  /** Reasoning depth for the active model, when it accepts one. */
+  reasoningEffort?: 'low' | 'medium' | 'high' | null;
+  reasoningSupported?: boolean;
   memoryTuning: {
     preset: 'speed' | 'balanced' | 'accuracy' | null;
     policyMode: 'auto' | 'legacy' | 'shadow' | 'balanced' | 'strict';

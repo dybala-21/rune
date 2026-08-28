@@ -1,4 +1,5 @@
 import { ModelPicker } from './ModelPicker';
+import { ReasoningPicker } from './ReasoningPicker';
 import { ThemeToggle } from './ThemeToggle';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { AgentState, StepInfo, TokenUsage as TokenUsageType } from '../types';
@@ -27,6 +28,9 @@ interface StatusBarProps {
     model: string;
     source: 'active' | 'default';
   } | null;
+  /** Reasoning depth + whether the active model accepts one. */
+  reasoningSupported?: boolean;
+  reasoningEffort?: 'low' | 'medium' | 'high' | null;
   /** Outcome of the last completed run; null when none this session. */
   lastRunSuccess?: boolean | null;
   /** Opens the ⌘K command palette. */
@@ -56,6 +60,8 @@ export function StatusBar({
   currentStepInfo,
   currentActivity,
   activeModel,
+  reasoningSupported,
+  reasoningEffort,
   approvalMode,
   lastRunSuccess = null,
   onOpenPalette,
@@ -192,6 +198,7 @@ export function StatusBar({
       )}
 
       {activeModel && <ModelPicker active={activeModel} />}
+      {reasoningSupported && <ReasoningPicker effort={reasoningEffort ?? null} />}
 
       {/* Token usage compact */}
       {tokenUsage && (

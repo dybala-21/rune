@@ -1984,6 +1984,17 @@ def create_app() -> Any:
                 _lcfg.default_model = _model
                 return _ok({"provider": _prov, "model": _model})
 
+            elif method == "reasoning.set":
+                # Set the reasoning depth new runs use (low/medium/high, or
+                # empty to clear back to the provider default).
+                from rune.config import get_config as _gc
+
+                _eff = str(params.get("effort", "")).strip().lower()
+                if _eff and _eff not in ("low", "medium", "high"):
+                    return _err("invalid", "effort must be low, medium, or high")
+                _gc().llm.reasoning_effort = _eff or None
+                return _ok({"reasoningEffort": _eff or None})
+
             # Markdown file editor (HEARTBEAT.md, MEMORY.md, learned.md, user-profile.md)
             elif method == "markdown.list":
                 from rune.utils.paths import rune_home

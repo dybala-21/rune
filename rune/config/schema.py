@@ -61,6 +61,12 @@ class LLMConfig(BaseModel):
     default_model: str = Field(default="gpt-5.4", alias="defaultModel")
     active_provider: str | None = Field(default=None, alias="activeProvider")
     active_model: str | None = Field(default=None, alias="activeModel")
+    # Reasoning depth for reasoning-capable models (low/medium/high). None
+    # leaves the provider default (GPT-5.6 defaults to medium). Only sent when
+    # the model's traits say it accepts reasoning_effort.
+    reasoning_effort: str | None = Field(
+        default=None, pattern="^(low|medium|high)$", alias="reasoningEffort"
+    )
     # Cloud-escalation profile for /escalate: data leaves the machine only when
     # the user invokes it (never auto-routed). Model is optional; defaults to the
     # provider's best tier.

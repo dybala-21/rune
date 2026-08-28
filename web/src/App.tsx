@@ -259,6 +259,8 @@ export function App() {
         currentStepInfo={!isViewingHistory ? agent.currentStepInfo : undefined}
         currentActivity={currentActivity}
         activeModel={configInfo?.activeModel ?? null}
+        reasoningSupported={configInfo?.reasoningSupported}
+        reasoningEffort={configInfo?.reasoningEffort ?? null}
         approvalMode={configInfo?.approvalMode}
         lastRunSuccess={runVerdict}
         onOpenPalette={() => setPaletteOpen(true)}

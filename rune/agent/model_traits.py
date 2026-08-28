@@ -29,6 +29,10 @@ class ModelTraits:
     # for the models its DB knows about; a False here covers a family
     # the DB has wrong (gpt-5.5 rejects it while listed as supported).
     temperature: bool = True
+    # Accepts a `reasoning_effort` (low/medium/high). litellm passes it
+    # through to OpenAI and maps it to adaptive thinking for Claude 4.6+/5.
+    # Only set for models that support it — others reject or ignore it.
+    reasoning_effort: bool = False
 
 
 _DEFAULT = ModelTraits()
@@ -37,11 +41,22 @@ _DEFAULT = ModelTraits()
 # appear in the lowercased model id wins, so specific families must
 # stay above general ones.
 _STATIC: tuple[tuple[tuple[str, ...], ModelTraits], ...] = (
+    # Reasoning-capable Claude (adaptive thinking via litellm): the 4.6
+    # generation and Claude 5. Matched by exact version substrings so
+    # opus-4-5 (no thinking) doesn't slip in. Above the general rows.
+    (("claude-opus-5",), ModelTraits(anthropic_wire=True, speed_param=True, reasoning_effort=True)),
+    (("claude-sonnet-5",), ModelTraits(anthropic_wire=True, reasoning_effort=True)),
+    (("claude-opus-4-6",), ModelTraits(anthropic_wire=True, speed_param=True, reasoning_effort=True)),
+    (("claude-sonnet-4-6",), ModelTraits(anthropic_wire=True, reasoning_effort=True)),
     (("claude", "opus"), ModelTraits(anthropic_wire=True, speed_param=True)),
     (("anthropic", "opus"), ModelTraits(anthropic_wire=True, speed_param=True)),
     (("claude",), ModelTraits(anthropic_wire=True)),
     (("anthropic",), ModelTraits(anthropic_wire=True)),
-    (("gpt-5",), ModelTraits(temperature=False)),
+    # OpenAI reasoning models: the GPT-5 family and the o-series.
+    (("gpt-5",), ModelTraits(temperature=False, reasoning_effort=True)),
+    (("o1",), ModelTraits(temperature=False, reasoning_effort=True)),
+    (("o3",), ModelTraits(temperature=False, reasoning_effort=True)),
+    (("o4",), ModelTraits(temperature=False, reasoning_effort=True)),
 )
 
 # Models whose temperature rejection we only learn from the API's own
