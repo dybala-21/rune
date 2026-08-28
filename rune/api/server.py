@@ -115,9 +115,12 @@ def build_trust_payload(trace: Any) -> dict[str, Any]:
             from rune.agent.escalation import (
                 escalation_hint,
                 honest_failure_note,
+                run_was_verifiable,
             )
 
-            out["honestNote"] = honest_failure_note(reason) or ""
+            out["honestNote"] = honest_failure_note(
+                reason, run_was_verifiable(trace),
+            ) or ""
             out["escalationHint"] = escalation_hint(reason) or ""
         except Exception as exc:
             log.debug("trust_payload_hint_failed", error=str(exc)[:100])

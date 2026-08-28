@@ -82,7 +82,7 @@ export function TrustCard({ trust, onEscalate }: TrustCardProps) {
         )
       ) : (
         <div style={{ marginTop: 6, fontSize: 12.5, color: 'var(--text-secondary)', lineHeight: 1.55 }}>
-          {trust.honestNote || "I couldn't verify this result, so I won't claim it's done."}
+          {trust.honestNote || "I couldn't confirm this result, so I'm not marking it done."}
           <div style={{ marginTop: 8 }}>
             {esc?.enabled ? (
               esc.isCloud && confirmCloud ? (

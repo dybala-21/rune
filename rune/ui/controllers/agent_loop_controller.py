@@ -688,9 +688,10 @@ class AgentLoopController:
             escalation_hint,
             escalation_setup_hint,
             honest_failure_note,
+            run_was_verifiable,
         )
 
-        _note = honest_failure_note(reason)
+        _note = honest_failure_note(reason, run_was_verifiable(trace))
         if _note:
             with contextlib.suppress(Exception):
                 self._renderer.print_system_message(f"⚠ {_note}")
