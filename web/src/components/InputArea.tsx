@@ -478,7 +478,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 : disabled
                   ? 'Connecting...'
                   : isRunning
-                    ? 'Run in progress. Stop to send the next message.'
+                    ? 'Running… stop to send a message'
                     : 'Message RUNE...'
             }
             disabled={disabled}
@@ -547,13 +547,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           padding: '0 16px 8px',
           opacity: 0.7,
         }}>
-          {isRunning
-            ? 'Current run active · Stop to send a new message'
-            : disabled
-              ? ''
-              : isDragOver
-                ? 'Drop to attach'
-                : 'Enter to send \u00B7 Shift+Enter for newline \u00B7 \u2191 recall'}
+          {isRunning || disabled
+            ? ''
+            : isDragOver
+              ? 'Drop to attach'
+              : 'Enter to send \u00B7 Shift+Enter for newline \u00B7 \u2191 recall'}
         </div>
       </div>
     </div>

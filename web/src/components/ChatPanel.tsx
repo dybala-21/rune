@@ -16,7 +16,6 @@ import { ToolCallCard, getToolColor } from './ToolCallCard';
 import { ThinkingBlockView } from './ThinkingBlock';
 import { normalizeToolName, inferWorkPhase } from '../utils/tooling';
 import { PixelWolf } from './PixelWolf';
-import { buildCompletionNarrative } from '../utils/completionSummary';
 import {
   APPROVAL_COPY,
   QUESTION_COPY,
@@ -314,13 +313,8 @@ export function ChatPanel({
           <RunningIndicator toolCalls={toolCalls} currentStepInfo={currentStepInfo} />
         )}
 
-        {!isRunning && activitySummary && (
-          <>
-            <CompletionNotice summary={activitySummary} />
-            {activitySummary.totalToolCalls > 0 && (
-              <ActivitySummaryBar summary={activitySummary} />
-            )}
-          </>
+        {!isRunning && activitySummary && activitySummary.totalToolCalls > 0 && (
+          <ActivitySummaryBar summary={activitySummary} />
         )}
 
         {/* In-stream extras (e.g. the workspace picker) — rendered inside the
@@ -566,33 +560,6 @@ function RunningIndicator({ toolCalls, currentStepInfo }: { toolCalls: ToolCall[
 
 // ── Activity summary ──
 
-function CompletionNotice({ summary }: { summary: ActivitySummary }) {
-  return (
-    <div className="fade-in" style={{
-      marginTop: 8,
-      padding: '2px 0 0',
-      display: 'flex',
-      alignItems: 'center',
-      gap: 8,
-      color: 'var(--text-secondary)',
-    }}>
-      <span style={{
-        width: 8,
-        height: 8,
-        borderRadius: '50%',
-        background: summary.success ? 'var(--success)' : 'var(--danger)',
-        flexShrink: 0,
-      }} />
-      <span style={{
-        fontSize: 14,
-        color: 'var(--text-primary)',
-      }}>
-        {buildCompletionNarrative(summary)}
-      </span>
-    </div>
-  );
-}
-
 function ActivitySummaryBar({ summary }: { summary: ActivitySummary }) {
   const items: Array<{ label: string; value: number }> = [];
   if (summary.totalToolCalls > 0) items.push({ label: 'Tools', value: summary.totalToolCalls });
@@ -614,6 +581,10 @@ function ActivitySummaryBar({ summary }: { summary: ActivitySummary }) {
       gap: 16,
       fontSize: 12,
     }}>
+      <span style={{
+        width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+        background: summary.success ? 'var(--success)' : 'var(--danger)',
+      }} />
       {items.map(item => (
         <div key={item.label} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
           <span style={{ color: 'var(--text-muted)' }}>{item.label}</span>
