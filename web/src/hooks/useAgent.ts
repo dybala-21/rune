@@ -912,8 +912,13 @@ export function useAgent() {
   }, []);
 
   const abort = useCallback(() => {
+    // Reflect the stop immediately — the backend only cancels between steps
+    // over the network, so without this the button feels dead until the run
+    // actually winds down. agent_aborted then confirms and cleans up.
+    flushTextDelta();
+    setState('idle');
     api.sendAbort().catch(err => pushSystemError('Failed to stop the run', err));
-  }, [pushSystemError]);
+  }, [pushSystemError, flushTextDelta]);
 
   const respondApproval = useCallback((decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) => {
     if (!pendingApproval) return;

@@ -253,6 +253,13 @@ def create_app() -> Any:
 
     # Active tasks - declared early so the lifespan can reference them.
     _active_tasks: dict[str, asyncio.Task[Any]] = {}
+    # Runs whose abort already broadcast agent_aborted, so the run path doesn't
+    # broadcast it a second time as it winds down.
+    _aborted_runs: set[str] = set()
+
+    def _finish_run(rid: str) -> None:
+        _active_tasks.pop(rid, None)
+        _aborted_runs.discard(rid)
     # Suggestion ids already broadcast, so the engine re-emitting the same
     # open suggestion each heartbeat does not re-send it.
     _broadcast_suggestion_ids: set[str] = set()
@@ -705,6 +712,15 @@ def create_app() -> Any:
             # 5. Post-process (memory persistence)
             await _post_process(agent_ctx, trace, full_text, duration_ms, "web")
 
+            # A cancelled run is not a completion — emit the dedicated aborted
+            # event so the UI resets through its stop path, not the trust card.
+            # Skip it if /api/abort already broadcast it for this run.
+            if trace.reason == "cancelled":
+                if run_id not in _aborted_runs:
+                    await _broadcast("agent_aborted", {"runId": run_id})
+                _aborted_runs.discard(run_id)
+                return answer
+
             await _broadcast(
                 "agent_complete",
                 {
@@ -969,7 +985,7 @@ def create_app() -> Any:
             )
             _active_tasks[run_id] = task
             task.add_done_callback(
-                lambda _t, _rid=run_id: _active_tasks.pop(_rid, None)
+                lambda _t, _rid=run_id: _finish_run(_rid)
             )
             return await task
 
@@ -1186,7 +1202,7 @@ def create_app() -> Any:
                             )
                         )
                         _active_tasks[run_id] = task
-                        task.add_done_callback(lambda _t, _rid=run_id: _active_tasks.pop(_rid, None))
+                        task.add_done_callback(lambda _t, _rid=run_id: _finish_run(_rid))
                         await ws.send_text(
                             json_encode(
                                 {
@@ -1355,7 +1371,7 @@ def create_app() -> Any:
             )
         )
         _active_tasks[run_id] = task
-        task.add_done_callback(lambda _t, _rid=run_id: _active_tasks.pop(_rid, None))
+        task.add_done_callback(lambda _t, _rid=run_id: _finish_run(_rid))
         # Hand back the run id so a caller can tell its own run's SSE events
         # (which carry runId) apart from a concurrent turn on the same session.
         return {"ok": True, "runId": run_id}
@@ -1409,26 +1425,33 @@ def create_app() -> Any:
         except Exception:
             pass
 
-        if run_id:
-            agent_loop = _active_loops.get(run_id)
+        async def _stop(rid: str) -> None:
+            # Broadcast the terminal event from here, not from the run path: a
+            # hard task cancel re-delivers CancelledError on the run's next
+            # await, which would skip its own broadcast. Emitting here makes the
+            # UI reset regardless. Then soft-cancel the loop (graceful between
+            # steps) AND hard-cancel the task — the soft flag alone is only
+            # checked between steps, so an in-flight LLM stream (a long single
+            # answer) would keep going; cancelling the task interrupts it now.
+            _aborted_runs.add(rid)
+            await _broadcast("agent_aborted", {"runId": rid})
+            agent_loop = _active_loops.get(rid)
             if agent_loop:
-                await agent_loop.cancel()
-                return {"ok": True}
-            task = _active_tasks.get(run_id)
-            if task:
+                with contextlib.suppress(Exception):
+                    await agent_loop.cancel()
+            task = _active_tasks.get(rid)
+            if task and not task.done():
                 task.cancel()
-                return {"ok": True}
 
-        # No specific runId - abort the most recent active loop
-        if _active_loops:
-            last_run_id = list(_active_loops.keys())[-1]
-            await _active_loops[last_run_id].cancel()
-            return {"ok": True}
-        if _active_tasks:
-            last_task_id = list(_active_tasks.keys())[-1]
-            _active_tasks[last_task_id].cancel()
+        if run_id and (run_id in _active_loops or run_id in _active_tasks):
+            await _stop(run_id)
             return {"ok": True}
 
+        # No specific runId - abort the most recent active run.
+        rid = (list(_active_loops.keys())[-1] if _active_loops
+               else list(_active_tasks.keys())[-1] if _active_tasks else "")
+        if rid:
+            await _stop(rid)
         return {"ok": True}
 
     @app.post("/api/approval", dependencies=[Depends(auth)])
