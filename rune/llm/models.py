@@ -69,6 +69,12 @@ def _has_provider_key(provider: str) -> bool:
 # Hardcoded model lists (fallbacks / static providers)
 # OpenAI
 FALLBACK_OPENAI_MODELS: list[ModelInfo] = [
+    # GPT-5.6 series (newest)
+    ModelInfo(id="gpt-5.6", provider="openai", label="GPT-5.6"),
+    ModelInfo(id="gpt-5.6-pro", provider="openai", label="GPT-5.6 Pro"),
+    # GPT-5.5 series
+    ModelInfo(id="gpt-5.5", provider="openai", label="GPT-5.5"),
+    ModelInfo(id="gpt-5.5-pro", provider="openai", label="GPT-5.5 Pro"),
     # GPT-5.4 series
     ModelInfo(id="gpt-5.4", provider="openai", label="GPT-5.4"),
     ModelInfo(id="gpt-5.4-pro", provider="openai", label="GPT-5.4 Pro"),
@@ -83,6 +89,8 @@ FALLBACK_OPENAI_MODELS: list[ModelInfo] = [
     ModelInfo(id="gpt-5-mini", provider="openai", label="GPT-5 Mini"),
     ModelInfo(id="gpt-5-nano", provider="openai", label="GPT-5 Nano"),
     # Codex (coding-optimized)
+    ModelInfo(id="gpt-5.6-codex", provider="openai", label="GPT-5.6 Codex"),
+    ModelInfo(id="gpt-5.5-codex", provider="openai", label="GPT-5.5 Codex"),
     ModelInfo(id="gpt-5-codex", provider="openai", label="GPT-5 Codex"),
     ModelInfo(id="gpt-5.3-codex", provider="openai", label="GPT-5.3 Codex"),
     ModelInfo(id="gpt-5.2-codex", provider="openai", label="GPT-5.2 Codex"),
@@ -122,7 +130,11 @@ FALLBACK_OPENAI_MODELS: list[ModelInfo] = [
 # Anthropic
 
 ANTHROPIC_MODELS: list[ModelInfo] = [
-    # Current generation
+    # Claude 5 family (newest)
+    ModelInfo(id="claude-opus-5", provider="anthropic", label="Claude Opus 5"),
+    ModelInfo(id="claude-sonnet-5", provider="anthropic", label="Claude Sonnet 5"),
+    ModelInfo(id="claude-fable-5", provider="anthropic", label="Claude Fable 5"),
+    # Claude 4 generation
     ModelInfo(id="claude-opus-4-6", provider="anthropic", label="Claude Opus 4.6"),
     ModelInfo(id="claude-sonnet-4-6", provider="anthropic", label="Claude Sonnet 4.6"),
     ModelInfo(id="claude-haiku-4-5-20251001", provider="anthropic", label="Claude Haiku 4.5"),
