@@ -61,6 +61,7 @@ from rune.agent.message_utils import validate_tool_pairs
 from rune.agent.model_traits import (
     is_temperature_error,
     note_temperature_rejected,
+    supports_reasoning_effort,
     traits,
 )
 from rune.agent.obs_cap import mask_stale_tool_messages
@@ -1195,10 +1196,10 @@ class StreamResult:
             if not _traits.temperature:
                 _acompletion_kwargs.pop("temperature", None)
             # Reasoning depth for models that accept it; litellm passes it to
-            # OpenAI and maps it to Claude's adaptive thinking. Only for models
-            # whose traits say so — others reject or ignore it.
+            # OpenAI and maps it to Claude's adaptive thinking. Gate on
+            # litellm's own capability DB so it's right per model.
             _effort: str | None = None
-            if _traits.reasoning_effort:
+            if supports_reasoning_effort(self._model):
                 from rune.config import get_config
                 _effort = get_config().llm.reasoning_effort
                 if _effort:

@@ -72,9 +72,9 @@ def _get_rune_config():
 
 
 def _reasoning_supported(model: str) -> bool:
-    """Whether the model accepts a reasoning_effort (traits gate)."""
-    from rune.agent.model_traits import traits
-    return traits(model or "").reasoning_effort
+    """Whether the model accepts a reasoning_effort (litellm capability DB)."""
+    from rune.agent.model_traits import supports_reasoning_effort
+    return supports_reasoning_effort(model or "")
 
 
 @router.get("", response_model=ConfigGetResponse, dependencies=[Depends(auth)])

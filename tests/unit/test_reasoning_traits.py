@@ -1,19 +1,25 @@
-"""reasoning_effort trait must be on only for models that accept it."""
-from rune.agent.model_traits import traits
+"""reasoning_effort gate follows litellm's per-model capability, not a hand-list.
+
+The point of using litellm.supports_reasoning is that support differs per model
+in ways a static list gets wrong: o1 takes an effort but o1-mini doesn't,
+opus-4-5 reasons while opus-4 doesn't. These assert the distinctions that a
+naive substring list would miss.
+"""
+from rune.agent.model_traits import supports_reasoning_effort
 
 
-def test_reasoning_on_for_gpt5_and_o_series():
-    for m in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.4", "gpt-5-mini", "o1", "o3", "o4-mini"]:
-        assert traits(m).reasoning_effort is True, m
+def test_reasoning_on_for_reasoning_models():
+    for m in ["gpt-5.6-sol", "gpt-5.4", "o1", "o3", "o4-mini",
+              "claude-opus-4-6", "claude-opus-5", "claude-opus-4-5"]:
+        assert supports_reasoning_effort(m) is True, m
 
 
-def test_reasoning_on_for_claude_46_and_5():
-    for m in ["claude-opus-4-6", "claude-sonnet-4-6", "claude-opus-5", "claude-sonnet-5"]:
-        assert traits(m).reasoning_effort is True, m
+def test_reasoning_off_where_a_hand_list_would_get_it_wrong():
+    # o1-mini takes no effort though it shares the "o1" prefix; opus-4 predates
+    # thinking; plain chat models don't reason.
+    for m in ["o1-mini", "claude-opus-4", "gpt-4o", "gpt-4o-mini", "ollama/llama3.2"]:
+        assert supports_reasoning_effort(m) is False, m
 
 
-def test_reasoning_off_for_older_claude_and_nonreasoning():
-    # opus-4-5 / opus-4 predate adaptive thinking; gpt-4o and local models don't reason.
-    for m in ["claude-opus-4-5-20251101", "claude-opus-4", "claude-sonnet-4-20250514",
-              "gpt-4o", "gpt-4o-mini", "llama3.2"]:
-        assert traits(m).reasoning_effort is False, m
+def test_unknown_model_defaults_false():
+    assert supports_reasoning_effort("totally-made-up-model-xyz") is False

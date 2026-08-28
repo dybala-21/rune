@@ -14,6 +14,7 @@ are read from it directly.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from functools import lru_cache
 
 
 @dataclass(frozen=True)
@@ -29,10 +30,6 @@ class ModelTraits:
     # for the models its DB knows about; a False here covers a family
     # the DB has wrong (gpt-5.5 rejects it while listed as supported).
     temperature: bool = True
-    # Accepts a `reasoning_effort` (low/medium/high). litellm passes it
-    # through to OpenAI and maps it to adaptive thinking for Claude 4.6+/5.
-    # Only set for models that support it — others reject or ignore it.
-    reasoning_effort: bool = False
 
 
 _DEFAULT = ModelTraits()
@@ -41,22 +38,11 @@ _DEFAULT = ModelTraits()
 # appear in the lowercased model id wins, so specific families must
 # stay above general ones.
 _STATIC: tuple[tuple[tuple[str, ...], ModelTraits], ...] = (
-    # Reasoning-capable Claude (adaptive thinking via litellm): the 4.6
-    # generation and Claude 5. Matched by exact version substrings so
-    # opus-4-5 (no thinking) doesn't slip in. Above the general rows.
-    (("claude-opus-5",), ModelTraits(anthropic_wire=True, speed_param=True, reasoning_effort=True)),
-    (("claude-sonnet-5",), ModelTraits(anthropic_wire=True, reasoning_effort=True)),
-    (("claude-opus-4-6",), ModelTraits(anthropic_wire=True, speed_param=True, reasoning_effort=True)),
-    (("claude-sonnet-4-6",), ModelTraits(anthropic_wire=True, reasoning_effort=True)),
     (("claude", "opus"), ModelTraits(anthropic_wire=True, speed_param=True)),
     (("anthropic", "opus"), ModelTraits(anthropic_wire=True, speed_param=True)),
     (("claude",), ModelTraits(anthropic_wire=True)),
     (("anthropic",), ModelTraits(anthropic_wire=True)),
-    # OpenAI reasoning models: the GPT-5 family and the o-series.
-    (("gpt-5",), ModelTraits(temperature=False, reasoning_effort=True)),
-    (("o1",), ModelTraits(temperature=False, reasoning_effort=True)),
-    (("o3",), ModelTraits(temperature=False, reasoning_effort=True)),
-    (("o4",), ModelTraits(temperature=False, reasoning_effort=True)),
+    (("gpt-5",), ModelTraits(temperature=False)),
 )
 
 # Models whose temperature rejection we only learn from the API's own
@@ -77,6 +63,25 @@ def traits(model: str) -> ModelTraits:
     if found.temperature and model in _TEMPERATURE_REJECTED:
         found = replace(found, temperature=False)
     return found
+
+
+@lru_cache(maxsize=256)
+def supports_reasoning_effort(model: str) -> bool:
+    """Whether *model* accepts a ``reasoning_effort``.
+
+    Trusts litellm's model-capability DB rather than a hand-kept list: it is
+    correct per model where a static list drifts — o1 takes one but o1-mini
+    does not, claude-opus-4-5 reasons while claude-opus-4 does not, gemini-2.5
+    reasons, deepseek-reasoner reasons but takes no effort param. Unknown or
+    lookup failure → False (the selector simply won't show; the model still
+    runs). drop_params is on, so a stray effort on a model that reasons but
+    ignores it is dropped, not an error.
+    """
+    try:
+        import litellm
+        return bool(litellm.supports_reasoning(model=model))
+    except Exception:
+        return False
 
 
 def note_temperature_rejected(model: str) -> None:
