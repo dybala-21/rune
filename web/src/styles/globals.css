@@ -626,3 +626,25 @@ a:focus-visible,
   color: var(--text-secondary);
 }
 .md-quote > div { margin: 2px 0; }
+
+/* ---- Markdown typography (readability) ---- */
+.md-p { margin: 8px 0; line-height: 1.7; }
+.md-p:first-child { margin-top: 0; }
+.md-p:last-child { margin-bottom: 0; }
+.md-h { margin: 18px 0 8px; color: var(--text-primary); line-height: 1.35; }
+.md-h:first-child { margin-top: 2px; }
+.md-hr {
+  border: none; border-top: 1px solid var(--border);
+  margin: 18px 0; height: 0;
+}
+.md-list { margin: 8px 0; padding-left: 24px; line-height: 1.7; }
+.md-list .md-list { margin: 2px 0; }
+.md-list li { margin: 3px 0; }
+ul.md-list { list-style: disc; }
+ul.md-list ul.md-list { list-style: circle; }
+ol.md-list { list-style: decimal; }
+.md-list li.md-task { list-style: none; margin-left: -20px; }
+.md-list li.md-task > input[type="checkbox"] {
+  margin-right: 8px; vertical-align: middle; accent-color: var(--accent);
+  pointer-events: none;
+}

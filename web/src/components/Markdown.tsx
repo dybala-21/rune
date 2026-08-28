@@ -48,24 +48,30 @@ export function Markdown({ content }: { content: string }) {
   );
 }
 
+const HEADER_SIZES = [20, 17, 15.5, 14, 13, 12.5];
+const HEADER_WEIGHTS = [700, 700, 600, 600, 600, 600];
+const LIST_ITEM_RE = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
+
 function RichContent({ text }: { text: string }) {
   const lines = text.split('\n');
   const elements: ReactNode[] = [];
-  let listItems: ReactNode[] = [];
-  let listType: 'ul' | 'ol' | null = null;
   let elemKey = 0;
+  let paragraph: string[] = [];
 
-  const flushList = () => {
-    if (listItems.length > 0) {
-      const Tag = listType === 'ol' ? 'ol' : 'ul';
-      elements.push(
-        <Tag key={elemKey++} style={{ margin: '6px 0', paddingLeft: 22, lineHeight: 1.7 }}>
-          {listItems}
-        </Tag>,
-      );
-      listItems = [];
-      listType = null;
-    }
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    const buf = paragraph;
+    paragraph = [];
+    elements.push(
+      <p key={elemKey++} className="md-p">
+        {buf.map((l, li) => (
+          <span key={li}>
+            <InlineFormatted text={l} />
+            {li < buf.length - 1 && <br />}
+          </span>
+        ))}
+      </p>,
+    );
   };
 
   for (let i = 0; i < lines.length; i++) {
@@ -73,7 +79,7 @@ function RichContent({ text }: { text: string }) {
 
     // GitHub-style table: a row of cells, then a |---|---| separator.
     if (line.includes('|') && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
-      flushList();
+      flushParagraph();
       const header = splitCells(line);
       const aligns = splitCells(lines[i + 1]).map(cellAlign);
       const rows: string[][] = [];
@@ -87,9 +93,16 @@ function RichContent({ text }: { text: string }) {
       continue;
     }
 
+    // Horizontal rule: a line of only ---, ***, or ___.
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) {
+      flushParagraph();
+      elements.push(<hr key={elemKey++} className="md-hr" />);
+      continue;
+    }
+
     // Blockquote: one or more consecutive '>' lines.
     if (/^\s*>\s?/.test(line)) {
-      flushList();
+      flushParagraph();
       const quote: string[] = [];
       let j = i;
       while (j < lines.length && /^\s*>\s?/.test(lines[j])) {
@@ -105,16 +118,14 @@ function RichContent({ text }: { text: string }) {
       continue;
     }
 
-    const headerMatch = line.match(/^(#{1,3})\s+(.+)/);
+    // Headers h1–h6.
+    const headerMatch = line.match(/^(#{1,6})\s+(.+)/);
     if (headerMatch) {
-      flushList();
+      flushParagraph();
       const level = headerMatch[1].length;
-      const sizes = [18, 16, 15];
-      const weights = [700, 600, 600];
       elements.push(
-        <div key={elemKey++} style={{
-          fontWeight: weights[level - 1], fontSize: sizes[level - 1],
-          margin: '16px 0 6px', color: 'var(--text-primary)', lineHeight: 1.4,
+        <div key={elemKey++} className="md-h" style={{
+          fontWeight: HEADER_WEIGHTS[level - 1], fontSize: HEADER_SIZES[level - 1],
         }}>
           <InlineFormatted text={headerMatch[2]} />
         </div>,
@@ -122,43 +133,83 @@ function RichContent({ text }: { text: string }) {
       continue;
     }
 
-    if (line.match(/^\s*[-*]\s+/)) {
-      if (listType !== 'ul') { flushList(); listType = 'ul'; }
-      listItems.push(<li key={elemKey++}><InlineFormatted text={line.replace(/^\s*[-*]\s+/, '')} /></li>);
+    // List block (nested, ordered/unordered, task items).
+    if (LIST_ITEM_RE.test(line)) {
+      flushParagraph();
+      const [list, next] = parseList(lines, i, line.match(LIST_ITEM_RE)![1].length);
+      elements.push(renderList(list, elemKey++));
+      i = next - 1;
       continue;
     }
-
-    if (line.match(/^\s*\d+\.\s+/)) {
-      if (listType !== 'ol') { flushList(); listType = 'ol'; }
-      listItems.push(<li key={elemKey++}><InlineFormatted text={line.replace(/^\s*\d+\.\s+/, '')} /></li>);
-      continue;
-    }
-
-    flushList();
 
     if (line.trim() === '') {
-      elements.push(<div key={elemKey++} style={{ height: 8 }} />);
+      flushParagraph();
     } else {
-      elements.push(
-        <span key={elemKey++}>
-          <InlineFormatted text={line} />
-          {i < lines.length - 1 && '\n'}
-        </span>,
-      );
+      paragraph.push(line);
     }
   }
-  flushList();
+  flushParagraph();
 
-  return <div style={{ whiteSpace: 'pre-wrap' }}>{elements}</div>;
+  return <>{elements}</>;
+}
+
+interface MdList { ordered: boolean; items: MdItem[]; }
+interface MdItem { text: string; task: boolean | null; sub: MdList | null; }
+
+// Consume a run of list lines at `baseIndent` into a nested structure and
+// return the index where the list ended. A deeper-indented line becomes a
+// sub-list of the item above it.
+function parseList(lines: string[], start: number, baseIndent: number): [MdList, number] {
+  const ordered = /^\s*\d+[.)]\s/.test(lines[start]);
+  const list: MdList = { ordered, items: [] };
+  let i = start;
+  while (i < lines.length) {
+    const m = lines[i].match(LIST_ITEM_RE);
+    if (!m) break;
+    const indent = m[1].length;
+    if (indent < baseIndent) break;
+    if (indent > baseIndent) {
+      const [sub, next] = parseList(lines, i, indent);
+      if (list.items.length) list.items[list.items.length - 1].sub = sub;
+      i = next;
+      continue;
+    }
+    let text = m[3];
+    let task: boolean | null = null;
+    const t = text.match(/^\[([ xX])\]\s+(.*)$/);
+    if (t) { task = t[1].toLowerCase() === 'x'; text = t[2]; }
+    list.items.push({ text, task, sub: null });
+    i++;
+  }
+  return [list, i];
+}
+
+function renderList(list: MdList, key: number): ReactNode {
+  const Tag = list.ordered ? 'ol' : 'ul';
+  return (
+    <Tag key={key} className="md-list">
+      {list.items.map((it, i) => (
+        <li key={i} className={it.task !== null ? 'md-task' : undefined}>
+          {it.task !== null && (
+            <input type="checkbox" checked={it.task} readOnly aria-hidden="true" />
+          )}
+          <InlineFormatted text={it.text} />
+          {it.sub && renderList(it.sub, 1)}
+        </li>
+      ))}
+    </Tag>
+  );
 }
 
 function InlineFormatted({ text }: { text: string }) {
-  const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g);
+  const parts = text.split(/(\*\*[^*]+\*\*|~~[^~]+~~|\*[^*]+\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g);
   return (
     <>
       {parts.map((part, i) => {
         if (part.startsWith('**') && part.endsWith('**'))
           return <strong key={i} style={{ fontWeight: 600 }}>{part.slice(2, -2)}</strong>;
+        if (part.startsWith('~~') && part.endsWith('~~'))
+          return <del key={i} style={{ opacity: 0.7 }}>{part.slice(2, -2)}</del>;
         if (part.startsWith('*') && part.endsWith('*') && !part.startsWith('**'))
           return <em key={i}>{part.slice(1, -1)}</em>;
         if (part.startsWith('`') && part.endsWith('`'))
