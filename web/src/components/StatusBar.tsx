@@ -4,7 +4,7 @@ import { ThemeToggle } from './ThemeToggle';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { AgentState, StepInfo, TokenUsage as TokenUsageType } from '../types';
 import { TokenUsage } from './TokenUsage';
-import { PixelWolf } from './PixelWolf';
+import { RuneMark } from './RuneMark';
 
 interface StatusBarProps {
   /** Trailing slot rendered before the palette button (e.g. workspace chip) */
@@ -122,7 +122,7 @@ export function StatusBar({
 
       {/* Logo */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <PixelWolf
+        <RuneMark
           state={
             !connected
               ? 'warning'
@@ -136,7 +136,7 @@ export function StatusBar({
                       ? 'failed'
                       : 'idle'
           }
-          px={1.6}
+          size={20}
           title={connected ? `RUNE (${STATE_LABELS[state]})` : 'RUNE — engine unreachable'}
         />
         <span style={{

@@ -1,6 +1,5 @@
 import { memo, useState } from 'react';
 import type { ChatMessage } from '../types';
-import { PixelWolf } from './PixelWolf';
 import { Markdown } from './Markdown';
 import { CopyButton } from './CopyButton';
 
@@ -116,25 +115,7 @@ export const MessageBubble = memo(function MessageBubble({ message, streaming = 
     <div className="slide-up msg-hover" style={{
       padding: '8px 0',
     }}>
-      <div style={{
-        display: 'flex',
-        gap: 12,
-        alignItems: 'flex-start',
-      }}>
-        {/* Avatar */}
-        <div style={{
-          width: 28,
-          height: 28,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          flexShrink: 0,
-          marginTop: 2,
-        }}>
-          <PixelWolf state={streaming ? 'working' : 'idle'} px={1.6} title="RUNE" />
-        </div>
-
-        {/* Content */}
+      <div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div
             className={streaming ? 'streaming-cursor' : undefined}

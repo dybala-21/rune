@@ -15,7 +15,7 @@ import { ProactiveCard } from './ProactiveCard';
 import { ToolCallCard, getToolColor } from './ToolCallCard';
 import { ThinkingBlockView } from './ThinkingBlock';
 import { normalizeToolName, inferWorkPhase } from '../utils/tooling';
-import { PixelWolf } from './PixelWolf';
+import { RuneMark } from './RuneMark';
 import {
   APPROVAL_COPY,
   QUESTION_COPY,
@@ -399,7 +399,7 @@ function EmptyState({ onSuggest }: { onSuggest?: (text: string) => void }) {
       margin: '0 auto',
       padding: '40px 8px',
     }}>
-      <PixelWolf state="idle" px={3.5} title="RUNE" />
+      <RuneMark state="idle" size={56} title="RUNE" />
       <div style={{
         fontSize: 20,
         fontWeight: 600,
@@ -525,7 +525,6 @@ function RunningIndicator({ toolCalls, currentStepInfo }: { toolCalls: ToolCall[
       gap: 10,
       color: 'var(--text-secondary)',
     }}>
-      <PixelWolf state="working" px={1.4} title="RUNE is working" />
       <span className="shimmer-text" style={{ fontSize: 13, fontWeight: 500 }}>
         {activity || 'Working through the request...'}
       </span>

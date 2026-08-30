@@ -1,7 +1,7 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ActivitySummary, OrchestrationState, StepInfo, ToolCall, TrustInfo } from '../types';
 import { normalizeToolName, isCodingToolName, argString, inferWorkPhase, inferActivityMode, computeRunVerdict, type WorkPhase } from '../utils/tooling';
-import { PixelWolf, type WolfState } from './PixelWolf';
+import { RuneMark, type MarkState } from './RuneMark';
 import { fetchWorkspaceDiff, readWorkspaceFile } from '../api';
 import { HighlightedCode } from './Code';
 import { Markdown } from './Markdown';
@@ -268,7 +268,7 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
 
   const startedAt = toolCalls.length > 0 ? toolCalls[0].timestamp : null;
 
-  let petState: WolfState = 'idle';
+  let petState: MarkState = 'idle';
   if (isRunning) petState = phase === 'verifying' ? 'thinking' : 'working';
   else if (verdictOk !== null) petState = verdictOk ? 'passed' : 'failed';
 
@@ -310,7 +310,7 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
         background: 'var(--bg-secondary)',
         borderBottom: '1px solid var(--border)',
       }}>
-        <PixelWolf state={petState} px={1.5} title={`RUNE workbench (${petState})`} />
+        <RuneMark state={petState} size={18} title={`RUNE workbench (${petState})`} />
         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-primary)' }}>
           Workbench
         </span>
