@@ -503,11 +503,12 @@ def _handle_non_interactive(
                 escalation_hint,
                 escalation_setup_hint,
                 honest_failure_note,
+                run_was_verifiable,
             )
 
             # Say why we didn't claim success, then the next step: /escalate, or
             # how to set it up if there's no escalation model yet.
-            _note = honest_failure_note(trace.reason)
+            _note = honest_failure_note(trace.reason, run_was_verifiable(trace))
             if _note:
                 console.print(f"[yellow]⚠ {_note}[/yellow]")
             else:

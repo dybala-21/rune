@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import math
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -710,7 +710,20 @@ class MemoryStore:
     def save_commitment(
         self, episode_id: str, text: str, deadline: str | None = None,
     ) -> None:
-        """Save a detected commitment linked to an episode."""
+        """Save a detected commitment linked to an episode.
+
+        Consolidation re-extracts commitments every turn from overlapping
+        conversation context, so the same one arrives again and again. Skip
+        an insert when an identical commitment is already open, so a repeated
+        extraction does not pile up duplicate rows.
+        """
+        existing = self.conn.execute(
+            """SELECT 1 FROM episode_commitments
+               WHERE commitment_text = ? AND status = 'open' LIMIT 1""",
+            (text,),
+        ).fetchone()
+        if existing:
+            return
         self.conn.execute(
             """INSERT INTO episode_commitments
                (episode_id, commitment_text, deadline)
@@ -718,17 +731,26 @@ class MemoryStore:
             (episode_id, text, deadline),
         )
 
-    def get_open_commitments(self, limit: int = 20) -> list[dict[str, Any]]:
-        """Return open (unfulfilled) commitments, most recent first."""
+    def get_open_commitments(self, limit: int = 20,
+                             max_age_days: int = 7) -> list[dict[str, Any]]:
+        """Return recent open commitments, most recent first.
+
+        Nothing marks a commitment fulfilled, so without a horizon an open
+        commitment would resurface on every heartbeat forever — which is how
+        stale bench-task rows ("Implement add(a,b)") ended up nagging the
+        user. A commitment older than the window has gone cold and is left
+        out of what the proactive layer surfaces; it stays in the table.
+        """
+        cutoff = (datetime.now(UTC) - timedelta(days=max_age_days)).isoformat()
         rows = self.conn.execute(
             """SELECT ec.id, ec.episode_id, ec.commitment_text, ec.deadline,
                       ec.detected_at, e.task_summary
                FROM episode_commitments ec
                JOIN episodes e ON ec.episode_id = e.id
-               WHERE ec.status = 'open'
+               WHERE ec.status = 'open' AND ec.detected_at >= ?
                ORDER BY ec.detected_at DESC
                LIMIT ?""",
-            (limit,),
+            (cutoff, limit),
         )
         return [
             {

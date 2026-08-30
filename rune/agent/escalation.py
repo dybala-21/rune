@@ -88,8 +88,37 @@ _HONEST_STOP_NOTES = {
 }
 
 
-def honest_failure_note(reason: str) -> str | None:
-    """Why the run stopped, in plain words. None for success or unknown reasons."""
+def run_was_verifiable(trace: object) -> bool:
+    """Did the run produce something checkable — files changed, or a
+    verification gate that actually ran?
+
+    A pure question/answer or writing task (draw a table, summarise) has
+    neither, so telling the user "I couldn't verify the result" is a category
+    error: there was nothing to verify. Unknown → True, keeping the stricter
+    coding framing for the higher-stakes case.
+    """
+    if trace is None:
+        return True
+    gate = getattr(trace, "evidence_gate", None)
+    if isinstance(gate, dict) and gate.get("has_check"):
+        return True
+    if getattr(trace, "tests_passed_after_edit", None) is not None:
+        return True
+    return bool(getattr(trace, "changed_files", 0))
+
+
+def honest_failure_note(reason: str, verifiable: bool = True) -> str | None:
+    """Why the run stopped, in plain words. None for success or unknown reasons.
+
+    ``verifiable`` (from :func:`run_was_verifiable`) reframes the budget note
+    for a task with nothing to verify, so a writing/Q&A run doesn't claim it
+    "couldn't verify" a result that never needed verifying.
+    """
+    if reason == "token_budget_exhausted" and not verifiable:
+        return (
+            "Stopping: I ran out of budget before finishing this, so the answer "
+            "above may be incomplete — I'm not marking it done."
+        )
     return _HONEST_STOP_NOTES.get(reason)
 
 

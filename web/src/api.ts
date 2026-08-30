@@ -124,6 +124,14 @@ export function getLiveSessionId(): string {
   return liveSessionId();
 }
 
+// The run id of the most recent message this tab sent, echoed back by
+// /api/message. Agent events carry runId, so this lets the tab recognise its
+// own run even when several turns share a session. It only ever adds a match,
+// never removes one — the POST can resolve after the first SSE event arrives.
+let _currentRunId = '';
+export function setCurrentRunId(id: string): void { _currentRunId = id; }
+export function getCurrentRunId(): string { return _currentRunId; }
+
 // ── Workspace API (directory pinned per conversation) ──
 
 export async function fetchWorkspace(): Promise<{ path: string }> {
@@ -176,8 +184,28 @@ export async function setEscalation(provider: string, model: string): Promise<{ 
   return rpc('escalation.set', { provider, model });
 }
 
+/** Available models grouped by provider, for the model picker. */
+export async function fetchModels(): Promise<Record<string, string[]>> {
+  return rpc('models.list');
+}
+
+/** Switch the model new runs use. */
+export async function setActiveModel(provider: string, model: string): Promise<{ provider: string; model: string }> {
+  return rpc('model.set', { provider, model });
+}
+
+/** Set reasoning depth for reasoning-capable models ('' clears to default). */
+export async function setReasoningEffort(effort: '' | 'low' | 'medium' | 'high'): Promise<{ reasoningEffort: string | null }> {
+  return rpc('reasoning.set', { effort });
+}
+
 export function sendMessage(text: string, attachments?: MessageAttachment[]) {
-  return post('/api/message', { text, attachments, sessionId: liveSessionId() });
+  return post<{ ok: boolean; runId?: string }>(
+    '/api/message', { text, attachments, sessionId: liveSessionId() },
+  ).then(res => {
+    if (res?.runId) setCurrentRunId(res.runId);
+    return res;
+  });
 }
 
 export function sendAbort() {
@@ -331,6 +359,9 @@ export interface ConfigInfo {
     model: string;
     source: 'active' | 'default';
   };
+  /** Reasoning depth for the active model, when it accepts one. */
+  reasoningEffort?: 'low' | 'medium' | 'high' | null;
+  reasoningSupported?: boolean;
   memoryTuning: {
     preset: 'speed' | 'balanced' | 'accuracy' | null;
     policyMode: 'auto' | 'legacy' | 'shadow' | 'balanced' | 'strict';

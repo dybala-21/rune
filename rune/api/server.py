@@ -26,17 +26,23 @@ from rune.utils.logger import get_logger
 log = get_logger(__name__)
 
 
-def split_answer(collected: list[str], last_step_start: int) -> tuple[str, str]:
+def split_answer(collected: list[str], step_starts: list[int]) -> tuple[str, str]:
     """(full transcript, user-facing answer) for a finished run.
 
-    The answer is the LAST step's text only — a multi-pass run (e.g. after
-    context compaction) otherwise concatenates every pass's narration and the
-    final message shows duplicated summaries. Memory extraction still gets the
-    full transcript. One helper so the rule can't drift between the SSE,
-    NDJSON, and interrupted-stream paths.
+    The answer is the narration of the last step that produced any text. A
+    multi-pass run otherwise concatenates every pass's narration and the final
+    message shows duplicated summaries. Crucially, a trailing step with no text
+    of its own — a tool-only round, or a re-observe/verify gate that ends the
+    run silently — must not blank the answer or fall back to dumping the whole
+    (duplicated) transcript, so walk back to the last step that actually spoke.
+    Memory extraction still gets the full transcript. One helper so the rule
+    can't drift between the SSE, NDJSON, and interrupted-stream paths.
     """
     full = "".join(collected)
-    return full, ("".join(collected[last_step_start:]) or full)
+    for start in reversed(step_starts):
+        if "".join(collected[start:]).strip():
+            return full, "".join(collected[start:])
+    return full, full
 
 
 async def _post_process(
@@ -109,9 +115,12 @@ def build_trust_payload(trace: Any) -> dict[str, Any]:
             from rune.agent.escalation import (
                 escalation_hint,
                 honest_failure_note,
+                run_was_verifiable,
             )
 
-            out["honestNote"] = honest_failure_note(reason) or ""
+            out["honestNote"] = honest_failure_note(
+                reason, run_was_verifiable(trace),
+            ) or ""
             out["escalationHint"] = escalation_hint(reason) or ""
         except Exception as exc:
             log.debug("trust_payload_hint_failed", error=str(exc)[:100])
@@ -244,6 +253,47 @@ def create_app() -> Any:
 
     # Active tasks - declared early so the lifespan can reference them.
     _active_tasks: dict[str, asyncio.Task[Any]] = {}
+    # Runs whose abort already broadcast agent_aborted, so the run path doesn't
+    # broadcast it a second time as it winds down.
+    _aborted_runs: set[str] = set()
+
+    def _finish_run(rid: str) -> None:
+        _active_tasks.pop(rid, None)
+        _aborted_runs.discard(rid)
+    # Suggestion ids already broadcast, so the engine re-emitting the same
+    # open suggestion each heartbeat does not re-send it.
+    _broadcast_suggestion_ids: set[str] = set()
+
+    def _on_proactive_suggestion(suggestions: list[Any]) -> None:
+        """Push engine suggestions to the web timeline, display-only.
+
+        The engine already emits these; the bridge decides whether to
+        auto-execute, off by default. This path only shows them, so the user
+        sees them and chooses — the alert-and-suggest, defer-execution stance
+        the proactivity work settled on.
+
+        The engine re-emits the same open suggestion every heartbeat, so we
+        broadcast each id at most once per server; the frontend dedups too,
+        but a client connecting later would otherwise get the whole backlog.
+        """
+        for s in suggestions:
+            sid = getattr(s, "id", "")
+            if sid and sid in _broadcast_suggestion_ids:
+                continue
+            if sid:
+                _broadcast_suggestion_ids.add(sid)
+            conf = getattr(s, "confidence", 0.0)
+            priority = ("high" if conf >= 0.8
+                        else "medium" if conf >= 0.6 else "low")
+            _sse_manager.broadcast("suggestion_created", {
+                "id": getattr(s, "id", ""),
+                "type": getattr(s, "type", "insight"),
+                "title": getattr(s, "title", ""),
+                "description": getattr(s, "description", ""),
+                "priority": priority,
+                "confidence": conf,
+                "source": getattr(s, "source", ""),
+            })
 
     @asynccontextmanager
     def _on_proactive_suggestion(suggestions: list[Any]) -> None:
@@ -464,13 +514,19 @@ def create_app() -> Any:
             # Workspace pinned to this conversation (picker in the app);
             # an @path in the message still overrides for the turn.
             workspace = await conv_wiring.get_workspace(conv_id or "")
+            # Unpinned turns would otherwise resolve relative paths against the
+            # daemon's launch dir and drop the user's files into the install
+            # directory; fall back to the user workspace. pinned_cwd stays None
+            # so an @path in the message can still override for the turn.
+            from rune.utils.paths import user_workspace
+            turn_cwd = workspace or str(user_workspace())
 
             # 1. Prepare agent context (loads prior turns as history)
             agent_ctx = await prepare_agent_context(
                 PrepareContextOptions(
                     goal=goal,
                     channel="web",
-                    cwd=workspace or "",
+                    cwd=turn_cwd,
                     pinned_cwd=workspace,
                     attachments=attachments or [],
                     conversation_id=conv_id or "",
@@ -546,14 +602,13 @@ def create_app() -> Any:
             # -- wire event callbacks ------------------------------------
 
             _run_start_time = time.monotonic()
-            # Marks where the final step's text begins in `collected`. Both the
-            # user-facing answer and the recorded history slice from here, so a
+            # Offsets in `collected` where each step's text begins. split_answer
+            # slices the answer from the last step that produced text, so a
             # multi-pass run's intermediate commentary is never replayed.
-            _step_text_start = [0]
+            _step_starts = [0]
 
             async def _on_step(step: int) -> None:
-                if len(collected) > _step_text_start[0]:
-                    _step_text_start[0] = len(collected)
+                _step_starts.append(len(collected))
                 await _broadcast(
                     "step_start",
                     {"stepNumber": step, "tokens": 0, "runId": run_id},
@@ -666,7 +721,7 @@ def create_app() -> Any:
                 context={"workspace_root": agent_ctx.workspace_root},
                 message_history=agent_ctx.messages if agent_ctx.messages else None,
             )
-            full_text, answer = split_answer(collected, _step_text_start[0])
+            full_text, answer = split_answer(collected, _step_starts)
             duration_ms = int((time.monotonic() - _run_start_time) * 1000)
 
             # 4b. Record the assistant turn for the next message's context.
@@ -678,6 +733,15 @@ def create_app() -> Any:
 
             # 5. Post-process (memory persistence)
             await _post_process(agent_ctx, trace, full_text, duration_ms, "web")
+
+            # A cancelled run is not a completion — emit the dedicated aborted
+            # event so the UI resets through its stop path, not the trust card.
+            # Skip it if /api/abort already broadcast it for this run.
+            if trace.reason == "cancelled":
+                if run_id not in _aborted_runs:
+                    await _broadcast("agent_aborted", {"runId": run_id})
+                _aborted_runs.discard(run_id)
+                return answer
 
             await _broadcast(
                 "agent_complete",
@@ -717,7 +781,7 @@ def create_app() -> Any:
         conv_id: str | None = None
         loop = None
         collected: list[str] = []
-        _step_text_start = [0]
+        _step_starts = [0]
         try:
             from rune.agent.agent_context import (
                 PrepareContextOptions,
@@ -806,8 +870,7 @@ def create_app() -> Any:
             loop.set_ask_user_callback(_ndjson_ask_user_cb)
 
             async def _on_step(step: int) -> None:
-                if len(collected) > _step_text_start[0]:
-                    _step_text_start[0] = len(collected)
+                _step_starts.append(len(collected))
                 await event_queue.put(
                     {
                         "event": "step_start",
@@ -883,7 +946,7 @@ def create_app() -> Any:
                 yield json_encode(evt) + "\n"
 
             trace = run_task.result()
-            full_text, answer = split_answer(collected, _step_text_start[0])
+            full_text, answer = split_answer(collected, _step_starts)
             duration_ms = int((time.monotonic() - _run_start_time) * 1000)
 
             # Post-process (memory persistence)
@@ -920,7 +983,7 @@ def create_app() -> Any:
             _active_loops.pop(run_id, None)
             # Awaits are fine during aclose(); yields are not.
             if conv_manager is not None and conv_id and loop is not None:
-                _, last_step_text = split_answer(collected, _step_text_start[0])
+                _, last_step_text = split_answer(collected, _step_starts)
                 from rune.api import conversation_wiring as conv_wiring
 
                 await conv_wiring.record_assistant_turn(
@@ -944,7 +1007,7 @@ def create_app() -> Any:
             )
             _active_tasks[run_id] = task
             task.add_done_callback(
-                lambda _t, _rid=run_id: _active_tasks.pop(_rid, None)
+                lambda _t, _rid=run_id: _finish_run(_rid)
             )
             return await task
 
@@ -1161,7 +1224,7 @@ def create_app() -> Any:
                             )
                         )
                         _active_tasks[run_id] = task
-                        task.add_done_callback(lambda _t, _rid=run_id: _active_tasks.pop(_rid, None))
+                        task.add_done_callback(lambda _t, _rid=run_id: _finish_run(_rid))
                         await ws.send_text(
                             json_encode(
                                 {
@@ -1330,8 +1393,10 @@ def create_app() -> Any:
             )
         )
         _active_tasks[run_id] = task
-        task.add_done_callback(lambda _t, _rid=run_id: _active_tasks.pop(_rid, None))
-        return {"ok": True}
+        task.add_done_callback(lambda _t, _rid=run_id: _finish_run(_rid))
+        # Hand back the run id so a caller can tell its own run's SSE events
+        # (which carry runId) apart from a concurrent turn on the same session.
+        return {"ok": True, "runId": run_id}
 
     @app.post("/api/voice/transcribe", dependencies=[Depends(auth)])
     async def api_voice_transcribe(request: Request) -> dict[str, Any]:
@@ -1382,26 +1447,33 @@ def create_app() -> Any:
         except Exception:
             pass
 
-        if run_id:
-            agent_loop = _active_loops.get(run_id)
+        async def _stop(rid: str) -> None:
+            # Broadcast the terminal event from here, not from the run path: a
+            # hard task cancel re-delivers CancelledError on the run's next
+            # await, which would skip its own broadcast. Emitting here makes the
+            # UI reset regardless. Then soft-cancel the loop (graceful between
+            # steps) AND hard-cancel the task — the soft flag alone is only
+            # checked between steps, so an in-flight LLM stream (a long single
+            # answer) would keep going; cancelling the task interrupts it now.
+            _aborted_runs.add(rid)
+            await _broadcast("agent_aborted", {"runId": rid})
+            agent_loop = _active_loops.get(rid)
             if agent_loop:
-                await agent_loop.cancel()
-                return {"ok": True}
-            task = _active_tasks.get(run_id)
-            if task:
+                with contextlib.suppress(Exception):
+                    await agent_loop.cancel()
+            task = _active_tasks.get(rid)
+            if task and not task.done():
                 task.cancel()
-                return {"ok": True}
 
-        # No specific runId - abort the most recent active loop
-        if _active_loops:
-            last_run_id = list(_active_loops.keys())[-1]
-            await _active_loops[last_run_id].cancel()
-            return {"ok": True}
-        if _active_tasks:
-            last_task_id = list(_active_tasks.keys())[-1]
-            _active_tasks[last_task_id].cancel()
+        if run_id and (run_id in _active_loops or run_id in _active_tasks):
+            await _stop(run_id)
             return {"ok": True}
 
+        # No specific runId - abort the most recent active run.
+        rid = (list(_active_loops.keys())[-1] if _active_loops
+               else list(_active_tasks.keys())[-1] if _active_tasks else "")
+        if rid:
+            await _stop(rid)
         return {"ok": True}
 
     @app.post("/api/approval", dependencies=[Depends(auth)])
@@ -1916,6 +1988,34 @@ def create_app() -> Any:
                 for prov, model in known_models():
                     providers.setdefault(prov, []).append(model)
                 return _ok(providers)
+
+            elif method == "model.set":
+                # Switch the model new runs use. Set both active_* (what the
+                # resolver runs) and default_* (what config.get reports and the
+                # status bar shows) so the picker and the run agree.
+                from rune.config import get_config as _gc
+
+                _prov = str(params.get("provider", "")).strip()
+                _model = str(params.get("model", "")).strip()
+                if not _prov or not _model:
+                    return _err("invalid", "provider and model required")
+                _lcfg = _gc().llm
+                _lcfg.active_provider = _prov
+                _lcfg.active_model = _model
+                _lcfg.default_provider = _prov
+                _lcfg.default_model = _model
+                return _ok({"provider": _prov, "model": _model})
+
+            elif method == "reasoning.set":
+                # Set the reasoning depth new runs use (low/medium/high, or
+                # empty to clear back to the provider default).
+                from rune.config import get_config as _gc
+
+                _eff = str(params.get("effort", "")).strip().lower()
+                if _eff and _eff not in ("low", "medium", "high"):
+                    return _err("invalid", "effort must be low, medium, or high")
+                _gc().llm.reasoning_effort = _eff or None
+                return _ok({"reasoningEffort": _eff or None})
 
             # Markdown file editor (HEARTBEAT.md, MEMORY.md, learned.md, user-profile.md)
             elif method == "markdown.list":

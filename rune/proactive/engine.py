@@ -462,6 +462,10 @@ class ProactiveEngine:
             if result.frustration and result.frustration.level in ("moderate", "high"):
                 candidates.append(
                     Suggestion(
+                        # Stable id: this trigger fires every heartbeat while
+                        # the condition holds; a fresh uuid each time would
+                        # slip past every dedup layer and repeat the card.
+                        id=f"frustration-{result.frustration.level}",
                         type="warning",
                         title="Difficulty detected",
                         description=result.frustration.suggested_action,
@@ -475,6 +479,7 @@ class ProactiveEngine:
                 if need.confidence >= 0.5:
                     candidates.append(
                         Suggestion(
+                            id=f"need-{need.need_type}",
                             type="reminder",
                             title=f"Consider {need.need_type}",
                             description=_NEED_DESCRIPTIONS.get(
@@ -501,6 +506,7 @@ class ProactiveEngine:
                 if dirty_count >= 2:
                     candidates.append(
                         Suggestion(
+                            id="git-uncommitted",
                             type="reminder",
                             title="Uncommitted changes",
                             description=f"{dirty_count} files have uncommitted changes. Want to commit?",
@@ -514,6 +520,7 @@ class ProactiveEngine:
             if idle_secs and idle_secs >= 180:
                 candidates.append(
                     Suggestion(
+                        id="idle-detected",
                         type="insight",
                         title="Idle detected",
                         description="You seem idle. Need help with anything?",
@@ -536,6 +543,12 @@ class ProactiveEngine:
                 for c in open_commits:
                     candidates.append(
                         Suggestion(
+                            # Stable id per commitment row: the suggestion is
+                            # regenerated every heartbeat, and dedup at every
+                            # layer (engine _seen_ids, SSE broadcast, the web
+                            # timeline) keys on the id. A fresh uuid each tick
+                            # would re-surface the same commitment every turn.
+                            id=f"commitment-{c['id']}",
                             type="followup",
                             title="Open commitment",
                             description=f"Pending: {c['text'][:100]}",

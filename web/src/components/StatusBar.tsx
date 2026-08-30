@@ -1,7 +1,10 @@
+import { ModelPicker } from './ModelPicker';
+import { ReasoningPicker } from './ReasoningPicker';
+import { ThemeToggle } from './ThemeToggle';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { AgentState, StepInfo, TokenUsage as TokenUsageType } from '../types';
 import { TokenUsage } from './TokenUsage';
-import { PixelWolf } from './PixelWolf';
+import { RuneMark } from './RuneMark';
 
 interface StatusBarProps {
   /** Trailing slot rendered before the palette button (e.g. workspace chip) */
@@ -25,6 +28,9 @@ interface StatusBarProps {
     model: string;
     source: 'active' | 'default';
   } | null;
+  /** Reasoning depth + whether the active model accepts one. */
+  reasoningSupported?: boolean;
+  reasoningEffort?: 'low' | 'medium' | 'high' | null;
   /** Outcome of the last completed run; null when none this session. */
   lastRunSuccess?: boolean | null;
   /** Opens the ⌘K command palette. */
@@ -54,6 +60,8 @@ export function StatusBar({
   currentStepInfo,
   currentActivity,
   activeModel,
+  reasoningSupported,
+  reasoningEffort,
   approvalMode,
   lastRunSuccess = null,
   onOpenPalette,
@@ -114,7 +122,7 @@ export function StatusBar({
 
       {/* Logo */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <PixelWolf
+        <RuneMark
           state={
             !connected
               ? 'warning'
@@ -128,7 +136,7 @@ export function StatusBar({
                       ? 'failed'
                       : 'idle'
           }
-          px={1.6}
+          size={20}
           title={connected ? `RUNE (${STATE_LABELS[state]})` : 'RUNE — engine unreachable'}
         />
         <span style={{
@@ -189,34 +197,8 @@ export function StatusBar({
         </div>
       )}
 
-      {activeModel && (
-        <div
-          title={`Active model (${activeModel.source}): ${activeModel.provider}:${activeModel.model}`}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-            padding: '4px 10px',
-            background: 'var(--bg-tertiary)',
-            border: '1px solid var(--border)',
-            borderRadius: '999px',
-            color: 'var(--text-secondary)',
-            fontSize: 11,
-            minWidth: 0,
-            maxWidth: 320,
-          }}
-        >
-          <span style={{ color: 'var(--text-muted)' }}>Model</span>
-          <span style={{
-            fontFamily: 'var(--font-mono)',
-            whiteSpace: 'nowrap',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-          }}>
-            {activeModel.provider}:{activeModel.model}
-          </span>
-        </div>
-      )}
+      {activeModel && <ModelPicker active={activeModel} />}
+      {reasoningSupported && <ReasoningPicker effort={reasoningEffort ?? null} />}
 
       {/* Token usage compact */}
       {tokenUsage && (
@@ -270,8 +252,8 @@ export function StatusBar({
       {onToggleWorkbench && (
         <button
           onClick={onToggleWorkbench}
-          title="Toggle workbench: files, diff, terminal (⌘J)"
-          aria-label="Toggle workbench"
+          title="Toggle Work panel: files, diff, terminal (⌘J)"
+          aria-label="Toggle Work panel"
           aria-pressed={workbenchOpen}
           style={{
             display: 'flex', alignItems: 'center', gap: 5, padding: '3px 8px',
@@ -285,9 +267,11 @@ export function StatusBar({
             <rect x="1.5" y="2.5" width="11" height="9" rx="1" />
             <path d="M8.5 2.5v9" />
           </svg>
-          Workbench
+          Work
         </button>
       )}
+
+      <ThemeToggle />
 
       {/* Safety prompts are off — the run can write to the network or run a
           risky command without asking, so say so where the model is shown. */}

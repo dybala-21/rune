@@ -1,9 +1,13 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ActivitySummary, OrchestrationState, StepInfo, ToolCall, TrustInfo } from '../types';
 import { normalizeToolName, isCodingToolName, argString, inferWorkPhase, inferActivityMode, computeRunVerdict, type WorkPhase } from '../utils/tooling';
-import { PixelWolf, type WolfState } from './PixelWolf';
+import { RuneMark, type MarkState } from './RuneMark';
 import { fetchWorkspaceDiff, readWorkspaceFile } from '../api';
-import { TerminalPane } from './TerminalPane';
+import { HighlightedCode } from './Code';
+import { Markdown } from './Markdown';
+import { langFromPath } from '../utils/highlight';
+// Terminal pulls in xterm (~330 KB). Load it only when the tab is opened.
+const TerminalPane = lazy(() => import('./TerminalPane').then(m => ({ default: m.TerminalPane })));
 import { ProgressPane } from './ProgressPane';
 
 /**
@@ -215,6 +219,7 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
   const [fileContent, setFileContent] = useState('');
   const [fileError, setFileError] = useState('');
   const [fileLoaded, setFileLoaded] = useState(false);
+  const [filePreview, setFilePreview] = useState(true);
 
   const loadDiff = useCallback(() => {
     setDiffLoading(true);
@@ -263,7 +268,7 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
 
   const startedAt = toolCalls.length > 0 ? toolCalls[0].timestamp : null;
 
-  let petState: WolfState = 'idle';
+  let petState: MarkState = 'idle';
   if (isRunning) petState = phase === 'verifying' ? 'thinking' : 'working';
   else if (verdictOk !== null) petState = verdictOk ? 'passed' : 'failed';
 
@@ -305,7 +310,7 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
         background: 'var(--bg-secondary)',
         borderBottom: '1px solid var(--border)',
       }}>
-        <PixelWolf state={petState} px={1.5} title={`RUNE workbench (${petState})`} />
+        <RuneMark state={petState} size={18} title={`RUNE workbench (${petState})`} />
         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-primary)' }}>
           Workbench
         </span>
@@ -427,22 +432,35 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
           flex: 1, overflow: 'auto', padding: 14,
           fontFamily: 'var(--font-mono)', fontSize: 11.5, lineHeight: 1.6,
         }}>
-          {diffText ? diffText.replace(/^```diff\n|\n```$/g, '').split('\n').map((l, i) => (
-            <div key={i} style={{
-              whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-              color: l.startsWith('+') ? 'var(--success)'
-                : l.startsWith('-') ? 'var(--danger)'
-                : l.startsWith('@@') ? 'var(--accent)'
-                : 'var(--text-muted)',
-            }}>{l || '\u00A0'}</div>
-          )) : (
+          {diffText ? diffText.replace(/^```diff\n|\n```$/g, '').split('\n').map((l, i) => {
+            const added = l.startsWith('+');
+            const removed = l.startsWith('-');
+            const hunk = l.startsWith('@@');
+            return (
+              <div key={i} style={{
+                whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+                margin: '0 -14px', padding: '0 14px',
+                background: added ? 'var(--success-subtle)'
+                  : removed ? 'var(--danger-subtle)'
+                  : hunk ? 'var(--accent-subtle)' : 'transparent',
+                color: added ? 'var(--success)'
+                  : removed ? 'var(--danger)'
+                  : hunk ? 'var(--accent)'
+                  : 'var(--text-muted)',
+              }}>{l || '\u00A0'}</div>
+            );
+          }) : (
             <div style={{ color: 'var(--text-muted)' }}>{diffLoading ? 'Loading diff…' : 'No diff yet.'}</div>
           )}
         </div>
       )}
 
       {/* Terminal — mounted only when selected so no PTY opens otherwise */}
-      {tab === 'terminal' && <TerminalPane />}
+      {tab === 'terminal' && (
+        <Suspense fallback={<div className="wb-loading">Loading terminal…</div>}>
+          <TerminalPane />
+        </Suspense>
+      )}
 
       {/* File view */}
       {tab === 'file' && (
@@ -466,19 +484,24 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
               border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
               padding: '5px 10px', fontSize: 11.5, cursor: 'pointer',
             }}>Open</button>
+            {langFromPath(filePath) === 'markdown' && fileContent && (
+              <button type="button" onClick={() => setFilePreview(p => !p)} style={{
+                background: 'var(--bg-tertiary)', color: 'var(--text-secondary)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                padding: '5px 10px', fontSize: 11.5, cursor: 'pointer',
+              }}>{filePreview ? 'Raw' : 'Preview'}</button>
+            )}
           </form>
-          <div style={{
-            flex: 1, overflow: 'auto', padding: 14,
-            fontFamily: 'var(--font-mono)', fontSize: 11.5, lineHeight: 1.6,
-            whiteSpace: 'pre-wrap', wordBreak: 'break-all', color: 'var(--text-primary)',
-          }}>
+          <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
             {fileError
-              ? <span style={{ color: 'var(--danger)' }}>{fileError}</span>
+              ? <div style={{ padding: 14, color: 'var(--danger)', fontFamily: 'var(--font-mono)', fontSize: 11.5 }}>{fileError}</div>
               : fileContent
-                ? fileContent
+                ? (langFromPath(filePath) === 'markdown' && filePreview
+                    ? <div style={{ padding: '16px 18px', fontSize: 14, lineHeight: 1.7, color: 'var(--text-primary)' }}><Markdown content={fileContent} /></div>
+                    : <HighlightedCode code={fileContent} lang={langFromPath(filePath)} lineNumbers />)
                 : fileLoaded
-                  ? <span style={{ color: 'var(--text-muted)' }}>(empty file)</span>
-                  : <span style={{ color: 'var(--text-muted)' }}>Open a file from the Activity tab or enter a path.</span>}
+                  ? <div style={{ padding: 14, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 11.5 }}>(empty file)</div>
+                  : <div style={{ padding: 14, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 11.5 }}>Open a file from the Activity tab or enter a path.</div>}
           </div>
         </div>
       )}

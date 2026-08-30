@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { useAgent } from './hooks/useAgent';
 import { useSessionHistory } from './hooks/useSessionHistory';
 import { ChatPanel } from './components/ChatPanel';
@@ -6,15 +6,18 @@ import { SessionSidebar } from './components/SessionSidebar';
 import { SettingsSidebar } from './components/SettingsSidebar';
 import { StatusBar } from './components/StatusBar';
 import { InputArea, type InputAreaHandle } from './components/InputArea';
-import { SkillsPanel } from './components/SkillsPanel';
-import { EnvPanel } from './components/EnvPanel';
-import { CronPanel } from './components/CronPanel';
-import { MCPPanel } from './components/MCPPanel';
-import { MarkdownPanel } from './components/MarkdownPanel';
+// Config panels are overlays, closed on first paint. Loading them on open
+// keeps their code (and MCP/Skills/Cron weight) out of the initial bundle.
+const SkillsPanel = lazy(() => import('./components/SkillsPanel').then(m => ({ default: m.SkillsPanel })));
+const EnvPanel = lazy(() => import('./components/EnvPanel').then(m => ({ default: m.EnvPanel })));
+const CronPanel = lazy(() => import('./components/CronPanel').then(m => ({ default: m.CronPanel })));
+const MCPPanel = lazy(() => import('./components/MCPPanel').then(m => ({ default: m.MCPPanel })));
+const MarkdownPanel = lazy(() => import('./components/MarkdownPanel').then(m => ({ default: m.MarkdownPanel })));
 import { WorkbenchPanel } from './components/WorkbenchPanel';
 import { CommandK, type Command } from './components/CommandK';
 import { WorkspaceChip } from './components/WorkspaceChip';
 import { InlineWorkspacePicker } from './components/InlineWorkspacePicker';
+import { Toaster } from './components/Toaster';
 import { normalizeToolName, isCodingToolName, inferWorkPhase, inferActivityMode, computeRunVerdict } from './utils/tooling';
 import { fetchConfig, fetchSessions, type ConfigInfo, type SessionInfo } from './api';
 
@@ -256,6 +259,8 @@ export function App() {
         currentStepInfo={!isViewingHistory ? agent.currentStepInfo : undefined}
         currentActivity={currentActivity}
         activeModel={configInfo?.activeModel ?? null}
+        reasoningSupported={configInfo?.reasoningSupported}
+        reasoningEffort={configInfo?.reasoningEffort ?? null}
         approvalMode={configInfo?.approvalMode}
         lastRunSuccess={runVerdict}
         onOpenPalette={() => setPaletteOpen(true)}
@@ -533,6 +538,16 @@ export function App() {
                 toolCalls={displayToolCalls}
                 thinkingBlocks={displayThinkingBlocks}
                 isRunning={!isViewingHistory && agent.state === 'running'}
+                onRegenerate={
+                  !isViewingHistory && agent.connected && agent.state === 'idle'
+                    ? agent.regenerate
+                    : undefined
+                }
+                onEditResend={
+                  !isViewingHistory && agent.connected && agent.state === 'idle'
+                    ? agent.sendMessage
+                    : undefined
+                }
                 activitySummary={displayActivitySummary}
                 delegateEvents={displayDelegateEvents}
                 compactionEvents={displayCompactionEvents}
@@ -557,7 +572,7 @@ export function App() {
                 inferWorkPhase(agent.toolCalls) !== 'analyzing' && (
                 <button
                   onClick={() => { setWorkbenchDismissed(false); setWorkbenchOpen(true); }}
-                  title="Show the coding workbench (⌘J)"
+                  title="Show the Work panel (⌘J)"
                   style={{
                     position: 'absolute',
                     top: 12,
@@ -576,7 +591,7 @@ export function App() {
                     cursor: 'pointer',
                   }}
                 >
-                  Workbench {'›'}
+                  Work {'›'}
                 </button>
               )}
 
@@ -637,31 +652,34 @@ export function App() {
         </div>
       </div>
 
-      {/* Panel overlays */}
-      {skillsPanelOpen && (
-        <SkillsPanel
-          onClose={() => setSkillsPanelOpen(false)}
-          initialSkillName={skillsPanelInitial}
-        />
-      )}
-      {envPanelOpen && (
-        <EnvPanel onClose={() => setEnvPanelOpen(false)} />
-      )}
-      {cronPanelOpen && (
-        <CronPanel onClose={() => setCronPanelOpen(false)} />
-      )}
-      {mcpPanelOpen && (
-        <MCPPanel onClose={() => setMcpPanelOpen(false)} />
-      )}
-      {markdownPanelOpen && (
-        <MarkdownPanel onClose={() => setMarkdownPanelOpen(false)} />
-      )}
+      {/* Panel overlays — lazy-loaded, so nothing paints until the chunk lands */}
+      <Suspense fallback={null}>
+        {skillsPanelOpen && (
+          <SkillsPanel
+            onClose={() => setSkillsPanelOpen(false)}
+            initialSkillName={skillsPanelInitial}
+          />
+        )}
+        {envPanelOpen && (
+          <EnvPanel onClose={() => setEnvPanelOpen(false)} />
+        )}
+        {cronPanelOpen && (
+          <CronPanel onClose={() => setCronPanelOpen(false)} />
+        )}
+        {mcpPanelOpen && (
+          <MCPPanel onClose={() => setMcpPanelOpen(false)} />
+        )}
+        {markdownPanelOpen && (
+          <MarkdownPanel onClose={() => setMarkdownPanelOpen(false)} />
+        )}
+      </Suspense>
 
       <CommandK
         open={paletteOpen}
         commands={paletteCommands}
         onClose={() => setPaletteOpen(false)}
       />
+      <Toaster />
     </div>
   );
 }

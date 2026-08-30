@@ -15,8 +15,7 @@ import { ProactiveCard } from './ProactiveCard';
 import { ToolCallCard, getToolColor } from './ToolCallCard';
 import { ThinkingBlockView } from './ThinkingBlock';
 import { normalizeToolName, inferWorkPhase } from '../utils/tooling';
-import { PixelWolf } from './PixelWolf';
-import { buildCompletionNarrative } from '../utils/completionSummary';
+import { RuneMark } from './RuneMark';
 import {
   APPROVAL_COPY,
   QUESTION_COPY,
@@ -30,6 +29,10 @@ interface ChatPanelProps {
   toolCalls: ToolCall[];
   thinkingBlocks: ThinkingBlock[];
   isRunning: boolean;
+  /** Re-run the last turn (Regenerate on the latest assistant message). */
+  onRegenerate?: () => void;
+  /** Resend an edited user message as a new turn. */
+  onEditResend?: (text: string) => void;
   activitySummary: ActivitySummary | null;
   delegateEvents: DelegateItem[];
   compactionEvents: CompactionItem[];
@@ -55,6 +58,8 @@ export function ChatPanel({
   toolCalls,
   thinkingBlocks,
   isRunning,
+  onRegenerate,
+  onEditResend,
   activitySummary,
   delegateEvents,
   compactionEvents,
@@ -115,10 +120,40 @@ export function ChatPanel({
     | { type: 'compaction'; item: CompactionItem };
 
   // Rebuilt only when a source list changes, not on every streaming re-render.
+  const lastAssistantId = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'assistant') return messages[i].id;
+    }
+    return null;
+  }, [messages]);
+
+  // The answer currently streaming = the last assistant message that comes
+  // after the last user turn. Only this one is pinned; a previous turn's answer
+  // (before a newer user message) must keep its real position.
+  const streamingAnswerId = useMemo(() => {
+    if (!isRunning) return null;
+    let lastUserIdx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') { lastUserIdx = i; break; }
+    }
+    for (let i = messages.length - 1; i > lastUserIdx; i--) {
+      if (messages[i].role === 'assistant') return messages[i].id;
+    }
+    return null;
+  }, [messages, isRunning]);
+
   const timeline = useMemo<TimelineItem[]>(() => [
     ...messages
       .filter(m => m.content?.trim() || m.trust || m.suggestion)
-      .map(m => ({ type: 'message' as const, item: m, ts: m.timestamp })),
+      // Pin the streaming answer to the end: it is created at the first token
+      // (an early timestamp) but its tools arrive after, so without this it
+      // renders above them and then jumps to the bottom when the run finishes.
+      // Keeping it last throughout gives a stable "tools, then answer" order.
+      .map(m => ({
+        type: 'message' as const,
+        item: m,
+        ts: m.id === streamingAnswerId ? Number.MAX_SAFE_INTEGER : m.timestamp,
+      })),
     ...toolCalls
       .filter(t => t.toolName?.trim())
       .map(t => ({ type: 'tool' as const, item: t, ts: t.timestamp })),
@@ -131,7 +166,8 @@ export function ChatPanel({
     ...compactionEvents
       .filter(c => c.message?.trim())
       .map(c => ({ type: 'compaction' as const, item: c, ts: c.timestamp })),
-  ].sort((a, b) => a.ts - b.ts), [messages, toolCalls, thinkingBlocks, delegateEvents, compactionEvents]);
+  ].sort((a, b) => a.ts - b.ts),
+  [messages, toolCalls, thinkingBlocks, delegateEvents, compactionEvents, streamingAnswerId]);
 
   const grouped = useMemo(() => groupConsecutiveTools(timeline), [timeline]);
 
@@ -140,14 +176,16 @@ export function ChatPanel({
     return toolCalls[toolCalls.length - 1].id;
   }, [isRunning, toolCalls]);
 
-  const lastAssistantId = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === 'assistant') return messages[i].id;
-    }
-    return null;
-  }, [messages]);
-
   const isEmpty = timeline.length === 0;
+
+  // Render only the most recent slice so a long run does not put thousands of
+  // DOM nodes in the scroll container; older entries stay in state (search,
+  // export) and reveal on request. Rendering the tail keeps stick-to-bottom.
+  const RENDER_STEP = 400;
+  const [renderCap, setRenderCap] = useState(RENDER_STEP);
+  useEffect(() => { setRenderCap(RENDER_STEP); }, [conversationKey]);
+  const hiddenCount = Math.max(0, grouped.length - renderCap);
+  const visible = hiddenCount > 0 ? grouped.slice(grouped.length - renderCap) : grouped;
 
   return (
     <div ref={scrollContainerRef} style={{
@@ -170,7 +208,17 @@ export function ChatPanel({
       }}>
         {isEmpty && <EmptyState onSuggest={onSuggest} />}
 
-        {grouped.map((entry, idx) => {
+        {hiddenCount > 0 && (
+          <button
+            className="msg-action-btn"
+            onClick={() => setRenderCap(c => c + RENDER_STEP * 4)}
+            style={{ alignSelf: 'center', margin: '4px 0 12px' }}
+          >
+            Show earlier ({hiddenCount} hidden)
+          </button>
+        )}
+
+        {visible.map((entry, idx) => {
           if (entry.type === 'group') {
             return (
               <ToolGroup
@@ -183,7 +231,7 @@ export function ChatPanel({
           }
           const item = entry.item;
           if (item.type === 'message') {
-            const prevItem = idx > 0 ? grouped[idx - 1] : null;
+            const prevItem = idx > 0 ? visible[idx - 1] : null;
             const needsGap = prevItem && (prevItem.type === 'group' || (prevItem.type === 'single' && prevItem.item.type !== 'message'));
             if (item.item.trust) {
               return (
@@ -210,6 +258,16 @@ export function ChatPanel({
                     isRunning
                     && item.item.role === 'assistant'
                     && item.item.id === lastAssistantId
+                  }
+                  onRegenerate={
+                    !isRunning
+                    && item.item.role === 'assistant'
+                    && item.item.id === lastAssistantId
+                      ? onRegenerate
+                      : undefined
+                  }
+                  onEdit={
+                    !isRunning && item.item.role === 'user' ? onEditResend : undefined
                   }
                 />
               </div>
@@ -255,13 +313,8 @@ export function ChatPanel({
           <RunningIndicator toolCalls={toolCalls} currentStepInfo={currentStepInfo} />
         )}
 
-        {!isRunning && activitySummary && (
-          <>
-            <CompletionNotice summary={activitySummary} />
-            {activitySummary.totalToolCalls > 0 && (
-              <ActivitySummaryBar summary={activitySummary} />
-            )}
-          </>
+        {!isRunning && activitySummary && activitySummary.totalToolCalls > 0 && (
+          <ActivitySummaryBar summary={activitySummary} />
         )}
 
         {/* In-stream extras (e.g. the workspace picker) — rendered inside the
@@ -346,7 +399,7 @@ function EmptyState({ onSuggest }: { onSuggest?: (text: string) => void }) {
       margin: '0 auto',
       padding: '40px 8px',
     }}>
-      <PixelWolf state="idle" px={3.5} title="RUNE" />
+      <RuneMark state="idle" size={56} title="RUNE" />
       <div style={{
         fontSize: 20,
         fontWeight: 600,
@@ -472,7 +525,6 @@ function RunningIndicator({ toolCalls, currentStepInfo }: { toolCalls: ToolCall[
       gap: 10,
       color: 'var(--text-secondary)',
     }}>
-      <PixelWolf state="working" px={1.4} title="RUNE is working" />
       <span className="shimmer-text" style={{ fontSize: 13, fontWeight: 500 }}>
         {activity || 'Working through the request...'}
       </span>
@@ -507,33 +559,6 @@ function RunningIndicator({ toolCalls, currentStepInfo }: { toolCalls: ToolCall[
 
 // ── Activity summary ──
 
-function CompletionNotice({ summary }: { summary: ActivitySummary }) {
-  return (
-    <div className="fade-in" style={{
-      marginTop: 8,
-      padding: '2px 0 0',
-      display: 'flex',
-      alignItems: 'center',
-      gap: 8,
-      color: 'var(--text-secondary)',
-    }}>
-      <span style={{
-        width: 8,
-        height: 8,
-        borderRadius: '50%',
-        background: summary.success ? 'var(--success)' : 'var(--danger)',
-        flexShrink: 0,
-      }} />
-      <span style={{
-        fontSize: 14,
-        color: 'var(--text-primary)',
-      }}>
-        {buildCompletionNarrative(summary)}
-      </span>
-    </div>
-  );
-}
-
 function ActivitySummaryBar({ summary }: { summary: ActivitySummary }) {
   const items: Array<{ label: string; value: number }> = [];
   if (summary.totalToolCalls > 0) items.push({ label: 'Tools', value: summary.totalToolCalls });
@@ -555,6 +580,10 @@ function ActivitySummaryBar({ summary }: { summary: ActivitySummary }) {
       gap: 16,
       fontSize: 12,
     }}>
+      <span style={{
+        width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+        background: summary.success ? 'var(--success)' : 'var(--danger)',
+      }} />
       {items.map(item => (
         <div key={item.label} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
           <span style={{ color: 'var(--text-muted)' }}>{item.label}</span>

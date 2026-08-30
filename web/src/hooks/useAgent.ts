@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { toast } from '../utils/toast';
 import { useSSE } from './useSSE';
 import * as api from '../api';
 import { computeActivitySummary } from '../utils/tooling';
@@ -248,6 +249,9 @@ export function useAgent() {
 
   // 현재 step의 텍스트를 보관 (교체 방식 — step.text는 delta가 아니라 해당 step 전체 텍스트)
   const pendingTextRef = useRef('');
+  // Trailing-debounced localStorage persistence (see the effect below).
+  const pendingPersistRef = useRef<PersistedLiveState | null>(null);
+  const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 현재 run의 assistant 메시지 ID (하나의 run에 하나의 assistant 메시지만 유지)
   const assistantMsgIdRef = useRef<string | null>(null);
 
@@ -333,12 +337,23 @@ export function useAgent() {
     setCurrentStepInfo(null);
     setSavedDraft(EMPTY_SAVED_DRAFT);
     setDraftDecisionPending(false);
+    // Drop any debounced write in flight, or it would restore the cleared
+    // conversation 400ms after this immediate reset.
+    if (persistTimerRef.current) {
+      clearTimeout(persistTimerRef.current);
+      persistTimerRef.current = null;
+    }
+    pendingPersistRef.current = null;
     persistLiveState(createEmptyLiveState());
   }, []);
 
+  // Serializing the whole live state (up to 1200 msgs + 3000 tool calls) on
+  // every streamed token would stringify megabytes many times a second. Hold
+  // the latest snapshot and write it on a trailing debounce; a pending write is
+  // flushed on unmount so the final state is never lost.
   useEffect(() => {
     if (draftDecisionPending) return;
-    persistLiveState({
+    pendingPersistRef.current = {
       version: 1,
       messages: trimTail(messages, MAX_MESSAGES),
       toolCalls: trimTail(toolCalls, MAX_TOOL_CALLS),
@@ -347,8 +362,21 @@ export function useAgent() {
       activitySummary,
       delegateEvents: trimTail(delegateEvents, MAX_DELEGATE_EVENTS),
       compactionEvents: trimTail(compactionEvents, MAX_COMPACTION_EVENTS),
-    });
+    };
+    if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
+    persistTimerRef.current = setTimeout(() => {
+      persistTimerRef.current = null;
+      if (pendingPersistRef.current) {
+        persistLiveState(pendingPersistRef.current);
+        pendingPersistRef.current = null;
+      }
+    }, 400);
   }, [messages, toolCalls, thinkingBlocks, tokenUsage, activitySummary, delegateEvents, compactionEvents, draftDecisionPending]);
+
+  useEffect(() => () => {
+    if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
+    if (pendingPersistRef.current) persistLiveState(pendingPersistRef.current);
+  }, []);
 
   // sseOn (addEventListener)은 useCallback([], [])로 항상 동일 참조.
   // flushTextDelta도 useCallback([], [])로 안정.
@@ -371,7 +399,9 @@ export function useAgent() {
       // a proactive/scheduled run). Suppress by session identity when the
       // server sends it; fall back to comparing against the user's last
       // message for older payloads without a sessionId.
-      const ownRun = Boolean(data.sessionId) && data.sessionId === api.getLiveSessionId();
+      const ownRun =
+        (Boolean(data.sessionId) && data.sessionId === api.getLiveSessionId()) ||
+        (Boolean(data.runId) && data.runId === api.getCurrentRunId());
       setMessages(prev => {
         const lastUser = ownRun ? null : [...prev].reverse().find(m => m.role === 'user');
         if (ownRun || (lastUser && lastUser.content.trim().startsWith(data.goal.trim()))) {
@@ -396,21 +426,28 @@ export function useAgent() {
       const conf = typeof d.confidence === 'number' ? d.confidence : 0.5;
       const intensity: ProactiveSuggestion['intensity'] =
         conf >= 0.8 ? 'intervene' : conf >= 0.6 ? 'suggest' : 'nudge';
-      setMessages(prev => appendWithLimit(prev, {
-        id: nextId(),
-        role: 'system',
-        content: d.title || d.description || 'RUNE has a suggestion',
-        timestamp: Date.now(),
-        suggestion: {
-          id: d.id || nextId(),
-          headline: d.title || '',
-          body: d.description || '',
-          actions: [],
-          confidence: conf,
-          intensity,
+      const suggestionId = d.id || nextId();
+      setMessages(prev => {
+        // The engine re-emits the same open suggestion on every heartbeat.
+        // Without this, each tick appended another identical card and buried
+        // the conversation. One card per suggestion id.
+        if (prev.some(m => m.suggestion?.id === suggestionId)) return prev;
+        return appendWithLimit(prev, {
+          id: nextId(),
+          role: 'system',
+          content: d.title || d.description || 'RUNE has a suggestion',
           timestamp: Date.now(),
-        },
-      }, MAX_MESSAGES));
+          suggestion: {
+            id: suggestionId,
+            headline: d.title || '',
+            body: d.description || '',
+            actions: [],
+            confidence: conf,
+            intensity,
+            timestamp: Date.now(),
+          },
+        }, MAX_MESSAGES);
+      });
     }));
 
     unsubs.push(sseOn('agent_complete', (raw) => {
@@ -421,6 +458,13 @@ export function useAgent() {
       setPendingQuestion(null);
       setCurrentStepInfo(null);
       if (data.usage) setTokenUsage(data.usage);
+
+      // Notify when the run finishes while the tab is in the background — the
+      // one moment a toast earns its keep, since the user has looked away.
+      if (typeof document !== 'undefined' && document.hidden) {
+        const ok = data.success !== false;
+        toast[ok ? 'success' : 'error'](ok ? 'RUNE finished the task' : 'RUNE stopped — needs a look');
+      }
 
       // Compute activity summary from tool calls
       setToolCalls(prev => {
@@ -727,6 +771,17 @@ export function useAgent() {
     });
   }, []);
 
+  // Re-run the most recent user turn (the Regenerate action, same as /retry).
+  const regenerate = useCallback(() => {
+    const lastUser = [...messagesRef.current].reverse().find(m => m.role === 'user');
+    if (!lastUser) return;
+    beginLiveSession();
+    setMessages(prev => appendWithLimit(prev, {
+      id: nextId(), role: 'user', content: lastUser.content, timestamp: Date.now(),
+    }, MAX_MESSAGES));
+    postToServer(lastUser.content);
+  }, [beginLiveSession, postToServer]);
+
   // Client-side slash commands; everything else goes to the server and
   // answers over the command_result SSE event.
   const handleClientCommand = useCallback((text: string): boolean => {
@@ -857,8 +912,13 @@ export function useAgent() {
   }, []);
 
   const abort = useCallback(() => {
+    // Reflect the stop immediately — the backend only cancels between steps
+    // over the network, so without this the button feels dead until the run
+    // actually winds down. agent_aborted then confirms and cleans up.
+    flushTextDelta();
+    setState('idle');
     api.sendAbort().catch(err => pushSystemError('Failed to stop the run', err));
-  }, [pushSystemError]);
+  }, [pushSystemError, flushTextDelta]);
 
   const respondApproval = useCallback((decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) => {
     if (!pendingApproval) return;
@@ -906,6 +966,7 @@ export function useAgent() {
     discardSavedDraft,
     resetLiveConversation,
     sendMessage,
+    regenerate,
     abort,
     respondApproval,
     respondQuestion,

@@ -79,29 +79,33 @@ function callLabel(tc: ToolCall): string {
   }
 }
 
+interface StepSource {
+  kind: 'search' | 'page';
+  label: string;
+  url?: string;
+  count: number;
+}
+
 interface StepGroup {
   step: number;
   summary: string;
   failedCount: number;
+  /** searches/pages that happened in this step, in first-touch order */
+  sources: StepSource[];
 }
 
 interface Derived {
   groups: StepGroup[];
   /** path → verbs used on it, in first-touch order */
   files: Array<[string, string[]]>;
-  queries: string[];
-  /** host+path → {sample url, hit count} — pagination collapses to ×N */
-  pages: Array<[string, { url: string; count: number }]>;
   /** what the agent is doing right now (newest pending, else newest call) */
   nowLabel: string | null;
 }
 
 /** Everything the pane renders, derived in a single pass over the calls. */
 function derive(toolCalls: ToolCall[]): Derived {
-  const groups: Array<StepGroup & { labels: Set<string>; extra: number }> = [];
+  const groups: Array<StepGroup & { labels: Set<string>; extra: number; srcKeys: Set<string> }> = [];
   const files = new Map<string, Set<string>>();
-  const queries: string[] = [];
-  const pages = new Map<string, { url: string; count: number }>();
   let pendingLabel: string | null = null;
   for (const tc of toolCalls) {
     const label = callLabel(tc);
@@ -110,7 +114,7 @@ function derive(toolCalls: ToolCall[]): Derived {
     const step = tc.step ?? 0;
     let g = groups[groups.length - 1];
     if (!g || g.step !== step) {
-      g = { step, summary: '', failedCount: 0, labels: new Set(), extra: 0 };
+      g = { step, summary: '', failedCount: 0, labels: new Set(), extra: 0, sources: [], srcKeys: new Set() };
       groups.push(g);
     }
     if (!g.labels.has(label)) {
@@ -127,8 +131,12 @@ function derive(toolCalls: ToolCall[]): Derived {
         files.get(path)!.add(name.replace('file.', ''));
       }
     } else if (name === 'web.search') {
+      // Attach the search to its own step, deduped within that step.
       const q = argString(tc.args, 'query', 'q');
-      if (q && !queries.includes(q)) queries.push(q);
+      if (q && !g.srcKeys.has(`s:${q}`)) {
+        g.srcKeys.add(`s:${q}`);
+        g.sources.push({ kind: 'search', label: q, count: 1 });
+      }
     } else if (name === 'web.fetch' || isBrowserToolName(name)) {
       const url = argString(tc.args, 'url');
       if (url) {
@@ -137,9 +145,9 @@ function derive(toolCalls: ToolCall[]): Derived {
           const u = new URL(url);
           key = u.host + u.pathname;
         } catch { /* non-URL string: group by the raw value */ }
-        const entry = pages.get(key);
-        if (entry) entry.count += 1;
-        else pages.set(key, { url, count: 1 });
+        const existing = g.sources.find(s => s.kind === 'page' && s.label === key);
+        if (existing) existing.count += 1;
+        else { g.srcKeys.add(`p:${key}`); g.sources.push({ kind: 'page', label: key, url, count: 1 }); }
       }
     }
   }
@@ -149,10 +157,9 @@ function derive(toolCalls: ToolCall[]): Derived {
       step: g.step,
       failedCount: g.failedCount,
       summary: [...g.labels].join(' · ') + (g.extra > 0 ? ` +${g.extra}` : ''),
+      sources: g.sources,
     })),
     files: [...files.entries()].map(([p, verbs]) => [p, [...verbs]]),
-    queries,
-    pages: [...pages.entries()],
     nowLabel: pendingLabel ?? (last ? callLabel(last) : null),
   };
 }
@@ -207,6 +214,7 @@ interface BandSpec {
   note?: string;
   details?: string[];
   showEvidence?: boolean;
+  live?: boolean;
 }
 
 /**
@@ -237,12 +245,14 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
       note: 'respond in the chat',
     };
   } else if (isRunning) {
+    // The one thing to draw the eye while a run is live: what it's doing now.
     spec = {
-      color: 'var(--border)', bg: 'var(--bg-secondary)',
+      color: 'var(--accent)', bg: 'var(--accent-subtle)',
       glyph: <span className="spinner" style={{ width: 12, height: 12, flexShrink: 0 }} />,
       title: nowLabel ?? 'working…',
       titleMono: true,
       note: stepNumber !== null ? `step ${stepNumber}` : undefined,
+      live: true,
     };
   } else if (verdictOk === null) {
     return null;
@@ -311,6 +321,16 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
         {spec.glyph}
+        {spec.live && (
+          <span style={{
+            fontSize: 9, fontWeight: 700, letterSpacing: '0.1em',
+            color: 'var(--accent)', background: 'var(--accent-subtle)',
+            padding: '1px 5px', borderRadius: 4, flexShrink: 0,
+            fontFamily: 'var(--font-mono)',
+          }}>
+            NOW
+          </span>
+        )}
         <span style={{
           color: 'var(--text-primary)', flex: 1, wordBreak: 'break-word',
           fontSize: 12.5,
@@ -365,7 +385,7 @@ export const ProgressPane = memo(function ProgressPane({
   toolCalls, mode, isRunning, currentStep, trust, activitySummary, orchestration, awaiting = null, onOpenFile,
 }: ProgressPaneProps) {
   const verdictOk = computeRunVerdict(trust, activitySummary);
-  const { groups, files, queries, pages, nowLabel } = useMemo(() => derive(toolCalls), [toolCalls]);
+  const { groups, files, nowLabel } = useMemo(() => derive(toolCalls), [toolCalls]);
 
   const listRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -469,39 +489,69 @@ export const ProgressPane = memo(function ProgressPane({
               : runEndedHere ? 'failed' : 'done';
             return (
               <div key={`${g.step}-${i}`} style={{
-                ...rowStyle,
                 position: 'relative',
-                paddingLeft: 0,
-                background: live ? 'var(--bg-secondary)' : undefined,
+                padding: live ? '2px 0 4px 8px' : undefined,
+                background: live ? 'var(--accent-subtle)' : undefined,
                 borderRadius: live ? 6 : undefined,
+                borderLeft: live ? '2px solid var(--accent)' : undefined,
               }}>
-                <span style={{
-                  position: 'relative', zIndex: 1,
-                  background: 'var(--code-bg)', borderRadius: '50%',
-                  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                }}>
-                  <StatusGlyph kind={kind} />
-                </span>
-                <span style={{
-                  color: 'var(--text-muted)', flexShrink: 0, fontSize: 10.5,
-                  fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums',
-                  minWidth: 14, textAlign: 'right',
-                }}>
-                  {i + 1}
-                </span>
-                {/* time gradient: past steps recede, the live one stays bright */}
-                <span style={{
-                  color: live ? 'var(--text-primary)' : 'var(--text-muted)',
-                  flex: 1,
-                  fontFamily: 'var(--font-mono)',
-                  fontSize: 11.5,
-                }}>
-                  {g.summary}
-                </span>
-                {g.failedCount > 0 && (
-                  <span style={{ color: 'var(--warning)', fontSize: 10.5, flexShrink: 0 }}>
-                    {g.failedCount} failed
+                <div style={rowStyle}>
+                  <span style={{
+                    position: 'relative', zIndex: 1,
+                    background: 'var(--code-bg)', borderRadius: '50%',
+                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                  }}>
+                    <StatusGlyph kind={kind} />
                   </span>
+                  <span style={{
+                    color: 'var(--text-muted)', flexShrink: 0, fontSize: 10.5,
+                    fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums',
+                    minWidth: 14, textAlign: 'right',
+                  }}>
+                    {i + 1}
+                  </span>
+                  {/* time gradient: past steps recede, the live one stays bright */}
+                  <span style={{
+                    color: live ? 'var(--text-primary)' : 'var(--text-muted)',
+                    flex: 1,
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 11.5,
+                  }}>
+                    {g.summary}
+                  </span>
+                  {g.failedCount > 0 && (
+                    <span style={{ color: 'var(--warning)', fontSize: 10.5, flexShrink: 0 }}>
+                      {g.failedCount} failed
+                    </span>
+                  )}
+                </div>
+                {/* Sources from this step only, nested under it. */}
+                {g.sources.length > 0 && (
+                  <div style={{ paddingLeft: 30, display: 'flex', flexDirection: 'column', gap: 1, marginTop: 1 }}>
+                    {g.sources.map(src => (
+                      <div key={`${src.kind}:${src.label}`} style={{
+                        display: 'flex', gap: 6, alignItems: 'baseline',
+                        fontSize: 10.5, color: 'var(--text-muted)',
+                      }}>
+                        <span style={{ flexShrink: 0, opacity: 0.8 }}>
+                          {src.kind === 'search' ? '⌕' : '↳'}
+                        </span>
+                        <span
+                          title={src.url ?? src.label}
+                          style={{
+                            flex: 1, wordBreak: 'break-all',
+                            fontFamily: src.kind === 'page' ? 'var(--font-mono)' : undefined,
+                            color: 'var(--text-secondary)',
+                          }}
+                        >
+                          {truncate(src.label, src.kind === 'page' ? 56 : 72)}
+                        </span>
+                        {src.count > 1 && (
+                          <span style={{ flexShrink: 0, opacity: 0.7 }}>×{src.count}</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
                 )}
               </div>
             );
@@ -542,33 +592,6 @@ export const ProgressPane = memo(function ProgressPane({
               <span style={{ color: 'var(--text-muted)', fontSize: 10.5, flexShrink: 0 }}>
                 {verbs.join(' · ')}
               </span>
-            </div>
-          ))}
-        </>
-      )}
-      {(mode !== 'coding' && (queries.length > 0 || pages.length > 0)) && (
-        <>
-          <SectionTitle label="Sources" count={queries.length + pages.length} />
-          {queries.map(q => (
-            <div key={`q-${q}`} style={rowStyle}>
-              <span style={{ color: 'var(--text-muted)', flexShrink: 0, fontSize: 10.5 }}>search</span>
-              <span style={{ color: 'var(--text-primary)', flex: 1 }}>{truncate(q, 80)}</span>
-            </div>
-          ))}
-          {pages.map(([key, { url, count }]) => (
-            <div key={`u-${key}`} style={rowStyle}>
-              <span style={{ color: 'var(--text-muted)', flexShrink: 0, fontSize: 10.5 }}>page</span>
-              <span style={{
-                color: 'var(--text-primary)', flex: 1, wordBreak: 'break-all',
-                fontFamily: 'var(--font-mono)', fontSize: 11.5,
-              }} title={url}>
-                {truncate(key, 60)}
-              </span>
-              {count > 1 && (
-                <span style={{ color: 'var(--text-muted)', fontSize: 10.5, flexShrink: 0 }}>
-                  ×{count}
-                </span>
-              )}
             </div>
           ))}
         </>

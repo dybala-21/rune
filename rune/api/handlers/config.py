@@ -40,6 +40,10 @@ class ConfigGetResponse(BaseModel):
     advisor_enabled: bool = Field(False, alias="advisorEnabled")
     # Surfaced so a session with its safety prompts switched off says so.
     approval_mode: str = Field("standard", alias="approvalMode")
+    # Reasoning depth for the active model, and whether it accepts one at all
+    # (so the UI only shows the selector for reasoning-capable models).
+    reasoning_effort: str | None = Field(None, alias="reasoningEffort")
+    reasoning_supported: bool = Field(False, alias="reasoningSupported")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -67,6 +71,12 @@ def _get_rune_config():
     return get_config()
 
 
+def _reasoning_supported(model: str) -> bool:
+    """Whether the model accepts a reasoning_effort (litellm capability DB)."""
+    from rune.agent.model_traits import supports_reasoning_effort
+    return supports_reasoning_effort(model or "")
+
+
 @router.get("", response_model=ConfigGetResponse, dependencies=[Depends(auth)])
 async def get_config_endpoint() -> ConfigGetResponse:
     """Retrieve the current daemon configuration."""
@@ -85,6 +95,8 @@ async def get_config_endpoint() -> ConfigGetResponse:
             "model": cfg.llm.default_model,
             "source": "config",
         },
+        reasoningEffort=cfg.llm.reasoning_effort,
+        reasoningSupported=_reasoning_supported(cfg.llm.default_model),
         memoryTuning={
             "preset": None,
             "policyMode": "auto",

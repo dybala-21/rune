@@ -14,6 +14,7 @@ are read from it directly.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from functools import lru_cache
 
 
 @dataclass(frozen=True)
@@ -62,6 +63,25 @@ def traits(model: str) -> ModelTraits:
     if found.temperature and model in _TEMPERATURE_REJECTED:
         found = replace(found, temperature=False)
     return found
+
+
+@lru_cache(maxsize=256)
+def supports_reasoning_effort(model: str) -> bool:
+    """Whether *model* accepts a ``reasoning_effort``.
+
+    Trusts litellm's model-capability DB rather than a hand-kept list: it is
+    correct per model where a static list drifts — o1 takes one but o1-mini
+    does not, claude-opus-4-5 reasons while claude-opus-4 does not, gemini-2.5
+    reasons, deepseek-reasoner reasons but takes no effort param. Unknown or
+    lookup failure → False (the selector simply won't show; the model still
+    runs). drop_params is on, so a stray effort on a model that reasons but
+    ignores it is dropped, not an error.
+    """
+    try:
+        import litellm
+        return bool(litellm.supports_reasoning(model=model))
+    except Exception:
+        return False
 
 
 def note_temperature_rejected(model: str) -> None:

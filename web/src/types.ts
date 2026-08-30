@@ -45,6 +45,9 @@ export interface AgentStartData {
   /** Conversation that started the run — lets the originating tab skip the
       "Goal:" echo line while other surfaces still show it. */
   sessionId?: string | null;
+  /** Run id echoed by /api/message, so the originating tab recognises its own
+      run even when several turns share a session. */
+  runId?: string;
 }
 export interface TrustInfo {
   verified: boolean;

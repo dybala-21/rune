@@ -69,6 +69,12 @@ def _has_provider_key(provider: str) -> bool:
 # Hardcoded model lists (fallbacks / static providers)
 # OpenAI
 FALLBACK_OPENAI_MODELS: list[ModelInfo] = [
+    # GPT-5.6 family (newest) — three capability tiers: Sol > Terra > Luna
+    ModelInfo(id="gpt-5.6-sol", provider="openai", label="GPT-5.6 Sol"),
+    ModelInfo(id="gpt-5.6-terra", provider="openai", label="GPT-5.6 Terra"),
+    ModelInfo(id="gpt-5.6-luna", provider="openai", label="GPT-5.6 Luna"),
+    # GPT-5.5
+    ModelInfo(id="gpt-5.5", provider="openai", label="GPT-5.5"),
     # GPT-5.4 series
     ModelInfo(id="gpt-5.4", provider="openai", label="GPT-5.4"),
     ModelInfo(id="gpt-5.4-pro", provider="openai", label="GPT-5.4 Pro"),
@@ -122,7 +128,11 @@ FALLBACK_OPENAI_MODELS: list[ModelInfo] = [
 # Anthropic
 
 ANTHROPIC_MODELS: list[ModelInfo] = [
-    # Current generation
+    # Claude 5 family (newest)
+    ModelInfo(id="claude-opus-5", provider="anthropic", label="Claude Opus 5"),
+    ModelInfo(id="claude-sonnet-5", provider="anthropic", label="Claude Sonnet 5"),
+    ModelInfo(id="claude-fable-5", provider="anthropic", label="Claude Fable 5"),
+    # Claude 4 generation
     ModelInfo(id="claude-opus-4-6", provider="anthropic", label="Claude Opus 4.6"),
     ModelInfo(id="claude-sonnet-4-6", provider="anthropic", label="Claude Sonnet 4.6"),
     ModelInfo(id="claude-haiku-4-5-20251001", provider="anthropic", label="Claude Haiku 4.5"),
@@ -132,8 +142,6 @@ ANTHROPIC_MODELS: list[ModelInfo] = [
     ModelInfo(id="claude-opus-4-1-20250805", provider="anthropic", label="Claude Opus 4.1"),
     ModelInfo(id="claude-sonnet-4-20250514", provider="anthropic", label="Claude Sonnet 4"),
     ModelInfo(id="claude-opus-4-20250514", provider="anthropic", label="Claude Opus 4"),
-    # Deprecated (retiring 2026-04-19, still usable)
-    ModelInfo(id="claude-3-haiku-20240307", provider="anthropic", label="Claude 3 Haiku (deprecated)"),
 ]
 
 # Google Gemini
