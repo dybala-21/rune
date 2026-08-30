@@ -296,6 +296,28 @@ def create_app() -> Any:
             })
 
     @asynccontextmanager
+    def _on_proactive_suggestion(suggestions: list[Any]) -> None:
+        """Push engine suggestions to the web timeline, display-only.
+
+        The engine already emits these; the bridge decides whether to
+        auto-execute, off by default. This path only shows them, so the user
+        sees them and chooses — the alert-and-suggest, defer-execution stance
+        the proactivity work settled on.
+        """
+        for s in suggestions:
+            conf = getattr(s, "confidence", 0.0)
+            priority = ("high" if conf >= 0.8
+                        else "medium" if conf >= 0.6 else "low")
+            _sse_manager.broadcast("suggestion_created", {
+                "id": getattr(s, "id", ""),
+                "type": getattr(s, "type", "insight"),
+                "title": getattr(s, "title", ""),
+                "description": getattr(s, "description", ""),
+                "priority": priority,
+                "confidence": conf,
+                "source": getattr(s, "source", ""),
+            })
+
     async def lifespan(app: FastAPI):  # type: ignore[arg-type]
         log.info("api_server_started")
         _proactive_engine = None
