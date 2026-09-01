@@ -67,7 +67,7 @@ export function SkillsPanel({ onClose, initialSkillName }: SkillsPanelProps) {
       if (result.projectPath) setProjectPath(result.projectPath);
       if (result.userPath) setUserPath(result.userPath);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load skills');
+      setError(err instanceof Error ? err.message : "Couldn't load skills");
     } finally {
       setLoading(false);
     }
@@ -86,7 +86,7 @@ export function SkillsPanel({ onClose, initialSkillName }: SkillsPanelProps) {
       setViewMode('view');
     } catch (err) {
       if (reqId !== selectReqRef.current) return;
-      setError(err instanceof Error ? err.message : 'Failed to load skill');
+      setError(err instanceof Error ? err.message : "Couldn't load the skill");
     }
   }, []);
 
@@ -157,7 +157,7 @@ export function SkillsPanel({ onClose, initialSkillName }: SkillsPanelProps) {
       }
       setViewMode('view');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save');
+      setError(err instanceof Error ? err.message : "Couldn't save");
     } finally {
       setSaving(false);
     }
@@ -172,7 +172,7 @@ export function SkillsPanel({ onClose, initialSkillName }: SkillsPanelProps) {
       setViewMode('list');
       setDeleteConfirm(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to delete');
+      setError(err instanceof Error ? err.message : "Couldn't delete");
     } finally {
       setSaving(false);
     }

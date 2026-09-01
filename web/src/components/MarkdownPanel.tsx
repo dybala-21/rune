@@ -48,7 +48,7 @@ export function MarkdownPanel({ onClose }: MarkdownPanelProps) {
       setFiles(list);
       setListError('');
     } catch {
-      setListError('Could not load the file list.');
+      setListError("Couldn't load the file list");
     }
   }, []);
 
@@ -69,7 +69,7 @@ export function MarkdownPanel({ onClose }: MarkdownPanelProps) {
       setOriginalContent(result.content);
     } catch {
       if (reqId !== reqIdRef.current) return;
-      setLoadError('Could not read this file.');
+      setLoadError("Couldn't read this file");
     } finally {
       if (reqId === reqIdRef.current) setLoading(false);
     }

@@ -444,7 +444,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 type="button"
                 onClick={() => (recState === 'recording' ? stopRecording() : startRecording())}
                 disabled={disabled || recState === 'transcribing'}
-                title={recState === 'recording' ? 'Stop recording' : recState === 'transcribing' ? 'Transcribing…' : 'Voice input'}
+                title={recState === 'recording' ? 'Stop recording' : recState === 'transcribing' ? 'Transcribing...' : 'Voice input'}
                 aria-label={recState === 'recording' ? 'Stop recording' : 'Voice input'}
                 style={{
                   width: 36, height: 36, borderRadius: '50%',
@@ -478,7 +478,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 : disabled
                   ? 'Connecting...'
                   : isRunning
-                    ? 'Running… stop to send a message'
+                    ? 'Running — press Stop to send a message'
                     : 'Message RUNE...'
             }
             disabled={disabled}

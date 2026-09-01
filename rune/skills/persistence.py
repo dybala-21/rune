@@ -28,7 +28,12 @@ def _skill_dir(skill: Skill) -> Path:
     from rune.utils.paths import rune_home
     base = (Path.cwd() / ".rune" / "skills" if skill.scope == "project"
             else rune_home() / "skills")
-    return base / skill.name
+    target = (base / skill.name).resolve()
+    # A name reaches this from SKILL.md frontmatter, so never let it climb out
+    # of the skills tree.
+    if not target.is_relative_to(base.resolve()):
+        raise ValueError(f"skill name escapes the skills directory: {skill.name!r}")
+    return target
 
 
 def _render(skill: Skill) -> str:
@@ -55,6 +60,13 @@ def write_skill_to_disk(skill: Skill) -> str | None:
     Records the path on ``skill.file_path`` so later state updates rewrite the
     same file. Best-effort; never raises.
     """
+    from rune.skills.validator import validate_name
+
+    check = validate_name(skill.name)
+    if not check.valid:
+        log.warning("skill_persist_rejected", name=skill.name, errors=check.errors)
+        return None
+
     try:
         d = _skill_dir(skill)
         d.mkdir(parents=True, exist_ok=True)

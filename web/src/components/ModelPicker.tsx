@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { fetchModels, setActiveModel } from '../api';
 import { toast } from '../utils/toast';
+import { ProviderMark } from './ProviderMark';
 
 interface ActiveModel { provider: string; model: string; source: string; }
 
@@ -19,7 +20,7 @@ export function ModelPicker({ active }: { active: ActiveModel }) {
   useEffect(() => {
     if (!open) return;
     if (!Object.keys(providers).length) {
-      fetchModels().then(setProviders).catch(() => toast.error('Could not load models'));
+      fetchModels().then(setProviders).catch(() => toast.error("Couldn't load models"));
     }
     const onClick = (e: MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
@@ -44,7 +45,7 @@ export function ModelPicker({ active }: { active: ActiveModel }) {
       toast.success(`Model → ${provider}:${model}`);
       setOpen(false);
     } catch {
-      toast.error('Failed to switch model');
+      toast.error("Couldn't switch model");
     } finally {
       setBusy(false);
     }
@@ -67,12 +68,12 @@ export function ModelPicker({ active }: { active: ActiveModel }) {
           minWidth: 0, maxWidth: 320,
         }}
       >
-        <span style={{ color: 'var(--text-muted)' }}>Model</span>
+        <ProviderMark provider={shown.provider} size={14} />
         <span style={{
           fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap',
           overflow: 'hidden', textOverflow: 'ellipsis',
         }}>
-          {shown.provider}:{shown.model}
+          {shown.model}
         </span>
         <span style={{ color: 'var(--text-muted)', fontSize: 9 }}>▾</span>
       </button>
@@ -103,6 +104,7 @@ export function ModelPicker({ active }: { active: ActiveModel }) {
                 }}
               >‹</button>
             )}
+            {step === 'model' && <ProviderMark provider={selProvider} size={14} />}
             <span>{step === 'provider' ? 'Provider' : selProvider}</span>
           </div>
 
@@ -116,6 +118,7 @@ export function ModelPicker({ active }: { active: ActiveModel }) {
                   onClick={() => { setSelProvider(p); setStep('model'); }}
                   style={rowBtn(p === shown.provider)}
                 >
+                  <ProviderMark provider={p} />
                   <span style={{ flex: 1, textAlign: 'left' }}>{p}</span>
                   <span style={{ color: 'var(--text-muted)', fontSize: 10 }}>
                     {providers[p].length} ›

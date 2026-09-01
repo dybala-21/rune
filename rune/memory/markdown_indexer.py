@@ -6,6 +6,7 @@ embeds changed chunks, and maintains the FAISS index.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import re
 from pathlib import Path
@@ -249,6 +250,16 @@ async def incremental_reindex(
     for oid in orphaned:
         chunks_state.pop(oid, None)
 
+    # Persist the index before recording what it contains. Writing the state
+    # file without saving the vectors told the next run everything was already
+    # indexed, so a rebuild became a permanent no-op after its first pass.
+    if stats["added"] or stats["updated"] or stats["removed"]:
+        try:
+            vectors.save()
+        except Exception as exc:
+            log.warning("indexer_vector_save_failed", error=str(exc))
+            return stats
+
     state["chunks"] = chunks_state
     save_index_state(state)
 
@@ -264,5 +275,10 @@ async def full_rebuild(vectors: VectorStore | None = None) -> dict[str, int]:
 
     if vectors is None:
         vectors = get_vector_store()
+
+    # Drop what is already loaded, or a rebuild appends a second copy of every
+    # vector to the in-memory index.
+    with contextlib.suppress(Exception):
+        vectors.clear()
 
     return await incremental_reindex(vectors)

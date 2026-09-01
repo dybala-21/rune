@@ -6,6 +6,7 @@
  */
 
 import type { ProactiveSuggestion } from '../types';
+import { SparkIcon } from './icons';
 
 interface ProactiveCardProps {
   suggestion: ProactiveSuggestion;
@@ -26,7 +27,7 @@ export function ProactiveCard({ suggestion }: ProactiveCardProps) {
         fontStyle: 'italic',
         opacity: 0.7,
       }}>
-        💬 rune: {suggestion.body}
+        rune: {suggestion.body}
       </div>
     );
   }
@@ -51,11 +52,15 @@ export function ProactiveCard({ suggestion }: ProactiveCardProps) {
           justifyContent: 'space-between',
         }}>
           <span style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 5,
             fontSize: 13,
             fontWeight: 600,
             color: accentColor,
           }}>
-            💬 rune
+            <SparkIcon size={12} />
+            rune
           </span>
           <span style={{
             fontSize: 11,

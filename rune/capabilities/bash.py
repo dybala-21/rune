@@ -30,6 +30,7 @@ from rune.config.defaults import (
     DEFAULT_BASH_TIMEOUT_MS,
     DEFAULT_OUTPUT_BUFFER_LIMIT,
 )
+from rune.safety.approval_context import was_approved
 from rune.safety.execution_policy import (
     DEFAULT_ALLOWED_EXECUTABLES,
     ExecutionPolicyConfig,
@@ -651,6 +652,60 @@ async def managed_service_stop(params: ServiceStopParams) -> CapabilityResult:
 # Main entry point
 
 
+# _evaluate_mode has branches for these only; anything else falls through to
+# the strict branch, which is not what "auto" is meant to mean.
+_POLICY_MODES = ("legacy", "shadow", "balanced", "strict")
+_DEFAULT_POLICY_MODE = "balanced"
+
+
+def _configured_deny_by_default() -> tuple[bool, list[str]]:
+    """The allowlist policy from config, or the shipped default.
+
+    ``safety.denyByDefault`` never reached this gate: the schema had flat
+    fields the config file does not use, and the executable list here was
+    hardcoded, so editing the allowlist changed nothing. An empty configured
+    list keeps the shipped default rather than locking the shell to nothing.
+    """
+    try:
+        from rune.config import get_config
+
+        cfg = get_config().safety.deny_by_default
+    except Exception as exc:
+        log.debug("deny_by_default_read_failed", error=str(exc))
+        return True, list(DEFAULT_ALLOWED_EXECUTABLES)
+
+    allowed = [str(x).strip() for x in (cfg.allowed_executables or []) if str(x).strip()]
+    if not allowed:
+        return bool(cfg.enabled), list(DEFAULT_ALLOWED_EXECUTABLES)
+    return bool(cfg.enabled), allowed
+
+
+def _configured_rollout_mode() -> str:
+    """The execution policy mode from config, or the shipped default.
+
+    This was hardcoded, so safety.rolloutMode never reached the shell gate. An
+    unrecognised value falls back rather than silently landing on strict, where
+    every non-allowlisted executable is refused.
+    """
+    try:
+        from rune.config import get_config
+
+        mode = (get_config().safety.rollout_mode or "").strip().lower()
+    except Exception as exc:
+        log.debug("rollout_mode_read_failed", error=str(exc))
+        return _DEFAULT_POLICY_MODE
+
+    if mode in _POLICY_MODES:
+        return mode
+    # "auto" is the schema default and means "let RUNE choose"; the policy
+    # engine has no branch for it, so it resolves to the shipped default.
+    if mode and mode != "auto":
+        log.warning(
+            "rollout_mode_unsupported", mode=mode, using=_DEFAULT_POLICY_MODE
+        )
+    return _DEFAULT_POLICY_MODE
+
+
 async def bash_execute(params: BashParams) -> CapabilityResult:
     """Execute a shell command with safety validation."""
     if blocked := blocked_benchmark_vcs_history_command(params.command):
@@ -670,10 +725,15 @@ async def bash_execute(params: BashParams) -> CapabilityResult:
     # Validate command through Guardian
     validation = guardian.validate(params.command)
 
-    # Apply execution policy
+    # sandbox_enabled is False because this executor does not sandbox —
+    # nothing on the agent path calls execute_sandboxed. Claiming otherwise
+    # made the policy demand a sandbox, find none, and deny the command.
+    deny_enabled, allowed_executables = _configured_deny_by_default()
     policy_config = ExecutionPolicyConfig(
-        rollout_mode="balanced",
-        allowed_executables=list(DEFAULT_ALLOWED_EXECUTABLES),
+        rollout_mode=_configured_rollout_mode(),
+        sandbox_enabled=False,
+        deny_by_default_enabled=deny_enabled,
+        allowed_executables=allowed_executables,
     )
     decision = decide_bash_execution(
         params.command, validation, policy_config,
@@ -687,7 +747,9 @@ async def bash_execute(params: BashParams) -> CapabilityResult:
             error=f"Command blocked: {decision.reason}",
         )
 
-    if decision.decision == "ask":
+    if decision.decision == "ask" and not was_approved():
+        # Approved calls arrive with the caller's gate already satisfied, so
+        # asking again here just refused what the user had said yes to.
         return CapabilityResult(
             success=False,
             error=f"Command requires approval: {decision.reason}",

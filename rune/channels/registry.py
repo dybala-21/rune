@@ -80,6 +80,27 @@ def get_channel_registry() -> ChannelRegistry:
 
 # Auto-discovery
 
+def _allowed_from_env(var: str) -> list[str] | None:
+    """Parse a comma-separated allowlist. ``None`` means open access.
+
+    These four channels serve webhooks on 0.0.0.0 and had no authorization at
+    all: the registry never passed them an allowlist and they never checked one,
+    so anyone who could reach the port could drive the agent.
+    """
+    raw = os.environ.get(var, "")
+    users = [u.strip() for u in raw.split(",") if u.strip()]
+    if not users:
+        # Kept open for compatibility with existing setups, but a webhook on
+        # 0.0.0.0 with no allowlist hands full tool access to whoever reaches
+        # the port, so say so rather than starting quietly.
+        log.warning(
+            "channel_open_to_all",
+            allowlist_var=var,
+            hint=f"set {var} to restrict who can drive the agent",
+        )
+    return users or None
+
+
 def auto_discover_channels() -> list[str]:
     """Discover and register channel adapters based on environment variables.
 
@@ -162,6 +183,7 @@ def auto_discover_channels() -> list[str]:
                 phone_number_id=whatsapp_phone_id,
                 verify_token=os.environ.get("RUNE_WHATSAPP_VERIFY_TOKEN", ""),
                 app_secret=os.environ.get("RUNE_WHATSAPP_APP_SECRET"),
+                allowed_users=_allowed_from_env("RUNE_WHATSAPP_ALLOWED_USERS"),
             )
             registry.register(adapter)
             discovered.append(adapter.name)
@@ -178,6 +200,7 @@ def auto_discover_channels() -> list[str]:
             adapter = MattermostAdapter(
                 url=mattermost_url,
                 token=mattermost_token,
+                allowed_users=_allowed_from_env("RUNE_MATTERMOST_ALLOWED_USERS"),
             )
             registry.register(adapter)
             discovered.append(adapter.name)
@@ -194,6 +217,7 @@ def auto_discover_channels() -> list[str]:
             adapter = LINEAdapter(
                 channel_access_token=line_access_token,
                 channel_secret=line_secret,
+                allowed_users=_allowed_from_env("RUNE_LINE_ALLOWED_USERS"),
             )
             registry.register(adapter)
             discovered.append(adapter.name)
@@ -210,7 +234,7 @@ def auto_discover_channels() -> list[str]:
             adapter = GoogleChatAdapter(
                 service_account_path=google_chat_creds,
                 project_id=google_chat_project,
-                webhook_secret=os.environ.get("RUNE_GOOGLE_CHAT_WEBHOOK_SECRET"),
+                allowed_users=_allowed_from_env("RUNE_GOOGLE_CHAT_ALLOWED_USERS"),
             )
             registry.register(adapter)
             discovered.append(adapter.name)

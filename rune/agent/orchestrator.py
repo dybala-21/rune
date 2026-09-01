@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 from uuid import uuid4
 
+from rune.agent.plan_validator import validate_plan
 from rune.agent.quality_gate import (
     AgentResult as QAResult,
 )
@@ -163,6 +164,29 @@ class Orchestrator(EventEmitter):
 
         if plan is None:
             plan = await self._parse_plan(goal)
+
+        # Static plan check. The planner is an LLM, so a dependency graph can
+        # come back cyclic or referencing tasks it never emitted; the worker
+        # pool would stall on either. Errors block, warnings only log.
+        validation = validate_plan(plan.tasks, goal)
+        for issue in validation.issues:
+            log.warning(
+                "orchestrator_plan_issue",
+                severity=issue.severity,
+                type=issue.type,
+                task_id=issue.task_id,
+                message=issue.message,
+            )
+        if not validation.approved:
+            log.warning("orchestrator_plan_rejected", issues=len(validation.issues))
+            return OrchestrationResult(
+                success=False,
+                merged_output=(
+                    "Plan rejected: the generated task graph is not executable.\n"
+                    + (validation.suggestion or "")
+                ),
+                duration_ms=(time.monotonic() - t0) * 1000,
+            )
 
         # Risk gate
         if self._config.risk_gate_enabled:

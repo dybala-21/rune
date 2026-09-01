@@ -15,12 +15,13 @@ _ToolState = Literal["unknown", "available", "unavailable"]
 
 _mic_state: _ToolState = "unknown"
 _deepgram_state: _ToolState = "unknown"
+_cloud_state: _ToolState = "unknown"
 _sherpa_onnx_state: _ToolState = "unknown"
 
 
 def _check() -> None:
     """Probe each dependency once and cache the result."""
-    global _mic_state, _deepgram_state, _sherpa_onnx_state
+    global _mic_state, _deepgram_state, _cloud_state, _sherpa_onnx_state
 
     # Microphone: sounddevice or pyaudio
     if _mic_state == "unknown":
@@ -40,6 +41,14 @@ def _check() -> None:
     if _deepgram_state == "unknown":
         _deepgram_state = (
             "available" if os.environ.get("DEEPGRAM_API_KEY") else "unavailable"
+        )
+
+    # OpenAI Whisper / Groq: key-only, same as _auto_detect_stt's tiers 2-3
+    if _cloud_state == "unknown":
+        _cloud_state = (
+            "available"
+            if os.environ.get("OPENAI_API_KEY") or os.environ.get("GROQ_API_KEY")
+            else "unavailable"
         )
 
     # Sherpa-ONNX: local offline STT
@@ -70,7 +79,11 @@ def is_voice_input_available() -> bool:
     _check()
     if _mic_state != "available":
         return False
-    return _deepgram_state == "available" or _sherpa_onnx_state == "available"
+    return (
+        _deepgram_state == "available"
+        or _cloud_state == "available"
+        or _sherpa_onnx_state == "available"
+    )
 
 
 def get_voice_availability() -> VoiceAvailability:
@@ -79,12 +92,15 @@ def get_voice_availability() -> VoiceAvailability:
 
     mic_ok = _mic_state == "available"
     dg_ok = _deepgram_state == "available"
+    cloud_ok = _cloud_state == "available"
     sp_ok = _sherpa_onnx_state == "available"
-    provider_ok = dg_ok or sp_ok
+    provider_ok = dg_ok or cloud_ok or sp_ok
 
     active: str | None = None
     if dg_ok:
         active = "deepgram"
+    elif cloud_ok:
+        active = "openai/groq"
     elif sp_ok:
         active = "sherpa-onnx"
 
@@ -92,7 +108,10 @@ def get_voice_availability() -> VoiceAvailability:
     if not mic_ok:
         hint = "Install sounddevice or pyaudio for microphone capture: pip install sounddevice"
     elif not provider_ok:
-        hint = "Set DEEPGRAM_API_KEY or install sherpa-onnx for STT: pip install sherpa-onnx"
+        hint = (
+            "Set DEEPGRAM_API_KEY / OPENAI_API_KEY / GROQ_API_KEY, "
+            "or install sherpa-onnx for local STT: pip install sherpa-onnx"
+        )
 
     return VoiceAvailability(
         available=mic_ok and provider_ok,
@@ -110,7 +129,8 @@ def get_voice_install_hint() -> str | None:
 
 def _reset_cache() -> None:
     """Reset cached states (for testing)."""
-    global _mic_state, _deepgram_state, _sherpa_onnx_state
+    global _mic_state, _deepgram_state, _cloud_state, _sherpa_onnx_state
     _mic_state = "unknown"
     _deepgram_state = "unknown"
+    _cloud_state = "unknown"
     _sherpa_onnx_state = "unknown"

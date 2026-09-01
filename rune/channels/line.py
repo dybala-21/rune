@@ -126,8 +126,9 @@ class LINEAdapter(ChannelAdapter):
         *,
         listen_host: str = "0.0.0.0",
         listen_port: int = 8082,
+        allowed_users: list[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(allowed_users=allowed_users)
         self._channel_access_token = channel_access_token
         self._channel_secret = channel_secret
         self._listen_host = listen_host
@@ -370,6 +371,10 @@ class LINEAdapter(ChannelAdapter):
                 "timestamp": event.get("timestamp", 0),
             },
         )
+
+        if not self.check_authorization(source.get("userId", "")):
+            log.warning("line_unauthorized_sender", sender_id=source.get("userId", ""))
+            return
 
         await self._on_message(incoming)
 

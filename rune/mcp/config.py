@@ -16,7 +16,9 @@ from rune.utils.paths import rune_home
 
 log = get_logger(__name__)
 
-_MCP_CONFIG_FILE = "mcp_servers.json"
+MCP_CONFIG_FILENAME = "mcp_servers.json"
+# Kept for existing references inside this module.
+_MCP_CONFIG_FILE = MCP_CONFIG_FILENAME
 
 TransportType = Literal["stdio", "sse", "streamable-http"]
 

@@ -241,7 +241,7 @@ export function StatusBar({
               padding: '14px',
               zIndex: 100,
             }}>
-              <TokenUsage usage={tokenUsage} />
+              <TokenUsage usage={tokenUsage} provider={activeModel?.provider} />
             </div>
           )}
         </div>

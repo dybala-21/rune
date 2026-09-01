@@ -35,7 +35,7 @@ export function TerminalPane() {
       const r = await mintTerminalToken();
       token = r.token;
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not get a terminal token');
+      setError(e instanceof Error ? e.message : "Couldn't get a terminal token");
       setPhase('idle');
       return;
     }

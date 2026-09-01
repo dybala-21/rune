@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { fetchWorkspace, fetchWorkspaceRecents, setWorkspace } from '../api';
 import { DirectoryCombobox } from './DirectoryCombobox';
+import { FolderIcon } from './icons';
 
 function basename(p: string): string {
   const parts = p.replace(/\/+$/, '').split('/');
@@ -51,7 +52,7 @@ export function WorkspaceChip() {
       // Let the inline picker and any other listeners refresh.
       window.dispatchEvent(new CustomEvent('rune:workspace-changed'));
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not set workspace');
+      setError(e instanceof Error ? e.message : "Couldn't set the workspace");
     }
   };
 
@@ -60,20 +61,24 @@ export function WorkspaceChip() {
       <button
         type="button"
         onClick={() => setOpen(o => !o)}
-        title={path ? `Workspace: ${path}` : 'Set the folder the agent works in'}
+        title={path ? `Workspace: ${path}` : 'Choose the folder the agent works in'}
         style={{
           display: 'flex', alignItems: 'center', gap: 6,
           background: 'var(--bg-tertiary)',
-          border: `1px solid ${path ? 'var(--border-strong, var(--border))' : 'var(--border)'}`,
+          // Unset reads as an empty slot waiting to be filled — a dashed accent
+          // outline — rather than a greyed-out label that scans as disabled.
+          border: path
+            ? '1px solid var(--border-strong, var(--border))'
+            : '1px dashed var(--accent)',
           borderRadius: 99, padding: '3px 12px',
           fontSize: 11.5, fontFamily: 'var(--font-mono)',
-          color: path ? 'var(--text-primary)' : 'var(--text-muted)',
+          color: path ? 'var(--text-primary)' : 'var(--accent)',
           cursor: 'pointer', maxWidth: 220,
         }}
       >
-        <span aria-hidden="true">📁</span>
+        <FolderIcon size={13} />
         <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {path ? basename(path) : 'Workspace'}
+          {path ? basename(path) : 'Set workspace'}
         </span>
         <span style={{ color: 'var(--text-muted)', fontSize: 9 }}>▾</span>
       </button>

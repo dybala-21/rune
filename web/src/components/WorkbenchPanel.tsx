@@ -533,8 +533,8 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
             <span aria-hidden="true">{verdictOk ? '✓' : '⚠'}</span>
             <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>
               {verdictOk
-                ? hasCheck ? 'Evidence Gate — verified' : 'Completed — no checks ran'
-                : 'Not marking this done'}
+                ? hasCheck ? 'Verified' : 'Done — no checks ran'
+                : 'Not verified'}
             </span>
             <span style={{ marginLeft: 'auto', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
               {trust?.evidenceGate?.hasCheck

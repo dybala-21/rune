@@ -360,7 +360,9 @@ When using external service tools (mcp.*):
 - If mcp.* tools return ANY error (auth, token, connection, timeout, "not found", etc.):
   → **IMMEDIATELY call `service_connect`**. Do NOT inform the user first.
   → ALWAYS pass `channel` parameter (tui/cli/telegram/discord) - this controls OAuth browser behavior.
-  → service_connect handles EVERYTHING: credentials, OAuth browser flow, MCP reconnection.
+  → service_connect writes the MCP server entry and reports what is still
+    missing. If it returns an error naming absent credentials, relay that to
+    the user — it cannot obtain them for you.
   → Do NOT ask the user about configuration, key files, tokens, or server setup.
   → Do NOT try to restart MCP servers via bash.
   → Do NOT use ask_user or browser capabilities for authentication.

@@ -91,7 +91,9 @@ class TestTheProbeActuallyRuns:
 
         monkeypatch.setattr(client.httpx, "get", refuse)
         client.refresh_ollama_installed_sync()
-        assert client._ollama_installed is None
+        # The miss is cached as empty, not left unset: leaving it None made
+        # every later caller re-probe and wait out the timeout again.
+        assert client._ollama_installed == []
         assert pick_ollama_model("qwen3-coder:30b") == "qwen3-coder:30b"
 
     def test_a_filled_cache_is_never_refetched(self, monkeypatch):
@@ -103,3 +105,33 @@ class TestTheProbeActuallyRuns:
         monkeypatch.setattr(client.httpx, "get", boom)
         client.refresh_ollama_installed_sync()
         assert pick_ollama_model("gone:1b") == "real:30b"
+
+
+class TestAFailedProbeIsNotRetried:
+    """A machine with no Ollama must pay the connect timeout once, not on
+    every model-picker open."""
+
+    def test_a_refused_probe_is_only_attempted_once(self, monkeypatch):
+        monkeypatch.setattr(client, "_ollama_installed", None)
+        calls = []
+
+        def refuse(*a, **k):
+            calls.append(1)
+            raise OSError("connection refused")
+
+        monkeypatch.setattr(client.httpx, "get", refuse)
+        client.refresh_ollama_installed_sync()
+        client.refresh_ollama_installed_sync()
+        client.refresh_ollama_installed_sync()
+        assert len(calls) == 1
+
+    def test_installed_models_never_probes_on_its_own(self, monkeypatch):
+        # It is called from an asyncio request handler, where a synchronous
+        # round-trip would stall every other request.
+        monkeypatch.setattr(client, "_ollama_installed", None)
+
+        def boom(*a, **k):
+            raise AssertionError("installed_ollama_models must not touch the network")
+
+        monkeypatch.setattr(client.httpx, "get", boom)
+        assert client.installed_ollama_models() == []

@@ -41,8 +41,6 @@ LAZY_SUBMODULES: dict[str, str] = {
     "config": "rune.config",
     "conversation": "rune.conversation",
     "daemon": "rune.daemon",
-    "evaluation": "rune.evaluation",
-    "identity": "rune.identity",
     "integration": "rune.integration",
     "intelligence": "rune.intelligence",
     "llm": "rune.llm",

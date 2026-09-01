@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
+import tempfile
+import threading
 from pathlib import Path
 from typing import overload
 
@@ -74,6 +77,12 @@ def _project_env_path() -> Path:
 
 USER_ENV_PATH = _user_env_path()
 
+_VALID_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# Read-modify-write on a shared file: without this, two overlapping writes both
+# start from the same snapshot and the loser's variables vanish.
+_env_write_lock = threading.Lock()
+
 _SENSITIVE_DIR_MODE = 0o700
 _SENSITIVE_FILE_MODE = 0o600
 
@@ -99,10 +108,25 @@ def _ensure_sensitive_dir(dir_path: Path) -> None:
 
 
 def _write_sensitive_env_file(file_path: Path, content: str) -> None:
-    """Write content to an env file with restricted permissions."""
+    """Replace an env file atomically, owner-only from the moment it exists.
+
+    These files hold API keys, so a half-written one is worse than no write at
+    all: build it beside the target and rename over it. The temp file is created
+    at 0600 by mkstemp, so the secrets are never briefly world-readable.
+    """
     _ensure_sensitive_dir(file_path.parent)
-    file_path.write_text(content, encoding="utf-8")
-    _harden_permissions(file_path, _SENSITIVE_FILE_MODE)
+
+    fd, tmp_name = tempfile.mkstemp(dir=str(file_path.parent), prefix=".env-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        _harden_permissions(Path(tmp_name), _SENSITIVE_FILE_MODE)
+        os.replace(tmp_name, file_path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
 
 
 # ============================================================================
@@ -110,33 +134,83 @@ def _write_sensitive_env_file(file_path: Path, content: str) -> None:
 # ============================================================================
 
 
+def _split_env_line(line: str) -> tuple[str, str] | None:
+    """Split one ``.env`` line into ``(key, value)``, or ``None`` if it is not one.
+
+    Handles the two forms a hand-edited file tends to contain: an ``export``
+    prefix, and a trailing ``# comment``. A quoted value keeps whatever is
+    inside the quotes and drops the rest of the line; an unquoted one ends at
+    the first whitespace-preceded ``#``.
+    """
+    trimmed = line.strip()
+    if not trimmed or trimmed.startswith("#"):
+        return None
+
+    if trimmed.startswith("export "):
+        trimmed = trimmed[len("export "):].lstrip()
+
+    key, sep, value = trimmed.partition("=")
+    if not sep:
+        return None
+
+    key = key.strip()
+    if not key or not _VALID_KEY.match(key):
+        return None
+
+    value = value.strip()
+    if value[:1] == '"':
+        # Scan for the closing quote, honouring the backslash escapes the
+        # serializer writes, then unescape what is inside.
+        escapes = {"n": "\n", "r": "\r", "t": "\t"}
+        out: list[str] = []
+        i = 1
+        while i < len(value):
+            ch = value[i]
+            if ch == "\\" and i + 1 < len(value):
+                nxt = value[i + 1]
+                out.append(escapes.get(nxt, nxt))
+                i += 2
+                continue
+            if ch == '"':
+                break
+            out.append(ch)
+            i += 1
+        # An unterminated quote just takes the rest of the line.
+        return key, "".join(out)
+    if value[:1] == "'":
+        # Single quotes are literal, as in the shell: no escapes inside.
+        end = value.find("'", 1)
+        if end > 0:
+            return key, value[1:end]
+        value = value[1:]
+    else:
+        comment = re.search(r"\s#", value)
+        if comment:
+            value = value[: comment.start()].rstrip()
+
+    return key, value
+
+
 def _parse_env_file(content: str) -> EnvConfig:
     """Parse a .env file content string into a dict."""
     env: EnvConfig = {}
-
     for line in content.split("\n"):
-        trimmed = line.strip()
-        if not trimmed or trimmed.startswith("#"):
-            continue
-
-        # KEY=VALUE parsing
-        eq_idx = trimmed.find("=")
-        if eq_idx < 0:
-            continue
-
-        key = trimmed[:eq_idx].strip()
-        value = trimmed[eq_idx + 1 :].strip()
-
-        # Strip surrounding quotes
-        if len(value) >= 2 and (
-            (value[0] == '"' and value[-1] == '"')
-            or (value[0] == "'" and value[-1] == "'")
-        ):
-            value = value[1:-1]
-
-        env[key] = value
-
+        pair = _split_env_line(line)
+        if pair is not None:
+            env[pair[0]] = pair[1]
     return env
+
+
+def _read_for_edit(file_path: Path) -> str:
+    """Current contents of an env file, for a read-modify-write.
+
+    A file that exists but cannot be read is an error, not an empty file:
+    treating it as empty would rewrite it from nothing and drop every variable
+    already in it.
+    """
+    if not file_path.exists():
+        return ""
+    return file_path.read_text(encoding="utf-8")
 
 
 def _read_env_file(file_path: Path) -> EnvConfig:
@@ -209,13 +283,11 @@ def set_env(key: str, value: str, scope: str = "user") -> None:
         scope: ``"user"`` for ``~/.rune/.env`` or ``"project"`` for ``.rune/.env``.
     """
     file_path = _user_env_path() if scope == "user" else _project_env_path()
-    _ensure_sensitive_dir(file_path.parent)
 
-    existing = _read_env_file(file_path)
-    existing[key] = value
-
-    content = _serialize_env(existing)
-    _write_sensitive_env_file(file_path, content)
+    with _env_write_lock:
+        _ensure_sensitive_dir(file_path.parent)
+        current = _read_for_edit(file_path)
+        _write_sensitive_env_file(file_path, _apply_env_edits(current, {key: value}))
 
     os.environ[key] = value
 
@@ -229,27 +301,85 @@ def unset_env(key: str, scope: str = "user") -> None:
     """
     file_path = _user_env_path() if scope == "user" else _project_env_path()
 
-    existing = _read_env_file(file_path)
-    existing.pop(key, None)
-
-    content = _serialize_env(existing)
-    if content.strip():
-        _write_sensitive_env_file(file_path, content)
-    elif file_path.exists():
-        file_path.unlink()
+    with _env_write_lock:
+        existed = file_path.exists()
+        content = _apply_env_edits(_read_for_edit(file_path), {key: None})
+        if content.strip():
+            _write_sensitive_env_file(file_path, content)
+        elif existed:
+            # Only reachable once the file has been read successfully, so this
+            # removes a file we know held nothing else.
+            file_path.unlink()
 
     os.environ.pop(key, None)
 
 
+_NEEDS_QUOTING = ' \t#"\'\n\r'
+
+
+def _format_env_line(key: str, value: str) -> str:
+    """One ``KEY=value`` line, quoted only when the value needs it.
+
+    Newlines are escaped rather than written through. A raw newline would end
+    the line and turn the rest of the value into another variable, so a single
+    write could define any key it liked.
+    """
+    if value and (any(ch in value for ch in _NEEDS_QUOTING) or value != value.strip()):
+        escaped = (
+            value.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+        )
+        return f'{key}="{escaped}"'
+    return f"{key}={value}"
+
+
 def _serialize_env(env: EnvConfig) -> str:
     """Serialize an env dict into .env file content."""
-    lines: list[str] = []
-    for k, v in env.items():
-        if any(ch in v for ch in (" ", "#", "=")):
-            lines.append(f'{k}="{v}"')
-        else:
-            lines.append(f"{k}={v}")
-    return "\n".join(lines) + "\n" if lines else ""
+    if not env:
+        return ""
+    return "\n".join(_format_env_line(k, v) for k, v in env.items()) + "\n"
+
+
+def _apply_env_edits(content: str, updates: dict[str, str | None]) -> str:
+    """Apply ``{KEY: value}`` edits to raw .env text, ``None`` to remove a key.
+
+    Rewrites only the lines it touches. A .env is hand-edited far more often
+    than a config file, so comments, ordering, and unrelated formatting have to
+    survive a write from the settings UI.
+    """
+    remaining = dict(updates)
+    written: set[str] = set()
+    out: list[str] = []
+
+    for line in content.split("\n"):
+        pair = _split_env_line(line)
+        if pair is None or pair[0] not in remaining:
+            out.append(line)
+            continue
+        key = pair[0]
+        if key in written:
+            continue  # a duplicate further down would shadow the edit
+        written.add(key)
+        value = remaining[key]
+        if value is not None:
+            out.append(_format_env_line(key, value))
+
+    for key in written:
+        remaining.pop(key, None)
+
+    # Drop a trailing blank so appended keys do not accumulate empty lines.
+    while out and not out[-1].strip():
+        out.pop()
+
+    out.extend(
+        _format_env_line(k, v) for k, v in remaining.items() if v is not None
+    )
+
+    if not any(line.strip() for line in out):
+        return ""
+    return "\n".join(out) + "\n"
 
 
 # ============================================================================
@@ -276,6 +406,20 @@ env_paths = {
     "user": USER_ENV_PATH,
     "project": PROJECT_ENV_PATH,
 }
+
+
+def user_env_path() -> Path:
+    """Path to the user-level ``.env`` (``~/.rune/.env``)."""
+    return _user_env_path()
+
+
+def project_env_path() -> Path:
+    """Path to the project-level ``.env`` (``<cwd>/.rune/.env``).
+
+    Resolved on each call rather than at import, so it follows the working
+    directory instead of pinning whatever it was when the module loaded.
+    """
+    return _project_env_path()
 
 
 # ============================================================================

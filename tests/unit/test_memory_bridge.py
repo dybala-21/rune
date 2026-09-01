@@ -229,9 +229,9 @@ class TestGenerateSkillName:
     def test_valid_goal(self):
         name = generate_skill_name("create unit tests for the auth module")
         assert name is not None
-        assert "_" in name
-        # Should be kebab/snake case
-        assert all(c.isalnum() or c == "_" for c in name)
+        assert "-" in name
+        # kebab-case, matching the convention every shipped skill uses
+        assert all(c.isalnum() or c == "-" for c in name)
 
     def test_too_short(self):
         name = generate_skill_name("hi")

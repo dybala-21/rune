@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { listWorkspaceDirs } from '../api';
+import { FolderIcon } from './icons';
 
 interface DirectoryComboboxProps {
   /** Recent workspaces shown when the field is empty. */
@@ -138,7 +139,9 @@ export function DirectoryCombobox({ recents = [], onChoose, autoFocus, placehold
                 color: 'var(--text-primary)',
               }}
             >
-              <span aria-hidden="true" style={{ opacity: 0.7 }}>📁</span>
+              <span style={{ color: 'var(--text-muted)', display: 'flex' }}>
+                <FolderIcon size={13} />
+              </span>
               <span style={{
                 fontFamily: row.kind === 'recent' ? 'var(--font-mono)' : 'var(--font-sans)',
                 fontSize: row.kind === 'recent' ? 11.5 : 12.5,

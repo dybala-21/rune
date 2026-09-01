@@ -47,10 +47,17 @@ class ServiceStatus:
 # ============================================================================
 
 def _mcp_config_path(scope: str = "user") -> Path:
-    """Return the path to the ``mcp.json`` config file."""
+    """Return the path to the MCP server config file.
+
+    Must match what :mod:`rune.mcp.config` loads. It wrote ``mcp_servers.json`` while
+    the loader read ``mcp_servers.json``, so a connected service never made a
+    single tool available.
+    """
+    from rune.mcp.config import MCP_CONFIG_FILENAME
+
     if scope == "project":
-        return Path.cwd() / ".rune" / "mcp.json"
-    return rune_home() / "mcp.json"
+        return Path.cwd() / ".rune" / MCP_CONFIG_FILENAME
+    return rune_home() / MCP_CONFIG_FILENAME
 
 
 def _load_mcp_config(scope: str = "user") -> dict[str, Any]:
@@ -120,7 +127,7 @@ class ServiceConnector:
     ) -> tuple[bool, str]:
         """Configure and persist a service connection.
 
-        Writes the service MCP server entry into ``mcp.json`` with the
+        Writes the service MCP server entry into ``mcp_servers.json`` with the
         supplied credential environment variables.
 
         Returns ``(success, config_path)``.
@@ -164,7 +171,7 @@ class ServiceConnector:
     ) -> tuple[bool, bool, bool]:
         """Fully disconnect a service.
 
-        * Removes the MCP config entry from ``mcp.json``
+        * Removes the MCP config entry from ``mcp_servers.json``
         * Optionally clears OAuth tokens
 
         Returns ``(success, tokens_cleared, config_removed)``.

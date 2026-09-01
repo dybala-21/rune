@@ -16,6 +16,7 @@ import { ToolCallCard, getToolColor } from './ToolCallCard';
 import { ThinkingBlockView } from './ThinkingBlock';
 import { normalizeToolName, inferWorkPhase } from '../utils/tooling';
 import { RuneMark } from './RuneMark';
+import { WorkspaceSetupRow } from './WorkspaceSetupRow';
 import {
   APPROVAL_COPY,
   QUESTION_COPY,
@@ -144,7 +145,7 @@ export function ChatPanel({
 
   const timeline = useMemo<TimelineItem[]>(() => [
     ...messages
-      .filter(m => m.content?.trim() || m.trust || m.suggestion)
+      .filter(m => m.content?.trim() || m.trust || m.suggestion || m.attachments?.length)
       // Pin the streaming answer to the end: it is created at the first token
       // (an early timestamp) but its tools arrive after, so without this it
       // renders above them and then jumps to the bottom when the run finishes.
@@ -349,21 +350,10 @@ export function ChatPanel({
 
 // ── Empty state ──
 
-const SUGGESTIONS: Array<{ icon: React.ReactNode; text: string; cat: string }> = [
+const SUGGESTIONS: Array<{ icon: React.ReactNode; text: string }> = [
   {
     icon: <path d="M9 8l-5 4 5 4M15 8l5 4-5 4" />,
-    text: 'Find and fix a failing test in this project',
-    cat: 'code',
-  },
-  {
-    icon: (
-      <>
-        <circle cx="12" cy="12" r="9" />
-        <path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18" />
-      </>
-    ),
-    text: "What's the latest news on AI agents?",
-    cat: 'web',
+    text: 'Find and fix a failing test',
   },
   {
     icon: (
@@ -372,18 +362,16 @@ const SUGGESTIONS: Array<{ icon: React.ReactNode; text: string; cat: string }> =
         <path d="M14 3v5h5" />
       </>
     ),
-    text: 'Summarize the structure of this project',
-    cat: 'files',
+    text: 'Summarize this project',
   },
   {
     icon: (
       <>
-        <path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1" />
-        <path d="M3 4v4.2h4.2" />
+        <circle cx="12" cy="12" r="9" />
+        <path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18" />
       </>
     ),
-    text: 'What did you learn from our last session?',
-    cat: 'memory',
+    text: "What's new with AI agents?",
   },
 ];
 
@@ -394,18 +382,18 @@ function EmptyState({ onSuggest }: { onSuggest?: (text: string) => void }) {
       display: 'flex',
       flexDirection: 'column',
       justifyContent: 'center',
-      maxWidth: 560,
+      maxWidth: 520,
       width: '100%',
       margin: '0 auto',
-      padding: '40px 8px',
+      padding: '32px 8px',
     }}>
-      <RuneMark state="idle" size={56} title="RUNE" />
+      <RuneMark state="idle" size={40} title="RUNE" />
       <div style={{
-        fontSize: 20,
+        fontSize: 19,
         fontWeight: 600,
         letterSpacing: '-0.015em',
         color: 'var(--text-primary)',
-        margin: '16px 0 6px',
+        margin: '14px 0 5px',
       }}>
         What should RUNE take on?
       </div>
@@ -413,23 +401,11 @@ function EmptyState({ onSuggest }: { onSuggest?: (text: string) => void }) {
         fontSize: 13.5,
         color: 'var(--text-secondary)',
         lineHeight: 1.6,
-        maxWidth: 460,
+        marginBottom: 20,
       }}>
-        Fix code, run commands, browse the web, or dig through files.{' '}
-        <span style={{ color: 'var(--text-primary)' }}>It verifies before it says done</span>
-        {' '}— on your machine, on your model.
+        Code, commands, the web, your files — verified before it says done.
       </div>
 
-      <div style={{
-        fontFamily: 'var(--font-mono)',
-        fontSize: 10.5,
-        letterSpacing: '0.16em',
-        textTransform: 'uppercase',
-        color: 'var(--text-muted)',
-        margin: '26px 0 4px',
-      }}>
-        Try
-      </div>
       <div style={{ display: 'flex', flexDirection: 'column' }}>
         {SUGGESTIONS.map(s => (
           <button
@@ -461,16 +437,9 @@ function EmptyState({ onSuggest }: { onSuggest?: (text: string) => void }) {
               {s.icon}
             </svg>
             <span style={{ flex: 1 }}>{s.text}</span>
-            <span style={{
-              fontFamily: 'var(--font-mono)',
-              fontSize: 10.5,
-              color: 'var(--text-muted)',
-              flexShrink: 0,
-            }}>
-              {s.cat}
-            </span>
           </button>
         ))}
+        <WorkspaceSetupRow />
       </div>
     </div>
   );
@@ -489,8 +458,8 @@ const TOOL_ACTIVITIES: Record<string, string> = {
   web_fetch: 'Checking the source...',
   browser_navigate: 'Opening the page...',
   browser_observe: 'Inspecting the page...',
-  browser_act: 'Working through the page...',
-  think: 'Working through the request...',
+  browser_act: 'Interacting with the page...',
+  think: 'Planning the approach...',
   memory_search: 'Checking past context...',
   memory_save: 'Saving context...',
   project_map: 'Mapping the project...',
@@ -526,7 +495,7 @@ function RunningIndicator({ toolCalls, currentStepInfo }: { toolCalls: ToolCall[
       color: 'var(--text-secondary)',
     }}>
       <span className="shimmer-text" style={{ fontSize: 13, fontWeight: 500 }}>
-        {activity || 'Working through the request...'}
+        {activity || 'Thinking...'}
       </span>
       {currentStepInfo && (
         <span style={{

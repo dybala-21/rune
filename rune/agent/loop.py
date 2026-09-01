@@ -25,7 +25,9 @@ import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass, field
+from itertools import count
 from typing import Any, Literal, TypeVar
 
 from rune.agent.advisor import AdvisorService
@@ -87,6 +89,10 @@ from rune.utils.logger import get_logger
 _HAS_PYDANTIC_AI = True  # Always True - LiteLLMAgent replaces PydanticAI
 
 log = get_logger(__name__)
+
+# What one attached image costs the context. Roughly what the major providers
+# charge for a 1568px long-edge image, which is what preprocess_image targets.
+IMAGE_TOKEN_ESTIMATE = 1_500
 
 T = TypeVar("T")
 
@@ -178,9 +184,21 @@ def _tail_text(text: str, max_bytes: int) -> str:
     return data[-max_bytes:].decode("utf-8", errors="ignore")
 
 
+# Tools run concurrently, so results do not come back in call order and pairing
+# them by tool name attaches a result to the wrong call. One tool's start and end
+# callbacks share a task, so a context variable pairs them exactly.
+_CALL_ID: ContextVar[str] = ContextVar("rune_tool_call_id", default="")
+_call_seq = count(1)
+
+
+def _next_call_id() -> str:
+    return f"c{next(_call_seq)}"
+
+
 def _tool_result_event_payload(cap_name: str, result: CapabilityResult) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "name": cap_name,
+        "callId": _CALL_ID.get(""),
         "success": result.success,
         "output_length": len(result.output or ""),
         # Clipped output so UI surfaces can show what a command/tool actually
@@ -528,6 +546,33 @@ class TokenBudget:
 # Agent Loop
 
 
+def _structured_by_extension(ext: str) -> bool | None:
+    """Whether the extension settles code-or-prose: True, False, or unknown.
+
+    Only an unrecognised or missing extension is worth parsing the body for;
+    docs and data formats are already decided, and classifying them costs
+    milliseconds on writes that happen constantly.
+    """
+    if not ext:
+        return None
+    from rune.intelligence.ast_analyzer import is_code_extension
+
+    if is_code_extension(ext):
+        return True
+    from rune.agent.write_artifact import (
+        CONFIG_EXTENSIONS,
+        DOC_EXTENSIONS,
+        JSON_EXTENSIONS,
+        YAML_EXTENSIONS,
+    )
+
+    if ext in DOC_EXTENSIONS:
+        return False
+    if ext in (JSON_EXTENSIONS | YAML_EXTENSIONS | CONFIG_EXTENSIONS):
+        return True
+    return None
+
+
 class NativeAgentLoop(EventEmitter):
     """Core agent execution loop using PydanticAI.
 
@@ -579,6 +624,9 @@ class NativeAgentLoop(EventEmitter):
         self._hard_failures: list[str] = []
         # R19: tool-call sequence counter (not step) to catch intra-step patterns
         self._last_code_write_step: int = 0
+        # Writes that produced structured code/config, feeding completion-gate R08.
+        self._structured_writes: int = 0
+        self._budget_upgraded_for_code: bool = False
         self._last_verify_step: int = 0
         # Tool-call sequence of the last verification command that both passed
         # AND actually asserted something. Distinct from _last_verify_step,
@@ -658,6 +706,8 @@ class NativeAgentLoop(EventEmitter):
         self._hard_failure_signatures.clear()
         self._hard_failures.clear()
         self._last_code_write_step = 0
+        self._structured_writes = 0
+        self._budget_upgraded_for_code = False
         self._last_verify_step = 0
         self._last_test_pass_step = 0
         self._last_verify_failed = False
@@ -1112,6 +1162,14 @@ class NativeAgentLoop(EventEmitter):
                 "full": "deep_research",
             }
             budget_intent = _goal_to_budget.get(intent_key, "research")
+            # Same floor the tool-round cap already applies: the classifier
+            # misses is_complex_coding often enough that code work in a real
+            # tree lands on a small budget and dies mid-verify. Rounds had this
+            # correction, the budget did not.
+            if budget_intent in ("code_modify", "quick_fix") and _repo_scale_workspace(
+                (context or {}).get("workspace_root") or "."
+            ):
+                budget_intent = "complex_coding"
             self._token_budget.total = _BUDGET_BY_INTENT.get(budget_intent, 500_000)
             # Optional explicit override (used by /goal for heavy tasks).
             _budget_override = getattr(self._config, "token_budget_override", None)
@@ -1516,7 +1574,11 @@ class NativeAgentLoop(EventEmitter):
                 self._activity_phase = "verification"
             elif cap_name in ("web_search", "web_fetch"):
                 self._activity_phase = "research"
-            await self.emit("tool_call", {"name": cap_name, "params": params})
+            _CALL_ID.set(_next_call_id())
+            await self.emit(
+                "tool_call",
+                {"name": cap_name, "params": params, "callId": _CALL_ID.get("")},
+            )
 
         def _tool_key(name: str, params: dict[str, Any]) -> str:
             """Extract command-level key for behavior prediction.
@@ -1606,10 +1668,36 @@ class NativeAgentLoop(EventEmitter):
                 # unverified, so it shouldn't finish on the model's word alone.
                 if cap_name != "file_delete":
                     fp = _last_tool_params.get("file_path") or _last_tool_params.get("path", "")
-                    from rune.intelligence.ast_analyzer import is_code_extension
-
                     _dot = fp.rfind(".")
-                    if fp and _dot >= 0 and is_code_extension(fp[_dot:]):
+                    _ext = fp[_dot:].lower() if fp and _dot >= 0 else ""
+                    _verdict = _structured_by_extension(_ext)
+                    _structured = _verdict is True
+                    if fp and _verdict is None:
+                        # Makefile, Dockerfile and friends are code with no
+                        # extension to go on, so classify the body. Only for
+                        # names the extension cannot settle: parsing every
+                        # write costs milliseconds for a known answer.
+                        _body = _last_tool_params.get("content") or ""
+                        if _body:
+                            try:
+                                from rune.agent.write_artifact import (
+                                    WriteArtifactOptions,
+                                    classify_write_artifact,
+                                )
+
+                                _shape = await classify_write_artifact(
+                                    _body, WriteArtifactOptions(path_hint=fp)
+                                )
+                                _structured = _shape.is_structured
+                            except Exception as exc:
+                                log.debug(
+                                    "write_artifact_classify_failed", error=str(exc)[:100]
+                                )
+                    if _structured:
+                        # R08 asks whether the run produced a code artifact at
+                        # all. The count was read in four places and assigned in
+                        # none, so R08 could never pass for a code task.
+                        self._structured_writes += 1
                         self._tool_call_seq += 1
                         self._last_code_write_step = self._tool_call_seq
             elif cap_name == "bash_execute":
@@ -1729,6 +1817,14 @@ class NativeAgentLoop(EventEmitter):
                     confidence=classification.confidence,
                 )
 
+        # Drop vision-only tools for a text-only model, so it does not spend
+        # tokens on a screenshot it cannot read. Must run before the options
+        # capture `tools` — rebinding the list afterwards changes nothing.
+        from rune.agent.model_traits import supports_vision
+
+        if not supports_vision(model):
+            tools = [t for t in tools if t != "browser_screenshot"]
+
         adapter_opts = ToolAdapterOptions(
             cognitive_cache=cache,
             stall_state=self._stall,
@@ -1748,17 +1844,6 @@ class NativeAgentLoop(EventEmitter):
 
             set_ask_user_callback(self._ask_user_callback)
             reset_ask_user_count()
-
-        # Remove vision-only tools if the model doesn't support vision.
-        # This prevents non-vision models from wasting tokens on
-        # screenshots they cannot interpret.
-        from rune.llm.model_capabilities import get_capabilities
-
-        _model_name = model.split("/")[-1] if "/" in model else model
-        _caps = get_capabilities(_model_name)
-        if not _caps.supports_vision:
-            _VISION_TOOLS = {"browser_screenshot"}
-            tools = [t for t in tools if t not in _VISION_TOOLS]
 
         advisor_service = AdvisorService.for_episode(model)
 
@@ -1843,6 +1928,23 @@ class NativeAgentLoop(EventEmitter):
 
         # Workspace root for guard checks
         workspace_root = (context or {}).get("workspace_root", "") if context else ""
+
+        # Attachments ride on the goal's user message, seeded once here. The
+        # whole conversation is resent every step, so building this per step
+        # would charge the image to each one.
+        _attachments = (context or {}).get("attachments") or []
+        if _attachments:
+            from rune.agent.attachments import build_user_content
+            content, skipped = await build_user_content(
+                goal, _attachments, vision=supports_vision(model)
+            )
+            # Seed whatever came back. When nothing could be sent, the content
+            # is a plain string carrying the reasons; appending it is what tells
+            # the model a file was attached and why it went unread.
+            if isinstance(content, list) or skipped:
+                messages.append({"role": "user", "content": content})
+            if skipped:
+                log.info("attachments_skipped", reasons="; ".join(skipped))
 
         # (advisor_service + native path detection happens earlier —
         # see `AdvisorService.for_episode(model)` above, right after
@@ -2129,6 +2231,12 @@ class NativeAgentLoop(EventEmitter):
                     )
                     trace.reason = "stalled"
                     break
+
+            # A run that has written several structured code artifacts is
+            # complex coding whatever the classifier said at t=0. Greenfield
+            # work starts in an empty directory, so the structural floor above
+            # cannot see it; this is the same correction applied on evidence.
+            self._maybe_upgrade_budget_for_code_work()
 
             # Wind-down hard_stop check (#14)
             self._update_wind_down_phase()
@@ -2782,6 +2890,7 @@ class NativeAgentLoop(EventEmitter):
                     output_expectation=effective_output_exp,
                     evidence=evidence,
                     changed_files_count=evidence.writes,
+                    structured_write_count=self._structured_writes,
                     answer_length=len(output_text),
                     # Code verification
                     requires_code_verification=requires_code_verification,
@@ -3744,11 +3853,67 @@ class NativeAgentLoop(EventEmitter):
 
     @staticmethod
     def _estimate_tokens(msg: Any) -> int:
-        """Rough token estimate: ~4 chars per token."""
-        text = str(msg) if not isinstance(msg, dict) else str(msg.get("content", ""))
+        """Rough token estimate: ~4 chars per token.
+
+        Multimodal content is a list of parts. Stringifying it would count the
+        image's base64 payload as text — a downscaled screenshot then scores
+        over 100k "tokens" and blows every cap, so the trimmer would drop the
+        image and the history around it on every step. Charge images a flat
+        rate instead; a 1568px image is ~1.5k tokens on the major providers.
+        """
+        if isinstance(msg, dict):
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                total = 0
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") == "image_url":
+                        total += IMAGE_TOKEN_ESTIMATE
+                    else:
+                        total += len(str(part.get("text", ""))) // 4
+                return total
+            text = str(content)
+        else:
+            text = str(msg)
         return len(text) // 4
 
     # Wind-down 5-stage state machine (#14)
+
+    # Writes that mark a run as real code work rather than a one-off edit.
+    _CODE_WORK_WRITE_THRESHOLD = 3
+
+    def _maybe_upgrade_budget_for_code_work(self) -> None:
+        """Raise a small token budget once a run proves to be code work.
+
+        One-way and capped at the complex-coding budget, so it can only buy the
+        verify-and-fix loop room it was already going to need — never shrink a
+        budget a caller chose deliberately.
+        """
+        if self._budget_upgraded_for_code:
+            return
+        if getattr(self._config, "token_budget_override", None):
+            # A caller named a number; it is not ours to widen.
+            self._budget_upgraded_for_code = True
+            return
+        if self._structured_writes < self._CODE_WORK_WRITE_THRESHOLD:
+            return
+
+        target = _BUDGET_BY_INTENT["complex_coding"]
+        if self._token_budget.total >= target:
+            self._budget_upgraded_for_code = True
+            return
+
+        previous = self._token_budget.total
+        self._token_budget.total = target
+        self._budget_upgraded_for_code = True
+        log.info(
+            "token_budget_upgraded",
+            reason="structured_code_writes",
+            writes=self._structured_writes,
+            was=previous,
+            now=target,
+        )
 
     def _update_wind_down_phase(self) -> None:
         """Advance the wind-down state machine based on token budget fraction."""

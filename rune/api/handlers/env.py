@@ -112,26 +112,50 @@ class EnvDeleteResponse(BaseModel):
 # Routes
 
 
+def _is_rune_key(key: str) -> bool:
+    """Whether a variable belongs to RUNE rather than the ambient shell."""
+    if key.startswith("RUNE_"):
+        return True
+    return any(
+        key.startswith(p) for prefixes, _ in _CATEGORY_PREFIXES for p in prefixes
+    )
+
+
 @router.get("", response_model=EnvListResponse, dependencies=[Depends(auth)])
 async def list_env(scope: str | None = None) -> EnvListResponse:
     """List environment variables.
 
-    Values are masked for security. Filter by ``scope`` (user/project).
+    Values are masked. Each variable reports the scope it is actually stored
+    in, so the UI can say where an edit will land. Variables only present in
+    the process environment report ``process`` — editing one writes a file.
     """
-    # In a full implementation, this would read from .env files.
-    # For now, expose RUNE_* environment variables from the process.
-    variables: list[EnvVarInfo] = []
-    for key, value in sorted(os.environ.items()):
-        if not key.startswith("RUNE_") and not any(
-            key.startswith(p) for prefixes, _ in _CATEGORY_PREFIXES for p in prefixes
-        ):
-            continue
+    from rune.utils.env import list_env as read_env_files
+    from rune.utils.env import project_env_path, user_env_path
 
+    files = read_env_files()
+
+    # Narrowest scope wins, matching the loader's precedence.
+    scopes: dict[str, str] = dict.fromkeys(files["user"], "user")
+    scopes.update(dict.fromkeys(files["project"], "project"))
+
+    merged: dict[str, str] = dict(files["merged"])
+    for key, value in os.environ.items():
+        if _is_rune_key(key):
+            merged.setdefault(key, value)
+            scopes.setdefault(key, "process")
+
+    variables: list[EnvVarInfo] = []
+    for key in sorted(merged):
+        if not _is_rune_key(key):
+            continue
+        var_scope = scopes.get(key, "process")
+        if scope and var_scope != scope:
+            continue
         variables.append(
             EnvVarInfo(
                 key=key,
-                maskedValue=_mask_value(key, value),
-                scope="project",
+                maskedValue=_mask_value(key, merged[key]),
+                scope=var_scope,
                 isSecret=_is_secret_like_key(key),
                 category=_categorize_key(key),
             )
@@ -139,10 +163,7 @@ async def list_env(scope: str | None = None) -> EnvListResponse:
 
     return EnvListResponse(
         variables=variables,
-        paths=EnvPathsInfo(
-            user=os.path.expanduser("~/.rune/.env"),
-            project=os.path.join(os.getcwd(), ".env"),
-        ),
+        paths=EnvPathsInfo(user=str(user_env_path()), project=str(project_env_path())),
     )
 
 
@@ -154,10 +175,22 @@ async def set_env(key: str, req: EnvSetRequest) -> EnvSetResponse:
     """
     _validate_key(key)
 
-    # In a full implementation, write to .env files.
-    os.environ[key] = req.value
-    log.info("env_set", key=key, scope=req.scope)
+    # Write the .env file too, not just this process: a variable that vanishes
+    # on restart is worse than one that was never accepted.
+    from rune.utils.env import set_env as write_env
 
+    try:
+        write_env(key, req.value, scope=req.scope)
+    except (OSError, UnicodeDecodeError) as exc:
+        # The existing file could not be read, so rewriting it would drop
+        # whatever else is in there. Refuse rather than destroy it.
+        log.warning("env_set_failed", key=key, scope=req.scope, error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not update the {req.scope} .env file: {exc}",
+        ) from exc
+
+    log.info("env_set", key=key, scope=req.scope)
     return EnvSetResponse(key=key, updated=True)
 
 
@@ -166,8 +199,31 @@ async def delete_env(key: str, scope: str = "project") -> EnvDeleteResponse:
     """Remove an environment variable."""
     _validate_key(key)
 
-    deleted = key in os.environ
-    os.environ.pop(key, None)
-    log.info("env_unset", key=key, scope=scope)
+    from rune.utils.env import list_env as read_env_files
+    from rune.utils.env import unset_env
 
-    return EnvDeleteResponse(key=key, deleted=deleted)
+    scope = scope if scope in ("user", "project") else "project"
+
+    files = read_env_files()
+    if key not in files[scope]:
+        # Report on the file, not the process. A variable inherited from the
+        # shell, or set in the other scope, is not ours to remove — saying
+        # "deleted" would have it reappear on the next start.
+        other = "project" if scope == "user" else "user"
+        where = other if key in files[other] else "the environment"
+        raise HTTPException(
+            status_code=404,
+            detail=f'"{key}" is not set in the {scope} .env file (it comes from {where})',
+        )
+
+    try:
+        unset_env(key, scope=scope)
+    except (OSError, UnicodeDecodeError) as exc:
+        log.warning("env_unset_failed", key=key, scope=scope, error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not update the {scope} .env file: {exc}",
+        ) from exc
+
+    log.info("env_unset", key=key, scope=scope)
+    return EnvDeleteResponse(key=key, deleted=True)

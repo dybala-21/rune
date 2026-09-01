@@ -15,6 +15,7 @@ import re
 import time
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, NamedTuple, Protocol, runtime_checkable
 
@@ -29,6 +30,7 @@ from rune.capabilities.output_prefixes import (
 )
 from rune.capabilities.registry import CapabilityRegistry, get_capability_registry
 from rune.capabilities.types import CapabilityDefinition
+from rune.safety.approval_context import approval_granted
 from rune.types import CapabilityResult
 from rune.utils.env import env_flag as _env_flag
 from rune.utils.env import env_int as _env_int
@@ -603,9 +605,11 @@ def _build_typed_tool(
                 if opts.on_tool_end is not None:
                     await opts.on_tool_end(cap_name, err)
                 return f"[BLOCKED] {guard_result.reason}"
+            approval_cleared = False
             if guard_result.requires_approval and approval_mode() == "bypass":
                 log.info("approval_bypassed", capability=cap_name, gate="guardian")
                 guard_result = _GuardianResult()
+                approval_cleared = True
             if guard_result.requires_approval:
                 if opts.approval_callback is not None:
                     approved = await opts.approval_callback(cap_name, guard_result.reason)
@@ -633,6 +637,7 @@ def _build_typed_tool(
                         return f"{DENIED_PREFIX} {guard_result.reason}{deny_hint}"
                     # Approved, reset denial counter
                     _consecutive_denials[0] = 0
+                    approval_cleared = True
                 else:
                     err = CapabilityResult(success=False, error=guard_result.reason)
                     if opts.on_tool_end is not None:
@@ -724,9 +729,52 @@ def _build_typed_tool(
         # 3. Execute
         start_time = time.monotonic()
         try:
-            result = await reg.execute(cap_name, effective_params)
+            if approval_cleared:
+                with approval_granted():
+                    result = await reg.execute(cap_name, effective_params)
+            else:
+                result = await reg.execute(cap_name, effective_params)
         except Exception as exc:
             result = CapabilityResult(success=False, error=f"Execution error: {exc}")
+        # A capability can refuse and ask to be asked. The execution policy's
+        # allowlist does this: Guardian never sees the verdict, so without this
+        # the refusal was a dead end — no prompt anywhere, and the metadata
+        # saying "requires_approval" was read by nothing.
+        if _capability_asked_for_approval(result):
+            reason = str((result.metadata or {}).get("reason") or result.error or "")
+            granted = False
+            if approval_mode() == "bypass":
+                log.info("approval_bypassed", capability=cap_name, gate="capability")
+                granted = True
+            elif opts.approval_callback is not None:
+                granted = await opts.approval_callback(cap_name, reason)
+            else:
+                # Nothing to ask on (cron, proactive, scheduled runs). Fail
+                # closed and say so, rather than looking like the tool broke.
+                log.info("capability_approval_no_channel", capability=cap_name)
+                result = CapabilityResult(
+                    success=False,
+                    error=(
+                        f"{reason} — no approval channel in this run "
+                        f"(scheduled or headless). Allowlist it in "
+                        f"safety.denyByDefault.allowedExecutables, or run with "
+                        f"approval mode 'bypass'."
+                    ),
+                )
+
+            if granted:
+                _consecutive_denials[0] = 0
+                try:
+                    with approval_granted():
+                        result = await reg.execute(cap_name, effective_params)
+                except Exception as exc:
+                    result = CapabilityResult(
+                        success=False, error=f"Execution error: {exc}"
+                    )
+            elif opts.approval_callback is not None:
+                _consecutive_denials[0] += 1
+                result = CapabilityResult(success=False, error=f"Denied: {reason}")
+
         elapsed_ms = (time.monotonic() - start_time) * 1000
         if cap_name == _BASH_CAPABILITY:
             result = _enforce_benchmark_status_markers(result)
@@ -1432,6 +1480,41 @@ class _GuardianResult:
     reason: str = ""
 
 
+def _capability_asked_for_approval(result: CapabilityResult) -> bool:
+    """Whether a capability refused and flagged the call as approvable.
+
+    The shell gate returns this when an executable is not allowlisted, which
+    is a question for the user, not a failure of the tool.
+    """
+    if result.success:
+        return False
+    meta = result.metadata
+    return bool(isinstance(meta, dict) and meta.get("requires_approval"))
+
+
+def _normalise_cap_name(name: str) -> str:
+    """file.delete / file-delete / file_delete are the same tool to an operator."""
+    return name.strip().lower().replace(".", "_").replace("-", "_")
+
+
+def _explicit_approval_patterns() -> list[str]:
+    """Capabilities the operator marked as always-prompt, normalised."""
+    try:
+        from rune.config import get_config
+
+        raw = get_config().approval.require_explicit_for or []
+    except Exception as exc:
+        log.debug("require_explicit_for_read_failed", error=str(exc))
+        return []
+    return [_normalise_cap_name(str(x)) for x in raw if str(x).strip()]
+
+
+def _requires_explicit_approval(cap_name: str) -> bool:
+    """Whether ``approval.requireExplicitFor`` names this capability."""
+    target = _normalise_cap_name(cap_name)
+    return any(fnmatch(target, pat) for pat in _explicit_approval_patterns())
+
+
 def _validate_with_guardian(cap_name: str, params: dict[str, Any]) -> _GuardianResult:
     """Validate a tool call with Guardian.
 
@@ -1467,6 +1550,14 @@ def _validate_with_guardian(cap_name: str, params: dict[str, Any]) -> _GuardianR
         log.error("guardian_validation_error", error=str(exc))
         # Fail closed: block if Guardian itself errors
         return _GuardianResult(blocked=True, reason=f"Guardian validation error (fail-closed): {exc}")
+
+    # Operator-pinned prompts. Guardian scores risk from the command and path;
+    # this list is the operator saying "ask me anyway" for a whole capability.
+    if _requires_explicit_approval(cap_name):
+        return _GuardianResult(
+            requires_approval=True,
+            reason=f"{cap_name} requires explicit approval (approval.requireExplicitFor)",
+        )
 
     return _GuardianResult()
 

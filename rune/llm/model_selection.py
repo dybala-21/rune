@@ -57,40 +57,43 @@ def get_effective_model_selection() -> ActiveModelSelection:
     return ActiveModelSelection(provider=provider, model=default_model)
 
 
-async def persist_active_model_selection(selection: ActiveModelSelection) -> ActiveModelSelection:
-    """Persist the active model selection to config and reset the LLM client."""
-    from rune.config import get_config_loader
+def persist_active_model_selection(selection: ActiveModelSelection) -> ActiveModelSelection:
+    """Set the active model and write it to config.yaml."""
+    llm_cfg = get_config().llm
+    llm_cfg.active_provider = selection.provider.value
+    llm_cfg.active_model = selection.model
 
-    loader = get_config_loader()
-    config = await loader.load()
+    from rune.config import save_config_values
+    save_config_values({
+        "llm.activeProvider": selection.provider.value,
+        "llm.activeModel": selection.model,
+    })
 
-    config.llm.active_provider = selection.provider.value  # type: ignore[attr-defined]
-    config.llm.active_model = selection.model  # type: ignore[attr-defined]
-    await loader.save(config)
-
-    # Reset the singleton client so it picks up the new selection
-    from rune.llm.client import get_llm_client
-    client = get_llm_client()
-    client._initialized = False  # noqa: SLF001
-
-    log.info("model_selection_persisted", provider=selection.provider, model=selection.model)
+    _reset_llm_client()
+    log.info(
+        "model_selection_persisted",
+        provider=selection.provider.value,
+        model=selection.model,
+    )
     return selection
 
 
-async def clear_active_model_selection() -> ActiveModelSelection:
-    """Clear the active override and return the effective (default) selection."""
-    from rune.config import get_config_loader
+def clear_active_model_selection() -> ActiveModelSelection:
+    """Drop the override and fall back to the configured default."""
+    llm_cfg = get_config().llm
+    llm_cfg.active_provider = None
+    llm_cfg.active_model = None
 
-    loader = get_config_loader()
-    config = await loader.load()
+    from rune.config import save_config_values
+    save_config_values({"llm.activeProvider": None, "llm.activeModel": None})
 
-    config.llm.active_provider = None  # type: ignore[attr-defined]
-    config.llm.active_model = None  # type: ignore[attr-defined]
-    await loader.save(config)
-
-    # Reset client
-    from rune.llm.client import get_llm_client
-    client = get_llm_client()
-    client._initialized = False  # noqa: SLF001
-
+    _reset_llm_client()
+    log.info("model_selection_cleared")
     return get_effective_model_selection()
+
+
+def _reset_llm_client() -> None:
+    """Force the shared client to re-resolve its provider on next use."""
+    from rune.llm.client import get_llm_client
+
+    get_llm_client()._initialized = False  # noqa: SLF001

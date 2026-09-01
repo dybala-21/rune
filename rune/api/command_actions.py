@@ -150,6 +150,15 @@ def _handle_model_command(args: str) -> str:
 # ── action dispatch ──────────────────────────────────────────────────────
 
 
+# Actions execute_action does not implement: rendering-side work only the TUI
+# can do. Listed so the web palette hides them rather than offering a command
+# that answers "not available here".
+WEB_UNSUPPORTED_COMMANDS = frozenset({
+    "compact", "copy", "cost", "export", "normal",
+    "retry", "stats", "style", "theme", "verbose",
+})
+
+
 async def execute_action(action: str, ctx: ActionContext) -> str:
     """Execute an ``__ACTION__:`` payload server-side; returns output text.
 
@@ -592,6 +601,10 @@ async def _action_load(conv_id: str, ctx: ActionContext) -> str:
                 "command": "/load",
                 "output": f"Resumed — {len(conv.turns)} messages"
                 + (f", workspace {workspace}" if workspace else ""),
+                # Every client gets this event, so name the session that asked
+                # for it. Without that, /load in one tab replaced the
+                # conversation in all the others.
+                "requestSessionId": ctx.session_id,
                 "data": {
                     "action": "load_session",
                     "sessionId": conv_id,

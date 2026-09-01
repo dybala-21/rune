@@ -62,7 +62,7 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
       if (result.paths) setPaths(result.paths);
       return result.variables;
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load env vars');
+      setError(err instanceof Error ? err.message : "Couldn't load environment variables");
       return null;
     } finally {
       setLoading(false);
@@ -122,7 +122,7 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
         setViewMode('list');
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save');
+      setError(err instanceof Error ? err.message : "Couldn't save");
     } finally {
       setSaving(false);
     }
@@ -138,7 +138,7 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
       setViewMode('list');
       setDeleteConfirm(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to delete');
+      setError(err instanceof Error ? err.message : "Couldn't delete");
     } finally {
       setSaving(false);
     }

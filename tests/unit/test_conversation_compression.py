@@ -203,11 +203,16 @@ class TestCompactConversation:
         assert events[0].turns_compacted > 0
         assert events[0].turns_preserved > 0
 
-        # Conversation should now have fewer turns
-        assert len(conv.turns) < 12
-        # First turn should be the summary
-        assert conv.turns[0].role == "system"
-        assert "[Conversation Summary]" in conv.turns[0].content
+        # Compacted turns are kept but flagged: store.save() rewrites the whole
+        # list, so dropping them here would delete the transcript from the DB.
+        # What shrinks is the live (non-archived) set, not the stored one.
+        live = [t for t in conv.turns if not t.archived]
+        assert len(live) < 12
+        assert len(conv.turns) >= 12
+        # The summary stands where the compacted turns end.
+        summary = next(t for t in conv.turns if not t.archived)
+        assert summary.role == "system"
+        assert "[Conversation Summary]" in summary.content
 
     @pytest.mark.asyncio
     async def test_compaction_preserves_latest_turns(self, store):
@@ -459,3 +464,54 @@ class TestLLMSummarizerProtocol:
 
     def test_none_is_not_instance(self):
         assert not isinstance(None, LLMSummarizer)
+
+
+# ---------------------------------------------------------------------------
+# Tests: compaction must not destroy stored history
+# ---------------------------------------------------------------------------
+
+
+class TestCompactionPreservesHistory:
+    """store.save() rewrites the whole turn list, so anything compaction drops
+    from conv.turns is deleted from the database. Compaction is a
+    context-window measure and must never lose the transcript."""
+
+    @pytest.fixture
+    def loaded(self, mgr_with_llm):
+        conv = mgr_with_llm.start_conversation("u1")
+        for i in range(12):
+            mgr_with_llm.add_turn(conv.id, "user", f"q{i} " + "pad " * 40)
+            mgr_with_llm.add_turn(conv.id, "assistant", f"a{i} " + "pad " * 40)
+        return mgr_with_llm, conv
+
+    def test_compacted_turns_stay_in_the_list(self, loaded):
+        mgr, conv = loaded
+        before = len(conv.turns)
+        asyncio.run(mgr.compact_conversation(conv.id, 400))
+        # +1 for the summary turn; nothing removed.
+        assert len(conv.turns) == before + 1
+        assert any(t.archived for t in conv.turns)
+
+    def test_compacted_turns_are_marked_archived(self, loaded):
+        mgr, conv = loaded
+        asyncio.run(mgr.compact_conversation(conv.id, 400))
+        archived = [t for t in conv.turns if t.archived]
+        live = [t for t in conv.turns if not t.archived]
+        assert archived, "compacted turns must be kept, flagged"
+        # Summary + the preserved tail.
+        assert 0 < len(live) < len(conv.turns)
+
+    def test_context_building_skips_archived_turns(self, loaded):
+        mgr, conv = loaded
+        asyncio.run(mgr.compact_conversation(conv.id, 400))
+        window = mgr.get_context_window(conv.id)
+        assert not any(t.archived for t in window)
+
+    def test_a_second_compaction_does_not_recount_archived_turns(self, loaded):
+        # Token counting must ignore what it already archived, or the
+        # conversation compacts on every single turn from then on.
+        mgr, conv = loaded
+        asyncio.run(mgr.compact_conversation(conv.id, 400))
+        after_first = sum(1 for t in conv.turns if t.archived)
+        asyncio.run(mgr.compact_conversation(conv.id, 400))
+        assert sum(1 for t in conv.turns if t.archived) == after_first

@@ -7,8 +7,6 @@ approval UI, and space/thread routing.
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
 import os
 from typing import Any
 
@@ -156,14 +154,16 @@ class GoogleChatAdapter(ChannelAdapter):
         service_account_path: str,
         project_id: str,
         *,
-        webhook_secret: str | None = None,
         listen_host: str = "0.0.0.0",
         listen_port: int = 8080,
+        allowed_users: list[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(allowed_users=allowed_users)
         self._service_account_path = service_account_path
         self._project_id = project_id
-        self._webhook_secret = webhook_secret
+        _interaction = _get_google_chat_interaction_config()
+        self._verify_requests = bool(_interaction.get("verify_requests", True))
+        self._auth_audience = str(_interaction.get("auth_audience") or "") or project_id
         self._listen_host = listen_host
         self._listen_port = listen_port
         self._chat_service: Any = None
@@ -305,16 +305,14 @@ class GoogleChatAdapter(ChannelAdapter):
         """Handle an incoming Google Chat webhook event."""
         import aiohttp.web
 
-        # Verify webhook signature if secret is configured
-        if self._webhook_secret:
-            signature = request.headers.get("X-Goog-Signature", "")
-            body_bytes = await request.read()
-            if not self._verify_signature(body_bytes, signature):
-                log.warning("google_chat_webhook_invalid_signature")
-                return aiohttp.web.Response(status=401, text="Invalid signature")
-            payload = json_decode(body_bytes)
-        else:
-            payload = await request.json()
+        body_bytes = await request.read()
+
+        if self._verify_requests:
+            denied = await self._reject_unverified(request, aiohttp.web)
+            if denied is not None:
+                return denied
+
+        payload = json_decode(body_bytes)
 
         event_type = payload.get("type", "")
 
@@ -330,16 +328,38 @@ class GoogleChatAdapter(ChannelAdapter):
 
         return aiohttp.web.json_response({})
 
-    def _verify_signature(self, body: bytes, signature: str) -> bool:
-        """Verify the webhook request signature."""
-        if not self._webhook_secret:
-            return True
-        expected = hmac.new(
-            self._webhook_secret.encode(),
-            body,
-            hashlib.sha256,
-        ).hexdigest()
-        return hmac.compare_digest(expected, signature)
+    async def _reject_unverified(self, request: Any, web: Any) -> Any | None:
+        """Return a 401 response when the caller is not a verified Google Chat.
+
+        Google Chat signs each webhook with a bearer JWT issued for the app's
+        configured audience. Returns ``None`` when the request is authentic.
+        Fails closed: anything unverifiable is denied.
+        """
+        if not self._auth_audience:
+            log.error(
+                "google_chat_webhook_no_audience",
+                hint="Set GOOGLE_CHAT_AUTH_AUDIENCE, or "
+                "GOOGLE_CHAT_VERIFY_REQUESTS=false to disable verification",
+            )
+            return web.Response(status=401, text="Verification not configured")
+
+        auth = request.headers.get("Authorization", "")
+        token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+        if not token:
+            log.warning("google_chat_webhook_no_bearer")
+            return web.Response(status=401, text="Missing bearer token")
+
+        from rune.channels.google_chat_security import (
+            verify_google_chat_bearer_token,
+        )
+
+        result = await verify_google_chat_bearer_token(
+            token, audience=self._auth_audience
+        )
+        if not result.ok:
+            log.warning("google_chat_webhook_invalid_token", reason=result.reason)
+            return web.Response(status=401, text="Invalid token")
+        return None
 
     async def _handle_message_event(self, payload: dict[str, Any]) -> None:
         """Convert a Google Chat MESSAGE event to IncomingMessage and dispatch."""
@@ -376,6 +396,10 @@ class GoogleChatAdapter(ChannelAdapter):
         question_future = self._pending_questions.pop(space_name, None)
         if question_future is not None and not question_future.done():
             question_future.set_result(text.strip())
+
+        if not self.check_authorization(sender.get("name", "")):
+            log.warning("google_chat_unauthorized_sender", sender_id=sender.get("name", ""))
+            return
 
         await self._on_message(incoming)
 

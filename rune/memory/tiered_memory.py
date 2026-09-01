@@ -37,6 +37,9 @@ class DailyMemoryEntry:
     patterns_learned: list[str] = field(default_factory=list)
     total_tasks: int = 0
     successful_tasks: int = 0
+    # How many of ``total_tasks`` carried a real outcome. Session events do not,
+    # so a ratio built over unmeasured tasks would be invented.
+    outcomes_recorded: int = 0
 
 
 @dataclass(slots=True)
@@ -97,8 +100,10 @@ class TieredMemoryManager:
             if pattern := entry.get("pattern"):
                 daily.patterns_learned.append(str(pattern))
             daily.total_tasks += 1
-            if entry.get("success", False):
-                daily.successful_tasks += 1
+            if "success" in entry:
+                daily.outcomes_recorded += 1
+                if entry["success"]:
+                    daily.successful_tasks += 1
 
         # Write each goal as a daily log entry in markdown
         from rune.memory.markdown_store import append_daily_entry
@@ -117,6 +122,7 @@ class TieredMemoryManager:
             date=today,
             tasks=daily.total_tasks,
             successful=daily.successful_tasks,
+            outcomes_recorded=daily.outcomes_recorded,
         )
         return daily
 
@@ -137,7 +143,6 @@ class TieredMemoryManager:
             for entry in entries:
                 daily.goal_summaries.append(entry["title"])
                 daily.total_tasks += 1
-                daily.successful_tasks += 1  # assume success unless marked
                 daily.key_decisions.extend(entry.get("decisions", []))
                 daily.patterns_learned.extend(entry.get("lessons", []))
             return daily
@@ -218,10 +223,7 @@ class TieredMemoryManager:
         # Build promotion entries from session events
         entries: list[dict[str, Any]] = []
         for evt in self._session_events:
-            entries.append({
-                "goal": evt.get("key", ""),
-                "success": True,
-            })
+            entries.append({"goal": evt.get("key", "")})
 
         loop = asyncio.get_running_loop()
         daily = await loop.run_in_executor(None, self.promote_to_daily, entries)

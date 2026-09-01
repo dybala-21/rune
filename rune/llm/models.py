@@ -350,8 +350,15 @@ def invalidate_cache() -> None:
 
 
 def known_models() -> list[tuple[str, str]]:
-    """(provider, model_id) pairs from the central registry, for model pickers
-    (TUI /model selector, web models.list RPC)."""
+    """(provider, model_id) pairs for model pickers (TUI /model selector, web
+    models.list RPC).
+
+    Cloud models come from the static registry. Ollama's are whatever is
+    actually pulled on this machine, so they are read from the local server
+    instead — a local-first app that hides the user's own models is the wrong
+    default. The probe is bounded and cached, and a missing Ollama simply
+    contributes nothing.
+    """
     result: list[tuple[str, str]] = []
     for group in (
         FALLBACK_OPENAI_MODELS,
@@ -365,4 +372,9 @@ def known_models() -> list[tuple[str, str]]:
     ):
         for m in group:
             result.append((m.provider, m.id))
+    # Imported here, not at module scope: client pulls in httpx and the
+    # provider SDKs, and this module is imported by things that never need them.
+    from rune.llm.client import installed_ollama_models
+
+    result.extend(("ollama", name) for name in installed_ollama_models())
     return result

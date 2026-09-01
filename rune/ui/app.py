@@ -62,7 +62,20 @@ _PT_STYLE = PTStyle.from_dict({
 
 from rune.llm.models import known_models as _known_models
 
-_KNOWN_MODELS: list[tuple[str, str]] = _known_models()
+_known_models_cache: list[tuple[str, str]] | None = None
+
+
+def _model_list() -> list[tuple[str, str]]:
+    """Provider/model pairs for tab completion, resolved on first use.
+
+    Not a module-level constant: known_models() probes the local Ollama
+    server, and doing that at import time makes `import rune.ui.app` — and so
+    the CLI and the test suite — depend on whether Ollama happens to be up.
+    """
+    global _known_models_cache
+    if _known_models_cache is None:
+        _known_models_cache = _known_models()
+    return _known_models_cache
 
 _KNOWN_THEMES = ["dark", "light", "minimal"]
 
@@ -133,12 +146,12 @@ class _RuneCompleter(Completer):
             if ":" not in partial:
                 # Step 1: complete provider name
                 seen_providers: list[str] = []
-                for prov, _ in _KNOWN_MODELS:
+                for prov, _ in _model_list():
                     if prov not in seen_providers:
                         seen_providers.append(prov)
                 for prov in seen_providers:
                     if prov.startswith(partial):
-                        count = sum(1 for p, _ in _KNOWN_MODELS if p == prov)
+                        count = sum(1 for p, _ in _model_list() if p == prov)
                         yield Completion(
                             f"{prov}:",
                             start_position=-len(partial),
@@ -148,7 +161,7 @@ class _RuneCompleter(Completer):
             else:
                 # Step 2: complete model within provider
                 prov_prefix, model_partial = partial.split(":", 1)
-                for prov, model in _KNOWN_MODELS:
+                for prov, model in _model_list():
                     if prov == prov_prefix and model.startswith(model_partial):
                         yield Completion(
                             f"{prov}:{model}",
@@ -1320,7 +1333,7 @@ class RuneApp:
         else:
             provider, model = self._provider, value
             # Try to find the provider
-            for prov, known in _KNOWN_MODELS:
+            for prov, known in _model_list():
                 if known == value:
                     provider = prov
                     break
@@ -1337,24 +1350,15 @@ class RuneApp:
 
     @staticmethod
     def _save_active_model_to_yaml(provider: str, model: str) -> None:
-        """Write activeProvider/activeModel to ~/.rune/config.yaml."""
-        from rune.utils.paths import rune_home
+        """Persist the picked model so it survives a restart."""
+        from rune.config import save_config_values
 
-        cfg_path = rune_home() / "config.yaml"
-        if not cfg_path.exists():
-            return
-        try:
-            from ruamel.yaml import YAML
-            yaml = YAML()
-            yaml.preserve_quotes = True
-            data = yaml.load(cfg_path) or {}
-            llm = data.setdefault("llm", {})
-            llm["activeProvider"] = provider
-            llm["activeModel"] = model
-            with open(cfg_path, "w", encoding="utf-8") as f:
-                yaml.dump(data, f)
-        except Exception:
-            pass  # best-effort, don't crash on save failure
+        save_config_values({
+            "llm.activeProvider": provider,
+            "llm.activeModel": model,
+            "llm.defaultProvider": provider,
+            "llm.defaultModel": model,
+        })
 
     def _fetch_ollama_models(self) -> list[str]:
         """Fetch available models from local Ollama instance."""
@@ -1372,7 +1376,7 @@ class RuneApp:
         from rune.ui.inline_select import inline_select
 
         # Build combined model list: static providers + dynamic ollama
-        all_models = list(_KNOWN_MODELS)
+        all_models = list(_model_list())
         ollama_models = self._fetch_ollama_models()
         for m in ollama_models:
             all_models.append(("ollama", m))

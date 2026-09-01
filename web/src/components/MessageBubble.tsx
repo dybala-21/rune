@@ -1,5 +1,5 @@
 import { memo, useState } from 'react';
-import type { ChatMessage } from '../types';
+import type { ChatMessage, SentAttachment } from '../types';
 import { Markdown } from './Markdown';
 import { CopyButton } from './CopyButton';
 
@@ -20,7 +20,8 @@ export const MessageBubble = memo(function MessageBubble({ message, streaming = 
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(message.content);
 
-  if (!message.content?.trim()) return null;
+  // An image sent with no caption is still a message.
+  if (!message.content?.trim() && !message.attachments?.length) return null;
 
   if (isSystem) {
     const isError = message.level === 'error';
@@ -104,7 +105,8 @@ export const MessageBubble = memo(function MessageBubble({ message, streaming = 
           wordBreak: 'break-word',
           color: 'var(--text-primary)',
         }}>
-          <SimpleContent text={message.content} />
+          {message.attachments?.length ? <Attachments items={message.attachments} /> : null}
+          {message.content ? <SimpleContent text={message.content} /> : null}
         </div>
       </div>
     );
@@ -115,39 +117,37 @@ export const MessageBubble = memo(function MessageBubble({ message, streaming = 
     <div className="slide-up msg-hover" style={{
       padding: '8px 0',
     }}>
-      <div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div
-            className={streaming ? 'streaming-cursor' : undefined}
-            style={{
-              fontSize: 15,
-              lineHeight: 1.7,
-              color: 'var(--text-primary)',
-              wordBreak: 'break-word',
-            }}
-          >
-            <Markdown content={message.content} />
-          </div>
-          {!streaming && (
-            <div className="msg-actions" style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 10 }}>
-              <CopyButton text={message.content} />
-              {onRegenerate && (
-                <button className="msg-action-btn" onClick={onRegenerate} title="Re-run the last turn">
-                  ↻ Regenerate
-                </button>
-              )}
-              {message.timestamp > 0 && (
-                <span style={{
-                  fontFamily: 'var(--font-mono)',
-                  fontSize: 11,
-                  color: 'var(--text-muted)',
-                }}>
-                  {formatClock(message.timestamp)}
-                </span>
-              )}
-            </div>
-          )}
+      <div style={{ minWidth: 0 }}>
+        <div
+          className={streaming ? 'streaming-cursor' : undefined}
+          style={{
+            fontSize: 15,
+            lineHeight: 1.7,
+            color: 'var(--text-primary)',
+            wordBreak: 'break-word',
+          }}
+        >
+          <Markdown content={message.content} />
         </div>
+        {!streaming && (
+          <div className="msg-actions" style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 10 }}>
+            <CopyButton text={message.content} />
+            {onRegenerate && (
+              <button className="msg-action-btn" onClick={onRegenerate} title="Re-run the last turn">
+                ↻ Regenerate
+              </button>
+            )}
+            {message.timestamp > 0 && (
+              <span style={{
+                fontFamily: 'var(--font-mono)',
+                fontSize: 11,
+                color: 'var(--text-muted)',
+              }}>
+                {formatClock(message.timestamp)}
+              </span>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -159,6 +159,47 @@ function formatClock(ts: number): string {
   } catch {
     return '';
   }
+}
+
+
+// ── Attachments ──
+
+/** Images render inline; a restored message has no data, so it falls back to a chip. */
+function Attachments({ items }: { items: SentAttachment[] }) {
+  return (
+    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
+      {items.map((att, i) => {
+        const isImage = att.mimeType.startsWith('image/') && att.dataUrl;
+        return isImage ? (
+          <img
+            key={i}
+            src={att.dataUrl}
+            alt={att.name}
+            title={att.name}
+            style={{
+              maxWidth: 240, maxHeight: 240, borderRadius: 'var(--radius-md)',
+              border: '1px solid var(--border)', display: 'block',
+            }}
+          />
+        ) : (
+          <span
+            key={i}
+            title={att.name}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              padding: '4px 8px', borderRadius: 'var(--radius-sm)',
+              background: 'var(--bg-secondary)', border: '1px solid var(--border)',
+              fontSize: 12, color: 'var(--text-secondary)', maxWidth: 220,
+            }}
+          >
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {att.name}
+            </span>
+          </span>
+        );
+      })}
+    </div>
+  );
 }
 
 

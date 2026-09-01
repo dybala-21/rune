@@ -90,12 +90,21 @@ class LLMConfig(BaseModel):
 # Approval Configuration
 
 class ApprovalConfig(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     profile: str = "general"  # general | developer | automation
     auto_approve_safe: bool = True
     auto_approve_low: bool = True
     auto_approve_medium: bool = False
     timeout_seconds: int = 300
     session_cache_max: int = 200
+    # Capabilities that always prompt, whatever the risk scoring says. Names are
+    # matched loosely ("file.delete", "file_delete" and "file-delete" are the
+    # same tool) and may be globs. Read by the tool gate; ``mode: bypass`` still
+    # wins, since that switch means "never ask".
+    require_explicit_for: list[str] = Field(
+        default_factory=list, alias="requireExplicitFor"
+    )
     # The one switch every approval site honors — risky shell commands, MCP
     # writes, and outbound network calls alike. RUNE_APPROVAL_MODE overrides it
     # for a single run.
@@ -119,8 +128,32 @@ class SandboxConfig(BaseModel):
     timeout_seconds: int = 60
 
 
+class DenyByDefaultConfig(BaseModel):
+    """Allowlist-only execution policy, read by the shell gate."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    enabled: bool = True
+    allowed_executables: list[str] = Field(
+        default_factory=list, alias="allowedExecutables"
+    )
+
+
 class SafetyConfig(BaseModel):
-    rollout_mode: str = "auto"  # auto | shadow | balanced | strict | legacy
+    model_config = ConfigDict(populate_by_name=True)
+
+    # Nested form used by config.yaml. An empty allowlist means "use the
+    # shipped default"; a non-empty one replaces it, which is what an
+    # allowlist is for.
+    deny_by_default: DenyByDefaultConfig = Field(
+        default_factory=DenyByDefaultConfig, alias="denyByDefault"
+    )
+
+    # Read by the shell gate (rune/capabilities/bash.py). "auto" means the
+    # shipped default; the other values map to execution-policy branches.
+    rollout_mode: str = Field(
+        default="auto", alias="rolloutMode"
+    )  # auto | shadow | balanced | strict | legacy
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     deny_by_default_executables: bool = True
     executable_allowlist: list[str] = Field(
@@ -144,10 +177,35 @@ class SafetyConfig(BaseModel):
 
 # Hooks Configuration
 
-class HooksConfig(BaseModel):
-    test_gate: str = "advisory"  # advisory | required
-    skill_gate: str = "advisory"  # advisory | required
+class SkillGateConfig(BaseModel):
+    """Security gate applied when an auto-distilled skill is written to disk.
+
+    Mirrors the shape already in config.yaml, which nests these under
+    ``hooks.skillGate`` — the fields match SkillSecurityGateConfig.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    # "required" rejects a flagged skill; "advisory" writes it and logs.
+    mode: str = "advisory"
+    auto_harden_on_code_tasks: bool = Field(default=True, alias="autoHardenOnCodeTasks")
+    allowed_authors: list[str] = Field(
+        default_factory=lambda: ["rune-agent"], alias="allowedAuthors"
+    )
+    require_signature: bool = Field(default=False, alias="requireSignature")
+    allow_auto_sign_when_missing: bool = Field(
+        default=True, alias="allowAutoSignWhenMissing"
+    )
+    signature_secret_env: str = Field(
+        default="RUNE_SKILL_SIGNING_KEY", alias="signatureSecretEnv"
+    )
+    block_project_scope: bool = Field(default=True, alias="blockProjectScope")
+    project_scope_allowed_name_prefixes: list[str] = Field(
+        default_factory=list, alias="projectScopeAllowedNamePrefixes"
+    )
+    max_body_chars: int = Field(default=12_000, alias="maxBodyChars")
     suspicious_patterns: list[str] = Field(
+        alias="suspiciousPatterns",
         default_factory=lambda: [
             r"curl\s+.*\|\s*(bash|sh)",
             r"wget\s+.*\|\s*(bash|sh)",
@@ -157,7 +215,15 @@ class HooksConfig(BaseModel):
             r"export\s+(OPENAI|ANTHROPIC|AWS|GITHUB)_[A-Z_]*\s*=",
             r"(api[_-]?key|secret|token|password)\s*[:=]",
             r"\.env",
-        ]
+        ],
+    )
+
+
+class HooksConfig(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    skill_gate: SkillGateConfig = Field(
+        default_factory=SkillGateConfig, alias="skillGate"
     )
 
 
@@ -181,7 +247,10 @@ class FilesystemConfig(BaseModel):
 # Proactive Configuration
 
 class ProactiveConfig(BaseModel):
-    enabled: bool = False
+    # The daemon ran proactive whether or not the file said so, while the API
+    # reported this default and showed the toggle as off. On means the two now
+    # agree, and a config with no proactive block keeps behaving as before.
+    enabled: bool = True
     quiet_hours_start: int = 22  # 10 PM
     quiet_hours_end: int = 8    # 8 AM
     autonomy_promotion_accepts: int = 3
@@ -202,8 +271,12 @@ class BrowserConfig(BaseModel):
 # Search Configuration
 
 class SearchConfig(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     provider: str = "auto"  # brave | duckduckgo | browser | auto
-    max_concurrent: int = 3
+    # Caps concurrent browser pages when search falls back to the browser
+    # (rune/daemon/main.py builds the page pool from this).
+    max_concurrent: int = Field(default=3, alias="maxConcurrent")
     native_budget: int = 5
 
 
