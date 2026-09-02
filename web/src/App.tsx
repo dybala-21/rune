@@ -189,7 +189,12 @@ export function App() {
     history.loadSession(sessionId);
   };
 
+  // Clearing is not undoable — resetLiveConversation also drops the saved
+  // draft, so the restore banner can't bring it back. Confirm once there is
+  // something to lose. (⌘K puts "New chat" first, so Enter alone can hit it.)
   const handleNewChat = () => {
+    const hasContent = agent.messages.length > 0 || agent.toolCalls.length > 0;
+    if (hasContent && !window.confirm('Start a new chat? This clears the current one.')) return;
     history.loadSession(null);
     agent.resetLiveConversation();
   };
@@ -652,8 +657,15 @@ export function App() {
         </div>
       </div>
 
-      {/* Panel overlays — lazy-loaded, so nothing paints until the chunk lands */}
-      <Suspense fallback={null}>
+      {/* Panel overlays are lazy-loaded; show a placeholder so clicking a menu
+          item does something visible while its chunk downloads. */}
+      <Suspense fallback={<PanelLoading onDismiss={() => {
+        setSkillsPanelOpen(false);
+        setEnvPanelOpen(false);
+        setCronPanelOpen(false);
+        setMcpPanelOpen(false);
+        setMarkdownPanelOpen(false);
+      }} />}>
         {skillsPanelOpen && (
           <SkillsPanel
             onClose={() => setSkillsPanelOpen(false)}
@@ -713,5 +725,48 @@ function SidebarTabButton({ active, onClick, icon, label }: {
       {icon}
       {label}
     </button>
+  );
+}
+
+/** Shown while a lazily-loaded panel chunk is still downloading. */
+/**
+ * Shown while a lazily-loaded panel chunk downloads.
+ *
+ * Dismissible on purpose: if the chunk never arrives — offline, or a stale
+ * asset hash after an app update — React never resolves the boundary, and a
+ * click-through-proof overlay would lock the user out of the chat entirely.
+ */
+function PanelLoading({ onDismiss }: { onDismiss: () => void }) {
+  const [stuck, setStuck] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setStuck(true), 6000);
+    return () => clearTimeout(t);
+  }, []);
+
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 60,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 12,
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'rgba(0, 0, 0, 0.35)',
+        color: 'var(--text-muted)',
+        fontSize: 13,
+      }}
+    >
+      {stuck ? "This panel isn't loading." : 'Loading…'}
+      {stuck && (
+        <button className="msg-action-btn" onClick={onDismiss}>
+          Close
+        </button>
+      )}
+    </div>
   );
 }

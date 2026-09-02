@@ -135,8 +135,9 @@ class MattermostAdapter(ChannelAdapter):
         *,
         listen_host: str = "0.0.0.0",
         listen_port: int = 8083,
+        allowed_users: list[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(allowed_users=allowed_users)
         # Normalise URL (strip trailing slash)
         self._url = url.rstrip("/")
         self._token = token
@@ -466,6 +467,10 @@ class MattermostAdapter(ChannelAdapter):
         # Ignore bot's own messages
         user_id = post.get("user_id", "")
         if user_id == self._bot_user_id:
+            return
+
+        if not self.check_authorization(user_id):
+            log.warning("mattermost_unauthorized_sender", sender_id=user_id)
             return
 
         # Extract file IDs as attachments

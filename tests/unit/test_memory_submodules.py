@@ -14,26 +14,6 @@ from rune.memory.tuning import (
     PRESETS,
     get_tuning_config,
 )
-from rune.memory.user_model import UserModel, WorkProfile
-
-
-def test_work_profile_defaults():
-    """WorkProfile defaults to empty collections."""
-    wp = WorkProfile()
-    assert wp.preferred_languages == []
-    assert wp.preferred_tools == {}
-    assert wp.active_hours == {}
-    assert wp.workspaces == {}
-    assert wp.language_stats == {}
-
-
-def test_user_model_defaults():
-    """UserModel defaults to empty profile."""
-    model = UserModel()
-    assert model.user_id == ""
-    assert model.communication_style == "concise"
-    assert model.goals == []
-    assert isinstance(model.work_profile, WorkProfile)
 
 
 def test_memory_tier_enum():

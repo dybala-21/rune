@@ -16,6 +16,7 @@ import os
 import time
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -24,6 +25,89 @@ from rune.utils.fast_serde import json_decode, json_encode
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
+
+
+def join_steps(collected: list[str], step_starts: list[int]) -> str:
+    """Join collected deltas, separating each step's narration with a blank line.
+
+    Deltas stream token by token, so within a step they concatenate directly.
+    Across steps they must not: each step is a separate remark ("Opening the
+    page." / "Now searching.") and running them together produces one unreadable
+    paragraph. Steps that produced no text drop out.
+    """
+    # Force a 0 boundary: an empty step_starts, or one that begins past the
+    # first delta, would otherwise leave that text outside every window and
+    # return it as nothing.
+    bounds = sorted({0, *step_starts, len(collected)})
+    parts = []
+    for begin, end in pairwise(bounds):
+        chunk = "".join(collected[begin:end]).strip()
+        if chunk:
+            parts.append(chunk)
+    return "\n\n".join(parts)
+
+
+class StreamJoiner:
+    """Incremental equivalent of :func:`join_steps` for a live stream.
+
+    ``join_steps`` re-joins everything collected so far on every delta: O(n) per
+    token, O(n^2) over an answer. Only the open step can grow and stripping is
+    prefix-stable, so the new text follows from the tail alone and the full
+    transcript is built only when asked for.
+
+    :attr:`text` is byte-identical to ``join_steps`` at every point.
+    """
+
+    __slots__ = ("_closed", "_open_parts", "_seen_nonws", "_pending_ws")
+
+    def __init__(self) -> None:
+        self._closed: list[str] = []      # finished steps, already stripped
+        self._open_parts: list[str] = []  # raw deltas of the current step
+        self._seen_nonws = False          # has the open step produced text yet
+        self._pending_ws = ""             # whitespace held back after the last emit
+
+    def start_step(self) -> None:
+        """Close the current step. A step that produced no text drops out."""
+        chunk = "".join(self._open_parts).strip()
+        if chunk:
+            self._closed.append(chunk)
+        self._open_parts = []
+        self._seen_nonws = False
+        self._pending_ws = ""
+
+    def append(self, delta: str) -> str:
+        """Add a delta and return only the text it made visible.
+
+        Costs O(len(delta) + held-back whitespace), not O(transcript).
+        """
+        self._open_parts.append(delta)
+
+        if not self._seen_nonws:
+            # Leading whitespace in a step is dropped, so nothing is visible
+            # until the first real character arrives.
+            head = delta.lstrip()
+            if not head:
+                return ""
+            self._seen_nonws = True
+            visible = head.rstrip()
+            self._pending_ws = head[len(visible):]
+            # Steps are separated by a blank line, and the separator only
+            # exists once a later step actually has text.
+            return ("\n\n" + visible) if self._closed else visible
+
+        candidate = self._pending_ws + delta
+        visible = candidate.rstrip()
+        self._pending_ws = candidate[len(visible):]
+        return visible
+
+    @property
+    def text(self) -> str:
+        """The whole transcript so far. Built on demand, not per delta."""
+        parts = list(self._closed)
+        tail = "".join(self._open_parts).strip()
+        if tail:
+            parts.append(tail)
+        return "\n\n".join(parts)
 
 
 def split_answer(collected: list[str], step_starts: list[int]) -> tuple[str, str]:
@@ -38,10 +122,12 @@ def split_answer(collected: list[str], step_starts: list[int]) -> tuple[str, str
     Memory extraction still gets the full transcript. One helper so the rule
     can't drift between the SSE, NDJSON, and interrupted-stream paths.
     """
+    # `full` feeds memory extraction, not the chat, so it stays a raw transcript.
     full = "".join(collected)
     for start in reversed(step_starts):
         if "".join(collected[start:]).strip():
-            return full, "".join(collected[start:])
+            rel = [s - start for s in step_starts if s >= start] or [0]
+            return full, join_steps(collected[start:], rel)
     return full, full
 
 
@@ -138,6 +224,9 @@ class SseClientManager:
         self._event_counter = 0
 
     def add_client(self, client_id: str) -> asyncio.Queue[str]:
+        # Unbounded on purpose: text_delta carries only the new text, so a
+        # dropped frame leaves that client short with no way to resync. Frames
+        # are small, so a slow reader costs kilobytes.
         queue: asyncio.Queue[str] = asyncio.Queue()
         self._clients[client_id] = queue
         return queue
@@ -157,11 +246,14 @@ class SseClientManager:
             f"id: {eid}\nevent: {event}\n"
             f"data: {json_encode(data)}\n\n"
         )
-        for queue in self._clients.values():
+        for queue in list(self._clients.values()):
             try:
                 queue.put_nowait(formatted)
             except asyncio.QueueFull:
-                pass  # Drop events for slow clients
+                # Unreachable while the queue is unbounded; kept so a future
+                # bound fails loudly here rather than silently desyncing a
+                # client's incremental text.
+                log.warning("sse_event_dropped", event=event)
 
     def send_to(self, client_id: str, event: str, data: dict[str, Any]) -> None:
         """Send an SSE event to a specific client."""
@@ -200,7 +292,10 @@ class WsClientManager:
         """Broadcast a message to all connected WebSocket clients."""
         msg = json_encode({"event": event, "data": data})
         disconnected: list[str] = []
-        for cid, ws in self._clients.items():
+        # Snapshot: send_text suspends, and a client connecting or dropping
+        # during that suspension would mutate the dict mid-iteration and take
+        # down a healthy run.
+        for cid, ws in list(self._clients.items()):
             try:
                 await ws.send_text(msg)
             except Exception:
@@ -509,7 +604,7 @@ def create_app() -> Any:
                     log.debug("web_conv_resolve_failed", error=str(exc)[:100])
                     conv_manager = None
             if conv_manager is not None and conv_id:
-                conv_wiring.record_user_turn(conv_manager, conv_id, goal)
+                conv_wiring.record_user_turn(conv_manager, conv_id, goal, attachments)
 
             # Workspace pinned to this conversation (picker in the app);
             # an @path in the message still overrides for the turn.
@@ -607,8 +702,14 @@ def create_app() -> Any:
             # multi-pass run's intermediate commentary is never replayed.
             _step_starts = [0]
 
+            # Sends only what the client has not seen. Re-broadcasting the whole
+            # transcript per token cost hundreds of megabytes on a long answer,
+            # and re-joining it per token cost O(n^2) CPU on top.
+            _joiner = StreamJoiner()
+
             async def _on_step(step: int) -> None:
                 _step_starts.append(len(collected))
+                _joiner.start_step()
                 await _broadcast(
                     "step_start",
                     {"stepNumber": step, "tokens": 0, "runId": run_id},
@@ -616,10 +717,11 @@ def create_app() -> Any:
 
             async def _on_text(delta: str) -> None:
                 collected.append(delta)
-                await _broadcast(
-                    "text_delta",
-                    {"text": "".join(collected), "runId": run_id},
-                )
+                chunk = _joiner.append(delta)
+                if chunk:
+                    await _broadcast(
+                        "text_delta", {"delta": chunk, "runId": run_id}
+                    )
 
             async def _on_tool(info: dict[str, Any]) -> None:
                 await _broadcast(
@@ -627,6 +729,9 @@ def create_app() -> Any:
                     {
                         "toolName": info.get("name", ""),
                         "args": info.get("params", {}),
+                        # Pairs this call with its result; tools run
+                        # concurrently, so name order is not call order.
+                        "callId": info.get("callId", ""),
                         "runId": run_id,
                     },
                 )
@@ -639,6 +744,7 @@ def create_app() -> Any:
                         "result": info.get("output_head", "")
                         or info.get("error_head", ""),
                         "success": info.get("success", True),
+                        "callId": info.get("callId", ""),
                         "runId": run_id,
                     },
                 )
@@ -718,7 +824,10 @@ def create_app() -> Any:
             # 4. Run with context + conversation history
             trace = await loop.run(
                 agent_ctx.goal,
-                context={"workspace_root": agent_ctx.workspace_root},
+                context={
+                    "workspace_root": agent_ctx.workspace_root,
+                    "attachments": agent_ctx.metadata.get("attachments") or [],
+                },
                 message_history=agent_ctx.messages if agent_ctx.messages else None,
             )
             full_text, answer = split_answer(collected, _step_starts)
@@ -782,6 +891,7 @@ def create_app() -> Any:
         loop = None
         collected: list[str] = []
         _step_starts = [0]
+        _ws_joiner = StreamJoiner()
         try:
             from rune.agent.agent_context import (
                 PrepareContextOptions,
@@ -871,6 +981,7 @@ def create_app() -> Any:
 
             async def _on_step(step: int) -> None:
                 _step_starts.append(len(collected))
+                _ws_joiner.start_step()
                 await event_queue.put(
                     {
                         "event": "step_start",
@@ -879,11 +990,17 @@ def create_app() -> Any:
                 )
 
             async def _on_text(delta: str) -> None:
+                # /ws is documented as sending the whole transcript, so the
+                # format stays. The joiner says cheaply whether this delta made
+                # anything visible; when it did not, skip the frame and the
+                # rebuild it would cost.
                 collected.append(delta)
+                if not _ws_joiner.append(delta):
+                    return
                 await event_queue.put(
                     {
                         "event": "text_delta",
-                        "data": {"text": "".join(collected), "runId": run_id},
+                        "data": {"text": _ws_joiner.text, "runId": run_id},
                     }
                 )
 
@@ -922,6 +1039,7 @@ def create_app() -> Any:
             run_task = asyncio.create_task(
                 loop.run(
                     agent_ctx.goal,
+                    # No attachments here: this endpoint takes text only.
                     context={"workspace_root": agent_ctx.workspace_root},
                     message_history=(
                         agent_ctx.messages if agent_ctx.messages else None
@@ -1371,7 +1489,13 @@ def create_app() -> Any:
                     if output:
                         await _broadcast(
                             "command_result",
-                            {"command": cmd_name, "output": output},
+                            {
+                                "command": cmd_name,
+                                "output": output,
+                                # Named so other tabs can tell whose command
+                                # this was; the event goes to every client.
+                                "requestSessionId": req.session_id,
+                            },
                         )
                     return {"ok": True, "command": cmd_name}
 
@@ -1421,13 +1545,15 @@ def create_app() -> Any:
 
             svc = get_voice_service()
             if not svc.has_stt:
+                from rune.voice.availability import get_voice_install_hint
+
+                hint = get_voice_install_hint() or (
+                    "Set DEEPGRAM_API_KEY / OPENAI_API_KEY, or install "
+                    "sherpa-onnx for local STT."
+                )
                 return {
                     "ok": False,
-                    "error": (
-                        "No speech-to-text provider available. Set "
-                        "DEEPGRAM_API_KEY / OPENAI_API_KEY, or install "
-                        "sherpa-onnx for local STT."
-                    ),
+                    "error": f"No speech-to-text provider available. {hint}",
                 }
             text = await svc.transcribe(audio_bytes)
             return {"ok": True, "text": text}
@@ -1465,11 +1591,15 @@ def create_app() -> Any:
             if task and not task.done():
                 task.cancel()
 
-        if run_id and (run_id in _active_loops or run_id in _active_tasks):
-            await _stop(run_id)
-            return {"ok": True}
+        if run_id:
+            # A caller that named a run means that run. If it is already gone,
+            # say so rather than cancelling whichever one happens to be newest.
+            if run_id in _active_loops or run_id in _active_tasks:
+                await _stop(run_id)
+                return {"ok": True}
+            return {"ok": True, "stopped": False, "reason": "run is not active"}
 
-        # No specific runId - abort the most recent active run.
+        # No runId given (an older client): abort the most recent active run.
         rid = (list(_active_loops.keys())[-1] if _active_loops
                else list(_active_tasks.keys())[-1] if _active_tasks else "")
         if rid:
@@ -1859,13 +1989,30 @@ def create_app() -> Any:
                 return _ok(result)
 
             elif method == "skills.create":
-                return _ok({"name": params.get("name", ""), "filePath": ""})
+                from rune.api.handlers.skills import SkillCreateRequest, create_skill
+                result = await create_skill(SkillCreateRequest(
+                    name=params.get("name") or "",
+                    description=params.get("description", "") or "",
+                    body=params.get("body", "") or "",
+                    scope=params.get("scope") if params.get("scope") in ("user", "project") else "user",
+                ))
+                return _ok(result)
 
             elif method == "skills.update":
-                return _ok({"updated": True})
+                from rune.api.handlers.skills import SkillUpdateRequest, update_skill
+                result = await update_skill(
+                    params.get("name") or "",
+                    SkillUpdateRequest(
+                        description=params.get("description"),
+                        body=params.get("body"),
+                    ),
+                )
+                return _ok(result)
 
             elif method == "skills.delete":
-                return _ok({"deleted": True})
+                from rune.api.handlers.skills import delete_skill
+                result = await delete_skill(params.get("name") or "")
+                return _ok(result)
 
             # -- env --
             elif method == "env.list":
@@ -1939,8 +2086,22 @@ def create_app() -> Any:
                 return _ok(result)
 
             elif method == "channels.restart":
-                # Placeholder - channel restart not yet implemented
-                return _ok({"restarted": True, "name": params.get("name", "")})
+                # Stop and start the adapter for real, so the Settings button
+                # reports what actually happened.
+                from rune.channels.registry import get_channel_registry
+
+                _cname = str(params.get("name", "")).strip()
+                _adapter = get_channel_registry().get(_cname) if _cname else None
+                if _adapter is None:
+                    return _err("not_found", f"No such channel: {_cname or '(unnamed)'}")
+                try:
+                    with contextlib.suppress(Exception):
+                        await _adapter.stop()
+                    await _adapter.start()
+                except Exception as exc:
+                    log.warning("channel_restart_failed", name=_cname, error=str(exc))
+                    return _err("restart_failed", f"{_cname}: {exc}")
+                return _ok({"restarted": True, "name": _cname})
 
             # mcp
             elif method == "mcp.list":
@@ -1970,6 +2131,7 @@ def create_app() -> Any:
                 return _ok(result.model_dump())
 
             elif method == "commands.list":
+                from rune.api.command_actions import WEB_UNSUPPORTED_COMMANDS
                 from rune.slash_commands import COMMANDS
                 return _ok([
                     {
@@ -1979,11 +2141,27 @@ def create_app() -> Any:
                         "aliases": c.aliases,
                     }
                     for c in COMMANDS.values()
-                    if not c.hidden
+                    # Commands whose action only the TUI implements would answer
+                    # "not available here"; the palette should not offer them.
+                    if not c.hidden and c.name.lstrip("/") not in WEB_UNSUPPORTED_COMMANDS
                 ])
 
+            elif method == "runs.active":
+                # Which runs are still going. A client whose event stream
+                # dropped mid-run has no other way to learn the run ended, and
+                # would sit on "running" until the page was reloaded.
+                return _ok({
+                    "runIds": sorted(set(_active_loops) | set(_active_tasks)),
+                })
+
             elif method == "models.list":
+                from rune.llm.client import prime_ollama_installed
                 from rune.llm.models import known_models
+
+                # Fill the local-model cache off the loop first; known_models
+                # only reads it, so probing here would stall every other
+                # request (SSE heartbeats, a run's text_delta) on localhost.
+                await prime_ollama_installed()
                 providers: dict[str, list[str]] = {}
                 for prov, model in known_models():
                     providers.setdefault(prov, []).append(model)
@@ -1999,11 +2177,28 @@ def create_app() -> Any:
                 _model = str(params.get("model", "")).strip()
                 if not _prov or not _model:
                     return _err("invalid", "provider and model required")
+                # An unknown provider would be written to config.yaml and then
+                # blow up Provider() on the next start, with the bad value on disk.
+                from rune.types import Provider as _Provider
+                try:
+                    _Provider(_prov)
+                except ValueError:
+                    _known = ", ".join(sorted(p.value for p in _Provider))
+                    return _err("invalid", f"unknown provider '{_prov}'; known: {_known}")
                 _lcfg = _gc().llm
                 _lcfg.active_provider = _prov
                 _lcfg.active_model = _model
                 _lcfg.default_provider = _prov
                 _lcfg.default_model = _model
+                # Survive a restart. The daemon holds config in memory, so
+                # without this the picker silently reverts on every restart.
+                from rune.config import save_config_values
+                save_config_values({
+                    "llm.activeProvider": _prov,
+                    "llm.activeModel": _model,
+                    "llm.defaultProvider": _prov,
+                    "llm.defaultModel": _model,
+                })
                 return _ok({"provider": _prov, "model": _model})
 
             elif method == "reasoning.set":
@@ -2015,6 +2210,8 @@ def create_app() -> Any:
                 if _eff and _eff not in ("low", "medium", "high"):
                     return _err("invalid", "effort must be low, medium, or high")
                 _gc().llm.reasoning_effort = _eff or None
+                from rune.config import save_config_values
+                save_config_values({"llm.reasoningEffort": _eff or None})
                 return _ok({"reasoningEffort": _eff or None})
 
             # Markdown file editor (HEARTBEAT.md, MEMORY.md, learned.md, user-profile.md)

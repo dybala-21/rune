@@ -132,7 +132,12 @@ async def test_compaction_keeps_turns_added_during_summarize(manager, monkeypatc
     assert any("RACE_TURN" in c for c in contents), (
         "turn added during compaction was dropped"
     )
-    assert conv.turns[0].role == "system"  # summary took the old prefix
+    # The compacted prefix is kept but flagged (store.save() rewrites the whole
+    # list, so dropping it would delete the transcript). The summary is the
+    # first turn that still counts toward context.
+    live = [t for t in conv.turns if not t.archived]
+    assert live[0].role == "system"
+    assert all(t.archived for t in conv.turns[:len(conv.turns) - len(live)])
 
 
 async def test_concurrent_compactions_serialized(manager, monkeypatch):

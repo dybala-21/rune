@@ -15,6 +15,8 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
+from rune.agent.attachments import content_text
+
 _litellm_mod: Any = None
 
 
@@ -2446,7 +2448,9 @@ class LiteLLMAgent:
                 role = msg.get("role", "") if isinstance(msg, dict) else ""
                 if role == "user":
                     content = msg.get("content", "") if isinstance(msg, dict) else ""
-                    if content == goal:
+                    # content may be a multimodal part list (goal + attachments);
+                    # compare its text so the goal isn't appended a second time.
+                    if content_text(content) == goal:
                         _dominated_by_history = True
                     break  # Only check the most recent user message
 

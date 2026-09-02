@@ -230,7 +230,7 @@ async def build_agent_memory_context(
     """Build the full agent memory context from 8 layers.
 
     Layers:
-    1. UserModel - user preferences and facts
+    1. Preferences - durable user facts from working memory
     2. User Profile - identity information
     3. Project Context - project-specific memory
     4. Relevant Past Work - semantically similar episodes
@@ -1283,6 +1283,68 @@ async def _synthesize_strategic_body(
     return None
 
 
+def _skill_gate_blocks() -> bool:
+    """Whether hooks.skillGate is set to reject a flagged skill."""
+    try:
+        from rune.config import get_config
+
+        gate = getattr(getattr(get_config(), "hooks", None), "skill_gate", None)
+        mode = getattr(gate, "mode", "advisory")
+        return str(mode).strip().lower() == "required"
+    except Exception:
+        return False
+
+
+async def _scan_distilled_skill(skill: Any) -> list[str]:
+    """Security findings for an auto-distilled skill, or an empty list.
+
+    Uses the same detector the (unregistered) skill security hook was built
+    around, so the checks live in one place.
+    """
+    try:
+        from dataclasses import replace
+
+        from rune.agent.hooks.skill_security_gate import (
+            DEFAULT_SKILL_SECURITY_GATE_CONFIG,
+            _detect_findings,
+        )
+        from rune.config import get_config
+
+        config = DEFAULT_SKILL_SECURITY_GATE_CONFIG
+        gate_cfg = getattr(getattr(get_config(), "hooks", None), "skill_gate", None)
+        if gate_cfg is not None:
+            # hooks.skillGate was settable and read by nothing; it now drives
+            # this scan, field for field.
+            config = replace(
+                config,
+                mode=gate_cfg.mode,
+                allowed_authors=list(gate_cfg.allowed_authors),
+                require_signature=gate_cfg.require_signature,
+                allow_auto_sign_when_missing=gate_cfg.allow_auto_sign_when_missing,
+                signature_secret_env=gate_cfg.signature_secret_env,
+                block_project_scope=gate_cfg.block_project_scope,
+                project_scope_allowed_name_prefixes=list(
+                    gate_cfg.project_scope_allowed_name_prefixes
+                ),
+                max_body_chars=gate_cfg.max_body_chars,
+                suspicious_patterns=list(gate_cfg.suspicious_patterns),
+            )
+
+        return await _detect_findings(
+            name=getattr(skill, "name", ""),
+            description=getattr(skill, "description", ""),
+            body=getattr(skill, "body", ""),
+            scope=getattr(skill, "scope", "user"),
+            author=getattr(skill, "author", "") or "rune-agent",
+            signature=(getattr(skill, "metadata", None) or {}).get("signature"),
+            config=config,
+        )
+    except Exception as exc:
+        # A scanner that cannot run must not silently wave the skill through.
+        log.warning("skill_security_scan_failed", error=str(exc)[:120])
+        return ["security scan could not run"]
+
+
 async def maybe_generate_skill(
     goal: str,
     result: Any,
@@ -1395,9 +1457,21 @@ async def maybe_generate_skill(
                 if getattr(skills_cfg, "gated_learning", False) or getattr(
                     skills_cfg, "auto_skill", False
                 ):
-                    from rune.skills.persistence import write_skill_to_disk
+                    # Scan before writing: a skill body is injected into a
+                    # later run's prompt, and nothing else checks it.
+                    findings = await _scan_distilled_skill(skill)
+                    blocking = findings and _skill_gate_blocks()
+                    if findings:
+                        log.warning(
+                            "skill_security_findings",
+                            name=skill_name,
+                            findings=findings[:3],
+                            blocked=bool(blocking),
+                        )
+                    if not blocking:
+                        from rune.skills.persistence import write_skill_to_disk
 
-                    write_skill_to_disk(skill)
+                        write_skill_to_disk(skill)
             except Exception as exc:
                 log.debug("candidate_persist_skipped", error=str(exc)[:120])
 
@@ -1429,6 +1503,8 @@ def generate_skill_name(goal: str) -> str | None:
 
     Returns ``None`` if the goal is too vague for a meaningful name.
     """
+    from rune.skills.validator import MAX_NAME_LENGTH
+
     # Remove common stop words and articles
     stop_words = {
         "a",
@@ -1496,12 +1572,13 @@ def generate_skill_name(goal: str) -> str | None:
     if len(words) < 2:
         return None
 
-    # Take first 4 significant words
+    # Take first 4 significant words. Kebab-case matches the convention every
+    # shipped skill uses and keeps the name inside validate_name's rules.
     name_parts = words[:4]
-    name = "_".join(name_parts)
+    name = "-".join(name_parts)
 
     # Validate length
-    if len(name) < 5 or len(name) > 60:
+    if len(name) < 5 or len(name) > MAX_NAME_LENGTH:
         return None
 
     return name

@@ -4,11 +4,8 @@ from __future__ import annotations
 
 from rune.proactive.activity_mode import ActivityModeDetector
 from rune.proactive.context import AwarenessContext
-from rune.proactive.evaluator import EvaluationResult, ProactiveEvaluator
 from rune.proactive.feedback import FeedbackEntry, FeedbackLearner
-from rune.proactive.initiative_contract import ContractManager
 from rune.proactive.intelligence import TimingScore, compute_timing_score
-from rune.proactive.message_composer import compose_message
 from rune.proactive.prediction.behavior_predictor import BehaviorPredictor
 from rune.proactive.prediction.frustration_detector import FrustrationDetector
 from rune.proactive.prediction.need_inferer import NeedInferer
@@ -55,21 +52,6 @@ def test_awareness_context_fields():
 
 
 # --- Evaluator ---
-
-def test_evaluator_scoring():
-    """Returns EvaluationResult with score 0-1."""
-    evaluator = ProactiveEvaluator()
-    suggestion = Suggestion(type="reminder", title="Test", confidence=0.7)
-    context = AwarenessContext()
-    engagement = EngagementMetrics()
-
-    result = evaluator.evaluate(suggestion, context, engagement)
-    assert isinstance(result, EvaluationResult)
-    assert 0.0 <= result.score <= 1.0
-    assert isinstance(result.reasons, list)
-
-
-# --- Feedback ---
 
 def test_feedback_learner():
     """Record feedback and check suppression."""
@@ -119,24 +101,6 @@ def test_timing_score_components():
 
 
 # --- Message composer ---
-
-def test_compose_message_korean():
-    """Korean message for reminder."""
-    suggestion = Suggestion(type="reminder", title="커밋하세요", description="변경사항이 있습니다")
-    msg = compose_message(suggestion, user_language="ko")
-    assert "리마인더" in msg
-    assert "커밋하세요" in msg
-
-
-def test_compose_message_english():
-    """English message for reminder."""
-    suggestion = Suggestion(type="reminder", title="Commit changes", description="You have uncommitted work")
-    msg = compose_message(suggestion, user_language="en")
-    assert "[Reminder]" in msg
-    assert "Commit changes" in msg
-
-
-# --- Frustration detector ---
 
 def test_frustration_none():
     """No errors -> none."""
@@ -193,23 +157,6 @@ def test_temporal_context():
 
 
 # --- Initiative contract ---
-
-def test_initiative_contract_lifecycle():
-    """create -> deliver -> resolve."""
-    manager = ContractManager()
-    suggestion = Suggestion(type="reminder", title="Test")
-
-    contract = manager.create(trigger_type="idle", suggestion=suggestion)
-    assert contract.status == "pending"
-
-    manager.deliver(contract.id)
-    assert contract.status == "delivered"
-
-    manager.resolve(contract.id, accepted=True)
-    assert contract.status == "accepted"
-
-
-# --- Need inferer ---
 
 def test_need_inferer():
     """Infer needs from patterns."""

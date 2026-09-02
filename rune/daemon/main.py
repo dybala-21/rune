@@ -51,6 +51,47 @@ def _default_rune_dir() -> Path:
     return Path.home() / ".rune" / "data"
 
 
+_proactive_cache: tuple[float, bool] | None = None
+
+
+def _configured_proactive_enabled() -> bool:
+    """Read the proactive toggle from config.yaml.
+
+    The daemon keeps its own settings dict, so without this it hardcoded True
+    and the user's setting never reached the engine.
+
+    This reads the one key directly instead of going through ``load_config()``.
+    A reload rebuilds the shared config object from the file, which would throw
+    away in-memory-only session state — the model a ``/model`` or ``/escalate``
+    switch selected — every time any setting was saved.
+    """
+    global _proactive_cache
+
+    try:
+        from rune.config.loader import _find_config_file
+
+        path = _find_config_file()
+        if path is None:
+            return True
+
+        mtime = path.stat().st_mtime
+        if _proactive_cache is not None and _proactive_cache[0] == mtime:
+            return _proactive_cache[1]
+
+        from ruamel.yaml import YAML
+
+        raw = YAML(typ="safe").load(path) or {}
+        section = raw.get("proactive")
+        enabled = True if not isinstance(section, dict) else bool(
+            section.get("enabled", True)
+        )
+        _proactive_cache = (mtime, enabled)
+        return enabled
+    except Exception as exc:  # unreadable — keep the prior default
+        log.debug("proactive_config_read_failed", error=str(exc))
+        return True
+
+
 def _default_config() -> dict[str, Any]:
     rune_dir = _default_rune_dir()
     return {
@@ -58,7 +99,7 @@ def _default_config() -> dict[str, Any]:
         "pid_file": str(rune_dir / "rune.pid"),
         "log_file": str(rune_dir / "daemon.log"),
         "heartbeat_file": str(rune_dir / "heartbeat"),
-        "proactive_enabled": True,
+        "proactive_enabled": _configured_proactive_enabled(),
         "check_interval_ms": 60_000,  # 1 minute
         "api_host": os.environ.get("RUNE_API_HOST", "127.0.0.1"),
         "api_port": int(os.environ.get("RUNE_API_PORT", "18789")),
@@ -113,6 +154,19 @@ class _EngagementStoreAdapter:
 
 
 # Daemon server
+
+def _config_to_dict(cfg: Any) -> dict[str, Any]:
+    """Best-effort dict view of an MCPServerConfig-like object."""
+    import dataclasses
+
+    if dataclasses.is_dataclass(cfg) and not isinstance(cfg, type):
+        return dataclasses.asdict(cfg)
+    if hasattr(cfg, "model_dump"):
+        return dict(cfg.model_dump())
+    if hasattr(cfg, "__dict__"):
+        return {k: v for k, v in vars(cfg).items() if not k.startswith("_")}
+    return {}
+
 
 class RuneDaemon:
     """Unix-domain-socket daemon that orchestrates background RUNE services.
@@ -342,18 +396,19 @@ class RuneDaemon:
         except Exception as exc:
             log.warning("pattern_learner_init_failed", error=str(exc))
 
-        # 7. Proactive engine start
-        if self._config.get("proactive_enabled", True):
-            try:
-                from rune.proactive.engine import get_proactive_engine
-                self._proactive_engine = get_proactive_engine()
-                if hasattr(self._proactive_engine, "initialize"):
-                    await self._proactive_engine.initialize()
-                elif hasattr(self._proactive_engine, "start"):
-                    await self._proactive_engine.start()
-                log.info("subsystem_initialised", name="proactive_engine")
-            except Exception as exc:
-                log.warning("proactive_engine_init_failed", error=str(exc))
+        # 7. Proactive engine start. Built regardless of the toggle: the ticks
+        #    check it themselves, and this same wiring registers the cron
+        #    scheduler, which has nothing to do with proactivity.
+        try:
+            from rune.proactive.engine import get_proactive_engine
+            self._proactive_engine = get_proactive_engine()
+            if hasattr(self._proactive_engine, "initialize"):
+                await self._proactive_engine.initialize()
+            elif hasattr(self._proactive_engine, "start"):
+                await self._proactive_engine.start()
+            log.info("subsystem_initialised", name="proactive_engine")
+        except Exception as exc:
+            log.warning("proactive_engine_init_failed", error=str(exc))
 
         # 7a. Heartbeat scheduler (moved early so proactive subsystems can
         #     register cron tasks on it - matches TS where heartbeat.start()
@@ -506,7 +561,21 @@ class RuneDaemon:
 
         # 5. Reflexion learner - stateless singleton, no shutdown needed
 
-        # 3. Close memory store (sync method)
+        # 3. Persist the vector index, then close the memory store. The index
+        #    lives on the manager, so closing only the store left it unwritten
+        #    and semantic memory empty on every launch.
+        try:
+            from rune.memory import manager as _mm_mod
+
+            # Read the singleton rather than get_memory_manager(), which would
+            # construct one during shutdown just to save an empty index.
+            _mm = _mm_mod._manager
+            if _mm is not None:
+                _mm.persist_vectors()
+                log.info("subsystem_shutdown", name="vector_index")
+        except Exception as exc:
+            log.warning("vector_index_persist_failed", error=str(exc))
+
         if self._memory_store is not None:
             try:
                 if hasattr(self._memory_store, "close"):
@@ -662,6 +731,8 @@ class RuneDaemon:
             if self._heartbeat_scheduler is not None:
                 async def _conversation_check() -> None:
                     """Periodic check for conversation opportunities."""
+                    if not _configured_proactive_enabled():
+                        return
                     try:
                         from rune.proactive.context import ContextGatherer
                         gatherer = ContextGatherer()
@@ -688,7 +759,7 @@ class RuneDaemon:
                         log.debug("conversation_check_failed", error=str(exc))
 
                 self._heartbeat_scheduler.add_task(
-                    "conversation_initiator",
+                    "conversation_initiator",  # gated inside _conversation_check
                     "*/5 * * * *",  # every 5 minutes
                     _conversation_check,
                 )
@@ -812,6 +883,11 @@ class RuneDaemon:
             try:
                 async def _heartbeat_engine_tick() -> None:
                     """Heartbeat tick: trigger proactive evaluation."""
+                    # Checked per tick so the toggle applies without a
+                    # restart, and read from config rather than the startup
+                    # dict because the API may be a separate process.
+                    if not _configured_proactive_enabled():
+                        return
                     try:
                         from dataclasses import asdict
 
@@ -889,6 +965,26 @@ class RuneDaemon:
                     _cron_goal_tick,
                 )
 
+                # --- Memory consolidation ---
+                # One-shot CLI runs defer this so the user does not wait for
+                # it, leaving a backlog for something long-lived to drain.
+                # Only the TUI did, so those runs never reached learned.md.
+                async def _consolidation_tick() -> None:
+                    try:
+                        from rune.memory.consolidation import consolidate_recent
+
+                        done = await consolidate_recent()
+                        if done:
+                            log.info("memory_consolidated", episodes=done)
+                    except Exception as exc:
+                        log.debug("consolidation_tick_failed", error=str(exc))
+
+                self._heartbeat_scheduler.add_task(
+                    "memory_consolidation",
+                    "*/10 * * * *",  # every 10 minutes
+                    _consolidation_tick,
+                )
+
                 log.info("heartbeat_engine_wiring_complete")
             except Exception as exc:
                 log.warning("heartbeat_engine_wiring_failed", error=str(exc))
@@ -936,8 +1032,25 @@ class RuneDaemon:
             log.warning("mcp_bridge_init_failed", error=str(exc))
 
     def _get_mcp_server_configs(self) -> list[dict[str, Any]]:
-        """Load MCP server configurations from RUNE config or environment."""
+        """Load MCP server configurations.
+
+        Reads ``~/.rune/mcp_servers.json`` first — the file the CLI, the TUI and
+        the web UI all write. The daemon only looked at a ``config.mcp`` key that
+        does not exist in the schema plus one env var, so it found nothing,
+        returned early, and never reached the loader: MCP silently did nothing
+        under ``rune web``.
+        """
         servers: list[dict[str, Any]] = []
+
+        try:
+            from rune.mcp.config import load_mcp_config
+
+            for name, cfg in (load_mcp_config() or {}).items():
+                entry = cfg if isinstance(cfg, dict) else _config_to_dict(cfg)
+                entry.setdefault("name", name)
+                servers.append(entry)
+        except Exception as exc:
+            log.debug("mcp_config_file_read_failed", error=str(exc))
 
         # Try loading from config
         try:
@@ -1108,12 +1221,19 @@ class RuneDaemon:
         self._heartbeat_task = asyncio.create_task(self._heartbeat_file_loop())
 
     async def _broadcast_notification(self, message: str) -> None:
-        """Send a notification to all connected channels (best-effort)."""
+        """Send a notification to all connected channels (best-effort).
+
+        The gateway lives in a module singleton, not on this instance —
+        guarding on ``self._gateway`` silently dropped every alert.
+        """
         try:
-            if hasattr(self, "_gateway") and self._gateway is not None:
-                await self._gateway.broadcast_text(message)
-        except Exception:
-            pass  # Notification is best-effort
+            from rune.daemon.gateway import get_gateway
+
+            gateway = get_gateway()
+            if gateway is not None:
+                await gateway.broadcast_text(message)
+        except Exception as exc:
+            log.debug("notification_broadcast_failed", error=str(exc)[:120])
 
     async def _skill_eval_tick(self) -> None:
         """Heartbeat callback: kick off a gated-skill eval cycle (non-blocking).

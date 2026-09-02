@@ -225,10 +225,24 @@ async def recent_workspaces(limit: int = 8) -> list[str]:
     return seen
 
 
-def record_user_turn(conv_manager: Any, conversation_id: str, text: str) -> None:
+def record_user_turn(
+    conv_manager: Any,
+    conversation_id: str,
+    text: str,
+    attachments: list[dict[str, Any]] | None = None,
+) -> None:
     """Record the user turn (before prepare_agent_context, which drops the
     trailing user message from loaded history — the goal is passed to the
-    loop separately)."""
+    loop separately).
+
+    Attachments are noted by name, never stored: history is replayed into every
+    later turn, so keeping the image data here would grow the conversation
+    without bound. The note is what stops a follow-up question about "the
+    image" from being answered about the workspace instead.
+    """
+    if attachments:
+        names = ", ".join(str(a.get("name") or "file") for a in attachments)
+        text = f"{text}\n[attached: {names} — image content was available for this turn only]"
     try:
         conv_manager.add_turn(conversation_id, "user", text)
     except Exception as exc:

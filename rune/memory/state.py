@@ -70,11 +70,20 @@ def update_fact_meta(key: str, updates: dict[str, Any]) -> None:
 
 
 def increment_hit_count(key: str) -> None:
+    increment_hit_counts([key])
+
+
+def increment_hit_counts(keys: list[str]) -> None:
+    """Record that these facts were used, in one read-modify-write."""
+    if not keys:
+        return
     meta = load_fact_meta()
-    entry = meta.get(key, {})
-    entry["hit_count"] = entry.get("hit_count", 0) + 1
-    entry["last_hit"] = datetime.now(UTC).isoformat()
-    meta[key] = entry
+    now = datetime.now(UTC).isoformat()
+    for key in keys:
+        entry = meta.get(key, {})
+        entry["hit_count"] = entry.get("hit_count", 0) + 1
+        entry["last_hit"] = now
+        meta[key] = entry
     save_fact_meta(meta)
 
 

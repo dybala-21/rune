@@ -101,7 +101,37 @@ def refresh_ollama_installed_sync(timeout: float = 0.3) -> None:
                 if "name" in m
             ]
     except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError):
+        # Cache the miss too. Leaving it None means every caller re-probes and
+        # re-waits out the timeout on a machine with no Ollama.
+        _ollama_installed = []
         log.debug("ollama_sync_probe_failed")
+
+
+def installed_ollama_models() -> list[str]:
+    """Ollama models pulled on this machine, newest first, for model pickers.
+
+    Returns only what a previous probe already cached — it never probes itself,
+    because callers include an asyncio request handler where a synchronous
+    round-trip would stall the whole server. Use ``prime_ollama_installed``
+    off the event loop to fill it. Embedding models are left out for the same
+    reason pick_ollama_model skips them: they cannot drive the agent loop.
+    """
+    return [n for n in (_ollama_installed or []) if "embed" not in n.lower()]
+
+
+async def prime_ollama_installed(timeout: float = 0.3) -> None:
+    """Fill the installed-model cache without blocking the event loop.
+
+    ``refresh_ollama_installed_sync`` only skips its probe when the list is
+    already set, so a machine without Ollama would re-block on every call.
+    Running it in a thread keeps that cost off the loop either way.
+    """
+    if _ollama_installed is not None:
+        return
+    try:
+        await asyncio.to_thread(refresh_ollama_installed_sync, timeout)
+    except Exception:
+        log.debug("ollama_prime_failed")
 
 
 def pick_ollama_model(configured: str) -> str:

@@ -30,7 +30,7 @@ export function InlineWorkspacePicker() {
       setNeeded(false);
       window.dispatchEvent(new CustomEvent('rune:workspace-changed'));
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Could not set workspace');
+      setError(e instanceof Error ? e.message : "Couldn't set the workspace");
     }
   };
 

@@ -64,6 +64,54 @@ class HealthResponse(BaseModel):
 # Route
 
 
+def _subsystem_status() -> SubsystemStatus:
+    """Report what is actually running.
+
+    Reads the live singletons. Defaults alone would make the endpoint — and the
+    overall status derived from it — always say "ok", which is worse than no
+    health check at all.
+    """
+    status = SubsystemStatus()
+
+    try:
+        from rune.memory import manager as memory_manager
+
+        status.memory = "ok" if memory_manager._manager is not None else "disabled"
+    except Exception:
+        status.memory = "error"
+
+    try:
+        from rune.daemon.gateway import get_gateway
+
+        status.gateway = "ok" if get_gateway() is not None else "disabled"
+    except Exception:
+        status.gateway = "error"
+
+    try:
+        from rune.daemon.main import _configured_proactive_enabled
+
+        status.proactive = "ok" if _configured_proactive_enabled() else "disabled"
+    except Exception:
+        status.proactive = "error"
+
+    try:
+        from rune.mcp.bridge import get_mcp_status
+
+        # A server appears here once registered, connected or not — report ok
+        # only when at least one is actually connected.
+        servers = get_mcp_status()["servers"]
+        if any(srv.get("connected") for srv in servers):
+            status.mcp = "ok"
+        elif servers:
+            status.mcp = "error"
+        else:
+            status.mcp = "disabled"
+    except Exception:
+        status.mcp = "disabled"
+
+    return status
+
+
 @router.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     """System health check.
@@ -72,7 +120,7 @@ async def health() -> HealthResponse:
     external monitoring tools can poll it freely.
     """
     uptime = time.monotonic() - _start_time
-    subsystems = SubsystemStatus()
+    subsystems = _subsystem_status()
 
     # Memory info
     memory_info = MemoryInfo(rssMb=0.0, heapUsedMb=0.0)

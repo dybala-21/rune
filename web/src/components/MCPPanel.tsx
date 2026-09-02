@@ -8,6 +8,7 @@ import {
   type MCPTestResult,
 } from '../api';
 import { useFocusTrap } from '../hooks/useFocusTrap';
+import { PlugIcon } from './icons';
 
 interface MCPPanelProps {
   onClose: () => void;
@@ -52,7 +53,7 @@ export function MCPPanel({ onClose }: MCPPanelProps) {
       const data = await fetchMCPServers();
       setServers(data.servers);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load');
+      setError(e instanceof Error ? e.message : "Couldn't load");
     } finally {
       setLoading(false);
     }
@@ -68,7 +69,7 @@ export function MCPPanel({ onClose }: MCPPanelProps) {
     } catch {
       setTestResults(prev => ({
         ...prev,
-        [name]: { name, success: false, message: 'Test request failed', tools_count: 0 },
+        [name]: { name, success: false, message: "Test request failed", tools_count: 0 },
       }));
     } finally {
       setTesting(null);
@@ -81,7 +82,7 @@ export function MCPPanel({ onClose }: MCPPanelProps) {
       await deleteMCPServer(name);
       await loadServers();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Delete failed');
+      setError(e instanceof Error ? e.message : "Couldn't delete");
     }
   };
 
@@ -301,7 +302,9 @@ export function MCPPanel({ onClose }: MCPPanelProps) {
             textAlign: 'center', padding: '60px 20px',
             color: 'var(--text-muted, #888)',
           }}>
-            <div style={{ fontSize: 40, marginBottom: 16 }}>🔌</div>
+            <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'center', opacity: 0.6 }}>
+              <PlugIcon size={40} strokeWidth={1.1} />
+            </div>
             <div style={{ fontSize: 15, marginBottom: 8 }}>No MCP servers configured</div>
             <div style={{ fontSize: 13, lineHeight: 1.6 }}>
               MCP servers extend RUNE with external tools.<br />

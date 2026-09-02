@@ -155,6 +155,27 @@ READ_BLOCKED_PATHS = [
 ]
 
 
+def _is_rune_secret_file(path: str) -> bool:
+    """Whether *path* is RUNE's own credential store.
+
+    ``~/.rune/.env`` holds live provider keys and was readable by any bash
+    command, unlike every equivalent file above. Backups rotate their names
+    (``.env.bak.<timestamp>``), so this matches the whole family rather than
+    a fixed list. Deliberately scoped to RUNE's home: a project's own ``.env``
+    is the developer's to read, and ``.env.example`` carries no secret.
+    """
+    try:
+        from rune.utils.paths import rune_home
+
+        candidate = Path(path)
+        return (
+            candidate.name.startswith(".env")
+            and candidate.parent.resolve() == rune_home().resolve()
+        )
+    except Exception:  # pragma: no cover - path or home resolution failure
+        return False
+
+
 # Helper: standalone path match
 
 _PATH_BOUNDARY = re.compile(r"""[\s"'`(=;|&<>]""")
@@ -355,6 +376,18 @@ class Guardian:
             return worst_result
 
         # Bash command referencing protected/blocked paths
+        if self._command_reads_rune_secret(command, analysis.parsed) or (
+            normalized != command
+            and self._command_reads_rune_secret(
+                normalized, normalized_analysis.parsed
+            )
+        ):
+            return ValidationResult(
+                allowed=False,
+                risk_level="high",
+                reason="Reading RUNE's credential store is not permitted",
+            )
+
         for pp in PROTECTED_PATHS + READ_BLOCKED_PATHS:
             expanded_pp = self._expand(pp)
             for cmd in (command, normalized) if normalized != command else (command,):
@@ -555,6 +588,61 @@ class Guardian:
 
         return ValidationResult(allowed=True, risk_level="safe")
 
+    def _command_reads_rune_secret(self, command: str, parsed: Any = None) -> bool:
+        """Whether *command* names RUNE's credential store in any spelling.
+
+        Substring matching is what protects ``~/.ssh``, and it works there only
+        because the directory name survives every rewrite. A single file inside
+        a directory that must stay readable needs the argument resolved
+        instead, so ``.rune/../.rune/.env``, ``.rune/./.env`` and ``.en''v``
+        all land on the same file.
+
+        Known limit: a path assembled at runtime (a variable, a substitution)
+        is not visible here. This raises the floor on an agent reading its own
+        keys; it is not a boundary against a caller who already controls the
+        shell.
+        """
+        try:
+            if parsed is None:
+                from rune.safety.analyzer import analyze_command
+
+                parsed = analyze_command(command).parsed
+            chain = parsed.chained_commands or [command]
+        except Exception as exc:  # pragma: no cover - parser failure
+            log.debug("guardian_parse_failed", error=str(exc))
+            return False
+
+        cwd: Path | None = None
+        for part in chain:
+            tokens = part.split()
+            if not tokens:
+                continue
+            # "cd <dir> && cat .env": later relative args resolve against <dir>.
+            if tokens[0] == "cd" and len(tokens) > 1:
+                cwd = self._resolve_arg(tokens[1], None)
+                continue
+            for token in tokens[1:]:
+                resolved = self._resolve_arg(token, cwd)
+                if resolved is not None and _is_rune_secret_file(str(resolved)):
+                    return True
+        return False
+
+    def _resolve_arg(self, token: str, cwd: Path | None) -> Path | None:
+        """Strip shell quoting from *token* and resolve it to a real path."""
+        cleaned = token.replace('"', "").replace("'", "").strip()
+        if not cleaned or cleaned.startswith("-"):
+            return None
+        cleaned = cleaned.replace("$HOME", self._home).replace("${HOME}", self._home)
+        if cleaned.startswith("~"):
+            cleaned = cleaned.replace("~", self._home, 1)
+        try:
+            base = Path(cleaned)
+            if not base.is_absolute() and cwd is not None:
+                base = cwd / base
+            return Path(os.path.normpath(str(base)))
+        except (OSError, ValueError):
+            return None
+
     def validate_file_read_path(self, file_path: str) -> ValidationResult:
         """Validate a read path against blocked paths."""
         expanded = file_path.replace("~", self._home, 1) if file_path.startswith("~") else file_path
@@ -571,6 +659,13 @@ class Guardian:
             # a reason to stop looking at where it was pointed.
             log.debug("guardian_symlink_unresolvable", path=normalized,
                       error=str(exc))
+
+        if _is_rune_secret_file(real_path) or _is_rune_secret_file(normalized):
+            return ValidationResult(
+                allowed=False,
+                risk_level="high",
+                reason="Reading RUNE's credential store is not permitted",
+            )
 
         for bp in READ_BLOCKED_PATHS:
             expanded_bp = self._expand(bp)

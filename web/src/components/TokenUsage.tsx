@@ -1,21 +1,30 @@
 import type { TokenUsage as TokenUsageType } from '../types';
 
+// Rough mid-tier cloud rates, used only to give a sense of scale. They are not
+// billing figures and are meaningless for a locally hosted model, so the cost
+// row is hidden for those providers instead of showing a made-up number.
 const INPUT_PRICE_PER_M = 2.50;
 const OUTPUT_PRICE_PER_M = 10.00;
 const CACHE_READ_PRICE_PER_M = 0.50;
 
+const LOCAL_PROVIDERS = ['ollama', 'lmstudio', 'llamacpp', 'local', 'vllm'];
+
 interface TokenUsageProps {
   usage: TokenUsageType;
+  /** Provider of the active model; cost is hidden when it runs locally. */
+  provider?: string;
 }
 
-export function TokenUsage({ usage }: TokenUsageProps) {
+export function TokenUsage({ usage, provider }: TokenUsageProps) {
+  const isLocal = !!provider && LOCAL_PROVIDERS.includes(provider.toLowerCase());
   const inputActual = usage.input - (usage.cacheRead ?? 0);
   const estimatedCost =
     (inputActual / 1_000_000) * INPUT_PRICE_PER_M +
     ((usage.cacheRead ?? 0) / 1_000_000) * CACHE_READ_PRICE_PER_M +
     (usage.output / 1_000_000) * OUTPUT_PRICE_PER_M;
 
-  const budgetPct = (usage.total / 500_000) * 100;
+  const CONTEXT_BUDGET = 500_000;
+  const budgetPct = (usage.total / CONTEXT_BUDGET) * 100;
 
   return (
     <div style={{ fontSize: 12 }}>
@@ -45,11 +54,15 @@ export function TokenUsage({ usage }: TokenUsageProps) {
         paddingTop: 8,
         borderTop: '1px solid var(--border-subtle)',
       }}>
-        <UsageRow
-          label="Est. Cost"
-          value={`$${estimatedCost.toFixed(4)}`}
-          color="var(--warning)"
-        />
+        {isLocal ? (
+          <UsageRow label="Cost" value="Runs locally" color="var(--text-muted)" />
+        ) : (
+          <UsageRow
+            label="Est. cost"
+            value={`~$${estimatedCost.toFixed(4)}`}
+            color="var(--warning)"
+          />
+        )}
       </div>
 
       {/* Budget bar */}
@@ -61,7 +74,9 @@ export function TokenUsage({ usage }: TokenUsageProps) {
           color: 'var(--text-muted)',
           marginBottom: 4,
         }}>
-          <span>Budget</span>
+          <span title={`RUNE compacts the conversation as it approaches ${formatTokens(CONTEXT_BUDGET)} tokens`}>
+            Used of {formatTokens(CONTEXT_BUDGET)}
+          </span>
           <span>{budgetPct.toFixed(1)}%</span>
         </div>
         <div style={{

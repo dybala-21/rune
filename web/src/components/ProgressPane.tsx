@@ -88,6 +88,8 @@ interface StepSource {
 
 interface StepGroup {
   step: number;
+  /** Which run this step belongs to; step numbers repeat across runs. */
+  run: number;
   summary: string;
   failedCount: number;
   /** searches/pages that happened in this step, in first-touch order */
@@ -112,9 +114,13 @@ function derive(toolCalls: ToolCall[]): Derived {
     if (tc.result === undefined) pendingLabel = label;
 
     const step = tc.step ?? 0;
+    const run = tc.run ?? 0;
     let g = groups[groups.length - 1];
-    if (!g || g.step !== step) {
-      g = { step, summary: '', failedCount: 0, labels: new Set(), extra: 0, sources: [], srcKeys: new Set() };
+    // Start a new group when either changes: a new run reuses step numbers, so
+    // comparing the step alone glues the previous turn's last step onto this
+    // turn's first one.
+    if (!g || g.step !== step || g.run !== run) {
+      g = { step, run, summary: '', failedCount: 0, labels: new Set(), extra: 0, sources: [], srcKeys: new Set() };
       groups.push(g);
     }
     if (!g.labels.has(label)) {
@@ -155,6 +161,7 @@ function derive(toolCalls: ToolCall[]): Derived {
   return {
     groups: groups.map(g => ({
       step: g.step,
+      run: g.run,
       failedCount: g.failedCount,
       summary: [...g.labels].join(' · ') + (g.extra > 0 ? ` +${g.extra}` : ''),
       sources: g.sources,
@@ -299,7 +306,7 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
       color: honest ? 'var(--warning)' : 'var(--danger)',
       bg: honest ? 'var(--warning-subtle, var(--danger-subtle))' : 'var(--danger-subtle)',
       glyph: <span style={{ color: honest ? 'var(--warning)' : 'var(--danger)' }}>✗</span>,
-      title: honest ? 'Not verified — honest stop' : 'Failed',
+      title: honest ? 'Not verified' : 'Failed',
       details: [
         ...(trust?.honestNote ? [trust.honestNote] : []),
         ...(capped ? [CAP_DETAIL] : []),

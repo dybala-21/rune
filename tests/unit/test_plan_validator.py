@@ -12,11 +12,12 @@ from rune.agent.plan_validator import (
 # ---------------------------------------------------------------------------
 
 def make_task(id: str, **kwargs) -> SubTask:
+    """Build a task board SubTask; keyword names mirror the old validator type."""
     return SubTask(
         id=id,
-        goal=kwargs.get("goal", f"do {id}"),
+        description=kwargs.get("goal", f"do {id}"),
         role=kwargs.get("role", "executor"),
-        depends_on=kwargs.get("depends_on", []),
+        dependencies=kwargs.get("depends_on", []),
     )
 
 

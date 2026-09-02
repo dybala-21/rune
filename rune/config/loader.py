@@ -11,6 +11,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel
+
 from rune.config.schema import RuneConfig
 from rune.utils.logger import get_logger
 from rune.utils.paths import rune_home
@@ -19,6 +21,8 @@ log = get_logger(__name__)
 
 _config: RuneConfig | None = None
 _config_mtime: float = 0.0
+# (path, mtime) the ignored-key warning was last emitted for.
+_warned_ignored_for: tuple[str, float] | None = None
 
 
 def _env_substitute(value: str) -> str:
@@ -50,24 +54,25 @@ def _load_dotenv() -> None:
         Path.cwd() / ".rune" / ".env", # project-level (higher priority)
     ]
 
+    # One parser for both readers. The separate one here read a trailing
+    # comment as part of the value, named a variable "export FOO", and turned
+    # any prose line containing "=" into one.
+    from rune.utils.env import _split_env_line
+
     for dotenv_path in dotenv_paths:
         if not dotenv_path.is_file():
             continue
         try:
             for line in dotenv_path.read_text().splitlines():
-                line = line.strip()
-                if not line or line.startswith("#"):
+                pair = _split_env_line(line)
+                if pair is None:
                     continue
-                if "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                key = key.strip()
-                value = value.strip().strip("\"'")
+                key, value = pair
                 # Don't overwrite existing env vars
                 if key not in os.environ:
                     os.environ[key] = value
-        except OSError:
-            pass
+        except OSError as exc:
+            log.debug("dotenv_read_failed", path=str(dotenv_path), error=str(exc))
 
 
 def _find_config_file() -> Path | None:
@@ -141,6 +146,67 @@ def _resolve_api_keys(data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+def _unknown_keys(raw: Any, model: type[BaseModel], path: str = "") -> list[str]:
+    """Config-file keys the schema does not declare, as dotted paths.
+
+    Pydantic drops unrecognised keys without a word, so a typo or a setting from
+    an older layout looks like it applied and silently does nothing. Surfacing
+    them turns that into something the user can see and fix.
+    """
+    if not isinstance(raw, dict):
+        return []
+
+    accepted: dict[str, Any] = {}
+    for name, field in model.model_fields.items():
+        accepted[name] = field
+        if field.alias:
+            accepted[field.alias] = field
+
+    unknown: list[str] = []
+    for key, value in raw.items():
+        if key not in accepted:
+            unknown.append(f"{path}{key}")
+            continue
+        annotation = accepted[key].annotation
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            unknown.extend(_unknown_keys(value, annotation, f"{path}{key}."))
+    return unknown
+
+
+def _validate_salvaging_valid_sections(
+    raw: dict[str, Any], cfg_path: Path
+) -> RuneConfig:
+    """Validate the config, dropping only the sections that fail.
+
+    Pydantic rejects the whole document on one bad value, and the caller's
+    fallback then replaced *every* setting with a default — so a typo in one
+    block silently cost the user their model, their toggles, everything, with
+    only a log line to say so. Retry without the offending top-level sections
+    instead, so the rest of the file still applies.
+    """
+    from pydantic import ValidationError
+
+    try:
+        return RuneConfig.model_validate(raw)
+    except ValidationError as exc:
+        bad_sections = {
+            str(err["loc"][0]) for err in exc.errors() if err.get("loc")
+        }
+        if not bad_sections:
+            raise
+
+        salvaged = {k: v for k, v in raw.items() if k not in bad_sections}
+        config = RuneConfig.model_validate(salvaged)
+        log.warning(
+            "config_sections_rejected",
+            path=str(cfg_path),
+            sections=sorted(bad_sections),
+            detail=exc.errors()[0].get("msg", "")[:160],
+            hint="these sections were skipped; the rest of the file still applies",
+        )
+        return config
+
+
 def load_config(force: bool = False) -> RuneConfig:
     """Load configuration from YAML file with env var substitution.
 
@@ -176,10 +242,24 @@ def load_config(force: bool = False) -> RuneConfig:
         # Resolve API keys
         raw = _resolve_api_keys(raw)
 
-        _config = RuneConfig.model_validate(raw)
+        _config = _validate_salvaging_valid_sections(raw, cfg_path)
         _config_mtime = current_mtime
 
         log.info("config_loaded", path=str(cfg_path))
+
+        ignored = _unknown_keys(raw, RuneConfig)
+        # Once per file version. The list does not change between reloads, and
+        # repeating it on every load buries the warnings that do.
+        global _warned_ignored_for
+        if ignored and _warned_ignored_for != (str(cfg_path), current_mtime):
+            _warned_ignored_for = (str(cfg_path), current_mtime)
+            log.warning(
+                "config_keys_ignored",
+                path=str(cfg_path),
+                count=len(ignored),
+                keys=ignored,
+                hint="these keys are not in the schema and had no effect",
+            )
 
     except Exception as exc:
         log.warning("config_load_failed", path=str(cfg_path), error=str(exc))

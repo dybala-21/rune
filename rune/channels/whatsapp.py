@@ -143,8 +143,9 @@ class WhatsAppAdapter(ChannelAdapter):
         app_secret: str | None = None,
         listen_host: str = "0.0.0.0",
         listen_port: int = 8081,
+        allowed_users: list[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(allowed_users=allowed_users)
         self._access_token = access_token
         self._phone_number_id = phone_number_id
         self._verify_token = verify_token
@@ -378,6 +379,10 @@ class WhatsAppAdapter(ChannelAdapter):
 
             # Mark message as read
             await self._mark_read(msg.get("id", ""))
+
+            if not self.check_authorization(sender):
+                log.warning("whatsapp_unauthorized_sender", sender_id=sender)
+                return
 
             await self._on_message(incoming)
 

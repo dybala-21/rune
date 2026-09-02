@@ -19,7 +19,7 @@ const ITEM_STYLE: React.CSSProperties = {
   display: 'flex',
   justifyContent: 'space-between',
   alignItems: 'center',
-  borderBottom: '1px solid var(--border-subtle, #222)',
+  borderBottom: '1px solid var(--border-subtle)',
 };
 
 async function rpc(method: string, params: Record<string, unknown> = {}) {
@@ -88,9 +88,9 @@ export function CommandPalette({ filter, onSelect, onClose }: Props) {
             setProviders(data as Record<string, string[]>);
             setSubMenu('provider');
           } else {
-            setError('Could not load model list.');
+            setError("Couldn't load the model list");
           }
-        }).catch(() => setError('Could not load model list.'));
+        }).catch(() => setError("Couldn't load the model list"));
         return;
       }
       onSelect(cmd.name);
@@ -102,7 +102,7 @@ export function CommandPalette({ filter, onSelect, onClose }: Props) {
       setError('');
       rpc('config.patch', { activeModel: { provider: selectedProvider, model } })
         .then(() => { onSelect(''); onClose(); })
-        .catch(() => setError('Could not switch model.'));
+        .catch(() => setError("Couldn't switch model"));
     }
   }, [subMenu, filtered, providerList, modelList, selectedProvider, onSelect, onClose]);
 
@@ -162,10 +162,10 @@ export function CommandPalette({ filter, onSelect, onClose }: Props) {
           aria-selected={i === selectedIdx}
           onMouseEnter={() => setSelectedIdx(i)}
           onClick={() => handleSelect(i)}
-          style={{ ...ITEM_STYLE, background: i === selectedIdx ? '#2a2a4a' : 'transparent' }}
+          style={{ ...ITEM_STYLE, background: i === selectedIdx ? 'var(--bg-hover)' : 'transparent' }}
         >
-          <span style={{ color: '#7dd3fc', fontFamily: 'monospace', fontSize: '13px' }}>{cmd.name}</span>
-          <span style={{ color: '#888', fontSize: '12px', marginLeft: '12px' }}>{cmd.description}</span>
+          <span style={{ color: 'var(--accent)', fontFamily: 'monospace', fontSize: '13px' }}>{cmd.name}</span>
+          <span style={{ color: 'var(--text-muted)', fontSize: '12px', marginLeft: '12px' }}>{cmd.description}</span>
         </div>
       ))}
       {subMenu === 'provider' && providerList.map((prov, i) => (
@@ -175,7 +175,7 @@ export function CommandPalette({ filter, onSelect, onClose }: Props) {
           aria-selected={i === selectedIdx}
           onMouseEnter={() => setSelectedIdx(i)}
           onClick={() => handleSelect(i)}
-          style={{ ...ITEM_STYLE, background: i === selectedIdx ? '#2a2a4a' : 'transparent' }}
+          style={{ ...ITEM_STYLE, background: i === selectedIdx ? 'var(--bg-hover)' : 'transparent' }}
         >
           <span style={{ color: '#c4b5fd', fontFamily: 'monospace', fontSize: '13px' }}>{prov}</span>
           <span style={{ color: '#666', fontSize: '12px' }}>{(providers[prov] || []).length} models</span>
@@ -188,9 +188,9 @@ export function CommandPalette({ filter, onSelect, onClose }: Props) {
           aria-selected={i === selectedIdx}
           onMouseEnter={() => setSelectedIdx(i)}
           onClick={() => handleSelect(i)}
-          style={{ ...ITEM_STYLE, background: i === selectedIdx ? '#2a2a4a' : 'transparent' }}
+          style={{ ...ITEM_STYLE, background: i === selectedIdx ? 'var(--bg-hover)' : 'transparent' }}
         >
-          <span style={{ color: '#7dd3fc', fontFamily: 'monospace', fontSize: '13px' }}>{model}</span>
+          <span style={{ color: 'var(--accent)', fontFamily: 'monospace', fontSize: '13px' }}>{model}</span>
         </div>
       ))}
     </div>

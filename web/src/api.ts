@@ -209,7 +209,9 @@ export function sendMessage(text: string, attachments?: MessageAttachment[]) {
 }
 
 export function sendAbort() {
-  return post('/api/abort');
+  // Without the id the server falls back to the newest run, so Stop in one tab
+  // could cancel a run started somewhere else.
+  return post('/api/abort', { runId: getCurrentRunId() });
 }
 
 export function transcribeAudio(audioBase64: string, mimeType: string) {
@@ -362,23 +364,27 @@ export interface ConfigInfo {
   /** Reasoning depth for the active model, when it accepts one. */
   reasoningEffort?: 'low' | 'medium' | 'high' | null;
   reasoningSupported?: boolean;
+  /** Only knobs the memory pipeline actually reads are listed here. */
   memoryTuning: {
     preset: 'speed' | 'balanced' | 'accuracy' | null;
-    policyMode: 'auto' | 'legacy' | 'shadow' | 'balanced' | 'strict';
-    uncertainScoreThreshold: number;
-    uncertainRelevanceFloor: number;
+    policyMode: 'legacy' | 'shadow' | 'balanced' | 'strict';
+    semanticLimit: number;
+    semanticMinScore: number;
     uncertainSemanticLimit: number;
     uncertainSemanticMinScore: number;
-    rolloutObservationWindowDays: number;
-    rolloutMinShadowSamples: number;
-    rolloutPromoteBalancedMinSuccessRate: number;
-    rolloutRollbackMaxP95Ms: number;
+    maxEpisodes: number;
+    contextMaxChars: number;
   };
   safetyTuning: {
     preset: 'conservative' | 'balanced' | 'developer' | null;
     rolloutMode: 'auto' | 'shadow' | 'balanced' | 'strict' | 'legacy';
     autoEnabled: boolean;
   };
+}
+
+/** Run ids the daemon still has in flight. */
+export async function fetchActiveRuns(): Promise<{ runIds: string[] }> {
+  return rpc('runs.active', {});
 }
 
 export async function fetchConfig(): Promise<ConfigInfo> {
@@ -391,18 +397,13 @@ export async function patchConfig(params: {
   memoryTuning?: {
     scope?: 'user' | 'project';
     preset?: 'speed' | 'balanced' | 'accuracy';
-    policyMode?: 'auto' | 'legacy' | 'shadow' | 'balanced' | 'strict';
-    uncertainScoreThreshold?: number;
-    uncertainRelevanceFloor?: number;
+    policyMode?: 'legacy' | 'shadow' | 'balanced' | 'strict';
+    semanticLimit?: number;
+    semanticMinScore?: number;
     uncertainSemanticLimit?: number;
     uncertainSemanticMinScore?: number;
-    rolloutObservationWindowDays?: number;
-    rolloutMinShadowSamples?: number;
-    rolloutPromoteBalancedMinSuccessRate?: number;
-    rolloutRollbackMaxP95Ms?: number;
-  };
-  safetyTuning?: {
-    preset?: 'conservative' | 'balanced' | 'developer';
+    maxEpisodes?: number;
+    contextMaxChars?: number;
   };
 }): Promise<void> {
   return rpc('config.patch', params);

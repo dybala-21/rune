@@ -13,12 +13,19 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 
 from rune.utils.logger import get_logger
 from rune.voice.player import AudioPlayer
 from rune.voice.types import STTProvider, SynthesisResult, TTSProvider
 
 log = get_logger(__name__)
+
+
+# How long to wait for the speaker to finish, and how long to let the closing
+# segment come back from the STT provider before stopping the session.
+_LISTEN_TIMEOUT_S = 30.0
+_SETTLE_TIMEOUT_S = 10.0
 
 
 class VoiceService:
@@ -100,33 +107,53 @@ class VoiceService:
     # ── Microphone input (CLI/TUI only) ──────────────────────────────────
 
     async def listen_and_transcribe(self) -> str:
-        """Listen from microphone and transcribe. Blocks until speech ends.
+        """Listen from the microphone until the speaker stops, and transcribe.
 
-        Uses VoiceSessionManager for mic + VAD + STT pipeline.
+        Waits for the VAD's end-of-speech, gives the last segment a moment to
+        come back from the STT provider, then stops the session — which flushes
+        anything still buffered and returns the combined text.
+
+        Do not wait on ``final_transcript``: the session emits it only from
+        ``stop()``, which runs after this returns, so the listener would be
+        gone before it fired.
         """
         from rune.voice.session import get_voice_session_manager
 
+        loop = asyncio.get_running_loop()
         mgr = get_voice_session_manager(self._stt)
 
-        # Wait for a single utterance
-        transcript_future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        spoke: asyncio.Future[None] = loop.create_future()
+        transcribed: asyncio.Future[None] = loop.create_future()
 
-        def _on_final(text: str) -> None:
-            if not transcript_future.done():
-                transcript_future.set_result(text)
+        def _on_speech_end() -> None:
+            if not spoke.done():
+                spoke.set_result(None)
 
-        mgr.on("final_transcript", _on_final)
+        def _on_partial(_text: str) -> None:
+            # A finished segment updates the combined text; used only to know
+            # the STT round trip landed before we stop.
+            if spoke.done() and not transcribed.done():
+                transcribed.set_result(None)
+
+        mgr.on("speech_end", _on_speech_end)
+        mgr.on("partial_transcript", _on_partial)
 
         try:
             await mgr.start()
-            text = await asyncio.wait_for(transcript_future, timeout=30.0)
-            return text.strip()
-        except TimeoutError:
-            log.debug("voice_listen_timeout")
-            return ""
+            try:
+                await asyncio.wait_for(spoke, timeout=_LISTEN_TIMEOUT_S)
+                # Let the closing segment finish transcribing; stop() flushes
+                # whatever is left either way, so this is a best-effort settle.
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(transcribed, timeout=_SETTLE_TIMEOUT_S)
+            except TimeoutError:
+                log.debug("voice_listen_timeout")
         finally:
-            mgr.off("final_transcript", _on_final)
-            await mgr.stop()
+            mgr.off("speech_end", _on_speech_end)
+            mgr.off("partial_transcript", _on_partial)
+
+        text = await mgr.stop()
+        return (text or "").strip()
 
 
 # ── Factory ─────────────────────────────────────────────────────────────
@@ -189,8 +216,12 @@ def _auto_detect_stt() -> STTProvider | None:
         except Exception as exc:
             log.debug("stt_detect_skip", provider="groq", error=str(exc)[:80])
 
-    # 4. Sherpa-ONNX (fully local, no API key)
+    # 4. Sherpa-ONNX (fully local, no API key). The provider constructor only
+    #    assigns attributes, so probe the native package before claiming STT.
     try:
+        import importlib
+
+        importlib.import_module("sherpa_onnx")
         from rune.voice.providers.sherpa_onnx import SherpaOnnxProvider
         return SherpaOnnxProvider()
     except Exception as exc:

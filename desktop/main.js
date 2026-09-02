@@ -130,7 +130,8 @@ function hardenSession() {
         'Content-Security-Policy': [
           "default-src 'self'; " +
             `connect-src 'self' ${ORIGIN} ws://127.0.0.1:${PORT}; ` +
-            "img-src 'self' data:; " +
+            // blob: is needed for attachment thumbnails (URL.createObjectURL).
+            "img-src 'self' data: blob:; " +
             "style-src 'self' 'unsafe-inline'; " +
             "script-src 'self'; " +
             "object-src 'none'; base-uri 'none'; frame-ancestors 'none';",

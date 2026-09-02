@@ -38,6 +38,7 @@ import type {
   OrchestrationTask,
   TrustInfo,
   ProactiveSuggestion,
+  SseEventType,
 } from '../types';
 
 let idCounter = 0;
@@ -200,13 +201,27 @@ function loadPersistedLiveState(): LoadedLiveDraft {
   }
 }
 
+/**
+ * Strip attachment image data before persisting. localStorage holds a few MB
+ * total, so keeping base64 here would overflow the quota and — since the write
+ * fails silently — take draft recovery down with it. Names survive so a
+ * restored conversation still reads correctly.
+ */
+function withoutAttachmentData(messages: ChatMessage[]): ChatMessage[] {
+  return messages.map(m => (
+    m.attachments?.length
+      ? { ...m, attachments: m.attachments.map(({ name, mimeType }) => ({ name, mimeType })) }
+      : m
+  ));
+}
+
 function persistLiveState(state: PersistedLiveState): void {
   if (typeof window === 'undefined') return;
   try {
     const payload: PersistedLiveEnvelope = {
       version: 1,
       savedAt: Date.now(),
-      state,
+      state: { ...state, messages: withoutAttachmentData(state.messages) },
     };
     window.localStorage.setItem(LIVE_STATE_STORAGE_KEY, JSON.stringify(payload));
   } catch {
@@ -242,6 +257,13 @@ export function useAgent() {
   const [orchestration, setOrchestration] = useState<OrchestrationState | null>(null);
   // tool_call 핸들러가 스텝 번호를 동기적으로 읽어야 하므로 state와 별도로 ref 유지
   const currentStepRef = useRef(0);
+  // Tool calls accumulate across turns while the server's step numbering
+  // restarts at 1 each run, so this counter keeps turns apart in the timeline.
+  // Seeded past the restored calls' highest run, or the next run would reuse a
+  // number and the timeline would merge the two turns.
+  const runSeqRef = useRef(
+    initialState.state.toolCalls.reduce((max, tc) => Math.max(max, tc.run ?? 0), 0),
+  );
   const [savedDraft, setSavedDraft] = useState<SavedLiveDraftSummary>(
     summarizeSavedDraft(initialState.state, initialState.savedAt),
   );
@@ -298,8 +320,12 @@ export function useAgent() {
   const restoreSavedDraft = useCallback(() => {
     const draft = savedDraftStateRef.current;
     if (!draft) return;
+    const restoredCalls = trimTail(draft.toolCalls, MAX_TOOL_CALLS);
+    // Same reason as the initial seed: the next run must not reuse a run
+    // number these calls already carry, or the timeline merges the two turns.
+    runSeqRef.current = restoredCalls.reduce((max, tc) => Math.max(max, tc.run ?? 0), 0);
     setMessages(trimTail(draft.messages, MAX_MESSAGES));
-    setToolCalls(trimTail(draft.toolCalls, MAX_TOOL_CALLS));
+    setToolCalls(restoredCalls);
     setThinkingBlocks(trimTail(draft.thinkingBlocks, MAX_THINKING_BLOCKS));
     setTokenUsage(draft.tokenUsage ?? null);
     setActivitySummary(draft.activitySummary ?? null);
@@ -318,12 +344,14 @@ export function useAgent() {
     persistLiveState(createEmptyLiveState());
   }, [savedDraft.available]);
 
-  const resetLiveConversation = useCallback(() => {
-    // New chat = new server-side conversation.
-    api.rotateLiveSessionId();
+  // Everything tied to one conversation. /load swaps conversations too, so it
+  // needs this without the session-id rotation that starting a new chat does.
+  const clearConversationState = useCallback(() => {
     pendingTextRef.current = '';
     assistantMsgIdRef.current = null;
     savedDraftStateRef.current = null;
+    currentStepRef.current = 0;
+    runSeqRef.current = 0;
     setState('idle');
     setMessages([]);
     setToolCalls([]);
@@ -346,6 +374,12 @@ export function useAgent() {
     pendingPersistRef.current = null;
     persistLiveState(createEmptyLiveState());
   }, []);
+
+  const resetLiveConversation = useCallback(() => {
+    // New chat = new server-side conversation.
+    api.rotateLiveSessionId();
+    clearConversationState();
+  }, [clearConversationState]);
 
   // Serializing the whole live state (up to 1200 msgs + 3000 tool calls) on
   // every streamed token would stringify megabytes many times a second. Hold
@@ -384,9 +418,37 @@ export function useAgent() {
   useEffect(() => {
     const unsubs: (() => void)[] = [];
 
+    /**
+     * Subscribe to a run event, ignoring runs this chat did not start.
+     *
+     * The server broadcasts to every connected surface, so without this a run
+     * from another tab, the desktop app, or a scheduled/proactive job streams
+     * its answer into this conversation and resets its state. Events with no
+     * run identity at all are still delivered — older payloads and the
+     * single-surface case must keep working.
+     */
+    const onOwnRun = <T,>(event: SseEventType, handler: (data: T) => void) =>
+      sseOn(event, (raw) => {
+        const d = raw as { runId?: string; sessionId?: string };
+        const tagged = Boolean(d?.runId) || Boolean(d?.sessionId);
+        const mine =
+          (Boolean(d?.sessionId) && d.sessionId === api.getLiveSessionId()) ||
+          (Boolean(d?.runId) && d.runId === api.getCurrentRunId());
+        if (tagged && !mine) return;
+        handler(raw as T);
+      });
+
     unsubs.push(sseOn('agent_start', (raw) => {
-      beginLiveSession();
       const data = raw as AgentStartData;
+      // Events reach every connected surface. A run started elsewhere — another
+      // tab, the desktop app, a scheduled one — must not reset this chat: that
+      // abandons an in-flight answer and discards the unrestored draft.
+      const ownRun =
+        (Boolean(data.sessionId) && data.sessionId === api.getLiveSessionId()) ||
+        (Boolean(data.runId) && data.runId === api.getCurrentRunId());
+      if (!ownRun) return;
+
+      beginLiveSession();
       setState('running');
       pendingTextRef.current = '';
       assistantMsgIdRef.current = null;
@@ -395,25 +457,7 @@ export function useAgent() {
       setCurrentStepInfo(null);
       setOrchestration(null);
       currentStepRef.current = 0;
-      // "Goal:" marks runs that did NOT start from this chat (another surface,
-      // a proactive/scheduled run). Suppress by session identity when the
-      // server sends it; fall back to comparing against the user's last
-      // message for older payloads without a sessionId.
-      const ownRun =
-        (Boolean(data.sessionId) && data.sessionId === api.getLiveSessionId()) ||
-        (Boolean(data.runId) && data.runId === api.getCurrentRunId());
-      setMessages(prev => {
-        const lastUser = ownRun ? null : [...prev].reverse().find(m => m.role === 'user');
-        if (ownRun || (lastUser && lastUser.content.trim().startsWith(data.goal.trim()))) {
-          return prev;
-        }
-        return appendWithLimit(prev, {
-          id: nextId(),
-          role: 'system',
-          content: `Goal: ${data.goal}`,
-          timestamp: Date.now(),
-        }, MAX_MESSAGES);
-      });
+      runSeqRef.current += 1;
     }));
 
     unsubs.push(sseOn('suggestion_created', (raw) => {
@@ -450,7 +494,7 @@ export function useAgent() {
       });
     }));
 
-    unsubs.push(sseOn('agent_complete', (raw) => {
+    unsubs.push(onOwnRun('agent_complete', (raw) => {
       const data = raw as AgentCompleteData;
       flushTextDelta();
       setState('idle');
@@ -524,7 +568,7 @@ export function useAgent() {
       }
     }));
 
-    unsubs.push(sseOn('agent_error', (raw) => {
+    unsubs.push(onOwnRun('agent_error', (raw) => {
       const data = raw as AgentErrorData;
       flushTextDelta();
       setState('idle');
@@ -543,7 +587,7 @@ export function useAgent() {
       });
     }));
 
-    unsubs.push(sseOn('agent_aborted', () => {
+    unsubs.push(onOwnRun('agent_aborted', () => {
       flushTextDelta();
       setState('idle');
       setPendingApproval(null);
@@ -560,17 +604,24 @@ export function useAgent() {
       });
     }));
 
-    unsubs.push(sseOn('text_delta', (raw) => {
+    unsubs.push(onOwnRun('text_delta', (raw) => {
       const data = raw as TextDeltaData;
-      // 교체 방식: onStepFinish의 step.text는 해당 step 전체 텍스트 (delta 아님).
-      // multi-pass에서 +=하면 이전 pass 텍스트가 누적되어 깨짐.
-      // 공백만 있는 텍스트는 빈 메시지 버블을 만들므로 무시
-      if (!data.text?.trim()) return;
-      pendingTextRef.current = data.text;
+      // The server sends only what we have not seen; step separators arrive as
+      // part of that increment. `text` is the whole transcript and replaces the
+      // buffer — used on a reset, and by the WebSocket path.
+      if (data.delta) {
+        pendingTextRef.current += data.delta;
+      } else if (data.text !== undefined) {
+        if (!data.text.trim()) return;
+        pendingTextRef.current = data.text;
+      } else {
+        return;
+      }
+      if (!pendingTextRef.current.trim()) return;
       flushTextDelta();
     }));
 
-    unsubs.push(sseOn('thinking', (raw) => {
+    unsubs.push(onOwnRun('thinking', (raw) => {
       const data = raw as ThinkingData;
       setThinkingBlocks(prev => appendWithLimit(prev, {
         id: nextId(),
@@ -579,27 +630,36 @@ export function useAgent() {
       }, MAX_THINKING_BLOCKS));
     }));
 
-    unsubs.push(sseOn('tool_call', (raw) => {
+    unsubs.push(onOwnRun('tool_call', (raw) => {
       const data = raw as ToolCallData;
       if (!data.toolName?.trim()) return;  // 빈 도구 이름 무시
       flushTextDelta();
       setToolCalls(prev => appendWithLimit(prev, {
         id: nextId(),
+        callId: data.callId,
         toolName: data.toolName,
         args: data.args ?? {},
         timestamp: Date.now(),
         step: currentStepRef.current,
+        run: runSeqRef.current,
       }, MAX_TOOL_CALLS));
     }));
 
-    unsubs.push(sseOn('tool_result', (raw) => {
+    unsubs.push(onOwnRun('tool_result', (raw) => {
       const data = raw as ToolResultData;
       const now = Date.now();
       setToolCalls(prev => {
-        // FIFO: results arrive in call order, so pair with the oldest unresolved call.
-        const actualIdx = prev.findIndex(
-          tc => tc.toolName === data.toolName && tc.result === undefined
-        );
+        // Pair on the id the server sends. Tools run concurrently, so results
+        // arrive out of order and matching by name attaches one to whichever
+        // call of that tool happens to be waiting.
+        const actualIdx = data.callId
+          ? prev.findIndex(tc => tc.callId === data.callId)
+          : prev.findIndex(
+              tc =>
+                tc.toolName === data.toolName &&
+                tc.result === undefined &&
+                tc.run === runSeqRef.current,
+            );
         if (actualIdx === -1) return prev;
         const original = prev[actualIdx];
         const updated = [...prev];
@@ -614,7 +674,7 @@ export function useAgent() {
       });
     }));
 
-    unsubs.push(sseOn('approval_request', (raw) => {
+    unsubs.push(onOwnRun('approval_request', (raw) => {
       const data = raw as ApprovalRequestData;
       setState('waiting_approval');
       setPendingApproval({
@@ -627,7 +687,7 @@ export function useAgent() {
       });
     }));
 
-    unsubs.push(sseOn('question', (raw) => {
+    unsubs.push(onOwnRun('question', (raw) => {
       const data = raw as QuestionData;
       setState('waiting_question');
       setPendingQuestion({
@@ -638,13 +698,13 @@ export function useAgent() {
       });
     }));
 
-    unsubs.push(sseOn('step_start', (raw) => {
+    unsubs.push(onOwnRun('step_start', (raw) => {
       const data = raw as StepStartData;
       currentStepRef.current = data.stepNumber;
       setCurrentStepInfo({ stepNumber: data.stepNumber, tokens: data.tokens });
     }));
 
-    unsubs.push(sseOn('orchestration_started', (raw) => {
+    unsubs.push(onOwnRun('orchestration_started', (raw) => {
       const data = raw as OrchestrationStartedData;
       setOrchestration({
         description: data.description,
@@ -654,7 +714,7 @@ export function useAgent() {
       });
     }));
 
-    unsubs.push(sseOn('orchestration_task_progress', (raw) => {
+    unsubs.push(onOwnRun('orchestration_task_progress', (raw) => {
       const data = raw as OrchestrationTaskProgressData;
       setOrchestration(prev => {
         const base = prev ?? { description: '', completed: 0, total: data.total, tasks: [] };
@@ -671,7 +731,7 @@ export function useAgent() {
       });
     }));
 
-    unsubs.push(sseOn('orchestration_task_retry', (raw) => {
+    unsubs.push(onOwnRun('orchestration_task_retry', (raw) => {
       const data = raw as OrchestrationTaskRetryData;
       setOrchestration(prev => prev && {
         ...prev,
@@ -682,7 +742,7 @@ export function useAgent() {
       });
     }));
 
-    unsubs.push(sseOn('orchestration_completed', (raw) => {
+    unsubs.push(onOwnRun('orchestration_completed', (raw) => {
       const data = raw as OrchestrationCompletedData;
       setOrchestration(prev => prev && { ...prev, completed: data.completedCount });
     }));
@@ -696,7 +756,7 @@ export function useAgent() {
       }, MAX_COMPACTION_EVENTS));
     }));
 
-    unsubs.push(sseOn('delegate_event', (raw) => {
+    unsubs.push(onOwnRun('delegate_event', (raw) => {
       const data = raw as DelegateEventData;
       setDelegateEvents(prev => appendWithLimit(prev, {
         id: nextId(),
@@ -708,8 +768,12 @@ export function useAgent() {
 
     unsubs.push(sseOn('command_result', (raw) => {
       const data = raw as CommandResultData;
+      // This event reaches every client, so a command run in another tab used
+      // to replace this one's conversation. Act only on our own.
+      if (data.requestSessionId && data.requestSessionId !== api.getLiveSessionId()) return;
       // /load: pin the live chat to the loaded conversation and show its turns.
       if (data.data?.action === 'load_session' && data.data.sessionId) {
+        clearConversationState();
         api.setLiveSessionId(data.data.sessionId);
         const turns = data.data.turns ?? [];
         setMessages(turns.map(t => ({
@@ -734,7 +798,7 @@ export function useAgent() {
       }
     }));
 
-    unsubs.push(sseOn('goal_iteration', (raw) => {
+    unsubs.push(onOwnRun('goal_iteration', (raw) => {
       const d = raw as GoalIterationData;
       setMessages(prev => appendWithLimit(prev, {
         id: nextId(),
@@ -745,7 +809,8 @@ export function useAgent() {
     }));
 
     return () => { unsubs.forEach(fn => fn()); };
-  }, [sseOn, flushTextDelta, beginLiveSession]);
+  }, [sseOn, flushTextDelta, beginLiveSession, clearConversationState]);
+
 
   // Snapshot for client-side slash commands (/retry, /copy, /export, /stats).
   const messagesRef = useRef<ChatMessage[]>([]);
@@ -883,14 +948,16 @@ export function useAgent() {
       return;
     }
     beginLiveSession();
-    const displayContent = pendingAttachments && pendingAttachments.length > 0
-      ? `${text}\n[${pendingAttachments.map(a => a.name).join(', ')}]`
-      : text;
     setMessages(prev => appendWithLimit(prev, {
       id: nextId(),
       role: 'user',
-      content: displayContent,
+      content: text,
       timestamp: Date.now(),
+      attachments: pendingAttachments?.map(a => ({
+        name: a.name,
+        mimeType: a.mimeType,
+        dataUrl: a.dataUrl,
+      })),
     }, MAX_MESSAGES));
     const apiAttachments = pendingAttachments?.map(a => ({
       name: a.name,
@@ -899,6 +966,31 @@ export function useAgent() {
     }));
     postToServer(text, apiAttachments);
   }, [beginLiveSession, handleClientCommand, postToServer]);
+
+  // Events emitted while the stream was down are gone, agent_complete among
+  // them, so a run that ended during the outage left the composer disabled
+  // until reload. On reconnect, ask whether our run is still going.
+  const stateRef = useRef(state);
+  stateRef.current = state;
+  useEffect(() => {
+    if (!connected || stateRef.current !== 'running') return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { runIds } = await api.fetchActiveRuns();
+        if (cancelled || stateRef.current !== 'running') return;
+        const runId = api.getCurrentRunId();
+        if (runId && !runIds.includes(runId)) {
+          flushTextDelta();
+          setState('idle');
+          pushSystem('The connection dropped while this run was finishing — reopen the conversation to see the full answer.');
+        }
+      } catch {
+        // Offline again; the next reconnect retries.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [connected, flushTextDelta, pushSystem]);
 
   const pushSystemError = useCallback((prefix: string, err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);

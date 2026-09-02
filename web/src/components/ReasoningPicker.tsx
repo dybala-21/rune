@@ -22,7 +22,7 @@ export function ReasoningPicker({ effort }: { effort: Effort | null }) {
       await setReasoningEffort(e);
     } catch {
       setCurrent(prev);
-      toast.error('Failed to set reasoning depth');
+      toast.error("Couldn't set reasoning depth");
     } finally {
       setBusy(false);
     }

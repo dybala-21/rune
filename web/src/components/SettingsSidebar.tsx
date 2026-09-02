@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   fetchSkills,
   fetchEnvVars,
@@ -12,6 +12,7 @@ import {
   type ConfigInfo,
   type ChannelInfo,
 } from '../api';
+import { toast } from '../utils/toast';
 
 interface SettingsSidebarProps {
   onOpenSkillPanel: (selectedName?: string) => void;
@@ -28,28 +29,35 @@ const CHANNEL_STATUS_COLORS: Record<string, string> = {
   error: 'var(--danger)',
 };
 
-const MEMORY_POLICY_MODES = ['auto', 'legacy', 'shadow', 'balanced', 'strict'] as const;
+// Matches RolloutManager._VALID_MODES; 'auto' was offered here and rejected by the API.
+const MEMORY_POLICY_MODES = ['legacy', 'shadow', 'balanced', 'strict'] as const;
 const MEMORY_PRESET_VALUES = {
   speed: {
     policyMode: 'shadow',
-    uncertainScoreThreshold: '0.65',
-    uncertainRelevanceFloor: '0.5',
-    uncertainSemanticLimit: '2',
-    uncertainSemanticMinScore: '0.65',
+    semanticLimit: '2',
+    semanticMinScore: '0.5',
+    uncertainSemanticLimit: '3',
+    uncertainSemanticMinScore: '0.4',
+    maxEpisodes: '3',
+    contextMaxChars: '3000',
   },
   balanced: {
     policyMode: 'balanced',
-    uncertainScoreThreshold: '0.5',
-    uncertainRelevanceFloor: '0.35',
-    uncertainSemanticLimit: '3',
-    uncertainSemanticMinScore: '0.45',
+    semanticLimit: '5',
+    semanticMinScore: '0.3',
+    uncertainSemanticLimit: '8',
+    uncertainSemanticMinScore: '0.2',
+    maxEpisodes: '10',
+    contextMaxChars: '8000',
   },
   accuracy: {
     policyMode: 'strict',
-    uncertainScoreThreshold: '0.4',
-    uncertainRelevanceFloor: '0.2',
-    uncertainSemanticLimit: '6',
-    uncertainSemanticMinScore: '0.3',
+    semanticLimit: '10',
+    semanticMinScore: '0.15',
+    uncertainSemanticLimit: '15',
+    uncertainSemanticMinScore: '0.1',
+    maxEpisodes: '20',
+    contextMaxChars: '16000',
   },
 } as const;
 const MEMORY_PRESET_ORDER = ['speed', 'balanced', 'accuracy'] as const;
@@ -68,28 +76,24 @@ type SafetyPreset = typeof SAFETY_PRESET_ORDER[number];
 interface MemoryTuningDraft {
   preset: MemoryDraftPreset;
   policyMode: MemoryPolicyMode;
-  uncertainScoreThreshold: string;
-  uncertainRelevanceFloor: string;
+  semanticLimit: string;
+  semanticMinScore: string;
   uncertainSemanticLimit: string;
   uncertainSemanticMinScore: string;
-  rolloutObservationWindowDays: string;
-  rolloutMinShadowSamples: string;
-  rolloutPromoteBalancedMinSuccessRate: string;
-  rolloutRollbackMaxP95Ms: string;
+  maxEpisodes: string;
+  contextMaxChars: string;
 }
 
 function toMemoryTuningDraft(config: ConfigInfo): MemoryTuningDraft {
   return {
     preset: config.memoryTuning.preset ?? 'custom',
     policyMode: config.memoryTuning.policyMode,
-    uncertainScoreThreshold: String(config.memoryTuning.uncertainScoreThreshold),
-    uncertainRelevanceFloor: String(config.memoryTuning.uncertainRelevanceFloor),
+    semanticLimit: String(config.memoryTuning.semanticLimit),
+    semanticMinScore: String(config.memoryTuning.semanticMinScore),
     uncertainSemanticLimit: String(config.memoryTuning.uncertainSemanticLimit),
     uncertainSemanticMinScore: String(config.memoryTuning.uncertainSemanticMinScore),
-    rolloutObservationWindowDays: String(config.memoryTuning.rolloutObservationWindowDays),
-    rolloutMinShadowSamples: String(config.memoryTuning.rolloutMinShadowSamples),
-    rolloutPromoteBalancedMinSuccessRate: String(config.memoryTuning.rolloutPromoteBalancedMinSuccessRate),
-    rolloutRollbackMaxP95Ms: String(config.memoryTuning.rolloutRollbackMaxP95Ms),
+    maxEpisodes: String(config.memoryTuning.maxEpisodes),
+    contextMaxChars: String(config.memoryTuning.contextMaxChars),
   };
 }
 
@@ -103,12 +107,13 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
   const [toggling, setToggling] = useState(false);
   const [restarting, setRestarting] = useState<string | null>(null);
   const [memoryDraft, setMemoryDraft] = useState<MemoryTuningDraft | null>(null);
+  // The 30s refresh must not overwrite fields the user is still filling in.
+  const memoryDirtyRef = useRef(false);
+  // Wrap the setter so every field edit flags the draft; load() then leaves it alone.
+  const editMemoryDraft: typeof setMemoryDraft = (v) => { memoryDirtyRef.current = true; setMemoryDraft(v); };
   const [savingMemory, setSavingMemory] = useState(false);
   const [memoryError, setMemoryError] = useState<string | null>(null);
-  const [showAdvancedMemory, setShowAdvancedMemory] = useState(false);
   const [selectedSafetyPreset, setSelectedSafetyPreset] = useState<SafetyPreset | null>(null);
-  const [savingSafetyPreset, setSavingSafetyPreset] = useState<SafetyPreset | null>(null);
-  const [safetyError, setSafetyError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -123,7 +128,7 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
       if (ev.status === 'fulfilled') setEnvVars(ev.value.variables);
       if (cfg.status === 'fulfilled') {
         setConfig(cfg.value);
-        setMemoryDraft(toMemoryTuningDraft(cfg.value));
+        if (!memoryDirtyRef.current) setMemoryDraft(toMemoryTuningDraft(cfg.value));
         setSelectedSafetyPreset(cfg.value.safetyTuning.preset);
       }
       if (ch.status === 'fulfilled') setChannels(ch.value.channels);
@@ -151,7 +156,7 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
       setMemoryDraft(toMemoryTuningDraft(updated));
       setSelectedSafetyPreset(updated.safetyTuning.preset);
     } catch {
-      // ignore
+      toast.error("Couldn't change the proactive setting");
     } finally {
       setToggling(false);
     }
@@ -167,7 +172,7 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
       setMemoryDraft(toMemoryTuningDraft(updated));
       setSelectedSafetyPreset(updated.safetyTuning.preset);
     } catch {
-      // ignore
+      toast.error("Couldn't change the advisor setting");
     } finally {
       setToggling(false);
     }
@@ -178,80 +183,61 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
     setSavingMemory(true);
     setMemoryError(null);
     try {
-      const uncertainScoreThreshold = Number(memoryDraft.uncertainScoreThreshold);
-      const uncertainRelevanceFloor = Number(memoryDraft.uncertainRelevanceFloor);
+      const semanticLimit = Number.parseInt(memoryDraft.semanticLimit, 10);
+      const semanticMinScore = Number(memoryDraft.semanticMinScore);
       const uncertainSemanticLimit = Number.parseInt(memoryDraft.uncertainSemanticLimit, 10);
       const uncertainSemanticMinScore = Number(memoryDraft.uncertainSemanticMinScore);
-      const rolloutObservationWindowDays = Number.parseInt(memoryDraft.rolloutObservationWindowDays, 10);
-      const rolloutMinShadowSamples = Number.parseInt(memoryDraft.rolloutMinShadowSamples, 10);
-      const rolloutPromoteBalancedMinSuccessRate = Number(memoryDraft.rolloutPromoteBalancedMinSuccessRate);
-      const rolloutRollbackMaxP95Ms = Number.parseInt(memoryDraft.rolloutRollbackMaxP95Ms, 10);
+      const maxEpisodes = Number.parseInt(memoryDraft.maxEpisodes, 10);
+      const contextMaxChars = Number.parseInt(memoryDraft.contextMaxChars, 10);
 
-      if (!Number.isFinite(uncertainScoreThreshold)) throw new Error('Score threshold must be a number');
-      if (!Number.isFinite(uncertainRelevanceFloor)) throw new Error('Relevance floor must be a number');
-      if (!Number.isFinite(uncertainSemanticMinScore)) throw new Error('Semantic min score must be a number');
-      if (!Number.isInteger(uncertainSemanticLimit)) throw new Error('Semantic limit must be an integer');
-      if (!Number.isInteger(rolloutObservationWindowDays)) throw new Error('Observation window days must be an integer');
-      if (!Number.isInteger(rolloutMinShadowSamples)) throw new Error('Min shadow samples must be an integer');
-      if (!Number.isFinite(rolloutPromoteBalancedMinSuccessRate)) throw new Error('Promote success rate must be a number');
-      if (!Number.isInteger(rolloutRollbackMaxP95Ms)) throw new Error('Rollback p95 ms must be an integer');
+      if (!Number.isInteger(semanticLimit)) throw new Error('Semantic limit must be a whole number');
+      if (!Number.isFinite(semanticMinScore)) throw new Error('Semantic min score must be a number');
+      if (!Number.isInteger(uncertainSemanticLimit)) throw new Error('Uncertain semantic limit must be a whole number');
+      if (!Number.isFinite(uncertainSemanticMinScore)) throw new Error('Uncertain semantic min score must be a number');
+      if (!Number.isInteger(maxEpisodes)) throw new Error('Max episodes must be a whole number');
+      if (!Number.isInteger(contextMaxChars)) throw new Error('Context max chars must be a whole number');
 
       await patchConfig({
         memoryTuning: {
           scope: 'project',
           ...(memoryDraft.preset !== 'custom' ? { preset: memoryDraft.preset } : {}),
           policyMode: memoryDraft.policyMode,
-          uncertainScoreThreshold,
-          uncertainRelevanceFloor,
+          semanticLimit,
+          semanticMinScore,
           uncertainSemanticLimit,
           uncertainSemanticMinScore,
-          rolloutObservationWindowDays,
-          rolloutMinShadowSamples,
-          rolloutPromoteBalancedMinSuccessRate,
-          rolloutRollbackMaxP95Ms,
+          maxEpisodes,
+          contextMaxChars,
         },
       });
       const updated = await fetchConfig();
       setConfig(updated);
+      memoryDirtyRef.current = false;   // saved — the refresh may take over again
       setMemoryDraft(toMemoryTuningDraft(updated));
       setSelectedSafetyPreset(updated.safetyTuning.preset);
     } catch (error) {
-      setMemoryError(error instanceof Error ? error.message : 'Failed to save memory tuning');
+      setMemoryError(error instanceof Error ? error.message : "Couldn't save memory tuning");
     } finally {
       setSavingMemory(false);
     }
   };
 
   const applyPreset = (preset: MemoryPreset) => {
-    setMemoryDraft((prev) => {
+    editMemoryDraft((prev) => {
       if (!prev) return prev;
       const values = MEMORY_PRESET_VALUES[preset];
       return {
         ...prev,
         preset,
         policyMode: values.policyMode,
-        uncertainScoreThreshold: values.uncertainScoreThreshold,
-        uncertainRelevanceFloor: values.uncertainRelevanceFloor,
+        semanticLimit: values.semanticLimit,
+        semanticMinScore: values.semanticMinScore,
         uncertainSemanticLimit: values.uncertainSemanticLimit,
         uncertainSemanticMinScore: values.uncertainSemanticMinScore,
+        maxEpisodes: values.maxEpisodes,
+        contextMaxChars: values.contextMaxChars,
       };
     });
-  };
-
-  const applySafetyPreset = async (preset: SafetyPreset) => {
-    setSavingSafetyPreset(preset);
-    setSafetyError(null);
-    try {
-      await patchConfig({ safetyTuning: { preset } });
-      const updated = await fetchConfig();
-      setConfig(updated);
-      setMemoryDraft(toMemoryTuningDraft(updated));
-      setSelectedSafetyPreset(updated.safetyTuning.preset);
-    } catch (error) {
-      setSafetyError(error instanceof Error ? error.message : 'Failed to save safety tuning');
-    } finally {
-      setSavingSafetyPreset(null);
-    }
   };
 
   const handleRestart = async (name: string) => {
@@ -461,7 +447,7 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
                     value={memoryDraft.policyMode}
                     onChange={(e) => {
                       const next = e.target.value as MemoryPolicyMode;
-                      setMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', policyMode: next } : prev));
+                      editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', policyMode: next } : prev));
                     }}
                     style={memoryInputStyle}
                   >
@@ -472,66 +458,35 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
                 </label>
 
                 <MemoryField
-                  label="Uncertain Score Threshold (0~1)"
-                  value={memoryDraft.uncertainScoreThreshold}
-                  onChange={(value) => setMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', uncertainScoreThreshold: value } : prev))}
+                  label="Semantic Limit (1~20)"
+                  value={memoryDraft.semanticLimit}
+                  onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', semanticLimit: value } : prev))}
                 />
                 <MemoryField
-                  label="Uncertain Relevance Floor (0~1)"
-                  value={memoryDraft.uncertainRelevanceFloor}
-                  onChange={(value) => setMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', uncertainRelevanceFloor: value } : prev))}
+                  label="Semantic Min Score (0~1)"
+                  value={memoryDraft.semanticMinScore}
+                  onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', semanticMinScore: value } : prev))}
                 />
                 <MemoryField
                   label="Uncertain Semantic Limit (1~20)"
                   value={memoryDraft.uncertainSemanticLimit}
-                  onChange={(value) => setMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', uncertainSemanticLimit: value } : prev))}
+                  onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', uncertainSemanticLimit: value } : prev))}
                 />
                 <MemoryField
                   label="Uncertain Semantic Min Score (0~1)"
                   value={memoryDraft.uncertainSemanticMinScore}
-                  onChange={(value) => setMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', uncertainSemanticMinScore: value } : prev))}
+                  onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', uncertainSemanticMinScore: value } : prev))}
                 />
-
-                <button
-                  onClick={() => setShowAdvancedMemory((prev) => !prev)}
-                  style={{
-                    justifySelf: 'start',
-                    padding: '3px 8px',
-                    background: 'var(--bg-tertiary)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 'var(--radius-sm)',
-                    color: 'var(--text-secondary)',
-                    fontSize: 10,
-                    cursor: 'pointer',
-                  }}
-                >
-                  {showAdvancedMemory ? 'Hide Advanced Rollout' : 'Show Advanced Rollout'}
-                </button>
-
-                {showAdvancedMemory && (
-                  <>
-                    <MemoryField
-                      label="Rollout Observation Window Days (3~90)"
-                      value={memoryDraft.rolloutObservationWindowDays}
-                      onChange={(value) => setMemoryDraft((prev) => (prev ? { ...prev, rolloutObservationWindowDays: value } : prev))}
-                    />
-                    <MemoryField
-                      label="Rollout Min Shadow Samples (5~200)"
-                      value={memoryDraft.rolloutMinShadowSamples}
-                      onChange={(value) => setMemoryDraft((prev) => (prev ? { ...prev, rolloutMinShadowSamples: value } : prev))}
-                    />
-                    <MemoryField
-                      label="Rollout Promote Success Rate (0.5~0.99)"
-                      value={memoryDraft.rolloutPromoteBalancedMinSuccessRate}
-                      onChange={(value) => setMemoryDraft((prev) => (prev ? { ...prev, rolloutPromoteBalancedMinSuccessRate: value } : prev))}
-                    />
-                    <MemoryField
-                      label="Rollout Rollback P95 Ms (50~1000)"
-                      value={memoryDraft.rolloutRollbackMaxP95Ms}
-                      onChange={(value) => setMemoryDraft((prev) => (prev ? { ...prev, rolloutRollbackMaxP95Ms: value } : prev))}
-                    />
-                  </>
-                )}
+                <MemoryField
+                  label="Max Episodes (1~50)"
+                  value={memoryDraft.maxEpisodes}
+                  onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', maxEpisodes: value } : prev))}
+                />
+                <MemoryField
+                  label="Context Max Chars (1000~32000)"
+                  value={memoryDraft.contextMaxChars}
+                  onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', contextMaxChars: value } : prev))}
+                />
               </div>
 
               {memoryError && (
@@ -574,18 +529,16 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
                 Safety Tuning
               </div>
               <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2, marginBottom: 10 }}>
-                Preset-only (guarded) · Current mode: {config.safetyTuning.rolloutMode}
+                Current mode: {config.safetyTuning.rolloutMode}
               </div>
 
               <div style={{ display: 'grid', gap: 6 }}>
                 {SAFETY_PRESET_ORDER.map((preset) => {
                   const active = selectedSafetyPreset === preset;
-                  const saving = savingSafetyPreset === preset;
                   return (
                     <button
                       key={preset}
-                      onClick={() => applySafetyPreset(preset)}
-                      disabled={savingSafetyPreset !== null}
+                      disabled
                       style={{
                         display: 'flex',
                         alignItems: 'center',
@@ -598,29 +551,23 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
                         color: active ? 'var(--accent)' : 'var(--text-secondary)',
                         fontSize: 10,
                         fontWeight: 600,
-                        cursor: savingSafetyPreset !== null ? 'wait' : 'pointer',
+                        cursor: 'not-allowed',
                         textTransform: 'capitalize',
-                        opacity: savingSafetyPreset !== null && !saving ? 0.65 : 1,
+                        opacity: 0.5,
                       }}
                     >
                       <span>{preset}</span>
                       <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>
-                        {saving ? 'Saving...' : SAFETY_PRESET_HINTS[preset]}
+                        {SAFETY_PRESET_HINTS[preset]}
                       </span>
                     </button>
                   );
                 })}
               </div>
 
-              {safetyError && (
-                <div style={{ marginTop: 8, fontSize: 10, color: 'var(--danger)' }}>
-                  {safetyError}
-                </div>
-              )}
-
               <div style={{ marginTop: 8, fontSize: 9, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-                NL: "Switch the safety preset to balanced"<br />
-                Advanced: npm run safety:tune
+                Read-only. The shell gate builds its own policy and does not read
+                this preset yet, so switching it here would change nothing.
               </div>
             </div>
           </div>

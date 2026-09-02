@@ -146,3 +146,37 @@ class TestModelLists:
 
     def test_invalidate_cache_does_not_raise(self):
         invalidate_cache()  # should not raise
+
+
+# ── local models in the picker ──
+
+def test_known_models_lists_installed_ollama_models(monkeypatch):
+    # A local-first app must offer the models the user actually pulled, not
+    # only the hardcoded cloud registry.
+    import rune.llm.client as client
+
+    monkeypatch.setattr(client, "_ollama_installed", ["qwen3:30b", "nomic-embed-text"])
+    from rune.llm.models import known_models
+
+    pairs = known_models()
+    assert ("ollama", "qwen3:30b") in pairs
+    # Embedding models can't drive the loop, so offering them would only
+    # produce a broken run.
+    assert ("ollama", "nomic-embed-text") not in pairs
+
+
+def test_known_models_survives_ollama_being_down(monkeypatch):
+    import httpx
+
+    import rune.llm.client as client
+
+    monkeypatch.setattr(client, "_ollama_installed", None)
+    monkeypatch.setattr(
+        client.httpx, "get",
+        lambda *a, **k: (_ for _ in ()).throw(httpx.ConnectError("refused")),
+    )
+    from rune.llm.models import known_models
+
+    pairs = known_models()
+    assert pairs, "cloud models must still be listed"
+    assert not any(p == "ollama" for p, _ in pairs)

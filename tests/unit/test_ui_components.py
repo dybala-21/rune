@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from rune.ui.commands import parse_slash_command
-from rune.ui.context_usage import calculate_context_usage
 from rune.ui.controllers.delayed_commit import DelayedCommitController
 from rune.ui.cost import estimate_cost, format_cost
 from rune.ui.format import format_tool_call, truncate_output
@@ -47,27 +46,6 @@ def test_truncate_output():
     result = truncate_output(lines, max_lines=10)
     assert "omitted" in result
     assert len(result) < len(lines)
-
-
-def test_context_usage_fraction():
-    """Correct fraction calculation."""
-    usage = calculate_context_usage(5000, 10000)
-    assert usage.fraction == 0.5
-
-
-def test_context_usage_phase():
-    """Correct phase for various fractions."""
-    low = calculate_context_usage(1000, 10000)
-    assert low.phase == "low"
-
-    medium = calculate_context_usage(6000, 10000)
-    assert medium.phase == "medium"
-
-    high = calculate_context_usage(8000, 10000)
-    assert high.phase == "high"
-
-    critical = calculate_context_usage(9500, 10000)
-    assert critical.phase == "critical"
 
 
 def test_estimate_cost():

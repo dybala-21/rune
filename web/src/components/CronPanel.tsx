@@ -49,7 +49,7 @@ export function CronPanel({ onClose }: CronPanelProps) {
       setJobs(sorted);
       setHeartbeatActive(result.heartbeatActive);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load cron jobs');
+      setError(err instanceof Error ? err.message : "Couldn't load cron jobs");
     } finally {
       setLoading(false);
     }
@@ -126,7 +126,7 @@ export function CronPanel({ onClose }: CronPanelProps) {
       await loadJobs();
       resetForm();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save cron job');
+      setError(err instanceof Error ? err.message : "Couldn't save the cron job");
     } finally {
       setSaving(false);
     }
@@ -134,7 +134,9 @@ export function CronPanel({ onClose }: CronPanelProps) {
 
   const handleDelete = async () => {
     if (!selectedId) return;
-    const ok = window.confirm(`Delete cron job "${selectedId}"?`);
+    // Confirm by the job's name — the id is internal and identifies nothing to the user.
+    const name = jobs.find((job) => job.id === selectedId)?.name || selectedId;
+    const ok = window.confirm(`Delete the scheduled job "${name}"?`);
     if (!ok) return;
 
     setSaving(true);
@@ -144,7 +146,7 @@ export function CronPanel({ onClose }: CronPanelProps) {
       await loadJobs();
       resetForm();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to delete cron job');
+      setError(err instanceof Error ? err.message : "Couldn't delete the cron job");
     } finally {
       setSaving(false);
     }

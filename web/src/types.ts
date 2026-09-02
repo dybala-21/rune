@@ -72,9 +72,25 @@ export interface AgentCompleteData { success: boolean; answer: string; durationM
 export interface AgentErrorData { error: string }
 export interface StepStartData { stepNumber: number; tokens: number }
 export interface ThinkingData { text: string }
-export interface ToolCallData { toolName: string; args: Record<string, unknown> }
-export interface ToolResultData { toolName: string; result: string; success: boolean }
-export interface TextDeltaData { text: string }
+export interface ToolCallData {
+  toolName: string;
+  args: Record<string, unknown>;
+  /** Pairs this call with its result; tools run concurrently. */
+  callId?: string;
+}
+export interface ToolResultData {
+  toolName: string;
+  result: string;
+  success: boolean;
+  callId?: string;
+}
+export interface TextDeltaData {
+  /** Only the new text since the last event (the SSE path). */
+  delta?: string;
+  /** The whole transcript so far — replaces the buffer (WebSocket path, resets). */
+  text?: string;
+  reset?: boolean;
+}
 export interface ApprovalRequestData { id: string; command: string; riskLevel: string; reason?: string; timeoutMs: number }
 export interface QuestionData {
   id: string;
@@ -87,6 +103,8 @@ export interface DelegateEventData { stage: string; message: string }
 export interface CommandResultData {
   command: string;
   output: string;
+  /** Session that ran the command; the event is sent to every client. */
+  requestSessionId?: string;
   data?: {
     action?: string;
     sessionId?: string;
@@ -163,6 +181,19 @@ export interface ChatMessage {
   trust?: TrustInfo;
   /** Attached to a proactive message: what RUNE noticed on its own. */
   suggestion?: ProactiveSuggestion;
+  /** Files sent with a user message, shown inline. */
+  attachments?: SentAttachment[];
+}
+
+/**
+ * An attachment as the chat shows it. `dataUrl` is dropped when the
+ * conversation is persisted — a few images would blow the localStorage quota
+ * and silently kill draft recovery — so a restored message keeps the name only.
+ */
+export interface SentAttachment {
+  name: string;
+  mimeType: string;
+  dataUrl?: string;
 }
 
 /** 프로액티브 제안 (RUNE이 먼저 말을 걸 때) */
@@ -179,6 +210,8 @@ export interface ProactiveSuggestion {
 /** 도구 호출 (UI 표시용) */
 export interface ToolCall {
   id: string;
+  /** Server-side id of the call this row is waiting on. */
+  callId?: string;
   toolName: string;
   args: Record<string, unknown>;
   result?: string;
@@ -188,6 +221,11 @@ export interface ToolCall {
   durationMs?: number;
   /** step_start 기준으로 이 호출이 속한 에이전트 스텝 번호 (진행 타임라인 그룹핑용) */
   step?: number;
+  /**
+   * 이 호출이 속한 실행의 순번. 서버 스텝 번호는 실행마다 1부터 다시 시작하므로,
+   * 이것이 없으면 이전 턴의 step 1과 새 턴의 step 1이 한 그룹으로 붙는다.
+   */
+  run?: number;
 }
 
 /** 위임 실행의 태스크 체크리스트 항목 (orchestration_* 이벤트에서 수집) */

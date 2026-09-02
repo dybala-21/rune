@@ -244,12 +244,19 @@ async def service_connect(params: ServiceConnectParams) -> CapabilityResult:
         "Set these and try again.",
     ])
 
+    # Not connected: the credentials are missing and nothing was configured.
+    # Reporting success here told the agent the service was ready, so it went on
+    # to call tools that did not exist.
     return CapabilityResult(
-        success=True,
+        success=False,
+        error=(
+            f"{service.name} is not connected — missing "
+            f"{', '.join(missing)}. Set them and run service_connect again."
+        ),
         output=output,
         metadata={
             "serviceId": service.id,
-            "status": "setup_guide_shown",
+            "status": "credentials_missing",
             "authType": service.auth.type.value,
             "missingCredentials": missing,
         },

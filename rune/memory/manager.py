@@ -370,7 +370,15 @@ class MemoryManager:
         if daily:
             parts.append("## Today's Progress")
             if daily.goal_summaries:
-                parts.append(f"- Tasks completed: {daily.successful_tasks}/{daily.total_tasks}")
+                # Only state a success rate over tasks whose outcome was
+                # actually recorded; otherwise report the count alone.
+                if daily.outcomes_recorded:
+                    parts.append(
+                        f"- Tasks completed: {daily.successful_tasks}"
+                        f"/{daily.outcomes_recorded}"
+                    )
+                else:
+                    parts.append(f"- Tasks logged: {daily.total_tasks}")
                 for g in daily.goal_summaries[:5]:
                     parts.append(f"  - {g}")
             if daily.key_decisions:
@@ -438,7 +446,13 @@ class MemoryManager:
             for r in vec_results:
                 vector_scores[r.id] = max(0.0, min(1.0, r.score))
         except Exception:
-            # Fallback: keyword overlap ratio
+            pass
+
+        if not vector_scores:
+            # Keyword overlap, whenever the vector side produced nothing —
+            # not only when it raised. An empty index returns [] cleanly, so
+            # gating this on the exception left episodes ranked by importance
+            # and recency alone the moment faiss was installed.
             query_terms = set(query.lower().split()) if query.strip() else set()
             if query_terms:
                 for ep in episodes:
@@ -644,10 +658,22 @@ class MemoryManager:
                 or any(w in k.lower() or w in v.lower() for w in goal_lower.split()[:3])
             ]
             if matching_facts:
+                chosen = matching_facts[:5]
                 lines = ["## Relevant Facts"]
-                for k, v in matching_facts[:5]:
+                for k, v in chosen:
                     lines.append(f"- {k}: {v}")
-                _add_section("\n".join(lines) + "\n")
+                if _add_section("\n".join(lines) + "\n"):
+                    # A fact that reaches the prompt has been used. Without
+                    # this, "most used" reads zero and `memory gc` decays every
+                    # fact past 30 days, since the hit_count guard never trips.
+                    try:
+                        from rune.memory.state import increment_hit_counts
+
+                        await asyncio.get_running_loop().run_in_executor(
+                            None, increment_hit_counts, [k for k, _ in chosen]
+                        )
+                    except Exception as exc:
+                        log.debug("hit_count_update_failed", error=str(exc)[:100])
 
         # 4. Tiered context (session + daily + durable)
         tiered = await self.get_tiered_context(goal)

@@ -84,6 +84,21 @@ def supports_reasoning_effort(model: str) -> bool:
         return False
 
 
+@lru_cache(maxsize=256)
+def supports_vision(model: str) -> bool:
+    """Whether *model* accepts image content in a user message.
+
+    Same reasoning as supports_reasoning_effort: litellm's capability DB beats
+    a hand-kept list. Unknown or lookup failure → False, so an image is
+    described in text rather than sent as content the model would reject.
+    """
+    try:
+        import litellm
+        return bool(litellm.supports_vision(model=model))
+    except Exception:
+        return False
+
+
 def note_temperature_rejected(model: str) -> None:
     """Record that *model* rejected temperature; traits() reflects it."""
     _TEMPERATURE_REJECTED.add(model)

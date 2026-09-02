@@ -251,6 +251,8 @@ class ConversationManager:
         other_turns: list[ConversationTurn] = []
 
         for turn in conv.turns:
+            if turn.archived:
+                continue  # compacted away; the summary turn stands in for it
             if turn.role == "system":
                 system_turns.append(turn)
             else:
@@ -386,6 +388,8 @@ class ConversationManager:
         other_turns: list[ConversationTurn] = []
 
         for turn in conv.turns:
+            if turn.archived:
+                continue  # compacted away; the summary turn stands in for it
             if turn.role == "system":
                 system_msgs.append({"role": turn.role, "content": turn.content})
             else:
@@ -462,7 +466,8 @@ class ConversationManager:
         if conv is None or not conv.turns:
             return
 
-        total_tokens = sum(self._turn_tokens(t) for t in conv.turns)
+        live_turns = [t for t in conv.turns if not t.archived]
+        total_tokens = sum(self._turn_tokens(t) for t in live_turns)
 
         # 65% threshold -- no compaction needed below this
         if total_tokens < budget_tokens * 0.65:
@@ -513,7 +518,13 @@ class ConversationManager:
             role="system",
             content=summary,
         )
-        conv.turns = [summary_turn] + preserved
+        # Compaction shrinks the context window, it does not delete history.
+        # store.save() rewrites the whole turn list, so dropping turns here
+        # would erase them from the database. Flag them archived instead:
+        # context building skips them, the transcript keeps them.
+        for turn in conv.turns[:split_idx]:
+            turn.archived = True
+        conv.turns = conv.turns[:split_idx] + [summary_turn] + preserved
         conv.updated_at = datetime.now()
 
         event = ConversationCompactionEvent(

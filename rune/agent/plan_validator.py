@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
+from rune.agent.task_board import SubTask
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -49,16 +50,6 @@ class PlanValidation:
     approved: bool
     issues: list[PlanIssue] = field(default_factory=list)
     suggestion: str | None = None
-
-
-@dataclass(slots=True)
-class SubTask:
-    """Minimal sub-task representation for validation."""
-
-    id: str
-    goal: str = ""
-    role: str = "executor"
-    depends_on: list[str] = field(default_factory=list)
 
 
 # Default timeout (executor role baseline)
@@ -102,7 +93,7 @@ def detect_cycle(tasks: list[SubTask]) -> list[str] | None:
 
         task = task_map.get(task_id)
         if task:
-            for dep in task.depends_on:
+            for dep in task.dependencies:
                 result = dfs(dep)
                 if result is not None:
                     return result
@@ -160,7 +151,7 @@ def validate_plan(
     # 2. Dangling dependency references
     task_ids = {t.id for t in tasks}
     for task in tasks:
-        for dep in task.depends_on:
+        for dep in task.dependencies:
             if dep not in task_ids:
                 issues.append(PlanIssue(
                     severity="error",
@@ -171,7 +162,7 @@ def validate_plan(
 
     # 3. Role-goal mismatch
     for task in tasks:
-        suggested = _suggest_role(task.goal)
+        suggested = _suggest_role(task.description)
         if suggested != task.role and task.role != "executor":
             issues.append(PlanIssue(
                 severity="warning",

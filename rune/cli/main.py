@@ -221,10 +221,12 @@ def _handle_voice_mode(
 
         voice_svc = get_voice_service()
         if not voice_svc.has_stt:
-            console.print(
-                "[red]No STT provider available.[/red]\n"
-                "  Set DEEPGRAM_API_KEY for cloud STT, or install sherpa-onnx for local."
+            from rune.voice.availability import get_voice_install_hint
+
+            hint = get_voice_install_hint() or (
+                "Set DEEPGRAM_API_KEY for cloud STT, or install sherpa-onnx for local."
             )
+            console.print(f"[red]No STT provider available.[/red]\n  {hint}")
             raise typer.Exit(1)
 
         agent_config = AgentConfig()
@@ -302,9 +304,9 @@ def _defer_memory_work() -> None:
     the *next* run pays before it can answer: with two pending, a trivial
     request went from 4.2s to 6.0s and the agent's own first call was pushed
     0.6s later. So a one-shot run does neither. It writes the episode and
-    leaves it; the sweep belongs to something that is not answering a user —
-    the REPL, the TUI, or the daemon, all of which stay up long enough to do
-    it unnoticed.
+    leaves it; the sweep belongs to something that is not answering a user.
+    The TUI sweeps after each turn and the daemon does it on a 10-minute
+    heartbeat task, so the backlog is drained by whichever is running.
     """
     try:
         from rune.agent import memory_bridge

@@ -50,7 +50,7 @@ export function TrustCard({ trust, onEscalate }: TrustCardProps) {
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <span aria-hidden="true" style={{ fontSize: 14 }}>{trust.verified ? '✓' : '⚠'}</span>
         <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>
-          {trust.verified ? 'Verified — done' : "Not marking this done"}
+          {trust.verified ? 'Verified' : 'Not verified'}
         </span>
         {gate?.hasCheck && (
           <span style={{
