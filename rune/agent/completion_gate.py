@@ -1,8 +1,13 @@
 """Completion gate for RUNE - verifies task completion before finishing.
 
-Ported from src/agent/completion-gate.ts (614 lines) - evaluates 18
-requirements to determine if a task is truly complete, partially done,
-or blocked.
+Ported from src/agent/completion-gate.ts (614 lines) - evaluates the
+requirement set that determines whether a task is truly complete, partially
+done, or blocked.
+
+Each requirement is ``(not required) or <evidence check>``, so one whose
+``required`` can never be true is not a lenient gate — it is a line in the
+trace that reports "done" without having checked anything. R16 and R17 were
+removed for that reason; see the note at their former site.
 """
 
 from __future__ import annotations
@@ -138,10 +143,6 @@ class CompletionGateInput:
     # Research / analysis requirements
     grounding_requirement: bool = False
     analysis_depth_min_reads: int = 0
-    module_count: int = 0
-    min_module_coverage: int = 0
-    deep_analysis_tools: int = 0
-    min_deep_analysis_tools: int = 0
     read_rounds: int = 0
     min_read_rounds: int = 0
 
@@ -188,8 +189,6 @@ REQUIREMENT_IDS: dict[str, str] = {
     "NO_HARD_FAILURES": "R13_NO_HARD_FAILURES",
     "GROUNDING": "R14_GROUNDING",
     "ANALYSIS_DEPTH": "R15_ANALYSIS_DEPTH",
-    "MODULE_COVERAGE": "R16_MODULE_COVERAGE",
-    "DEEP_ANALYSIS": "R17_DEEP_ANALYSIS",
     "WEB_EVIDENCE": "R18_WEB_EVIDENCE",
     "VERIFY_FRESHNESS": "R19_VERIFY_FRESHNESS",
 }
@@ -462,11 +461,20 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
     if ws is not None:
         ws_aligned, ws_warning = _evaluate_workspace_alignment(ws)
 
+    # Two strengths of signal, and they deserve different answers. A misaligned
+    # *primary* root says the run did its work somewhere the workspace snapshot
+    # cannot roll back, which is worth failing on. A stray entry among all the
+    # roots is usually a temp dir or a worktree — routine, often correct — so
+    # that only warns. Blocking on the weak signal would refuse good work, the
+    # failure mode this gate has been bitten by before.
+    primary_misaligned = bool(
+        ws is not None and not ws_aligned and ws.primary_execution_root
+    )
     r12 = RequirementTraceItem(
         id=REQUIREMENT_IDS["WORKSPACE_ALIGNMENT"],
         description="Workspace alignment",
         required=ws is not None,
-        status="done" if ws_aligned else "blocked",
+        status="done" if ws_aligned else ("blocked" if primary_misaligned else "skipped"),
         evidence=(
             f"workspace={ws.workspace_root if ws else ''}, "
             f"exec_root={ws.primary_execution_root if ws else ''}"
@@ -474,8 +482,10 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
         failure_reason=ws_warning,
     )
     requirements.append(r12)
-    if r12.required and r12.status != "done":
+    if primary_misaligned:
         missing.append(r12.id)
+    if ws_warning:
+        log.warning("workspace_alignment_warning", detail=ws_warning)
 
     # R13: No Hard Failures
     r13_ok = len(inp.hard_failures) == 0
@@ -506,6 +516,15 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
         missing.append(r14.id)
 
     # R15: Analysis Depth
+    # This gates on a raw read count, which is only defensible as the floor it
+    # currently is (1-3 reads on research goals): "did you look at anything at
+    # all" before answering. Do not raise it into a coverage claim. Read volume
+    # is not what predicts a good answer — SWE-Explore (arXiv 2606.07297) found
+    # context efficiency and hitting the right files predict success while
+    # "simply reaching more files does not", and a higher floor pushes the agent
+    # to pad reads, which measurably degrades answers (Chroma context-rot study,
+    # 18 models: a single distractor is enough). R16 made exactly that mistake
+    # and was removed; see the note below.
     min_reads = inp.analysis_depth_min_reads
     r15_required = min_reads > 0
     r15_ok = (not r15_required) or ev.unique_file_reads >= min_reads
@@ -521,40 +540,22 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
     if r15.required and r15.status != "done":
         missing.append(r15.id)
 
-    # R16: Module Coverage
-    r16_required = inp.min_module_coverage > 0 and inp.module_count > 0
-    coverage = ev.unique_file_reads
-    r16_ok = (not r16_required) or coverage >= inp.min_module_coverage
-    r16 = RequirementTraceItem(
-        id=REQUIREMENT_IDS["MODULE_COVERAGE"],
-        description=f"Module coverage ({inp.min_module_coverage}/{inp.module_count})",
-        required=r16_required,
-        status="done" if r16_ok else "blocked",
-        evidence=f"covered={coverage}, min={inp.min_module_coverage}, total={inp.module_count}",
-        failure_reason="" if r16_ok else (
-            f"Module coverage {coverage}/{inp.min_module_coverage} insufficient"
-        ),
-    )
-    requirements.append(r16)
-    if r16.required and r16.status != "done":
-        missing.append(r16.id)
+    # R16 (module coverage) and R17 (deep analysis) were removed. R16's
+    # "coverage" was ev.unique_file_reads — the same signal R15 already gates on,
+    # with module_count never entering the ratio it claimed to compute. R17 had
+    # no definition of a "deep analysis tool" anywhere outside this file.
+    #
+    # Neither is worth building properly. SWE-Explore (arXiv 2606.07297) measured
+    # what actually predicts patch success: context efficiency (r=0.950) and
+    # hitting the right files (HitFile r=0.925) — "simply reaching more files does
+    # not correlate with success". Those metrics need ground-truth files/lines,
+    # which no completion gate has at runtime. A raw-count floor is computable but
+    # unevidenced, and making it a target invites padding reads, which Chroma's
+    # 18-model context-rot study shows degrades answers (one distractor is enough).
+    # For R17 the evidence points the other way entirely: LoCoBench-Agent
+    # (arXiv 2511.13998) finds tool diversity is a symptom of trial-and-error, not
+    # a cause of success (conversation length vs efficiency r=-0.71).
 
-    # R17: Deep Analysis Tools
-    r17_required = inp.min_deep_analysis_tools > 0
-    r17_ok = (not r17_required) or inp.deep_analysis_tools >= inp.min_deep_analysis_tools
-    r17 = RequirementTraceItem(
-        id=REQUIREMENT_IDS["DEEP_ANALYSIS"],
-        description=f"Deep analysis tools (min {inp.min_deep_analysis_tools})",
-        required=r17_required,
-        status="done" if r17_ok else "blocked",
-        evidence=f"used={inp.deep_analysis_tools}, min={inp.min_deep_analysis_tools}",
-        failure_reason="" if r17_ok else (
-            f"Deep analysis tools {inp.deep_analysis_tools}/{inp.min_deep_analysis_tools}"
-        ),
-    )
-    requirements.append(r17)
-    if r17.required and r17.status != "done":
-        missing.append(r17.id)
 
     # R18: Web Evidence
     r18_required = inp.min_web_searches > 0 or inp.min_web_fetches > 0

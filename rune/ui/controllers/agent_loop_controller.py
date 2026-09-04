@@ -1242,6 +1242,14 @@ class AgentLoopController:
                 if ev_parts:
                     lines.append(f"[#555555]    {'  '.join(ev_parts)}[/#555555]")
 
+        # Not a verdict, a location: see CompletionTrace.workspace_warning.
+        ws_warning = getattr(trace, "workspace_warning", "")
+        if ws_warning:
+            lines.append(
+                f"[bold #E5C07B]\u25CB[/bold #E5C07B] [#E5C07B]outside workspace[/#E5C07B] "
+                f"[#555555]{ws_warning}[/#555555]"
+            )
+
         return "\n".join(lines)
 
     def set_file_tracker(self, tracker: FileTracker) -> None:
