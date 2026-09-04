@@ -59,6 +59,9 @@ export interface TrustInfo {
       nothing was edited. Weaker than an Evidence Gate check — the suite may
       have passed before the change too — so it never reads as "verified". */
   testsPassedAfterEdit?: boolean | null;
+  /** Where the run worked, when that was not only the workspace. Not a failure:
+      the snapshot simply cannot undo anything outside it. */
+  workspaceWarning?: string;
   evidenceGate?: {
     hasCheck: boolean;
     lastVerdict: string;

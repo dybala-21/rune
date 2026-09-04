@@ -50,6 +50,10 @@ _STATIC: tuple[tuple[tuple[str, ...], ModelTraits], ...] = (
 # can't enumerate these ahead of time — claude-opus-4-8 rejects
 # temperature while claude-opus-4-6 accepts it.
 _TEMPERATURE_REJECTED: set[str] = set()
+# Models that reason and take tools, but refuse both in one request. litellm's
+# capability DB answers "does it reason", which is true and not the question, so
+# this is learned from the provider's own 400 rather than declared up front.
+_REASONING_EFFORT_REJECTED: set[str] = set()
 
 
 def traits(model: str) -> ModelTraits:
@@ -102,6 +106,29 @@ def supports_vision(model: str) -> bool:
 def note_temperature_rejected(model: str) -> None:
     """Record that *model* rejected temperature; traits() reflects it."""
     _TEMPERATURE_REJECTED.add(model)
+
+
+def note_reasoning_effort_rejected(model: str) -> None:
+    """Record that *model* refused reasoning_effort alongside tools."""
+    _REASONING_EFFORT_REJECTED.add(model)
+
+
+def reasoning_effort_rejected(model: str) -> bool:
+    """Whether *model* has refused reasoning_effort in this process.
+
+    Deliberately not cached, and deliberately not folded into
+    :func:`supports_reasoning_effort`: that one is ``lru_cache``d, so a True
+    answered before the first rejection would mask everything learned after it.
+    """
+    return model in _REASONING_EFFORT_REJECTED
+
+
+def is_reasoning_effort_error(exc: Exception) -> bool:
+    """Whether a BadRequest is about reasoning_effort being unacceptable."""
+    m = str(exc).lower()
+    return "reasoning_effort" in m and (
+        "support" in m or "deprecat" in m or "invalid" in m
+    )
 
 
 def is_temperature_error(exc: Exception) -> bool:

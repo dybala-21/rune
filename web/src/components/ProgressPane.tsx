@@ -241,6 +241,8 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
   const [showEvidence, setShowEvidence] = useState(false);
   const evidence = trust?.evidenceGate?.lastEvidence?.trim() || null;
   const capped = Boolean(trust?.budgetExhausted);
+  // A line, not a verdict — running in a temp dir is ordinary.
+  const outsideWorkspace = trust?.workspaceWarning?.trim() || null;
   const passes = passedChecks(trust);
 
   let spec: BandSpec | null = null;
@@ -298,7 +300,10 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
         : testsRed
           ? 'tests not green after the last edit'
           : 'no verification checks ran',
-      details: capped ? [CAP_DETAIL] : undefined,
+      details: [
+        ...(capped ? [CAP_DETAIL] : []),
+        ...(outsideWorkspace ? [outsideWorkspace] : []),
+      ],
     };
   } else {
     const honest = Boolean(trust && !trust.verified);
@@ -310,6 +315,7 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
       details: [
         ...(trust?.honestNote ? [trust.honestNote] : []),
         ...(capped ? [CAP_DETAIL] : []),
+        ...(outsideWorkspace ? [outsideWorkspace] : []),
         ...(trust?.escalationHint ? [trust.escalationHint] : []),
       ],
       showEvidence: true,

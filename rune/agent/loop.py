@@ -51,6 +51,8 @@ from rune.agent.cognitive_cache import SessionToolCache
 from rune.agent.completion_gate import (
     CompletionGateInput,
     ExecutionEvidenceSnapshot,
+    ServiceTaskEvidenceSnapshot,
+    WorkspaceAlignmentSnapshot,
     evaluate_completion_gate,
 )
 from rune.agent.failover import FailoverManager, classify_error
@@ -573,6 +575,72 @@ def _structured_by_extension(ext: str) -> bool | None:
     return None
 
 
+@dataclass(slots=True)
+class ExecutionRoots:
+    """Directories the run explicitly executed commands in.
+
+    Only an explicit ``cwd`` is recorded. A command without one runs in the
+    workspace by definition, so it cannot be misaligned and would only dilute
+    the signal.
+    """
+
+    roots: list[str] = field(default_factory=list)
+
+    def observe(self, params: Any) -> None:
+        if not isinstance(params, dict):
+            return
+        cwd = params.get("cwd")
+        if not cwd:
+            return
+        cwd = str(cwd)
+        if cwd not in self.roots:
+            self.roots.append(cwd)
+
+
+@dataclass(slots=True)
+class ServiceEvidence:
+    """Counts the managed-service lifecycle phases a run actually completed.
+
+    ``_execute_managed_service`` reports each phase in the tool result's
+    metadata; nothing read it, so the completion gate's three service
+    requirements judged a lifecycle no one had observed. Only a run that used
+    managed_service mode registers here — ordinary shell calls leave
+    ``observed`` False so the gate does not treat them as service tasks.
+    """
+
+    observed: bool = False
+    starts: int = 0
+    runtime_probes: int = 0
+    cleanups: int = 0
+
+    def observe(self, metadata: Any) -> None:
+        """Record one tool result, ignoring anything that is not a service."""
+        if not isinstance(metadata, dict):
+            return
+        if metadata.get("mode") != "managed_service":
+            return
+
+        self.observed = True
+        self.starts += 1
+        # Readiness and smoke are both probes against the running service.
+        # Readiness must pass for the call to succeed at all, so a healthy run
+        # always has at least one; a service that never came up has none.
+        for phase in ("readiness", "smoke"):
+            stage = metadata.get(phase)
+            if isinstance(stage, dict) and stage.get("success"):
+                self.runtime_probes += 1
+        teardown = metadata.get("teardown")
+        if isinstance(teardown, dict) and teardown.get("success"):
+            self.cleanups += 1
+
+    def as_snapshot_kwargs(self) -> dict[str, int]:
+        return {
+            "starts": self.starts,
+            "runtime_probes": self.runtime_probes,
+            "cleanups": self.cleanups,
+        }
+
+
 class NativeAgentLoop(EventEmitter):
     """Core agent execution loop using PydanticAI.
 
@@ -626,6 +694,8 @@ class NativeAgentLoop(EventEmitter):
         self._last_code_write_step: int = 0
         # Writes that produced structured code/config, feeding completion-gate R08.
         self._structured_writes: int = 0
+        self._service_evidence = ServiceEvidence()
+        self._execution_roots = ExecutionRoots()
         self._budget_upgraded_for_code: bool = False
         self._last_verify_step: int = 0
         # Tool-call sequence of the last verification command that both passed
@@ -707,6 +777,8 @@ class NativeAgentLoop(EventEmitter):
         self._hard_failures.clear()
         self._last_code_write_step = 0
         self._structured_writes = 0
+        self._service_evidence = ServiceEvidence()
+        self._execution_roots = ExecutionRoots()
         self._budget_upgraded_for_code = False
         self._last_verify_step = 0
         self._last_test_pass_step = 0
@@ -1702,6 +1774,10 @@ class NativeAgentLoop(EventEmitter):
                         self._last_code_write_step = self._tool_call_seq
             elif cap_name == "bash_execute":
                 evidence.executions += 1
+                # managed_service mode reports its lifecycle here and nowhere
+                # else; ordinary commands are ignored by observe().
+                self._service_evidence.observe(result.metadata)
+                self._execution_roots.observe(_last_tool_params)
                 self._consecutive_reads_without_write = 0  # (#27) reset
                 # R19: any successful bash counts as verification
                 from rune.agent.bash_parsing import is_verification_command
@@ -2529,8 +2605,16 @@ class NativeAgentLoop(EventEmitter):
                         gate_input_snapshot = None
                     if gate_input_snapshot is not None:
                         rollover_gate_result = evaluate_completion_gate(gate_input_snapshot)
+                        # Only what the gate calls missing. "not done" also
+                        # catches the statuses it deliberately does not block
+                        # on (an unobserved cleanup, a command run in a temp
+                        # dir), and telling the agent to go finish those sends
+                        # it after work that was never required.
+                        _blocking = set(
+                            rollover_gate_result.missing_requirement_ids
+                        )
                         for req in rollover_gate_result.requirements:
-                            if req.required and req.status != "done":
+                            if req.id in _blocking:
                                 detail = req.failure_reason or req.description
                                 incomplete_reqs.append(f"{req.id}: {detail}")
 
@@ -2909,8 +2993,30 @@ class NativeAgentLoop(EventEmitter):
                     last_verify_step=self._last_verify_step,
                     # Hard failures tracked (deduplicated) (#16)
                     hard_failures=list(self._hard_failures),
+                    # Only a run that actually used managed_service is judged
+                    # as a service task; passing a snapshot unconditionally
+                    # would make every run one.
+                    # Where commands ran, when the run declared a workspace.
+                    # Reported by the gate, never blocking — see R12.
+                    workspace=(
+                        WorkspaceAlignmentSnapshot(
+                            workspace_root=workspace_root,
+                            execution_roots=list(self._execution_roots.roots),
+                        )
+                        if workspace_root
+                        else None
+                    ),
+                    service_task=(
+                        ServiceTaskEvidenceSnapshot(
+                            **self._service_evidence.as_snapshot_kwargs()
+                        )
+                        if self._service_evidence.observed
+                        else None
+                    ),
                 )
                 gate_result = evaluate_completion_gate(gate_input)
+                if gate_result.workspace_warning:
+                    trace.workspace_warning = gate_result.workspace_warning
 
                 # Same check here — the fast path isn't the only way to finish, so
                 # the full gate must not wave through unverified code either.
@@ -3040,10 +3146,11 @@ class NativeAgentLoop(EventEmitter):
                     )
                     # Inject missing requirements so the agent knows
                     # exactly what to do next instead of retrying blindly.
+                    _blocking_ids = set(gate_result.missing_requirement_ids)
                     _missing = [
                         f"{r.id}: {r.failure_reason or r.description}"
                         for r in gate_result.requirements
-                        if r.required and r.status != "done"
+                        if r.id in _blocking_ids
                     ]
                     if _missing:
                         messages = self._inject_system_message(

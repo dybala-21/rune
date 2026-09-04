@@ -258,6 +258,10 @@ class CompletionTrace:
     # suite may have passed before the change too, so this is "tests passing",
     # never "verified". None when the guard did not apply to this task.
     tests_passed_after_edit: bool | None = None
+    # Commands ran outside the declared workspace. Not a failure — temp dirs
+    # and worktrees are routine — but the workspace snapshot cannot roll back
+    # anything outside it, so the run should say where it worked.
+    workspace_warning: str = ""
 
 
 # LLM

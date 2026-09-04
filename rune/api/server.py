@@ -187,6 +187,8 @@ def build_trust_payload(trace: Any) -> dict[str, Any]:
         # suite may have passed before the change — so the UI shows it as
         # "tests passing", never as "verified".
         "testsPassedAfterEdit": getattr(trace, "tests_passed_after_edit", None),
+        # Where the run worked, when that was not only the workspace.
+        "workspaceWarning": getattr(trace, "workspace_warning", "") or "",
     }
     gate = getattr(trace, "evidence_gate", None)
     if isinstance(gate, dict):

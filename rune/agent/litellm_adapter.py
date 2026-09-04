@@ -61,8 +61,11 @@ def __getattr__(name: str) -> Any:
 
 from rune.agent.message_utils import validate_tool_pairs
 from rune.agent.model_traits import (
+    is_reasoning_effort_error,
     is_temperature_error,
+    note_reasoning_effort_rejected,
     note_temperature_rejected,
+    reasoning_effort_rejected,
     supports_reasoning_effort,
     traits,
 )
@@ -1201,7 +1204,9 @@ class StreamResult:
             # OpenAI and maps it to Claude's adaptive thinking. Gate on
             # litellm's own capability DB so it's right per model.
             _effort: str | None = None
-            if supports_reasoning_effort(self._model):
+            if supports_reasoning_effort(self._model) and not reasoning_effort_rejected(
+                self._model
+            ):
                 from rune.config import get_config
                 _effort = get_config().llm.reasoning_effort
                 if _effort:
@@ -1245,18 +1250,9 @@ class StreamResult:
                 }
 
             _ll = _litellm()
-            try:
-                self._stream = await _ll.acompletion(**_acompletion_kwargs)
-            except _ll.BadRequestError as _e:
-                # Model rejected temperature and litellm didn't strip it; drop it
-                # and retry once, remembering for next time.
-                if "temperature" in _acompletion_kwargs and is_temperature_error(_e):
-                    note_temperature_rejected(self._model)
-                    _acompletion_kwargs.pop("temperature", None)
-                    log.warning("temperature_unsupported_retry", model=self._model)
-                    self._stream = await _ll.acompletion(**_acompletion_kwargs)
-                else:
-                    raise
+            self._stream = await _complete_dropping_rejected_params(
+                _ll, self._model, _acompletion_kwargs
+            )
 
             text_this_turn = ""
             tool_calls_by_index: dict[int, dict[str, Any]] = {}
@@ -2355,6 +2351,43 @@ class StreamResult:
 
 
 # LiteLLMAgent - mirrors PydanticAI Agent interface
+
+# Tuning parameters a provider can refuse. Both are quality knobs: dropping one
+# costs depth, keeping one the model rejects costs the whole run.
+_DROPPABLE_PARAMS = (
+    ("temperature", is_temperature_error, note_temperature_rejected),
+    ("reasoning_effort", is_reasoning_effort_error, note_reasoning_effort_rejected),
+)
+
+
+async def _complete_dropping_rejected_params(
+    client: Any, model: str, kwargs: dict[str, Any]
+) -> Any:
+    """Call ``acompletion``, dropping any tuning parameter the model refuses.
+
+    A rejected parameter is deterministic — the identical request can only fail
+    again — so retrying it unchanged burns the failover budget and trips the
+    circuit breaker before a real recovery is ever tried. Each refusal is
+    recorded so later steps never send that parameter again. Loops because one
+    request can carry more than one parameter a model will not take, and an
+    unrecognised 400 is re-raised rather than swallowed.
+
+    *kwargs* is mutated: the caller's dict is the request that finally worked.
+    """
+    for _ in range(len(_DROPPABLE_PARAMS) + 1):
+        try:
+            return await client.acompletion(**kwargs)
+        except client.BadRequestError as exc:
+            for param, matches, note in _DROPPABLE_PARAMS:
+                if param in kwargs and matches(exc):
+                    note(model)
+                    kwargs.pop(param, None)
+                    log.warning("param_unsupported_retry", model=model, param=param)
+                    break
+            else:
+                raise
+    raise RuntimeError("parameter-drop retries exhausted")
+
 
 class LiteLLMAgent:
     """Drop-in replacement for ``pydantic_ai.Agent``.
