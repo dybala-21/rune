@@ -92,6 +92,12 @@ async def test_msg_cache_env_off_leaves_wire_clean(monkeypatch):
 @pytest.mark.asyncio
 async def test_fast_mode_reaches_a_model_that_supports_it(monkeypatch):
     monkeypatch.setenv("RUNE_FAST_MODE", "1")
+    # speed and a high reasoning effort pull opposite ways, and the adapter
+    # withholds speed when both are asked for. Without pinning the effort this
+    # test passes or fails on whatever the developer has in config.yaml.
+    from rune.config import get_config
+
+    monkeypatch.setattr(get_config().llm, "reasoning_effort", None)
     captured = _capture_kwargs(monkeypatch)
     await _drain(_make_result(model="anthropic/claude-opus-5"))
     assert captured[0]["speed"] == "fast"

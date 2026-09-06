@@ -243,6 +243,10 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
   const capped = Boolean(trust?.budgetExhausted);
   // A line, not a verdict — running in a temp dir is ordinary.
   const outsideWorkspace = trust?.workspaceWarning?.trim() || null;
+  // A caveat, not a verdict — see TrustInfo.unsourcedNumbers.
+  const unsourced = trust?.unsourcedNumbers?.length
+    ? `unsourced figures: ${trust.unsourcedNumbers.slice(0, 5).join(', ')} — not found in anything read`
+    : null;
   const passes = passedChecks(trust);
 
   let spec: BandSpec | null = null;
@@ -302,6 +306,7 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
           : 'no verification checks ran',
       details: [
         ...(capped ? [CAP_DETAIL] : []),
+        ...(unsourced ? [unsourced] : []),
         ...(outsideWorkspace ? [outsideWorkspace] : []),
       ],
     };
@@ -315,6 +320,7 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
       details: [
         ...(trust?.honestNote ? [trust.honestNote] : []),
         ...(capped ? [CAP_DETAIL] : []),
+        ...(unsourced ? [unsourced] : []),
         ...(outsideWorkspace ? [outsideWorkspace] : []),
         ...(trust?.escalationHint ? [trust.escalationHint] : []),
       ],

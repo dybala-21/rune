@@ -19,7 +19,7 @@ def test_no_provider_follows_active_provider():
     cfg.llm.active_provider = "anthropic"  # user chose anthropic this session
     client = LLMClient()
     # FAST tier, no explicit provider -> must resolve the ANTHROPIC fast model,
-    # not the openai default (gpt-5-mini).
+    # not the openai default.
     assert client._effective_provider(None) == Provider.ANTHROPIC
     assert client.resolve_model(ModelTier.FAST) == "claude-haiku-4-5-20251001"
 
@@ -30,7 +30,10 @@ def test_no_active_falls_back_to_default():
     cfg.llm.active_provider = None
     client = LLMClient()
     assert client._effective_provider(None) == Provider.OPENAI
-    assert client.resolve_model(ModelTier.FAST) == "gpt-5-mini"
+    # Read the configured default rather than pinning a name: the frontier
+    # tiers move, and this test is about which provider answers, not which
+    # model is current.
+    assert client.resolve_model(ModelTier.FAST) == get_config().llm.models.openai.fast
 
 
 def test_ollama_uses_active_model_for_all_tiers(monkeypatch):
@@ -78,7 +81,10 @@ def test_explicit_provider_overrides_active():
     client = LLMClient()
     # An explicit provider arg always wins over the session-active one.
     assert client._effective_provider(Provider.OPENAI) == Provider.OPENAI
-    assert client.resolve_model(ModelTier.FAST, Provider.OPENAI) == "gpt-5-mini"
+    assert (
+        client.resolve_model(ModelTier.FAST, Provider.OPENAI)
+        == get_config().llm.models.openai.fast
+    )
 
 
 def test_invalid_active_provider_falls_back():

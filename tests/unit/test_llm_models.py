@@ -72,41 +72,22 @@ class TestIsChatModel:
 
 
 class TestModelSortKey:
-    def test_gpt54_highest_priority(self):
-        assert _model_sort_key("gpt-5.4") == 0
+    def test_families_rank_newest_first(self):
+        """The ordering is the contract; the integers are an implementation
+        detail that shifts every time a family is added."""
+        newest_first = [
+            "gpt-6-astra", "gpt-5.6-sol", "gpt-5.5", "gpt-5.4", "gpt-5.3-codex",
+            "gpt-5.2", "gpt-5.1-codex", "gpt-5-turbo", "o4-mini", "o3-pro",
+            "o3-mini", "o1", "gpt-4.1-nano", "gpt-4o-latest", "gpt-4-turbo",
+        ]
+        ranks = [_model_sort_key(m) for m in newest_first]
 
-    def test_gpt52_variant(self):
-        assert _model_sort_key("gpt-5.2") == 1
+        assert ranks == sorted(ranks), (
+            f"out of order: {list(zip(newest_first, ranks, strict=True))}"
+        )
 
-    def test_gpt51_variant(self):
-        assert _model_sort_key("gpt-5.1-codex") == 2
-
-    def test_gpt5_variant(self):
-        assert _model_sort_key("gpt-5-turbo") == 3
-
-    def test_o4_mini(self):
-        assert _model_sort_key("o4-mini") == 6
-
-    def test_o3_pro(self):
-        assert _model_sort_key("o3-pro") == 7
-
-    def test_o3_mini(self):
-        assert _model_sort_key("o3-mini") == 8
-
-    def test_o1(self):
-        assert _model_sort_key("o1") == 9
-
-    def test_gpt41(self):
-        assert _model_sort_key("gpt-4.1-nano") == 10
-
-    def test_gpt4o(self):
-        assert _model_sort_key("gpt-4o-latest") == 11
-
-    def test_gpt4(self):
-        assert _model_sort_key("gpt-4-turbo") == 12
-
-    def test_gpt35(self):
-        assert _model_sort_key("gpt-3.5-turbo") == 15
+    def test_an_unknown_model_sorts_no_higher_than_the_oldest(self):
+        assert _model_sort_key("some-future-model") >= _model_sort_key("gpt-4-turbo")
 
     def test_sort_order(self):
         model_ids = [
@@ -137,7 +118,7 @@ class TestModelSortKey:
 class TestModelLists:
     def test_fallback_openai_has_entries(self):
         assert len(FALLBACK_OPENAI_MODELS) >= 10
-        assert FALLBACK_OPENAI_MODELS[0].id == "gpt-5.6-sol"
+        assert FALLBACK_OPENAI_MODELS[0].id == "gpt-6-astra"
         assert all(m.provider == "openai" for m in FALLBACK_OPENAI_MODELS)
 
     def test_anthropic_models_have_entries(self):

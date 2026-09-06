@@ -63,6 +63,7 @@ from rune.agent.output_integrity import (
     build_nudge,
     fabricated_citations,
     output_integrity_enabled,
+    unsourced_numbers,
 )
 from rune.agent.prompts import build_system_prompt
 from rune.agent.requirement_gate import RequirementGate, requirement_gate_enabled
@@ -735,6 +736,7 @@ class NativeAgentLoop(EventEmitter):
         self._rehydration_trigger: Any = None
         self._gate_blocked_count: int = 0
         self._output_integrity_fired: int = 0
+        self._unsourced_numbers: list[str] = []
         self._citation_support_fired: int = 0
         self._evidence_gate: Any = None
 
@@ -799,6 +801,7 @@ class NativeAgentLoop(EventEmitter):
         self._rehydration_trigger = None
         self._gate_blocked_count = 0
         self._output_integrity_fired = 0
+        self._unsourced_numbers = []
         self._citation_support_fired = 0
         # Evidence Gate (benchmark output-correctness verification; opt-in)
         self._evidence_gate = None
@@ -948,9 +951,18 @@ class NativeAgentLoop(EventEmitter):
     def _output_integrity_gate(
         self, messages: list[Any], blocked_count: int
     ) -> tuple[bool, list[Any], int]:
-        """Deterministic citation-integrity check (opt-in, model-free). Flags URLs
-        cited in the output that were never retrieved. Skips when disabled or when
-        retrieval cannot be determined."""
+        """Deterministic citation-integrity check (model-free, on by default).
+
+        Two passes over what the run retrieved: URLs the answer cites but never
+        fetched, and quantities the answer asserts that appear in nothing it
+        found. The second is why a run can report "SanDisk +22%" from articles
+        saying 8% — the grounding requirement asks whether a search happened,
+        not whether the answer follows from it.
+
+        Numbers are recorded, never blocked: a figure can be legitimately
+        derived or rounded, and refusing a good answer costs more here than a
+        number carrying a caveat.
+        """
         if not output_integrity_enabled():
             return True, messages, blocked_count
         # Bounded: after a couple of blocks the model is not fixing the citation
@@ -960,7 +972,16 @@ class NativeAgentLoop(EventEmitter):
         if self._output_integrity_fired >= 2:
             log.warning("output_integrity_budget_spent", step=self._step)
             return True, messages, blocked_count
-        bad = fabricated_citations(self._gather_citation_text(), messages)
+        answer_text = self._gather_citation_text()
+        unsourced = unsourced_numbers(answer_text, messages)
+        if unsourced:
+            self._unsourced_numbers = unsourced
+            log.warning(
+                "unsourced_numbers_in_answer",
+                step=self._step,
+                values=unsourced[:6],
+            )
+        bad = fabricated_citations(answer_text, messages)
         if bad:
             self._output_integrity_fired += 1
             log.info("output_integrity_block", step=self._step, n=len(bad))
@@ -3017,6 +3038,8 @@ class NativeAgentLoop(EventEmitter):
                 gate_result = evaluate_completion_gate(gate_input)
                 if gate_result.workspace_warning:
                     trace.workspace_warning = gate_result.workspace_warning
+                if self._unsourced_numbers:
+                    trace.unsourced_numbers = list(self._unsourced_numbers)
 
                 # Same check here — the fast path isn't the only way to finish, so
                 # the full gate must not wave through unverified code either.

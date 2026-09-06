@@ -1242,6 +1242,17 @@ class AgentLoopController:
                 if ev_parts:
                     lines.append(f"[#555555]    {'  '.join(ev_parts)}[/#555555]")
 
+        # See CompletionTrace.unsourced_numbers.
+        unsourced = getattr(trace, "unsourced_numbers", None) or []
+        if unsourced:
+            shown = ", ".join(unsourced[:5])
+            more = f" (+{len(unsourced) - 5})" if len(unsourced) > 5 else ""
+            lines.append(
+                f"[bold #E5C07B]\u25CB[/bold #E5C07B] "
+                f"[#E5C07B]unsourced figures[/#E5C07B] "
+                f"[#555555]{shown}{more} — not found in anything read[/#555555]"
+            )
+
         # Not a verdict, a location: see CompletionTrace.workspace_warning.
         ws_warning = getattr(trace, "workspace_warning", "")
         if ws_warning:
