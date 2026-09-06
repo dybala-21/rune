@@ -304,6 +304,7 @@ def _cap_fast_lane_fetch(params: dict[str, Any]) -> dict[str, Any]:
 
 _FILE_MUTATING_CAPABILITIES = frozenset({
     "file_write", "file_edit", "file_delete",
+    "document_create", "document_bundle",
 })
 
 _BASH_CAPABILITY = "bash_execute"
@@ -524,8 +525,8 @@ def _build_typed_tool(
         # paths against the process cwd, which is the daemon's start dir when
         # serving the app — a bare "app.py" must mean the pinned project.
         if opts.workspace_root:
-            if cap_name.startswith("file_"):
-                for _pk in ("file_path", "path", "target"):
+            if cap_name.startswith("file_") or cap_name.startswith("document_"):
+                for _pk in ("file_path", "path", "target", "source_path", "directory"):
                     _pv = effective_params.get(_pk)
                     if (
                         isinstance(_pv, str) and _pv
@@ -598,6 +599,7 @@ def _build_typed_tool(
                     return hit.output
 
         # 2. Guardian validation
+        approval_cleared = False
         if opts.enable_guardian:
             guard_result = _validate_with_guardian(cap_name, effective_params)
             if guard_result.blocked:
@@ -605,7 +607,6 @@ def _build_typed_tool(
                 if opts.on_tool_end is not None:
                     await opts.on_tool_end(cap_name, err)
                 return f"[BLOCKED] {guard_result.reason}"
-            approval_cleared = False
             if guard_result.requires_approval and approval_mode() == "bypass":
                 log.info("approval_bypassed", capability=cap_name, gate="guardian")
                 guard_result = _GuardianResult()
@@ -795,6 +796,8 @@ def _build_typed_tool(
                 fp = effective_params.get("file_path") or effective_params.get("path", "")
                 if fp:
                     cache.invalidate_file(fp)
+                for path in (result.metadata or {}).get("paths", []):
+                    cache.invalidate_file(path)
             if cap_name == _BASH_CAPABILITY:
                 cache.invalidate_from_bash(effective_params.get("command", ""), result.success)
 
@@ -1534,13 +1537,17 @@ def _validate_with_guardian(cap_name: str, params: dict[str, Any]) -> _GuardianR
             if result.requires_approval:
                 return _GuardianResult(requires_approval=True, reason=result.reason)
 
-        elif cap_name in ("file_write", "file_edit", "file_delete"):
-            file_path = params.get("file_path") or params.get("path", "")
+        elif cap_name in _FILE_MUTATING_CAPABILITIES:
+            file_path = params.get("file_path") or params.get("path") or params.get("directory", "")
             result = guardian.validate_file_path(file_path)
             if not result.allowed:
                 return _GuardianResult(blocked=True, reason=f"Guardian blocked file write: {result.reason}")
+            if cap_name == "document_bundle":
+                result = guardian.validate_file_read_path(params.get("source_path", ""))
+                if not result.allowed:
+                    return _GuardianResult(blocked=True, reason=f"Guardian blocked source read: {result.reason}")
 
-        elif cap_name == "file_read":
+        elif cap_name in ("file_read", "document_read"):
             file_path = params.get("file_path") or params.get("path", "")
             result = guardian.validate_file_read_path(file_path)
             if not result.allowed:

@@ -526,6 +526,7 @@ def _handle_non_interactive(
         if not _throwaway:
             try:
                 _learned = await post_process_agent_result(PostProcessInput(
+                    verification=getattr(trace, "verification", None),
                     context=ctx,
                     success=(trace.reason == "completed"),
                     answer="".join(output_parts),
@@ -749,6 +750,7 @@ def _simple_repl(model: str | None = None, provider: str | None = None) -> None:
 
         with contextlib.suppress(Exception):
             await post_process_agent_result(PostProcessInput(
+                verification=getattr(trace, "verification", None),
                 context=ctx,
                 success=(trace.reason == "completed"),
                 answer=answer,

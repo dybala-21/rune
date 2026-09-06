@@ -65,6 +65,7 @@ from rune.agent.output_integrity import (
 from rune.agent.prompts import build_system_prompt
 from rune.agent.requirement_gate import RequirementGate, requirement_gate_enabled
 from rune.agent.tool_adapter import STALL_LIMITS, ToolAdapterOptions, build_tool_set
+from rune.agent.verification_state import VerificationState, verified_outcome
 from rune.config.defaults import (
     ACTIVE_TOOLS_REDUCTION_STEP,
     COGNITIVE_CACHE_MAX,
@@ -622,21 +623,10 @@ class NativeAgentLoop(EventEmitter):
         self._files_read: set[str] = set()
         self._hard_failure_signatures: set[str] = set()
         self._hard_failures: list[str] = []
-        # R19: tool-call sequence counter (not step) to catch intra-step patterns
-        self._last_code_write_step: int = 0
-        # Writes that produced structured code/config, feeding completion-gate R08.
+        self._verification = VerificationState()
         self._structured_writes: int = 0
         self._budget_upgraded_for_code: bool = False
-        self._last_verify_step: int = 0
-        # Tool-call sequence of the last verification command that both passed
-        # AND actually asserted something. Distinct from _last_verify_step,
-        # which any successful bash bumps — `ls` must never read as a test run.
-        self._last_test_pass_step: int = 0
-        # Did the last test/verify command fail, and how many times we've held
-        # back a finish because the code wasn't verified yet.
-        self._last_verify_failed: bool = False
         self._unverified_completion_blocks: int = 0
-        self._tool_call_seq: int = 0
         # Activity phase for adaptive observation windows
         self._activity_phase: str = "exploration"
         self._prev_activity_phase: str = "exploration"
@@ -705,14 +695,10 @@ class NativeAgentLoop(EventEmitter):
         self._auto_skill = _auto_skill_enabled()
         self._hard_failure_signatures.clear()
         self._hard_failures.clear()
-        self._last_code_write_step = 0
+        self._verification = VerificationState()
         self._structured_writes = 0
         self._budget_upgraded_for_code = False
-        self._last_verify_step = 0
-        self._last_test_pass_step = 0
-        self._last_verify_failed = False
         self._unverified_completion_blocks = 0
-        self._tool_call_seq = 0
         self._activity_phase = "exploration"
         self._prev_activity_phase = "exploration"
         self._max_output_tokens = 8_192
@@ -1245,14 +1231,8 @@ class NativeAgentLoop(EventEmitter):
                     trace.evidence_gate = self._evidence_gate.summary()
                 except Exception:  # observability must never break the run
                     trace.evidence_gate = None
-            # Did the project's own tests go green after the last code change?
-            # Only meaningful once something was actually edited — claiming it
-            # for a run that changed nothing is the vacuous verification this
-            # codebase has already been bitten by.
-            if self._last_code_write_step > 0:
-                trace.tests_passed_after_edit = (
-                    self._last_test_pass_step > self._last_code_write_step
-                )
+            trace.verification = self._verification.snapshot()
+            trace.tests_passed_after_edit = self._verification.tests_passed_after_edit
             await self.emit("completed", trace)
 
             # On a verified-successful run, distil the tool trace into a skill
@@ -1385,7 +1365,9 @@ class NativeAgentLoop(EventEmitter):
         if self._injected_skill is None:
             return
         name, score = self._injected_skill
-        verified = getattr(trace, "reason", "") in ("completed", "verified")
+        verified = verified_outcome(trace)
+        if verified is None:
+            return  # Unknown outcomes must not become wins or losses.
         try:
             from rune.memory.store import get_memory_store
 
@@ -1648,7 +1630,7 @@ class NativeAgentLoop(EventEmitter):
                     pass  # Prediction recording must never break the agent loop
 
             # Update evidence counters
-            if cap_name == "file_read":
+            if cap_name in ("file_read", "document_read"):
                 evidence.file_reads += 1
                 evidence.reads += 1
                 self._consecutive_reads_without_write += 1  # (#27)
@@ -1657,26 +1639,34 @@ class NativeAgentLoop(EventEmitter):
                 if fp and fp not in self._files_read:
                     self._files_read.add(fp)
                 evidence.unique_file_reads = len(self._files_read)
+            elif cap_name in ("document_create", "document_bundle") and result.success:
+                evidence.writes += 1
+                self._consecutive_reads_without_write = 0
+                metadata = result.metadata or {}
+                paths = metadata.get("paths", []) or [metadata.get("path", "")]
+                self._files_written.update(p for p in paths if p)
+                if cap_name == "document_bundle" and metadata.get("verified"):
+                    evidence.verifications += 1
             elif cap_name in ("file_write", "file_edit", "file_delete"):
                 evidence.writes += 1
                 self._consecutive_reads_without_write = 0  # (#27) reset
                 self._pending_verification_nudge = True  # (#27)
                 # Written file paths are tracked in _on_tool_start where
                 # params are available - no duplicate tracking needed here.
-                # Note code-file writes for the verification gate. Count attempts,
-                # not just successes: a rejected write still leaves the task
-                # unverified, so it shouldn't finish on the model's word alone.
-                if cap_name != "file_delete":
+                # Code write attempts and deletions require a new passing check.
+                if cap_name == "file_delete":
+                    fp = _last_tool_params.get("file_path") or _last_tool_params.get("path", "")
+                    if _structured_by_extension(os.path.splitext(fp)[1].lower()) is True:
+                        self._structured_writes += 1
+                        self._verification.changed()
+                else:
                     fp = _last_tool_params.get("file_path") or _last_tool_params.get("path", "")
                     _dot = fp.rfind(".")
                     _ext = fp[_dot:].lower() if fp and _dot >= 0 else ""
                     _verdict = _structured_by_extension(_ext)
                     _structured = _verdict is True
                     if fp and _verdict is None:
-                        # Makefile, Dockerfile and friends are code with no
-                        # extension to go on, so classify the body. Only for
-                        # names the extension cannot settle: parsing every
-                        # write costs milliseconds for a known answer.
+                        # Inspect content when the extension does not determine file type.
                         _body = _last_tool_params.get("content") or ""
                         if _body:
                             try:
@@ -1694,40 +1684,16 @@ class NativeAgentLoop(EventEmitter):
                                     "write_artifact_classify_failed", error=str(exc)[:100]
                                 )
                     if _structured:
-                        # R08 asks whether the run produced a code artifact at
-                        # all. The count was read in four places and assigned in
-                        # none, so R08 could never pass for a code task.
+                        # Count code artifacts for the completion gate.
                         self._structured_writes += 1
-                        self._tool_call_seq += 1
-                        self._last_code_write_step = self._tool_call_seq
+                        self._verification.changed()
             elif cap_name == "bash_execute":
                 evidence.executions += 1
                 self._consecutive_reads_without_write = 0  # (#27) reset
-                # R19: any successful bash counts as verification
-                from rune.agent.bash_parsing import is_verification_command
-
-                _bash_cmd = _last_tool_params.get("command", "")
-                if result.success:
-                    self._tool_call_seq += 1
-                    self._last_verify_step = self._tool_call_seq
-                    # R06: count formal verification commands separately
-                    if _bash_cmd and is_verification_command(_bash_cmd):
-                        evidence.verifications += 1
-                        # An empty suite exits 0 having checked nothing, so it
-                        # must not clear the unverified flag — otherwise the
-                        # task finishes as done on code no test ever touched.
-                        from rune.agent.auto_verify import assertions_ran
-
-                        if assertions_ran(result.output or "") is not False:
-                            self._last_verify_failed = False  # tests just passed
-                            self._last_test_pass_step = self._tool_call_seq
-                        else:
-                            log.info(
-                                "verification_asserted_nothing",
-                                command=_bash_cmd[:120],
-                            )
-                elif _bash_cmd and is_verification_command(_bash_cmd):
-                    self._last_verify_failed = True  # tests just failed
+                if self._verification.observe_command(
+                    _last_tool_params.get("command", ""), result.success, result.output or ""
+                ):
+                    evidence.verifications += 1
             elif cap_name == "web_search":
                 evidence.web_searches += 1
                 self._stall.web_search_count += 1  # (#15)
@@ -1982,9 +1948,7 @@ class NativeAgentLoop(EventEmitter):
             """True when the latest code change still has no passing test behind it."""
             if not _require_test_pass:
                 return False
-            if self._last_code_write_step > self._last_verify_step:
-                return True
-            return self._last_verify_failed
+            return self._verification.pending
 
         # main loop
         _prev_evidence_total = 0
@@ -2704,21 +2668,21 @@ class NativeAgentLoop(EventEmitter):
                         )
                     elif (
                         verify_freshness_enabled
-                        and self._last_code_write_step > self._last_verify_step
+                        and self._verification.pending
                     ):
                         # R19: code modified but not re-run
                         log.info(
                             "verify_freshness_fastpath_block",
                             step=self._step,
-                            last_write=self._last_code_write_step,
-                            last_verify=self._last_verify_step,
+                            last_write=self._verification.last_write,
+                            last_verify=self._verification.last_pass,
                         )
                         messages = self._inject_system_message(
                             messages,
                             f"[Completion Gate] You modified a code file (tool call "
-                            f"#{self._last_code_write_step}) but did not run "
-                            f"bash_execute after that (last verify call "
-                            f"#{self._last_verify_step}). Re-run the script and "
+                            f"#{self._verification.last_write}) but did not run "
+                            f"a passing verification after that (last check call "
+                            f"#{self._verification.last_pass}). Re-run the script and "
                             f"show the real output before declaring done.",
                         )
                     elif _unverified_code():
@@ -2729,9 +2693,9 @@ class NativeAgentLoop(EventEmitter):
                         log.info(
                             "require_test_pass_block",
                             step=self._step,
-                            last_write=self._last_code_write_step,
-                            last_verify=self._last_verify_step,
-                            verify_failed=self._last_verify_failed,
+                            last_write=self._verification.last_write,
+                            last_verify=self._verification.last_pass,
+                            verify_failed=self._verification.last_check_failed,
                             count=self._unverified_completion_blocks,
                         )
                         if self._unverified_completion_blocks >= 5:
@@ -2742,11 +2706,11 @@ class NativeAgentLoop(EventEmitter):
                         messages = self._inject_system_message(
                             messages,
                             "[Completion Gate] You changed code (tool call "
-                            f"#{self._last_code_write_step}) but no test/verification "
+                            f"#{self._verification.last_write}) but no test/verification "
                             "command has PASSED since that change"
                             + (
                                 " — your last test run FAILED."
-                                if self._last_verify_failed
+                                if self._verification.last_check_failed
                                 else "."
                             )
                             + " Run the tests now and make them pass before declaring"
@@ -2905,8 +2869,9 @@ class NativeAgentLoop(EventEmitter):
                     min_web_fetches=min_web_fetches,
                     # R19: verification freshness (opt-in via env var)
                     verify_freshness_enabled=verify_freshness_enabled,
-                    last_code_write_step=self._last_code_write_step,
-                    last_verify_step=self._last_verify_step,
+                    last_code_write_step=self._verification.last_write,
+                    last_verify_step=self._verification.last_pass,
+                    verification_passed=self._verification.passed,
                     # Hard failures tracked (deduplicated) (#16)
                     hard_failures=list(self._hard_failures),
                 )
@@ -2919,9 +2884,9 @@ class NativeAgentLoop(EventEmitter):
                     log.info(
                         "require_test_pass_block_fullgate",
                         step=self._step,
-                        last_write=self._last_code_write_step,
-                        last_verify=self._last_verify_step,
-                        verify_failed=self._last_verify_failed,
+                        last_write=self._verification.last_write,
+                        last_verify=self._verification.last_pass,
+                        verify_failed=self._verification.last_check_failed,
                         count=self._unverified_completion_blocks,
                     )
                     if self._unverified_completion_blocks >= 5:
@@ -2932,10 +2897,10 @@ class NativeAgentLoop(EventEmitter):
                     messages = self._inject_system_message(
                         messages,
                         "[Completion Gate] No test/verification command has PASSED "
-                        f"since you last changed code (tool call #{self._last_code_write_step})"
+                        f"since you last changed code (tool call #{self._verification.last_write})"
                         + (
                             " and your last test run FAILED."
-                            if self._last_verify_failed
+                            if self._verification.last_check_failed
                             else "."
                         )
                         + " Run the tests and make them pass before declaring done.",

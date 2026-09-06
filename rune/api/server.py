@@ -143,6 +143,10 @@ async def _post_process(
         )
 
         await post_process_agent_result(PostProcessInput(
+            verification=getattr(trace, "verification", None),
+            reason=getattr(trace, "reason", ""),
+            mech_check=getattr(trace, "mech_check", ""),
+            evidence_gate=getattr(trace, "evidence_gate", None),
             context=agent_ctx,
             success=trace.reason == "completed",
             answer=full_text,
@@ -169,24 +173,19 @@ def approval_granted(result: dict[str, Any] | None) -> bool:
 
 
 def build_trust_payload(trace: Any) -> dict[str, Any]:
-    """The 'why did it say done' data for the app's trust card: whether the run
-    was verified, the Evidence Gate summary, and — when it did NOT complete —
-    the honest reason plus the escalation next step. RUNE's differentiator
-    (verify, or fail honestly), so it must reach the UI; agent_complete used to
-    drop it. Module-level so it's unit-testable outside create_app's closure."""
+    """Build the UI's verification summary and any follow-up guidance."""
     reason = getattr(trace, "reason", "") or ""
-    verified = reason == "completed"
+    from rune.agent.verification_state import verified_outcome
+
+    verified = reason == "completed" and verified_outcome(trace) is True
     out: dict[str, Any] = {
         "verified": verified,
         "reason": reason,
-        # A step died at the tool-round cap without a final LLM turn — the
-        # answer may omit work that never ran; the UI must say so.
+        # The tool-round limit may leave requested work unfinished.
         "budgetExhausted": bool(getattr(trace, "tool_budget_exhausted", False)),
-        # The project's tests after the last edit: true green, false not green,
-        # null when nothing was edited. Weaker than the Evidence Gate — the
-        # suite may have passed before the change — so the UI shows it as
-        # "tests passing", never as "verified".
+        # A fresh test pass does not establish coverage of the whole task.
         "testsPassedAfterEdit": getattr(trace, "tests_passed_after_edit", None),
+        "verification": getattr(trace, "verification", None),
     }
     gate = getattr(trace, "evidence_gate", None)
     if isinstance(gate, dict):

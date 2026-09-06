@@ -858,11 +858,17 @@ class RuneDaemon:
                 )
                 loop = NativeAgentLoop(config=cfg)
                 result = await asyncio.wait_for(loop.run(goal), timeout=timeout_s)
+                from rune.agent.verification_state import verified_outcome
+
                 return {
-                    "success": getattr(result, "success", True),
+                    "success": result.reason == "completed" and verified_outcome(result) is not False,
+                    "verified": verified_outcome(result) is True,
                     "output": getattr(result, "answer", str(result)),
                     "error": getattr(result, "error", None),
                 }
+
+            from rune.proactive.execution_store import ExecutionStore
+            from rune.utils.paths import rune_data
 
             bridge = initialize_proactive_bridge(
                 engine=engine,
@@ -870,6 +876,7 @@ class RuneDaemon:
                 config=bridge_config,
                 context={"policy_profile": "rune"},
                 autonomous_executor=self._autonomous_executor,
+                execution_store=ExecutionStore(rune_data() / "proactive-executions.db"),
             )
             bridge.start()
             log.info("subsystem_initialised", name="proactive_agent_bridge")

@@ -30,9 +30,9 @@ class CapabilityDefinition:
 # Groups for policy-based access control
 TOOL_GROUPS: dict[str, list[str]] = {
     "read": ["file_read", "file_list", "file_search", "code_analyze",
-             "code_find_def", "code_find_refs", "code_impact", "project_map"],
+             "code_find_def", "code_find_refs", "code_impact", "project_map", "document_read"],
     "write": ["file_write", "file_edit", "file_delete", "credential_save",
-              "skill_create", "skill_promote", "memory_tune"],
+              "skill_create", "skill_promote", "memory_tune", "document_create", "document_bundle"],
     "runtime": ["bash_execute"],
     "browser": ["browser_navigate", "browser_observe", "browser_act",
                  "browser_batch", "browser_extract", "browser_find",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import shutil
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -20,14 +20,10 @@ from rune.capabilities.document import (
 
 @pytest.fixture
 def tmp_path():
-    # The Guardian blocks writes under /var (pytest's default tmp), so use a
-    # HOME-based directory the safety layer allows.
-    d = Path.home() / ".rune_doctest"
-    d.mkdir(parents=True, exist_ok=True)
-    try:
-        yield d
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
+    # The Guardian blocks /var; use a unique scratch directory, never a fixed
+    # home folder that may contain a user's files or another test run.
+    with tempfile.TemporaryDirectory(prefix="rune-document-", dir="/tmp") as d:
+        yield Path(d)
 
 _BLOCKS = [
     DocBlock(type="heading", text="Overview", level=1),
@@ -131,11 +127,11 @@ async def test_missing_library_reports_gracefully(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_registered_in_registry():
+async def test_registered_in_registry(tmp_path):
     from rune.capabilities.registry import get_capability_registry
 
     reg = get_capability_registry()
-    probe = Path.home() / ".rune_doctest_probe.html"
+    probe = tmp_path / "probe.html"
     try:
         r = await reg.execute("document_create", {
             "path": str(probe), "format": "html", "title": "x",

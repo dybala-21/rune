@@ -126,7 +126,7 @@ class TestProactiveAgentBridge:
     @pytest.mark.asyncio
     async def test_execute_suggestion_failure_retries(self):
         engine = _make_engine()
-        config = BridgeConfig(max_retries=2, backoff_base_seconds=0.01, auto_execute=True)
+        config = BridgeConfig(max_retries=2, backoff_base_seconds=0.01, auto_execute=True, retry_safe=True)
         bridge = ProactiveAgentBridge(engine, _failure_factory, config)
 
         suggestion = _make_suggestion()
@@ -140,7 +140,7 @@ class TestProactiveAgentBridge:
     @pytest.mark.asyncio
     async def test_execute_suggestion_exception_retries(self):
         engine = _make_engine()
-        config = BridgeConfig(max_retries=1, backoff_base_seconds=0.01, auto_execute=True)
+        config = BridgeConfig(max_retries=1, backoff_base_seconds=0.01, auto_execute=True, retry_safe=True)
         bridge = ProactiveAgentBridge(engine, _exception_factory, config)
 
         suggestion = _make_suggestion()

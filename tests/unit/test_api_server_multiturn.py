@@ -518,7 +518,7 @@ def test_build_trust_payload_budget_exhausted():
         reason="completed", evidence_gate=None, tool_budget_exhausted=True,
     )
     p = build_trust_payload(trace)
-    assert p["verified"] is True
+    assert p["verified"] is False  # Completion without check evidence is not verification.
     assert p["budgetExhausted"] is True
 
     trace2 = SimpleNamespace(reason="completed", evidence_gate=None)

@@ -261,6 +261,10 @@ async def _execute_agent(
         # 5. Post-process (memory persistence)
         try:
             await post_process_agent_result(PostProcessInput(
+                verification=getattr(trace, "verification", None),
+                reason=getattr(trace, "reason", ""),
+                mech_check=getattr(trace, "mech_check", ""),
+                evidence_gate=getattr(trace, "evidence_gate", None),
                 context=agent_ctx,
                 success=trace.reason == "completed",
                 answer=answer,
@@ -271,7 +275,7 @@ async def _execute_agent(
         tracker.mark_completed(
             run_id,
             RunResult(
-                success=True,
+                success=trace.reason == "completed",
                 answer=answer,
             ),
         )
