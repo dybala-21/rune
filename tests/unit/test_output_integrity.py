@@ -6,7 +6,10 @@ from rune.agent import output_integrity as oi
 
 
 def test_enabled_reads_env(monkeypatch):
+    """On by default: the check costs no model call and only nudges."""
     monkeypatch.delenv("RUNE_OUTPUT_INTEGRITY", raising=False)
+    assert oi.output_integrity_enabled() is True
+    monkeypatch.setenv("RUNE_OUTPUT_INTEGRITY", "0")
     assert oi.output_integrity_enabled() is False
     monkeypatch.setenv("RUNE_OUTPUT_INTEGRITY", "1")
     assert oi.output_integrity_enabled() is True

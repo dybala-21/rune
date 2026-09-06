@@ -189,6 +189,8 @@ def build_trust_payload(trace: Any) -> dict[str, Any]:
         "testsPassedAfterEdit": getattr(trace, "tests_passed_after_edit", None),
         # Where the run worked, when that was not only the workspace.
         "workspaceWarning": getattr(trace, "workspace_warning", "") or "",
+        # Figures the answer states that no retrieved page mentions.
+        "unsourcedNumbers": list(getattr(trace, "unsourced_numbers", []) or []),
     }
     gate = getattr(trace, "evidence_gate", None)
     if isinstance(gate, dict):

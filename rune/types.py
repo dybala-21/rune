@@ -262,6 +262,10 @@ class CompletionTrace:
     # and worktrees are routine — but the workspace snapshot cannot roll back
     # anything outside it, so the run should say where it worked.
     workspace_warning: str = ""
+    # Quantities the answer asserts that appear in nothing the run retrieved.
+    # Not a verdict: a figure can be derived or rounded. A number the sources
+    # never mention is the shape of a fabricated statistic.
+    unsourced_numbers: list[str] = field(default_factory=list)
 
 
 # LLM

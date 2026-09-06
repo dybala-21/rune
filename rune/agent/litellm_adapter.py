@@ -61,9 +61,13 @@ def __getattr__(name: str) -> Any:
 
 from rune.agent.message_utils import validate_tool_pairs
 from rune.agent.model_traits import (
+    is_max_tokens_rename_error,
     is_reasoning_effort_error,
+    is_responses_only_error,
     is_temperature_error,
+    needs_responses_api,
     note_reasoning_effort_rejected,
+    note_responses_only,
     note_temperature_rejected,
     reasoning_effort_rejected,
     supports_reasoning_effort,
@@ -2360,6 +2364,17 @@ _DROPPABLE_PARAMS = (
 )
 
 
+async def _stream_via_responses(client: Any, kwargs: dict[str, Any]) -> Any:
+    """Run the request on /v1/responses, shaped like a chat-completions stream."""
+    from rune.agent.responses_bridge import (
+        ResponsesToChatStream,
+        build_responses_kwargs,
+    )
+
+    stream = await client.aresponses(**build_responses_kwargs(kwargs))
+    return ResponsesToChatStream(stream)
+
+
 async def _complete_dropping_rejected_params(
     client: Any, model: str, kwargs: dict[str, Any]
 ) -> Any:
@@ -2374,10 +2389,24 @@ async def _complete_dropping_rejected_params(
 
     *kwargs* is mutated: the caller's dict is the request that finally worked.
     """
-    for _ in range(len(_DROPPABLE_PARAMS) + 1):
+    # Some models serve tool calls only on /v1/responses. Once one has said so,
+    # go straight there instead of spending a refusal to relearn it.
+    if needs_responses_api(model):
+        return await _stream_via_responses(client, kwargs)
+
+    # +2: one turn for the max_tokens rename, one for the final success.
+    for _ in range(len(_DROPPABLE_PARAMS) + 2):
         try:
             return await client.acompletion(**kwargs)
         except client.BadRequestError as exc:
+            if is_max_tokens_rename_error(exc) and "max_tokens" in kwargs:
+                kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+                log.warning("max_tokens_renamed", model=model)
+                continue
+            if is_responses_only_error(exc):
+                note_responses_only(model)
+                log.warning("responses_api_required", model=model)
+                return await _stream_via_responses(client, kwargs)
             for param, matches, note in _DROPPABLE_PARAMS:
                 if param in kwargs and matches(exc):
                     note(model)

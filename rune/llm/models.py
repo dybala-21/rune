@@ -69,7 +69,9 @@ def _has_provider_key(provider: str) -> bool:
 # Hardcoded model lists (fallbacks / static providers)
 # OpenAI
 FALLBACK_OPENAI_MODELS: list[ModelInfo] = [
-    # GPT-5.6 family (newest) — three capability tiers: Sol > Terra > Luna
+    # GPT-6. Tools only on /v1/responses; the adapter routes there.
+    ModelInfo(id="gpt-6-astra", provider="openai", label="GPT-6 Astra"),
+    # GPT-5.6 family — Sol > Terra > Luna. Same endpoint restriction.
     ModelInfo(id="gpt-5.6-sol", provider="openai", label="GPT-5.6 Sol"),
     ModelInfo(id="gpt-5.6-terra", provider="openai", label="GPT-5.6 Terra"),
     ModelInfo(id="gpt-5.6-luna", provider="openai", label="GPT-5.6 Luna"),
@@ -78,6 +80,8 @@ FALLBACK_OPENAI_MODELS: list[ModelInfo] = [
     # GPT-5.4 series
     ModelInfo(id="gpt-5.4", provider="openai", label="GPT-5.4"),
     ModelInfo(id="gpt-5.4-pro", provider="openai", label="GPT-5.4 Pro"),
+    ModelInfo(id="gpt-5.4-mini", provider="openai", label="GPT-5.4 Mini"),
+    ModelInfo(id="gpt-5.4-nano", provider="openai", label="GPT-5.4 Nano"),
     # GPT-5.2 series
     ModelInfo(id="gpt-5.2", provider="openai", label="GPT-5.2"),
     ModelInfo(id="gpt-5.2-pro", provider="openai", label="GPT-5.2 Pro"),
@@ -129,6 +133,7 @@ FALLBACK_OPENAI_MODELS: list[ModelInfo] = [
 
 ANTHROPIC_MODELS: list[ModelInfo] = [
     # Claude 5 family (newest)
+    ModelInfo(id="claude-fable-5-1", provider="anthropic", label="Claude Fable 5.1"),
     ModelInfo(id="claude-opus-5", provider="anthropic", label="Claude Opus 5"),
     ModelInfo(id="claude-sonnet-5", provider="anthropic", label="Claude Sonnet 5"),
     ModelInfo(id="claude-fable-5", provider="anthropic", label="Claude Fable 5"),
@@ -242,29 +247,43 @@ def _is_chat_model(model_id: str) -> bool:
 
 
 def _model_sort_key(model_id: str) -> int:
-    """Sort key for OpenAI models (lower = higher priority)."""
-    if model_id.startswith("gpt-5.4"):
+    """Sort key for OpenAI models (lower = higher priority).
+
+    The list this orders comes from a live fetch, so a new family shows up
+    here before anyone edits the file — an unranked name lands in the generic
+    gpt-5 bucket rather than at the top, which is why the newest ones are
+    listed explicitly.
+    """
+    if model_id.startswith("gpt-6"):
         return 0
-    if model_id.startswith("gpt-5.2"):
+    if model_id.startswith("gpt-5.6"):
         return 1
-    if model_id.startswith("gpt-5.1"):
+    if model_id.startswith("gpt-5.5"):
         return 2
-    if model_id.startswith("gpt-5"):
+    if model_id.startswith("gpt-5.4"):
         return 3
-    if model_id.startswith("o4"):
+    if model_id.startswith("gpt-5.3"):
+        return 4
+    if model_id.startswith("gpt-5.2"):
+        return 5
+    if model_id.startswith("gpt-5.1"):
         return 6
-    if model_id.startswith("o3-pro"):
+    if model_id.startswith("gpt-5"):
         return 7
-    if model_id.startswith("o3"):
+    if model_id.startswith("o4"):
         return 8
-    if model_id.startswith("o1"):
+    if model_id.startswith("o3-pro"):
         return 9
-    if model_id.startswith("gpt-4.1"):
+    if model_id.startswith("o3"):
         return 10
-    if model_id.startswith("gpt-4o"):
+    if model_id.startswith("o1"):
         return 11
-    if model_id.startswith("gpt-4"):
+    if model_id.startswith("gpt-4.1"):
         return 12
+    if model_id.startswith("gpt-4o"):
+        return 13
+    if model_id.startswith("gpt-4"):
+        return 14
     if model_id.startswith("gpt-3"):
         return 15
     return 20

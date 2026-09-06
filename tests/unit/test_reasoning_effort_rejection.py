@@ -105,11 +105,18 @@ class _FakeLiteLLM:
         self.calls.append(dict(kwargs))
         for param in ("temperature", "reasoning_effort"):
             if param in self._rejects and param in kwargs:
+                # Deliberately not the "/v1/chat/completions ... use
+                # /v1/responses" wording: that refusal means the endpoint is
+                # wrong, not the parameter, and dropping anything cannot fix
+                # it. These tests are about the drop-and-retry path.
                 raise _BadRequestError(
-                    f"OpenAIException - Function tools with {param} are not "
-                    f"supported for fake-model in /v1/chat/completions."
+                    f"OpenAIException - Unsupported parameter: '{param}' is "
+                    f"not supported with this model."
                 )
         return "stream"
+
+    async def aresponses(self, **kwargs):  # pragma: no cover - not this path
+        raise AssertionError("a dropped parameter must not change endpoint")
 
 
 async def _drive(fake, kwargs, model="fake-model"):
@@ -153,6 +160,9 @@ async def test_an_unrelated_bad_request_is_not_swallowed():
         async def acompletion(self, **kwargs):
             self.calls.append(dict(kwargs))
             raise _BadRequestError("OpenAIException - model not found")
+
+        async def aresponses(self, **kwargs):  # pragma: no cover
+            raise AssertionError("an unknown 400 must not change endpoint")
 
     fake = _Unrelated(rejects=set())
 
