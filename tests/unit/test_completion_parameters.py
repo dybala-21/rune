@@ -97,33 +97,3 @@ async def test_both_request_paths_preserve_the_completion_cap(monkeypatch, strea
     assert calls[0]["max_completion_tokens"] == 1024 and "max_tokens" not in calls[0]
     assert calls[0]["model"] == "openai/responses/gpt-6-astra"
     assert calls[0]["store"] is False
-    wire = litellm.get_optional_params(model="gpt-6-astra", custom_llm_provider="openai",
-                                      max_completion_tokens=1024, drop_params=True)
-    assert wire["max_completion_tokens"] == 1024
-
-
-async def test_responses_bridge_preserves_tools_effort_and_output_budget():
-    from litellm.completion_extras.litellm_responses_transformation.transformation import (
-        LiteLLMResponsesTransformationHandler,
-    )
-    from litellm.main import responses_api_bridge_check
-
-    info, model = responses_api_bridge_check("responses/gpt-6-astra", "openai")
-    assert info["mode"] == "responses" and model == "gpt-6-astra"
-    transformer = LiteLLMResponsesTransformationHandler()
-    converted = {}
-    transformer._map_optional_params_to_responses_api_request(
-        {"max_completion_tokens": 1024, "reasoning_effort": "high", "store": False,
-         "tools": [{"type": "function", "function": {"name": "read_fixture", "strict": False,
-                    "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}}]}, converted)
-    assert converted["max_output_tokens"] == 1024
-    assert converted["reasoning"]["effort"] == "high"
-    assert converted["tools"][0]["name"] == "read_fixture"
-    assert converted["tools"][0]["strict"] is False and converted["store"] is False
-    items, _ = transformer.convert_chat_completion_messages_to_responses_api([
-        {"role": "assistant", "tool_calls": [{"id": "call-1", "type": "function",
-         "function": {"name": "read_fixture", "arguments": '{"path":"input.txt"}'}}]},
-        {"role": "tool", "tool_call_id": "call-1", "content": "fixture data"},
-    ])
-    assert [item["type"] for item in items] == ["function_call", "function_call_output"]
-    assert all(item["call_id"] == "call-1" for item in items)

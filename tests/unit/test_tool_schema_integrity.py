@@ -26,7 +26,7 @@ def test_nested_bundle_contract_reaches_model_and_validates_partial_patch(monkey
                'changes': {'filters': [{'column': 'status', 'operator': 'not-a-real-operator'}]}}
     assert list(validator.iter_errors(invalid))
     create = tools['document_bundle'].json_schema
-    assert create['$defs']['BundleMetric']['required'] == ['id', 'operation']
+    assert set(create['$defs']['BundleMetric']['required']) == {'id', 'operation'}
     assert create['additionalProperties'] is False
 
 
@@ -43,5 +43,8 @@ def test_raw_mcp_schema_is_preserved_without_mutating_registration():
                                            risk_level=RiskLevel.LOW, raw_json_schema=raw))
     tools = build_tool_set(ToolAdapterOptions(enable_guardian=False), registry=registry)
     wire = tools_to_openai_schema(list(tools.values()))[0]['function']['parameters']
-    Draft202012Validator(wire).validate({'value': 'ok'})
+    validator = Draft202012Validator(wire)
+    validator.validate({'value': 'ok'})
+    for invalid in ({}, {'value': 'x'}, {'value': 3}, {'value': 'ok', 'extra': True}):
+        assert list(validator.iter_errors(invalid)), invalid
     assert raw == before

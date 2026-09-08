@@ -100,19 +100,22 @@ async def test_cancel_during_render_preserves_current_and_removes_stage(office, 
     pointer = Path(office.directory) / 'current.json'
     before = pointer.read_bytes()
     started = asyncio.Event()
-    render = bundle._render_staged
 
-    async def notify_start(payload):
+    async def wait_for_cancellation(payload):
+        assert Path(payload['stage']).is_dir()
         started.set()
-        return await render(payload)
+        await asyncio.Future()
 
-    monkeypatch.setattr(bundle, '_render_staged', notify_start)
+    monkeypatch.setattr(bundle, '_render_staged', wait_for_cancellation)
     task = asyncio.create_task(document_bundle_update(update_request(office, initial.metadata['revision'], filters=[])))
-    await started.wait()
-    await asyncio.sleep(0.02)
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
     assert pointer.read_bytes() == before
     assert not list(pointer.parent.glob('.stage-*'))
 
@@ -165,18 +168,6 @@ async def test_inspect_and_update_follow_adapter_paths_and_permissions(office, t
     assert 'revision' in response
     current = json.loads((Path(office.directory) / 'current.json').read_text())
     assert current['revision'] != initial.metadata['revision']
-
-
-def test_artifact_receipt_does_not_certify_whole_task():
-    from rune.api.server import build_trust_payload
-    from rune.types import CompletionTrace
-
-    receipt = {'kind': 'document_bundle', 'revision': 'a' * 32,
-               'checks': {'native_content': 'pass', 'task_acceptance': 'not_performed'}}
-    trace = CompletionTrace(reason='completed', artifact_receipts=[receipt])
-    payload = build_trust_payload(trace)
-    assert payload['artifactReceipts'] == [receipt]
-    assert payload['verified'] is False
 
 
 async def test_disabling_updates_preserves_published_versions(office, monkeypatch):

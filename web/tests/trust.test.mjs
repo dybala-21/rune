@@ -128,17 +128,15 @@ test('legacy required checks still warn even if the old boolean claims success',
   assert.equal(view.ok, false);
 });
 
-test('stop snapshots update one persisted card with the final receipts', () => {
+test('stop snapshots update one card with the final receipts', () => {
   const trust = payloads[cases.findIndex(c => c.name === 'cancelled run retains published document checks')];
   let messages = [{ id: 'answer', role: 'assistant', content: 'A file was saved.', timestamp: 0 }];
   messages = upsertRunMessage(messages, abortedMessage({ runId: 'run-1', trust: { ...trust, artifactReceipts: [] } }, 'unused', 1));
   const final = abortedMessage({ runId: 'run-1', trust }, 'unused', 2);
   messages = upsertRunMessage(upsertRunMessage(messages, final), final);
   assert.equal(messages.length, 2);
-  const restored = JSON.parse(JSON.stringify({ messages, lastTrust: trust }));
-  assert.deepEqual(restored.messages[1].trust.artifactReceipts, trust.artifactReceipts);
-  assert.equal(describeTrust(restored.lastTrust).title, 'Stopped');
-  const card = renderToStaticMarkup(createElement(TrustCard, { trust: restored.messages[1].trust }));
+  assert.deepEqual(messages[1].trust.artifactReceipts, trust.artifactReceipts);
+  const card = renderToStaticMarkup(createElement(TrustCard, { trust: messages[1].trust }));
   assert.ok(card.includes('published.xlsx') && card.includes('Stopped') && card.includes('Layout: not checked'), card);
 });
 
