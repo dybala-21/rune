@@ -27,7 +27,10 @@ from rune.memory.types import SearchResult, VectorMetadata
 
 @pytest.fixture
 def mem_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    import rune.memory.markdown_indexer  # noqa: F401
+
     monkeypatch.setattr("rune.memory.markdown_store.memory_dir", lambda: tmp_path)
+    monkeypatch.setattr("rune.memory.markdown_indexer.memory_dir", lambda: tmp_path)
     monkeypatch.setattr("rune.memory.state._state_dir", lambda: tmp_path / ".state")
     (tmp_path / ".state").mkdir()
     for f in ("fact-meta.json", "suppressed.json", "index-state.json"):

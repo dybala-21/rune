@@ -3,6 +3,8 @@ import { toast } from '../utils/toast';
 import { useSSE } from './useSSE';
 import * as api from '../api';
 import { computeActivitySummary } from '../utils/tooling';
+import { describeTrust } from '../utils/trust';
+import { abortedMessage, upsertRunMessage } from '../utils/runEvents';
 import type {
   AgentState,
   ChatMessage,
@@ -18,6 +20,7 @@ import type {
   StepInfo,
   AgentCompleteData,
   AgentErrorData,
+  AgentAbortedData,
   AgentStartData,
   ToolCallData,
   ToolResultData,
@@ -76,6 +79,7 @@ interface PersistedLiveState {
   thinkingBlocks: ThinkingBlock[];
   tokenUsage: TokenUsage | null;
   activitySummary: ActivitySummary | null;
+  lastTrust?: TrustInfo | null;
   delegateEvents: DelegateItem[];
   compactionEvents: CompactionItem[];
 }
@@ -188,6 +192,7 @@ function loadPersistedLiveState(): LoadedLiveDraft {
         thinkingBlocks: trimTail(Array.isArray(stateCandidate.thinkingBlocks) ? stateCandidate.thinkingBlocks as ThinkingBlock[] : [], MAX_THINKING_BLOCKS),
         tokenUsage: stateCandidate.tokenUsage ?? null,
         activitySummary: stateCandidate.activitySummary ?? null,
+        lastTrust: stateCandidate.lastTrust ?? null,
         delegateEvents: trimTail(Array.isArray(stateCandidate.delegateEvents) ? stateCandidate.delegateEvents as DelegateItem[] : [], MAX_DELEGATE_EVENTS),
         compactionEvents: trimTail(Array.isArray(stateCandidate.compactionEvents) ? stateCandidate.compactionEvents as CompactionItem[] : [], MAX_COMPACTION_EVENTS),
       },
@@ -249,6 +254,7 @@ export function useAgent() {
   const [tokenUsage, setTokenUsage] = useState<TokenUsage | null>(initialLiveState.tokenUsage);
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const [pendingQuestion, setPendingQuestion] = useState<PendingQuestion | null>(null);
+  const pendingQuestionRef = useRef<PendingQuestion | null>(null);
   const [activitySummary, setActivitySummary] = useState<ActivitySummary | null>(initialLiveState.activitySummary);
   const [lastTrust, setLastTrust] = useState<TrustInfo | null>(null);
   const [delegateEvents, setDelegateEvents] = useState<DelegateItem[]>(initialLiveState.delegateEvents);
@@ -329,6 +335,7 @@ export function useAgent() {
     setThinkingBlocks(trimTail(draft.thinkingBlocks, MAX_THINKING_BLOCKS));
     setTokenUsage(draft.tokenUsage ?? null);
     setActivitySummary(draft.activitySummary ?? null);
+    setLastTrust(draft.lastTrust ?? null);
     setDelegateEvents(trimTail(draft.delegateEvents, MAX_DELEGATE_EVENTS));
     setCompactionEvents(trimTail(draft.compactionEvents, MAX_COMPACTION_EVENTS));
     savedDraftStateRef.current = null;
@@ -358,8 +365,10 @@ export function useAgent() {
     setThinkingBlocks([]);
     setTokenUsage(null);
     setPendingApproval(null);
+    pendingQuestionRef.current = null;
     setPendingQuestion(null);
     setActivitySummary(null);
+    setLastTrust(null);
     setDelegateEvents([]);
     setCompactionEvents([]);
     setCurrentStepInfo(null);
@@ -394,6 +403,7 @@ export function useAgent() {
       thinkingBlocks: trimTail(thinkingBlocks, MAX_THINKING_BLOCKS),
       tokenUsage,
       activitySummary,
+      lastTrust,
       delegateEvents: trimTail(delegateEvents, MAX_DELEGATE_EVENTS),
       compactionEvents: trimTail(compactionEvents, MAX_COMPACTION_EVENTS),
     };
@@ -405,7 +415,7 @@ export function useAgent() {
         pendingPersistRef.current = null;
       }
     }, 400);
-  }, [messages, toolCalls, thinkingBlocks, tokenUsage, activitySummary, delegateEvents, compactionEvents, draftDecisionPending]);
+  }, [messages, toolCalls, thinkingBlocks, tokenUsage, activitySummary, lastTrust, delegateEvents, compactionEvents, draftDecisionPending]);
 
   useEffect(() => () => {
     if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
@@ -456,6 +466,7 @@ export function useAgent() {
       setLastTrust(null);
       setCurrentStepInfo(null);
       setOrchestration(null);
+      setToolCalls([]);
       currentStepRef.current = 0;
       runSeqRef.current += 1;
     }));
@@ -499,6 +510,7 @@ export function useAgent() {
       flushTextDelta();
       setState('idle');
       setPendingApproval(null);
+      pendingQuestionRef.current = null;
       setPendingQuestion(null);
       setCurrentStepInfo(null);
       if (data.usage) setTokenUsage(data.usage);
@@ -552,12 +564,10 @@ export function useAgent() {
         });
       }
 
-      // Trust verdict: show whether the run was actually verified, or — when
-      // it wasn't — the honest reason + escalation next step. Skip the card for
-      // plain chat turns that never ran a check (nothing to attest).
+      // Ordinary completions need no extra chat card; checks and gaps do.
       const trust = data.trust;
-      if (trust) setLastTrust(trust);
-      if (trust && (!trust.verified || trust.evidenceGate?.hasCheck)) {
+      setLastTrust(trust ?? null);
+      if (trust && describeTrust(trust).showCard) {
         setMessages(prev => appendWithLimit(prev, {
           id: nextId(),
           role: 'system' as const,
@@ -573,6 +583,7 @@ export function useAgent() {
       flushTextDelta();
       setState('idle');
       setPendingApproval(null);
+      pendingQuestionRef.current = null;
       setPendingQuestion(null);
       setMessages(prev => {
         pendingTextRef.current = '';
@@ -587,20 +598,27 @@ export function useAgent() {
       });
     }));
 
-    unsubs.push(onOwnRun('agent_aborted', () => {
+    unsubs.push(sseOn('agent_aborted', (raw) => {
+      const data = raw as AgentAbortedData;
+      if (data.runId && data.runId !== api.getCurrentRunId()) {
+        setMessages(prev => upsertRunMessage(prev, abortedMessage(data, nextId(), Date.now()), true));
+        return;
+      }
       flushTextDelta();
       setState('idle');
       setPendingApproval(null);
+      pendingQuestionRef.current = null;
       setPendingQuestion(null);
+      setCurrentStepInfo(null);
+      setLastTrust(data.trust ?? null);
+      setToolCalls(prev => {
+        setActivitySummary(computeActivitySummary(prev, 0, false));
+        return prev;
+      });
       setMessages(prev => {
         pendingTextRef.current = '';
         assistantMsgIdRef.current = null;
-        return appendWithLimit(prev, {
-          id: nextId(),
-          role: 'system',
-          content: 'Execution aborted.',
-          timestamp: Date.now(),
-        }, MAX_MESSAGES);
+        return trimTail(upsertRunMessage(prev, abortedMessage(data, nextId(), Date.now())), MAX_MESSAGES);
       });
     }));
 
@@ -668,7 +686,7 @@ export function useAgent() {
           result: data.result,
           success: data.success,
           completedAt: now,
-          durationMs: now - original.timestamp,
+          durationMs: Math.max(0, now - original.timestamp),
         };
         return updated;
       });
@@ -690,12 +708,23 @@ export function useAgent() {
     unsubs.push(onOwnRun('question', (raw) => {
       const data = raw as QuestionData;
       setState('waiting_question');
-      setPendingQuestion({
+      const question = {
         id: data.id,
         question: data.question,
+        callId: data.callId,
         options: data.options,
         inputMode: data.inputMode,
-      });
+      };
+      pendingQuestionRef.current = question;
+      setPendingQuestion(question);
+    }));
+
+    unsubs.push(onOwnRun('question_closed', (raw) => {
+      const { id } = raw as { id: string };
+      if (pendingQuestionRef.current?.id !== id) return;
+      pendingQuestionRef.current = null;
+      setPendingQuestion(null);
+      setState(current => current === 'waiting_question' ? 'running' : current);
     }));
 
     unsubs.push(onOwnRun('step_start', (raw) => {
@@ -1009,6 +1038,8 @@ export function useAgent() {
     // actually winds down. agent_aborted then confirms and cleans up.
     flushTextDelta();
     setState('idle');
+    pendingQuestionRef.current = null;
+    setPendingQuestion(null);
     api.sendAbort().catch(err => pushSystemError('Failed to stop the run', err));
   }, [pushSystemError, flushTextDelta]);
 
@@ -1025,18 +1056,21 @@ export function useAgent() {
       });
   }, [pendingApproval, pushSystemError]);
 
-  const respondQuestion = useCallback((answer: string, selectedIndex?: number) => {
-    if (!pendingQuestion) return;
-    api.sendQuestion(pendingQuestion.id, answer, selectedIndex)
-      .then(() => {
+  const respondQuestion = useCallback(async (answer: string, selectedIndex?: number) => {
+    const question = pendingQuestionRef.current;
+    if (!question) throw new Error('This question is no longer waiting for an answer.');
+    try {
+      await api.sendQuestion(question.id, answer, selectedIndex);
+      if (pendingQuestionRef.current?.id === question.id) {
+        pendingQuestionRef.current = null;
         setPendingQuestion(null);
-        setState('running');
-      })
-      .catch(err => {
-        setState('waiting_question');
-        pushSystemError('Question response failed', err);
-      });
-  }, [pendingQuestion, pushSystemError]);
+        setState(current => current === 'waiting_question' ? 'running' : current);
+      }
+    } catch (error) {
+      pushSystemError('Question response failed', error);
+      throw error;
+    }
+  }, [pushSystemError]);
 
   return {
     connected,

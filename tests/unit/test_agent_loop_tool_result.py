@@ -172,6 +172,7 @@ async def test_finalize_runs_requirement_gate_for_non_execution_task(
     loop._requires_execution = False
     ok, _msgs, n = await loop._finalize_gates([], 0)
     assert ok is False and n == 1
+    assert loop._completion_check == {"name": "Output requirements", "detail": "[Requirement Gate] unmet: X"}
 
 
 def test_wind_down_phase_final_at_90pct_then_forces_write() -> None:
@@ -214,6 +215,47 @@ def test_max_gate_reason_graceful_for_non_execution_task() -> None:
     assert loop._max_gate_reason() == "completed_gate_warnings"
     loop._requires_execution = True
     assert loop._max_gate_reason() == "max_gate_blocked"
+
+
+def test_completion_block_diagnostics_are_bounded_and_reset_between_runs() -> None:
+    loop = NativeAgentLoop()
+    loop._record_completion_block("Output requirements", "x" * 8000)
+    assert len(loop._completion_check["detail"]) == 4000
+    loop._reset_run_state()
+    assert loop._completion_check is None
+
+
+@pytest.mark.asyncio
+async def test_evidence_failure_records_the_actual_check():
+    loop = NativeAgentLoop()
+    loop._evidence_gate = _FakeGate("fail", "Expected 42, got 41")
+    assert await loop._evidence_verdict() == ("fail", "Expected 42, got 41")
+    assert loop._completion_check == {"name": "Task verification", "detail": "Expected 42, got 41"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["completed_gate_warnings", "completed"])
+async def test_run_delivers_only_unresolved_completion_diagnostics(monkeypatch, reason):
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.api.trust import build_trust_payload
+    from rune.types import CompletionTrace
+
+    loop = NativeAgentLoop()
+
+    async def execute(**kwargs):
+        loop._requirement_gate_obj = _FakeReqGate("fail", "[Requirement Gate] Comparison table missing")
+        ok, _, count = await loop._requirement_gate([], 4)
+        assert not ok and count == 5
+        return CompletionTrace(reason=reason)
+
+    monkeypatch.setattr(loop, "_execute_loop", execute)
+    trace = await loop.run("Explain the comparison", classification=ClassificationResult(goal_type="chat", confidence=0.9, tier=2))
+    payload = build_trust_payload(trace)
+    if reason == "completed_gate_warnings":
+        assert payload["completionCheck"]["detail"] == "[Requirement Gate] Comparison table missing"
+        assert not payload["verified"]
+    else:
+        assert payload["completionCheck"] is None
 
 
 def test_output_integrity_gate_bounded(monkeypatch: MonkeyPatch) -> None:

@@ -314,7 +314,7 @@ For non-code document tasks (business plans, reports, proposals, etc.):
 
 1. **Inspect sources first**: Read supplied office files with document_read. Use web_search/web_fetch when external facts are needed. Never fabricate numbers.
 2. **Match the requested format**: Use document_create for XLSX, DOCX, PPTX, PDF, CSV or HTML. Use file_write for Markdown/text. Save under `{cwd}` unless another location was requested.
-3. **Keep related files consistent**: For multiple documents derived from tabular data, use document_bundle with explicit filters and metrics. Reference shared values as {{metric_id}} in text and cells. Resubmit the complete specification when conditions change. Link the returned version paths.
+3. **Keep related files consistent**: For multiple documents derived from tabular data, use document_bundle with explicit filters and metrics. Reference shared values as {{metric_id}} in text and cells. When conditions change, inspect the existing bundle with document_bundle_inspect. If document_bundle_update is available, pass its revision and current source hash with the changed fields; otherwise pass the revised full specification to document_bundle. Preserve unspecified documents and fields. On a revision conflict, inspect again before deciding how to apply the requested change. Link the returned version paths.
 4. **Verify saved content**: Reopen documents using document_read and check source totals, units and requested sections. Bundle native readback is automatic; visual layout still needs inspection when a renderer is available. Report a missing font or unsupported formula instead of claiming success.
 
 ### Self-Review (mandatory before final output)

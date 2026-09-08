@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import hashlib
 import os
 import re
@@ -66,6 +67,7 @@ from rune.agent.prompts import build_system_prompt
 from rune.agent.requirement_gate import RequirementGate, requirement_gate_enabled
 from rune.agent.tool_adapter import STALL_LIMITS, ToolAdapterOptions, build_tool_set
 from rune.agent.verification_state import VerificationState, verified_outcome
+from rune.capabilities.ask_user import AskUserCallback
 from rune.config.defaults import (
     ACTIVE_TOOLS_REDUCTION_STEP,
     COGNITIVE_CACHE_MAX,
@@ -189,6 +191,10 @@ def _tail_text(text: str, max_bytes: int) -> str:
 # them by tool name attaches a result to the wrong call. One tool's start and end
 # callbacks share a task, so a context variable pairs them exactly.
 _CALL_ID: ContextVar[str] = ContextVar("rune_tool_call_id", default="")
+
+
+def current_tool_call_id() -> str:
+    return _CALL_ID.get("")
 _call_seq = count(1)
 
 
@@ -588,6 +594,7 @@ class NativeAgentLoop(EventEmitter):
         self._stall = StallState()
         self._token_budget = TokenBudget()
         self._running = False
+        self._workspace_root = ""
         self._cancel_event = asyncio.Event()
         # Wind-down 5-stage state machine (#14)
         self._wind_down_phase: WindDownPhase = "none"
@@ -624,6 +631,7 @@ class NativeAgentLoop(EventEmitter):
         self._hard_failure_signatures: set[str] = set()
         self._hard_failures: list[str] = []
         self._verification = VerificationState()
+        self._artifact_receipts: list[dict[str, Any]] = []
         self._structured_writes: int = 0
         self._budget_upgraded_for_code: bool = False
         self._unverified_completion_blocks: int = 0
@@ -641,7 +649,7 @@ class NativeAgentLoop(EventEmitter):
         self._recent_failed_tool_nudge: str = ""
         # Injected callbacks (set from CLI / controller)
         self._approval_callback: Callable[[str, str], Awaitable[bool]] | None = None
-        self._ask_user_callback: Any = None  # AskUserCallback
+        self._ask_user_callback: AskUserCallback | None = None
         # Last classification result (for domain change detection across turns)
         self._last_goal_type: str = ""
         # Whether this run's task is verified by execution (tests/commands). When
@@ -654,6 +662,7 @@ class NativeAgentLoop(EventEmitter):
         self._rehydration_recorder: Any = None
         self._rehydration_trigger: Any = None
         self._gate_blocked_count: int = 0
+        self._completion_check: dict[str, str] | None = None
         self._output_integrity_fired: int = 0
         self._citation_support_fired: int = 0
         self._evidence_gate: Any = None
@@ -674,7 +683,7 @@ class NativeAgentLoop(EventEmitter):
         """Set the approval callback: (capability, reason) -> approved."""
         self._approval_callback = cb
 
-    def set_ask_user_callback(self, cb: Any) -> None:
+    def set_ask_user_callback(self, cb: AskUserCallback | None) -> None:
         """Set the ask_user callback (AskUserCallback type)."""
         self._ask_user_callback = cb
 
@@ -687,6 +696,7 @@ class NativeAgentLoop(EventEmitter):
         self._wind_down_write_forced = False
         self._step_start_time = 0.0
         self._last_activity = 0.0
+        self._last_answer_text = ""
         self._consecutive_reads_without_write = 0
         self._pending_verification_nudge = False
         self._files_written.clear()
@@ -696,6 +706,7 @@ class NativeAgentLoop(EventEmitter):
         self._hard_failure_signatures.clear()
         self._hard_failures.clear()
         self._verification = VerificationState()
+        self._artifact_receipts = []
         self._structured_writes = 0
         self._budget_upgraded_for_code = False
         self._unverified_completion_blocks = 0
@@ -712,6 +723,7 @@ class NativeAgentLoop(EventEmitter):
         self._rehydration_recorder = None
         self._rehydration_trigger = None
         self._gate_blocked_count = 0
+        self._completion_check = None
         self._output_integrity_fired = 0
         self._citation_support_fired = 0
         # Evidence Gate (benchmark output-correctness verification; opt-in)
@@ -749,6 +761,8 @@ class NativeAgentLoop(EventEmitter):
             return "skip", None
         try:
             state, message = await self._evidence_gate.verdict()
+            if state == "fail" and message:
+                self._record_completion_block("Task verification", message)
             return str(state), message
         except Exception as exc:  # never let verification crash finalize
             log.warning("evidence_gate_check_error", error=str(exc)[:120])
@@ -763,15 +777,13 @@ class NativeAgentLoop(EventEmitter):
         ``("pass"|"fail"|"skip", evidence)``; ``"skip"`` when neither is detected.
         Never raises.
         """
-        import os as _os
-
         from rune.agent.auto_verify import (
             detect_test_command,
             detect_verify_command,
             run_verify,
         )
 
-        cwd = _os.getcwd()
+        cwd = self._workspace_root or os.getcwd()
         cmd = detect_test_command(cwd) or detect_verify_command(cwd)
         if not cmd:
             return "skip", ""
@@ -794,6 +806,7 @@ class NativeAgentLoop(EventEmitter):
         state, msg = await self._auto_verify()
         if state == "fail" and msg:
             log.info("auto_verify_block", step=self._step)
+            self._record_completion_block("Project checks", msg)
             self._auto_verify_failure = msg
             messages = self._inject_system_message(
                 messages,
@@ -853,6 +866,7 @@ class NativeAgentLoop(EventEmitter):
         state, msg = await self._requirement_gate_obj.verdict(artifact)
         if state == "fail" and msg:
             log.info("requirement_gate_block", step=self._step)
+            self._record_completion_block("Output requirements", msg)
             messages = self._inject_system_message(messages, msg)
             blocked_count += 1
             self._gate_blocked_count = blocked_count
@@ -878,7 +892,9 @@ class NativeAgentLoop(EventEmitter):
         if bad:
             self._output_integrity_fired += 1
             log.info("output_integrity_block", step=self._step, n=len(bad))
-            messages = self._inject_system_message(messages, build_nudge(bad))
+            note = build_nudge(bad)
+            self._record_completion_block("Citation retrieval", note)
+            messages = self._inject_system_message(messages, note)
             blocked_count += 1
             self._gate_blocked_count = blocked_count
             return False, messages, blocked_count
@@ -933,7 +949,9 @@ class NativeAgentLoop(EventEmitter):
         if bad:
             self._citation_support_fired += 1
             log.info("citation_support_block", step=self._step, n=len(bad))
-            messages = self._inject_system_message(messages, build_support_note(bad))
+            note = build_support_note(bad)
+            self._record_completion_block("Citation support", note)
+            messages = self._inject_system_message(messages, note)
             blocked_count += 1
             self._gate_blocked_count = blocked_count
             return False, messages, blocked_count
@@ -957,12 +975,11 @@ class NativeAgentLoop(EventEmitter):
             "artifact now.",
         )
 
+    def _record_completion_block(self, name: str, detail: str) -> None:
+        self._completion_check = {"name": name, "detail": detail[:4000]}
+
     def _max_gate_reason(self) -> str:
-        """Reason to record when the gate-block budget is exhausted. For a
-        non-executable task the blocking gates are the soft quality gates
-        (requirement / depth / integrity) and a usable artifact already exists, so
-        report a warning rather than a hard failure. Executable tasks keep
-        failing: do not ship code whose tests/verification never passed."""
+        """Record unresolved checks without claiming that a file was produced."""
         return "max_gate_blocked" if self._requires_execution else "completed_gate_warnings"
 
     async def _finalize_gates(
@@ -1027,6 +1044,7 @@ class NativeAgentLoop(EventEmitter):
         self._running = True
         self._cancel_event.clear()
         self._reset_run_state()
+        self._workspace_root = (context or {}).get("workspace_root") or os.getcwd()
         self._replay_capture = None
         # T1-1: record the pre-task git ref now (before the agent
         # mutates the tree) so a distilled skill can later be A/B'd by replay.
@@ -1038,7 +1056,7 @@ class NativeAgentLoop(EventEmitter):
                 if getattr(get_config().skills, "capture_replay", False):
                     from rune.skills.capture import capture_head_ref
 
-                    _cwd = os.getcwd()
+                    _cwd = self._workspace_root
                     _ref = capture_head_ref(_cwd)
                     if _ref:
                         self._replay_capture = {"goal": goal, "cwd": _cwd, "head": _ref}
@@ -1232,7 +1250,10 @@ class NativeAgentLoop(EventEmitter):
                 except Exception:  # observability must never break the run
                     trace.evidence_gate = None
             trace.verification = self._verification.snapshot()
+            trace.artifact_receipts = list(self._artifact_receipts)
             trace.tests_passed_after_edit = self._verification.tests_passed_after_edit
+            if trace.reason in ("completed_gate_warnings", "max_gate_blocked"):
+                trace.completion_check = self._completion_check
             await self.emit("completed", trace)
 
             # On a verified-successful run, distil the tool trace into a skill
@@ -1252,18 +1273,23 @@ class NativeAgentLoop(EventEmitter):
 
         except asyncio.CancelledError:
             self._status = AgentStatus.IDLE
-            return CompletionTrace(reason="cancelled")
+            return CompletionTrace(reason="cancelled", artifact_receipts=list(self._artifact_receipts))
         except Exception as exc:
             self._status = AgentStatus.IDLE
             log.error("agent_loop_error", error=str(exc))
             await self.emit("error", exc)
-            return CompletionTrace(reason=f"error: {exc}")
+            return CompletionTrace(reason=f"error: {exc}", artifact_receipts=list(self._artifact_receipts))
         finally:
             self._running = False
 
     async def cancel(self) -> None:
         """Request cancellation of the running loop."""
         self._cancel_event.set()
+
+    @property
+    def artifact_receipts(self) -> list[dict[str, Any]]:
+        """Return checks for files published so far, including during cancellation."""
+        return copy.deepcopy(self._artifact_receipts)
 
     def _select_tools(self, classification: ClassificationResult) -> list[str]:
         """Select tool subset based on goal classification."""
@@ -1418,6 +1444,8 @@ class NativeAgentLoop(EventEmitter):
         # Map GoalType → goal_category for prompt assembly
         from rune.config.defaults import TOKEN_OPTIMIZATION_ENABLED
 
+        workspace_root = (context or {}).get("workspace_root") or self._workspace_root or os.getcwd()
+
         if TOKEN_OPTIMIZATION_ENABLED:
             _CATEGORY_MAP: dict[str, str] = {
                 "code_modify": "code",
@@ -1455,10 +1483,10 @@ class NativeAgentLoop(EventEmitter):
                 # not block the event loop (streaming, MCP, UI) before the first
                 # token. Behaviour and result are unchanged.
                 repo_map_text = await asyncio.to_thread(
-                    build_repo_map_sync, os.getcwd(), max_tokens=2048
+                    build_repo_map_sync, workspace_root, max_tokens=2048
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("repo_map_build_failed", error=str(exc)[:200])
 
         # Detect connected MCP servers for prompt guide
         from rune.capabilities.registry import get_capability_registry
@@ -1477,7 +1505,7 @@ class NativeAgentLoop(EventEmitter):
             goal_category=goal_category,
             channel=getattr(self._config, "channel", None),
             environment={
-                "cwd": os.getcwd(),
+                "cwd": workspace_root,
                 "home": os.path.expanduser("~"),
             },
             repo_map=repo_map_text,
@@ -1532,11 +1560,10 @@ class NativeAgentLoop(EventEmitter):
         # Observation masking constant
         _OBSERVATION_TRUNCATE_LIMIT = 4000
 
-        _last_tool_params: dict[str, Any] = {}
+        _tool_params: ContextVar[dict[str, Any] | None] = ContextVar("rune_run_tool_params", default=None)
 
         async def _on_tool_start(cap_name: str, params: dict[str, Any]) -> None:
-            nonlocal _last_tool_params
-            _last_tool_params = params
+            _tool_params.set(params)
             self._last_activity = time.monotonic()  # (#30) activity on tool call
             self._stall.mark_activity(cap_name)
             _step_tool_calls.append(cap_name)
@@ -1569,14 +1596,15 @@ class NativeAgentLoop(EventEmitter):
             "file_write" + any → "file_write" (unchanged)
             """
             if name == "bash_execute":
-                cmd = params.get("command", "")
-                _skip = {"uv", "python", "python3", "npx", "run", "exec", "sudo", "-m", "-c"}
-                for part in cmd.split():
-                    if part not in _skip and not part.startswith("-"):
-                        return f"bash:{part}"
+                from rune.utils.shell_command import command_name
+
+                command = command_name(params.get("command", ""))
+                if command:
+                    return f"bash:{command}"
             return name
 
         async def _on_tool_end(cap_name: str, result: CapabilityResult) -> None:
+            _last_tool_params = _tool_params.get() or {}
             self._last_activity = time.monotonic()  # (#30) activity on tool result
 
             # A throwaway best-of-K sample (RUNE_IN_BEST_OF set in the attempt
@@ -1630,7 +1658,7 @@ class NativeAgentLoop(EventEmitter):
                     pass  # Prediction recording must never break the agent loop
 
             # Update evidence counters
-            if cap_name in ("file_read", "document_read"):
+            if cap_name in ("file_read", "document_read", "document_bundle_inspect"):
                 evidence.file_reads += 1
                 evidence.reads += 1
                 self._consecutive_reads_without_write += 1  # (#27)
@@ -1639,14 +1667,16 @@ class NativeAgentLoop(EventEmitter):
                 if fp and fp not in self._files_read:
                     self._files_read.add(fp)
                 evidence.unique_file_reads = len(self._files_read)
-            elif cap_name in ("document_create", "document_bundle") and result.success:
+            elif cap_name in ("document_create", "document_bundle", "document_bundle_update") and result.success:
                 evidence.writes += 1
                 self._consecutive_reads_without_write = 0
                 metadata = result.metadata or {}
                 paths = metadata.get("paths", []) or [metadata.get("path", "")]
                 self._files_written.update(p for p in paths if p)
-                if cap_name == "document_bundle" and metadata.get("verified"):
+                if cap_name in ("document_bundle", "document_bundle_update") and metadata.get("verified"):
                     evidence.verifications += 1
+                    if isinstance(metadata.get("receipt"), dict):
+                        self._artifact_receipts.append(metadata["receipt"])
             elif cap_name in ("file_write", "file_edit", "file_delete"):
                 evidence.writes += 1
                 self._consecutive_reads_without_write = 0  # (#27) reset
@@ -1804,12 +1834,9 @@ class NativeAgentLoop(EventEmitter):
         )
         tool_functions = build_tool_set(adapter_opts)
 
-        # Wire ask_user callback if set
-        if self._ask_user_callback is not None:
-            from rune.capabilities.ask_user import reset_ask_user_count, set_ask_user_callback
+        from rune.capabilities.ask_user import set_ask_user_callback
 
-            set_ask_user_callback(self._ask_user_callback)
-            reset_ask_user_count()
+        set_ask_user_callback(self._ask_user_callback)
 
         advisor_service = AdvisorService.for_episode(model)
 
@@ -2296,6 +2323,8 @@ class NativeAgentLoop(EventEmitter):
                     goal,
                     message_history=messages or None,
                     usage_limits=usage_limits,
+                    workspace_root=self._workspace_root,
+                    verification_callback=self._verification.observe_command,
                 ) as stream:
                     # Inject persistent fail streak into this step (#P4)
                     if self._persistent_fail_streak:
@@ -2686,6 +2715,10 @@ class NativeAgentLoop(EventEmitter):
                             f"show the real output before declaring done.",
                         )
                     elif _unverified_code():
+                        self._record_completion_block(
+                            "Verification after code changes",
+                            "No verification command has passed since the latest code change.",
+                        )
                         # Code changed but nothing verifies it yet. Don't take the
                         # model's word — nudge it to get tests green; if it can't,
                         # stop honestly (max_gate_blocked -> /escalate).
@@ -2880,6 +2913,10 @@ class NativeAgentLoop(EventEmitter):
                 # Same check here — the fast path isn't the only way to finish, so
                 # the full gate must not wave through unverified code either.
                 if _unverified_code():
+                    self._record_completion_block(
+                        "Verification after code changes",
+                        "No verification command has passed since the latest code change.",
+                    )
                     self._unverified_completion_blocks += 1
                     log.info(
                         "require_test_pass_block_fullgate",
@@ -3011,6 +3048,8 @@ class NativeAgentLoop(EventEmitter):
                         if r.required and r.status != "done"
                     ]
                     if _missing:
+                        if _ev_state != "fail":
+                            self._record_completion_block("Completion requirements", "\n".join(_missing))
                         messages = self._inject_system_message(
                             messages,
                             "[Completion Gate] Requirements not met: "

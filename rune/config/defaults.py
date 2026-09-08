@@ -132,7 +132,7 @@ HEALTH_CHECK_CACHE_TTL_MS = 15_000
 TOOLS_CHAT = [
     "think", "memory_search", "memory_save", "ask_user",
     "web_search", "web_fetch", "file_read", "file_write", "file_edit",
-    "document_read", "document_create", "document_bundle",
+    "document_read", "document_bundle_inspect", "document_create", "document_bundle", "document_bundle_update",
 ]
 
 TOOLS_WEB = [
@@ -141,7 +141,7 @@ TOOLS_WEB = [
     "browser_navigate", "browser_observe", "browser_act",
     "browser_batch", "browser_extract", "browser_find",
     "browser_screenshot", "file_read",
-    "document_read",
+    "document_read", "document_bundle_inspect",
 ]
 
 TOOLS_RESEARCH = [
@@ -150,5 +150,5 @@ TOOLS_RESEARCH = [
     "file_read", "file_list", "file_search",
     "code_analyze", "code_find_def", "code_find_refs",
     "code_impact", "project_map",
-    "document_read", "document_create", "document_bundle",
+    "document_read", "document_bundle_inspect", "document_create", "document_bundle", "document_bundle_update",
 ]

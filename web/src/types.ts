@@ -23,6 +23,7 @@ export const SSE_EVENT_TYPES = [
   'text_delta',
   'approval_request',
   'question',
+  'question_closed',
   'context_compaction',
   'delegate_event',
   'command_result',
@@ -52,13 +53,28 @@ export interface AgentStartData {
 export interface TrustInfo {
   verified: boolean;
   reason: string;
+  completionStatus?: 'completed' | 'incomplete' | 'failed' | 'cancelled' | 'unknown';
+  verificationStatus?: 'passed' | 'failed' | 'not_checked' | 'inconclusive';
+  verificationRequired?: boolean;
+  completionCheck?: { name: string; detail: string } | null;
+  canEscalate?: boolean;
+  verification?: {
+    required: boolean;
+    status: 'pass' | 'fail' | 'unverified';
+    command?: string;
+  } | null;
   /** A step hit the tool-round cap and was cut off without a final LLM turn —
       the answer may silently omit work that never ran. */
   budgetExhausted?: boolean;
-  /** Project tests after the last code change: green, not green, or null when
-      nothing was edited. Weaker than an Evidence Gate check — the suite may
-      have passed before the change too — so it never reads as "verified". */
+  /** Test freshness after code changes; this does not establish task coverage. */
   testsPassedAfterEdit?: boolean | null;
+  artifactReceipts?: Array<{
+    kind: 'document_bundle';
+    revision: string;
+    source_sha256: string;
+    artifacts: Array<{ path: string; sha256: string }>;
+    checks: Record<'native_content' | 'source_metrics' | 'visual_layout' | 'task_acceptance', string>;
+  }>;
   evidenceGate?: {
     hasCheck: boolean;
     lastVerdict: string;
@@ -70,6 +86,7 @@ export interface TrustInfo {
 }
 export interface AgentCompleteData { success: boolean; answer: string; durationMs: number; usage?: TokenUsage; trust?: TrustInfo }
 export interface AgentErrorData { error: string }
+export interface AgentAbortedData { runId?: string; trust?: TrustInfo }
 export interface StepStartData { stepNumber: number; tokens: number }
 export interface ThinkingData { text: string }
 export interface ToolCallData {
@@ -95,6 +112,7 @@ export interface ApprovalRequestData { id: string; command: string; riskLevel: s
 export interface QuestionData {
   id: string;
   question: string;
+  callId?: string;
   options?: Array<{ label: string; description?: string }>;
   inputMode?: 'text' | 'secret';
 }
@@ -302,6 +320,7 @@ export interface StepInfo {
 export interface PendingQuestion {
   id: string;
   question: string;
+  callId?: string;
   options?: Array<{ label: string; description?: string }>;
   inputMode?: 'text' | 'secret';
 }

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -61,8 +61,6 @@ def __getattr__(name: str) -> Any:
 
 from rune.agent.message_utils import validate_tool_pairs
 from rune.agent.model_traits import (
-    is_temperature_error,
-    note_temperature_rejected,
     supports_reasoning_effort,
     traits,
 )
@@ -125,32 +123,7 @@ _VERIFY_ON_STOP_ENV = "RUNE_VERIFY_ON_STOP"
 _MSG_CACHE_ENV = "RUNE_MSG_CACHE"
 # Anthropic fast mode (research preview, Opus-class models only). Opt-in.
 _FAST_MODE_ENV = "RUNE_FAST_MODE"
-# Structured match on the bash command string (documented runner invocations,
-# not NL). Matching is per shell segment and anchored at the command head, so
-# "grep -r pytest" or "pip install pytest" never count as running tests.
-_TEST_HEAD_RE = None  # compiled lazily
-
-
-def _is_test_command(command: str) -> bool:
-    import re
-    global _TEST_HEAD_RE
-    if _TEST_HEAD_RE is None:
-        _TEST_HEAD_RE = re.compile(
-            r"^(pytest|py\.test|tox"
-            r"|make\s+test|go\s+test|cargo\s+test|yarn\s+test"
-            r"|npm\s+(run\s+)?test"
-            r"|python3?\s+-m\s+(pytest|unittest)"
-            r"|python3?\s+\S*runtests?\.py"
-            r"|\S*bin/test)\b"
-        )
-    for seg in re.split(r"[;&|]+", command or ""):
-        words = seg.strip().split()
-        while words and "=" in words[0]:  # skip leading env assignments
-            words = words[1:]
-        if words and _TEST_HEAD_RE.match(" ".join(words[:4])):
-            return True
-    return False
-
+from rune.agent.bash_parsing import is_test_command as _is_test_command
 
 _VERIFY_ON_STOP_MSG = (
     "You edited code this run but have not run any test since the last edit. "
@@ -983,8 +956,17 @@ class StreamResult:
         provider_extra: dict[str, str] | None = None,
         extra_headers: dict[str, str] | None = None,
         explore_budget: int = 0,
+        workspace_root: str = "",
+        request: str | None = None,
+        verification_callback: Callable[[str, bool, str], Any] | None = None,
     ) -> None:
         self._model = model
+        self._verification_callback = verification_callback
+        self._workspace_root = os.path.abspath(os.path.expanduser(workspace_root or os.getcwd()))
+        self._request = request if request is not None else next(
+            (content_text(m.get("content", "")) for m in reversed(messages)
+             if m.get("role") == "user"), "",
+        )
         self._messages = list(messages)
         self._tool_schemas = tool_schemas
         self._tool_lookup = tool_lookup
@@ -1245,18 +1227,9 @@ class StreamResult:
                 }
 
             _ll = _litellm()
-            try:
-                self._stream = await _ll.acompletion(**_acompletion_kwargs)
-            except _ll.BadRequestError as _e:
-                # Model rejected temperature and litellm didn't strip it; drop it
-                # and retry once, remembering for next time.
-                if "temperature" in _acompletion_kwargs and is_temperature_error(_e):
-                    note_temperature_rejected(self._model)
-                    _acompletion_kwargs.pop("temperature", None)
-                    log.warning("temperature_unsupported_retry", model=self._model)
-                    self._stream = await _ll.acompletion(**_acompletion_kwargs)
-                else:
-                    raise
+            from rune.llm.request_params import compatible_completion
+
+            self._stream = await compatible_completion(_ll.acompletion, _ll.BadRequestError, _acompletion_kwargs)
 
             text_this_turn = ""
             tool_calls_by_index: dict[int, dict[str, Any]] = {}
@@ -1528,14 +1501,13 @@ class StreamResult:
                     # nothing runnable.
                     _stop_check = None
                     if os.environ.get(_VOS_EXEC_ENV, "1") != "0":
-                        import os as _os2
                         _stop_check = await _run_stop_check(
-                            _os2.getcwd(),
+                            self._workspace_root,
                             getattr(self, "_vos_edited_paths", set()),
                         )
                     if _stop_check is not None:
                         _cmd, _out, _rc = _stop_check
-                        _MECH_CHECK.set("fail" if _rc != 0 else "pass")
+                        self._record_mechanical_check(_cmd, _out, _rc)
                         self._messages.append({
                             "role": "user", "content": (
                                 "You edited code and stopped without running "
@@ -1597,7 +1569,7 @@ class StreamResult:
                             "role": "assistant", "content": text_this_turn,
                         })
                     self._messages.append({
-                        "role": "user", "content": unresolved_stop_note(_missing),
+                        "role": "user", "content": unresolved_stop_note(_missing, self._request),
                     })
                     self._collected_text = ""
                     log.info("unresolved_artifact_nudge", missing=_missing)
@@ -1621,7 +1593,7 @@ class StreamResult:
                     from rune.agent.reobservation import observation_note
 
                     self._reobs_nudges = 1
-                    _note = observation_note(_reobs, os.getcwd())
+                    _note = observation_note(_reobs, self._workspace_root)
                     if _note:
                         if text_this_turn:
                             self._messages.append({
@@ -1767,15 +1739,19 @@ class StreamResult:
             getattr(self, "_vos_edited_paths", None)
             and os.environ.get(_VOS_EXEC_ENV, "1") != "0"
         ):
-            import os as _os4
             _final = await _run_stop_check(
-                _os4.getcwd(), self._vos_edited_paths,
+                self._workspace_root, self._vos_edited_paths,
                 getattr(self, "_vos_pretest_files", None),
             )
             if _final is not None:
                 _fcmd, _fout, _frc = _final
-                _MECH_CHECK.set("fail" if _frc != 0 else "pass")
+                self._record_mechanical_check(_fcmd, _fout, _frc)
                 log.info("final_check_executed", cmd=_fcmd, rc=_frc)
+
+    def _record_mechanical_check(self, command: str, output: str, returncode: int) -> None:
+        _MECH_CHECK.set("fail" if returncode else "pass")
+        if self._verification_callback is not None:
+            self._verification_callback(command, returncode == 0, output)
 
     _TOOL_GROUPS: dict[str, str] = {
         "browser_act": "browser", "browser_navigate": "browser",
@@ -1926,7 +1902,7 @@ class StreamResult:
                             from rune.agent.reobservation import bulk_targets
 
                             _bulk = bulk_targets(
-                                str(args.get("command", "")), os.getcwd()
+                                str(args.get("command", "")), self._workspace_root
                             )
                             if _bulk:
                                 if not hasattr(self, "_reobs_dirs"):
@@ -1936,7 +1912,7 @@ class StreamResult:
                             from rune.agent.reobservation import mutation_dir
 
                             _md = mutation_dir(
-                                str(args.get("path", "")), os.getcwd()
+                                str(args.get("path", "")), self._workspace_root
                             )
                             if _md:
                                 if not hasattr(self, "_reobs_removed"):
@@ -1958,13 +1934,11 @@ class StreamResult:
                                     # Which test files exist BEFORE the work
                                     # starts editing. Only these can answer
                                     # for it at the end.
-                                    import os as _os3
-
                                     from rune.agent.rejection_sampler import (
                                         _enumerate_test_files,
                                     )
                                     self._vos_pretest_files = set(
-                                        _enumerate_test_files(_os3.getcwd())
+                                        _enumerate_test_files(self._workspace_root)
                                     )
                                 self._vos_edited_paths.add(str(_vp))
                             elif not _vp:
@@ -1994,19 +1968,10 @@ class StreamResult:
         if not provenance_enabled():
             return None
         if getattr(self, "_artifact_ledger", None) is None:
-            # Every user turn, not just the first: memory and context get
-            # injected ahead of the goal, so "the first user message" is
-            # often not the request.
-            parts = [
-                m["content"] for m in self._messages
-                if isinstance(m, dict) and m.get("role") == "user"
-                and isinstance(m.get("content"), str)
-            ]
-            import os as _os
             self._artifact_ledger = ArtifactLedger.for_request(
-                "\n".join(parts), root=_os.getcwd()
+                self._request, root=self._workspace_root,
             )
-            self._artifact_request = "\n".join(parts)
+            self._artifact_request = self._request
             log.info("artifact_ledger_init",
                      referenced=sorted(self._artifact_ledger.referenced)[:10])
         return self._artifact_ledger
@@ -2070,11 +2035,17 @@ class StreamResult:
         )
         if roles:
             ledger.roles.update(roles)
+            for name, paths in ledger.requested_paths.items():
+                if roles.get(name) != "input":
+                    continue
+                for path in paths:
+                    if "/" in path and not ledger.resolve_path(path).exists():
+                        ledger.record_read(path, False)
             log.info("artifact_roles", roles=roles)
             from pathlib import Path as _FsPath
 
             from rune.agent.postconditions import derive
-            self._postconditions = derive(roles, _FsPath.cwd())
+            self._postconditions = derive(roles, _FsPath(self._workspace_root))
 
     def _revert_circumvented_writes(self) -> str:
         """Undo a refused artifact that appeared anyway.
@@ -2107,7 +2078,7 @@ class StreamResult:
             return ""
         notes: list[str] = []
         for name in sorted(candidates):
-            p = _PathT.cwd() / name
+            p = _PathT(ledger.observed_paths.get(name, self._workspace_root + "/" + name))
             if not p.exists():
                 continue
             try:
@@ -2132,7 +2103,7 @@ class StreamResult:
         from pathlib import Path as _FsPath
 
         from rune.agent.postconditions import check
-        return check(conds, _FsPath.cwd())
+        return check(conds, _FsPath(self._workspace_root))
 
     def _unresolved_artifacts(self) -> list[str]:
         ledger = self._ledger()
@@ -2152,13 +2123,14 @@ class StreamResult:
         if ledger is None:
             return None
         target = params.get("path") or params.get("file_path") or ""
-        if not target or path_exists(str(target)):
+        if not target or path_exists(str(target), self._workspace_root):
             return None
         if not ledger.is_phantom(str(target)):
             return None
         import os as _os
         _name = _os.path.basename(str(target))
         ledger.refused.add(_name)
+        ledger.observed_paths[_name] = str(ledger.resolve_path(str(target)))
         log.info("phantom_write_blocked", path=str(target))
         return phantom_write_error(_name)
 
@@ -2184,9 +2156,12 @@ class StreamResult:
         if name in _READ_TOOLS and target:
             # Whether the read found anything is a question about the
             # filesystem, not about how the tool phrased its answer.
-            ledger.record_read(str(target), path_exists(str(target)))
+            exists = path_exists(str(target), self._workspace_root)
+            ledger.record_read(
+                str(target), exists and not _looks_like_tool_failure(result), missing=not exists,
+            )
         if name in _WRITE_TOOLS and target:
-            ledger.record_write(str(target), path_exists(str(target)))
+            ledger.record_write(str(target), path_exists(str(target), self._workspace_root))
 
     async def _execute_tool(self, name: str, params: dict[str, Any]) -> str:
         """Execute a tool by name and return string result.
@@ -2246,6 +2221,16 @@ class StreamResult:
         # write tools, and the revert needs the classification to exist by
         # then. Self-guarded, so this costs one call per run at most.
         await self._classify_artifact_roles()
+        ledger = self._ledger()
+        if ledger is not None and ledger.known_absent & set(ledger.unresolved()):
+            target = params.get("path") or params.get("file_path") or params.get("directory")
+            if (target and name in self._READ_ONLY_TOOLS | {"document_read"}
+                    and not ledger._within_root(str(target))):
+                return (
+                    "BLOCKED: a required input is missing in the selected workspace. "
+                    "Do not search unrelated directories for a replacement. "
+                    "Report the missing input and ask the user for its location."
+                )
         _phantom = self._phantom_write_check(name, params)
         if _phantom:
             return _phantom
@@ -2414,6 +2399,8 @@ class LiteLLMAgent:
         *,
         message_history: list[Any] | None = None,
         usage_limits: Any = None,
+        workspace_root: str = "",
+        verification_callback: Callable[[str, bool, str], Any] | None = None,
     ) -> AsyncIterator[StreamResult]:
         """Start a streaming run. Mirrors ``Agent.run_stream()``."""
         # Build messages list
@@ -2478,6 +2465,9 @@ class LiteLLMAgent:
             provider_extra=self._provider_extra,
             extra_headers=self._extra_headers,
             explore_budget=self._explore_budget,
+            workspace_root=workspace_root,
+            request=goal,
+            verification_callback=verification_callback,
         )
         self._last_stream_result = stream_result
 

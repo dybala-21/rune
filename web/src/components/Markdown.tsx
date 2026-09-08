@@ -1,4 +1,5 @@
-import type { ReactNode } from 'react';
+import { createContext, useContext, type ReactNode } from 'react';
+import { artifactHref } from '../utils/artifactLinks';
 import { HighlightedCode } from './Code';
 import { CopyButton } from './CopyButton';
 
@@ -7,10 +8,12 @@ import { CopyButton } from './CopyButton';
 // lists, and inline bold/italic/code/links. Deliberately small — enough to read
 // assistant output and .md files at a glance, not a full CommonMark engine.
 
-export function Markdown({ content }: { content: string }) {
+const ArtifactSession = createContext<string | undefined>(undefined);
+
+export function Markdown({ content, sessionId }: { content: string; sessionId?: string }) {
   const blocks = content.split(/(```[\s\S]*?```)/g);
   return (
-    <>
+    <ArtifactSession.Provider value={sessionId}>
       {blocks.map((block, i) => {
         if (block.startsWith('```') && block.endsWith('```')) {
           const inner = block.slice(3, -3);
@@ -44,7 +47,7 @@ export function Markdown({ content }: { content: string }) {
         if (!block || !block.trim()) return null;
         return <RichContent key={i} text={block} />;
       })}
-    </>
+    </ArtifactSession.Provider>
   );
 }
 
@@ -202,16 +205,17 @@ function renderList(list: MdList, key: number): ReactNode {
 }
 
 function InlineFormatted({ text }: { text: string }) {
+  const sessionId = useContext(ArtifactSession);
   const parts = text.split(/(\*\*[^*]+\*\*|~~[^~]+~~|\*[^*]+\*|`[^`]+`|\[[^\]]+\]\([^)]+\))/g);
   return (
     <>
       {parts.map((part, i) => {
         if (part.startsWith('**') && part.endsWith('**'))
-          return <strong key={i} style={{ fontWeight: 600 }}>{part.slice(2, -2)}</strong>;
+          return <strong key={i} style={{ fontWeight: 600 }}><InlineFormatted text={part.slice(2, -2)} /></strong>;
         if (part.startsWith('~~') && part.endsWith('~~'))
-          return <del key={i} style={{ opacity: 0.7 }}>{part.slice(2, -2)}</del>;
+          return <del key={i} style={{ opacity: 0.7 }}><InlineFormatted text={part.slice(2, -2)} /></del>;
         if (part.startsWith('*') && part.endsWith('*') && !part.startsWith('**'))
-          return <em key={i}>{part.slice(1, -1)}</em>;
+          return <em key={i}><InlineFormatted text={part.slice(1, -1)} /></em>;
         if (part.startsWith('`') && part.endsWith('`'))
           return (
             <code key={i} style={{
@@ -220,8 +224,12 @@ function InlineFormatted({ text }: { text: string }) {
             }}>{part.slice(1, -1)}</code>
           );
         const linkMatch = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
-        if (linkMatch)
-          return <a key={i} href={linkMatch[2]} target="_blank" rel="noopener noreferrer">{linkMatch[1]}</a>;
+        if (linkMatch) {
+          const href = artifactHref(linkMatch[2], sessionId);
+          return href
+            ? <a key={i} href={href} target="_blank" rel="noopener noreferrer">{linkMatch[1]}</a>
+            : <span key={i}>{linkMatch[1]}</span>;
+        }
         return <span key={i}>{part}</span>;
       })}
     </>

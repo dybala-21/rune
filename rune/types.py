@@ -252,6 +252,8 @@ class CompletionTrace:
     tests_passed_after_edit: bool | None = None
     # Tool-event verification state, when available.
     verification: dict[str, Any] | None = None
+    artifact_receipts: list[dict[str, Any]] = field(default_factory=list)
+    completion_check: dict[str, str] | None = None
 
 
 # LLM

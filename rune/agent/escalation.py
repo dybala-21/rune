@@ -24,13 +24,18 @@ _HINT_REASONS = ("max_gate_blocked", "advisor_abort")
 _GOAL_STUCK_CAUSES = ("stagnation", "max_iterations", "budget")
 
 
+def can_escalate(reason: str) -> bool:
+    """Whether the stop reason supports offering a stronger-model retry."""
+    return reason in _HINT_REASONS
+
+
 def escalation_hint(reason: str) -> str | None:
     """Return a one-line escalation suggestion, or None.
 
     Shown only on a terminal local failure AND when an escalation profile is
     configured, so the suggestion is always actionable.
     """
-    if reason not in _HINT_REASONS:
+    if not can_escalate(reason):
         return None
     from rune.config import get_config
 
@@ -66,8 +71,7 @@ _HONEST_STOP_NOTES = {
         "shipping an unverified result."
     ),
     "completed_gate_warnings": (
-        "Delivered with caveats: the artifact exists but some quality checks did "
-        "not fully pass — treat it as unverified."
+        "The response was returned, but completion checks remain unresolved."
     ),
     "checks_failed": (
         "Not marking this done: the last test run on this work FAILED and no "

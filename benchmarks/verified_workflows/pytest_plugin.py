@@ -8,11 +8,15 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def isolate_native_embedding(monkeypatch):
+def isolate_native_embedding(monkeypatch, request):
     from rune.llm.local_embedding import LocalEmbeddingEngine
+
+    if request.node.get_closest_marker("embedding_engine"):
+        return
 
     def unavailable(*args, **kwargs):
         raise RuntimeError("Native embeddings excluded from verified-workflow regression run")
 
     monkeypatch.setattr(LocalEmbeddingEngine, "_activate_model", unavailable)
     monkeypatch.setattr(LocalEmbeddingEngine, "_download_model", unavailable)
+    monkeypatch.setattr(LocalEmbeddingEngine, "_call", unavailable)

@@ -7,8 +7,10 @@ non-interactive mode handling.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -64,50 +66,78 @@ AskUserCallback = Callable[[AskUserParams], Awaitable[UserResponse]]
 
 # Session state
 
-_ask_count: int = 0
 _DEFAULT_MAX_ASK: int = 2
-_max_ask_limit: int = _DEFAULT_MAX_ASK
-_response_callback: AskUserCallback | None = None
+
+
+@dataclass
+class _AskSession:
+    callback: AskUserCallback | None = None
+    count: int = 0
+    limit: int = _DEFAULT_MAX_ASK
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+_session: ContextVar[_AskSession | None] = ContextVar("rune_ask_user_session", default=None)
+
+
+def _current_session() -> _AskSession:
+    state = _session.get()
+    if state is None:
+        state = _AskSession()
+        _session.set(state)
+    return state
 
 
 def set_ask_user_callback(callback: AskUserCallback | None) -> None:
     """Set the callback that delivers the question to the user (TUI/CLI)."""
-    global _response_callback
-    _response_callback = callback
+    _session.set(_AskSession(callback=callback))
 
 
 def set_ask_user_limit(limit: int) -> None:
     """Adjust the per-session ask limit (clamped to 1..6)."""
-    global _max_ask_limit
-    _max_ask_limit = max(1, min(limit, 6))
+    _session.set(replace(_current_session(), limit=max(1, min(limit, 6))))
 
 
 def reset_ask_user_count() -> None:
     """Reset counters at the start of a new session."""
-    global _ask_count, _max_ask_limit
-    _ask_count = 0
-    _max_ask_limit = _DEFAULT_MAX_ASK
+    _session.set(_AskSession(callback=_current_session().callback))
 
 
 def get_ask_user_count() -> int:
     """Return the current session ask count (useful for tests)."""
-    return _ask_count
+    return _current_session().count
+
+
+def user_response(params: AskUserParams, answer: str, selected_index: int | None = None) -> UserResponse:
+    """Normalize channel input while preserving selection versus free text."""
+    if selected_index is None or selected_index == -1:
+        return UserResponse(selected_index=-1, answer=answer, raw_input=answer, free_text=True)
+    if (isinstance(selected_index, bool) or not isinstance(selected_index, int)
+            or not params.options or not 0 <= selected_index < len(params.options)):
+        raise ValueError("Selected option is not available for this question")
+    return UserResponse(selected_index=selected_index, answer=params.options[selected_index].label,
+                        raw_input=answer, free_text=False)
 
 
 # Capability implementation
 
 async def ask_user(params: AskUserParams) -> CapabilityResult:
     """Ask the user a question."""
-    global _ask_count
+    state = _current_session()
+    async with state.lock:
+        return await _ask_user(params, state)
+
+
+async def _ask_user(params: AskUserParams, state: _AskSession) -> CapabilityResult:
 
     log.debug("ask_user", urgency=params.urgency, question=params.question, reason=params.reason)
 
     # Session limit
-    if _ask_count >= _max_ask_limit:
+    if state.count >= state.limit:
         return CapabilityResult(
             success=False,
             error=(
-                f"Maximum ask_user calls ({_max_ask_limit}) reached for this session. "
+                f"Maximum ask_user calls ({state.limit}) reached for this session. "
                 "Make a decision based on available information."
             ),
             suggestions=[
@@ -117,7 +147,7 @@ async def ask_user(params: AskUserParams) -> CapabilityResult:
         )
 
     # Non-interactive mode
-    if _response_callback is None:
+    if state.callback is None:
         log.info("ask_user_blocked_non_interactive", question=params.question)
         return CapabilityResult(
             success=False,
@@ -134,10 +164,10 @@ async def ask_user(params: AskUserParams) -> CapabilityResult:
         )
 
     # Interactive: ask the user
-    _ask_count += 1
+    state.count += 1
 
     try:
-        response = await _response_callback(params)
+        response = await state.callback(params)
         raw_input = response.raw_input if response.raw_input is not None else response.answer
 
         # Empty response - user skipped or dismissed the question
@@ -167,7 +197,7 @@ async def ask_user(params: AskUserParams) -> CapabilityResult:
                 "freeText": response.free_text,
                 "rawInput": raw_input,
                 "urgency": params.urgency,
-                "askCount": _ask_count,
+                "askCount": state.count,
             },
         )
     except Exception as exc:

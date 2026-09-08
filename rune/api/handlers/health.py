@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import platform
 import time
+from typing import Any
 
 from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict, Field
@@ -40,6 +41,7 @@ class SubsystemStatus(BaseModel):
     gateway: str = "ok"
     mcp: str = "disabled"
     scheduler: SchedulerStats = Field(default_factory=SchedulerStats)
+    embedding: dict[str, Any] = Field(default_factory=lambda: {"state": "idle"})
 
 
 class MemoryInfo(BaseModel):
@@ -72,6 +74,10 @@ def _subsystem_status() -> SubsystemStatus:
     health check at all.
     """
     status = SubsystemStatus()
+    from rune.llm import local_embedding
+
+    if local_embedding._engine is not None:
+        status.embedding = local_embedding._engine.health
 
     try:
         from rune.memory import manager as memory_manager

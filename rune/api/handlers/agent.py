@@ -213,11 +213,13 @@ async def _execute_agent(
 
         loop.set_approval_callback(_api_approval_cb)
 
+        from rune.capabilities.ask_user import AskUserParams, UserResponse, user_response
+
         async def _api_ask_user_cb(
-            question: str, options: list[str] | None = None
-        ) -> str:
-            log.info("api_ask_user_autonomous", run_id=run_id, question=question[:100])
-            return ""
+            params: AskUserParams,
+        ) -> UserResponse:
+            log.info("api_ask_user_autonomous", run_id=run_id, question=params.question[:100])
+            return user_response(params, "")
 
         loop.set_ask_user_callback(_api_ask_user_cb)
 

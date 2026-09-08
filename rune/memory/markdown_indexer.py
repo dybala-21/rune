@@ -6,7 +6,6 @@ embeds changed chunks, and maintains the FAISS index.
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import re
 from pathlib import Path
@@ -199,6 +198,30 @@ async def incremental_reindex(
     chunks_state: dict[str, Any] = state.get("chunks", {})
 
     current_chunks = collect_all_chunks()
+    probe = None
+    identity = state.get("model_fingerprint")
+    dimensions = state.get("embedding_dimensions")
+    indexed_ids: set[str] = set()
+    if current_chunks:
+        try:
+            from rune.llm.local_embedding import get_embedding_provider
+
+            provider = get_embedding_provider()
+            probe = await provider.embed_single(current_chunks[0]["text"])
+            identity = getattr(probe, "fingerprint", None)
+            if not identity:
+                raise ValueError("Embedding provenance is missing")
+            dimensions = len(probe)
+            vectors.select_model(identity, dimensions)
+            indexed_ids = vectors.indexed_ids({"md_fact", "md_daily", "md_profile", "md_rule"})
+            if state.get("model_fingerprint") != identity:
+                chunks_state = {}
+        except Exception as exc:
+            log.warning("indexer_model_unavailable", error=type(exc).__name__)
+            return {"added": 0, "updated": 0, "removed": 0, "unchanged": 0}
+    elif identity and dimensions:
+        vectors.select_model(identity, dimensions)
+        indexed_ids = vectors.indexed_ids({"md_fact", "md_daily", "md_profile", "md_rule"})
     current_ids = {c["id"] for c in current_chunks}
 
     stats = {"added": 0, "updated": 0, "removed": 0, "unchanged": 0}
@@ -207,17 +230,13 @@ async def incremental_reindex(
     to_embed: list[dict[str, Any]] = []
     for chunk in current_chunks:
         old = chunks_state.get(chunk["id"])
-        if old and old.get("hash") == chunk["hash"]:
+        if old and old.get("hash") == chunk["hash"] and chunk["id"] in indexed_ids:
             stats["unchanged"] += 1
             continue
-        if old:
-            stats["updated"] += 1
-        else:
-            stats["added"] += 1
         to_embed.append(chunk)
 
     # Find orphaned chunks (deleted from markdown)
-    orphaned = set(chunks_state.keys()) - current_ids
+    orphaned = (set(chunks_state.keys()) | indexed_ids) - current_ids
     stats["removed"] = len(orphaned)
 
     # Embed and add new/changed chunks
@@ -227,7 +246,9 @@ async def incremental_reindex(
             provider = get_embedding_provider()
 
             for chunk in to_embed:
-                embedding = await provider.embed_single(chunk["text"])
+                embedding = probe if probe is not None and chunk is current_chunks[0] else await provider.embed_single(chunk["text"])
+                if getattr(embedding, "fingerprint", None) != identity:
+                    raise ValueError("Embedding model changed during indexing")
                 meta = VectorMetadata(
                     type=chunk["type"],
                     id=chunk["id"],
@@ -235,7 +256,8 @@ async def incremental_reindex(
                     summary=chunk["text"][:200],
                     category=chunk.get("category", ""),
                 )
-                vectors.add(embedding, meta)
+                vectors.upsert(embedding, meta)
+                stats["updated" if chunk["id"] in chunks_state else "added"] += 1
 
                 chunks_state[chunk["id"]] = {
                     "hash": chunk["hash"],
@@ -248,6 +270,8 @@ async def incremental_reindex(
 
     # Remove orphaned entries from state (FAISS tombstoning handled by vector.py)
     for oid in orphaned:
+        if oid in indexed_ids:
+            vectors.delete_by_id(oid)
         chunks_state.pop(oid, None)
 
     # Persist the index before recording what it contains. Writing the state
@@ -261,6 +285,8 @@ async def incremental_reindex(
             return stats
 
     state["chunks"] = chunks_state
+    state["model_fingerprint"] = identity
+    state["embedding_dimensions"] = dimensions
     save_index_state(state)
 
     if stats["added"] or stats["updated"] or stats["removed"]:
@@ -278,7 +304,9 @@ async def full_rebuild(vectors: VectorStore | None = None) -> dict[str, int]:
 
     # Drop what is already loaded, or a rebuild appends a second copy of every
     # vector to the in-memory index.
-    with contextlib.suppress(Exception):
+    try:
         vectors.clear()
+    except Exception as exc:
+        log.warning("indexer_clear_failed", error=type(exc).__name__)
 
     return await incremental_reindex(vectors)

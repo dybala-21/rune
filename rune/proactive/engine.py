@@ -448,8 +448,13 @@ class ProactiveEngine:
             for tool, prob in result.tool_predictions:
                 if prob >= 0.6 and tool.startswith("bash:"):
                     cmd_name = tool.split(":", 1)[1]
+                    from rune.utils.shell_command import command_name
+
+                    if command_name(cmd_name) != cmd_name:
+                        continue
                     candidates.append(
                         Suggestion(
+                            id=f"behavior-command-{cmd_name}",
                             type="followup",
                             title=f"Run {cmd_name}?",
                             description=f"You usually run {cmd_name} here ({prob:.0%})",

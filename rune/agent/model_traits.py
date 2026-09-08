@@ -30,6 +30,8 @@ class ModelTraits:
     # for the models its DB knows about; a False here covers a family
     # the DB has wrong (gpt-5.5 rejects it while listed as supported).
     temperature: bool = True
+    max_completion_tokens: bool = False
+    responses_api: bool = False
 
 
 _DEFAULT = ModelTraits()
@@ -42,6 +44,7 @@ _STATIC: tuple[tuple[tuple[str, ...], ModelTraits], ...] = (
     (("anthropic", "opus"), ModelTraits(anthropic_wire=True, speed_param=True)),
     (("claude",), ModelTraits(anthropic_wire=True)),
     (("anthropic",), ModelTraits(anthropic_wire=True)),
+    (("gpt-6-astra",), ModelTraits(max_completion_tokens=True, responses_api=True)),
     (("gpt-5",), ModelTraits(temperature=False)),
 )
 
@@ -50,6 +53,7 @@ _STATIC: tuple[tuple[tuple[str, ...], ModelTraits], ...] = (
 # can't enumerate these ahead of time — claude-opus-4-8 rejects
 # temperature while claude-opus-4-6 accepts it.
 _TEMPERATURE_REJECTED: set[str] = set()
+_COMPLETION_TOKENS_REQUIRED: set[str] = set()
 
 
 def traits(model: str) -> ModelTraits:
@@ -62,6 +66,8 @@ def traits(model: str) -> ModelTraits:
             break
     if found.temperature and model in _TEMPERATURE_REJECTED:
         found = replace(found, temperature=False)
+    if model in _COMPLETION_TOKENS_REQUIRED:
+        found = replace(found, max_completion_tokens=True)
     return found
 
 
@@ -102,6 +108,10 @@ def supports_vision(model: str) -> bool:
 def note_temperature_rejected(model: str) -> None:
     """Record that *model* rejected temperature; traits() reflects it."""
     _TEMPERATURE_REJECTED.add(model)
+
+
+def note_completion_tokens_required(model: str) -> None:
+    _COMPLETION_TOKENS_REQUIRED.add(model)
 
 
 def is_temperature_error(exc: Exception) -> bool:

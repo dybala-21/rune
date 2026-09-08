@@ -304,7 +304,7 @@ def _cap_fast_lane_fetch(params: dict[str, Any]) -> dict[str, Any]:
 
 _FILE_MUTATING_CAPABILITIES = frozenset({
     "file_write", "file_edit", "file_delete",
-    "document_create", "document_bundle",
+    "document_create", "document_bundle", "document_bundle_update",
 })
 
 _BASH_CAPABILITY = "bash_execute"
@@ -525,7 +525,10 @@ def _build_typed_tool(
         # paths against the process cwd, which is the daemon's start dir when
         # serving the app — a bare "app.py" must mean the pinned project.
         if opts.workspace_root:
-            if cap_name.startswith("file_") or cap_name.startswith("document_"):
+            if (cap_name.startswith(("file_", "document_", "code_"))
+                    or cap_name == "project_map"):
+                if cap_name == "project_map" and not effective_params.get("path"):
+                    effective_params["path"] = "."
                 for _pk in ("file_path", "path", "target", "source_path", "directory"):
                     _pv = effective_params.get(_pk)
                     if (
@@ -535,6 +538,12 @@ def _build_typed_tool(
                         effective_params[_pk] = os.path.join(
                             opts.workspace_root, _pv,
                         )
+                if cap_name == "document_bundle_update" and isinstance(effective_params.get("changes"), dict):
+                    changes = dict(effective_params["changes"])
+                    source = changes.get("source_path")
+                    if isinstance(source, str) and source and not os.path.isabs(os.path.expanduser(source)):
+                        changes["source_path"] = os.path.join(opts.workspace_root, source)
+                    effective_params["changes"] = changes
             elif cap_name == _BASH_CAPABILITY and not effective_params.get("cwd"):
                 effective_params["cwd"] = opts.workspace_root
         if (
@@ -850,12 +859,8 @@ def _build_typed_tool(
     if param_model is not None:
         try:
             json_schema = param_model.model_json_schema()
-            schema = {
-                "type": "object",
-                "properties": json_schema.get("properties", {}),
-            }
-            if "required" in json_schema:
-                schema["required"] = json_schema["required"]
+            # Nested fields refer to root $defs; keep their validation contract intact.
+            schema = json_schema
             # Add field descriptions from model_fields
             for fname, finfo in param_model.model_fields.items():
                 if fname in schema["properties"]:
@@ -865,13 +870,9 @@ def _build_typed_tool(
             log.debug("tool_schema_fallback", tool=cap_name, error=str(exc)[:100])
     elif cap_def.raw_json_schema is not None:
         # MCP tools provide raw JSON schema without Pydantic model
-        raw = cap_def.raw_json_schema
-        schema = {
-            "type": "object",
-            "properties": raw.get("properties", {}),
-        }
-        if "required" in raw:
-            schema["required"] = raw["required"]
+        from copy import deepcopy
+
+        schema = deepcopy(cap_def.raw_json_schema)
 
     return ToolWrapper(
         name=cap_name,
@@ -1547,8 +1548,8 @@ def _validate_with_guardian(cap_name: str, params: dict[str, Any]) -> _GuardianR
                 if not result.allowed:
                     return _GuardianResult(blocked=True, reason=f"Guardian blocked source read: {result.reason}")
 
-        elif cap_name in ("file_read", "document_read"):
-            file_path = params.get("file_path") or params.get("path", "")
+        elif cap_name in ("file_read", "document_read", "document_bundle_inspect"):
+            file_path = params.get("file_path") or params.get("path") or params.get("directory", "")
             result = guardian.validate_file_read_path(file_path)
             if not result.allowed:
                 return _GuardianResult(blocked=True, reason=f"Guardian blocked file read: {result.reason}")

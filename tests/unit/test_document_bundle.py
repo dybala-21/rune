@@ -16,6 +16,7 @@ from rune.capabilities.document_bundle import document_bundle
 
 @pytest.fixture
 def office(tmp_path, monkeypatch):
+    monkeypatch.setenv("RUNE_BUNDLE_UPDATE_ENABLED", "1")
     guardian = SimpleNamespace(
         validate_file_path=lambda _: SimpleNamespace(allowed=True),
         validate_file_read_path=lambda _: SimpleNamespace(allowed=True),
@@ -90,6 +91,13 @@ async def test_failed_update_preserves_previous_version(office, monkeypatch, fai
                 Path(office.source_path).write_text("changed", encoding="utf-8")
 
         monkeypatch.setitem(bundle._RENDERERS, "docx", (render, "python-docx"))
+        from rune.capabilities.document_worker import render_snapshot
+
+        async def injected_render(payload):
+            return render_snapshot(payload)
+
+        # Inject at the renderer boundary; other tests use the real spawn worker.
+        monkeypatch.setattr(bundle, "_render_staged", injected_render)
     result = await document_bundle(office)
     assert not result.success
     assert pointer.read_bytes() == before

@@ -136,17 +136,15 @@ def get_prediction_engine() -> PredictionEngine:
             from rune.memory.store import get_memory_store
             store = get_memory_store()
             calls = store.get_recent_tool_calls(limit=200)
-            _skip = {"uv", "python", "python3", "npx", "run", "exec", "sudo", "-m", "-c"}
+            from rune.utils.shell_command import command_name
             for c in reversed(calls):  # oldest first
                 if not c.get("result_success", True):
                     continue  # Skip failed calls — don't learn failure patterns
                 name = c["tool_name"]
                 if name == "bash_execute":
-                    cmd = (c.get("params") or {}).get("command", "")
-                    for part in cmd.split():
-                        if part not in _skip and not part.startswith("-"):
-                            name = f"bash:{part}" if part else name
-                            break
+                    command = command_name((c.get("params") or {}).get("command", ""))
+                    if command:
+                        name = f"bash:{command}"
                 _engine.behavior_predictor.record_tool_call(name)
             if calls:
                 log.info("behavior_predictor_seeded", history=len(calls))

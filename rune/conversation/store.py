@@ -164,17 +164,27 @@ class ConversationStore:
             }
             if not contents:
                 return
+            from rune.llm.local_embedding import get_embedding_provider
+
+            provider = get_embedding_provider()
+            fingerprint = provider.fingerprint
+            cached = self.get_cached_embeddings(list(contents), fingerprint=fingerprint) if fingerprint else {}
             todo = {
                 h: c
                 for h, c in contents.items()
-                if h not in self.get_cached_embeddings(list(contents))
+                if h not in cached
             }
             if not todo:
                 return
-            from rune.llm.local_embedding import get_embedding_provider
-
-            vecs = await get_embedding_provider().embed([c[:500] for c in todo.values()])
-            self.cache_embeddings(dict(zip(todo.keys(), vecs, strict=True)))
+            items = list(todo.items())
+            for start in range(0, len(items), 64):
+                batch = items[start:start + 64]
+                vecs = await provider.embed([c[:500] for _, c in batch])
+                identity = getattr(vecs[0], "fingerprint", None)
+                if not identity or any(getattr(v, "fingerprint", None) != identity for v in vecs):
+                    raise ValueError("Embedding provenance is missing or mixed")
+                self.cache_embeddings(dict(zip([h for h, _ in batch], vecs, strict=True)),
+                                      fingerprint=identity)
         except Exception as exc:
             log.debug("embed_on_write_failed", error=str(exc)[:120])
 
@@ -528,7 +538,7 @@ class ConversationStore:
         ).fetchall()
         return [{"role": r[0], "content": r[1], "timestamp": r[2]} for r in rows]
 
-    def get_cached_embeddings(self, hashes: list[str]) -> dict[str, Any]:
+    def get_cached_embeddings(self, hashes: list[str], *, fingerprint: str = "") -> dict[str, Any]:
         """Return {content_hash: float32 ndarray} for any cached hashes.
 
         Embeddings are stored as raw float32 bytes and read with
@@ -540,21 +550,23 @@ class ConversationStore:
             return {}
         import numpy as np
 
-        want = set(hashes)
+        prefix = f"{fingerprint}:" if fingerprint else ""
+        want = {prefix + h: h for h in hashes}
         out: dict[str, Any] = {}
         for h, blob in self._conn.execute("SELECT content_hash, embedding FROM turn_embeddings"):
             if h in want:
-                out[h] = np.frombuffer(blob, dtype=np.float32)
+                out[want[h]] = np.frombuffer(blob, dtype=np.float32)
         return out
 
-    def cache_embeddings(self, embeddings: dict[str, Any]) -> None:
+    def cache_embeddings(self, embeddings: dict[str, Any], *, fingerprint: str = "") -> None:
         """Persist {content_hash: embedding} as raw float32 bytes."""
         import numpy as np
 
+        prefix = f"{fingerprint}:" if fingerprint else ""
         for h, vec in embeddings.items():
             blob = np.asarray(vec, dtype=np.float32).tobytes()
             self._conn.execute(
                 "INSERT OR REPLACE INTO turn_embeddings (content_hash, embedding) VALUES (?, ?)",
-                (h, blob),
+                (prefix + h, blob),
             )
         self._conn.commit()

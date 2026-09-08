@@ -170,59 +170,9 @@ def _render_docx(p: Path, params: DocumentCreateParams) -> None:
 
 
 def _render_pptx(p: Path, params: DocumentCreateParams) -> None:
-    from pptx import Presentation
-    from pptx.util import Inches
+    from rune.capabilities.document_slides import render_slides
 
-    prs = Presentation()
-    if params.title:
-        slide = prs.slides.add_slide(prs.slide_layouts[0])
-        slide.shapes.title.text = params.title
-        if len(slide.placeholders) > 1:
-            slide.placeholders[1].text = ""
-
-    current_body = None
-
-    def _new_content_slide(heading: str) -> None:
-        nonlocal current_body
-        slide = prs.slides.add_slide(prs.slide_layouts[1])
-        slide.shapes.title.text = heading
-        current_body = slide.placeholders[1].text_frame
-        current_body.clear()
-
-    for b in params.blocks:
-        if b.type == "heading":
-            _new_content_slide(b.text)
-        elif b.type in ("paragraph", "bullets"):
-            if current_body is None:
-                _new_content_slide(params.title or "Slide")
-            texts = b.items if b.type == "bullets" else [b.text]
-            for txt in texts:
-                para = current_body.add_paragraph()
-                para.text = txt
-        elif b.type == "table" and b.rows:
-            slide = prs.slides.add_slide(prs.slide_layouts[5])
-            rows, cols = len(b.rows), max(len(r) for r in b.rows)
-            shape = slide.shapes.add_table(
-                rows, cols, Inches(0.5), Inches(1.5), Inches(9), Inches(0.4 * rows)
-            )
-            for i, r in enumerate(b.rows):
-                for j in range(cols):
-                    shape.table.cell(i, j).text = str(r[j]) if j < len(r) else ""
-            current_body = None
-    if not prs.slides:
-        prs.slides.add_slide(prs.slide_layouts[6])
-    if params.font_family:
-        for slide in prs.slides:
-            for shape in slide.shapes:
-                frames = [shape.text_frame] if shape.has_text_frame else []
-                if shape.has_table:
-                    frames.extend(cell.text_frame for row in shape.table.rows for cell in row.cells)
-                for frame in frames:
-                    for paragraph in frame.paragraphs:
-                        paragraph.font.name = params.font_family
-                        for run in paragraph.runs:
-                            run.font.name = params.font_family
-    prs.save(str(p))
+    render_slides(p, params)
 
 
 def _render_pdf(p: Path, params: DocumentCreateParams) -> None:
@@ -393,12 +343,17 @@ def _read_xlsx(p: Path) -> str:
 
 def _read_docx(p: Path) -> str:
     from docx import Document
+    from docx.text.paragraph import Paragraph
 
     doc = Document(str(p))
-    out = [para.text for para in doc.paragraphs if para.text]
-    for t in doc.tables:
-        for row in t.rows:
-            out.append("\t".join(c.text for c in row.cells))
+    out = []
+    for block in doc.iter_inner_content():
+        if isinstance(block, Paragraph):
+            if block.text:
+                out.append(block.text)
+        else:
+            for row in block.rows:
+                out.append("\t".join(c.text for c in row.cells))
     return "\n".join(out)
 
 

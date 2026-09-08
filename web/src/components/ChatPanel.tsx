@@ -8,8 +8,10 @@ import type {
   CompactionItem,
   StepInfo,
   PendingApproval,
+  PendingQuestion,
 } from '../types';
 import { MessageBubble } from './MessageBubble';
+import { getLiveSessionId } from '../api';
 import { TrustCard } from './TrustCard';
 import { ProactiveCard } from './ProactiveCard';
 import { ToolCallCard, getToolColor } from './ToolCallCard';
@@ -38,13 +40,8 @@ interface ChatPanelProps {
   delegateEvents: DelegateItem[];
   compactionEvents: CompactionItem[];
   currentStepInfo: StepInfo | null;
-  pendingQuestion: {
-    id: string;
-    question: string;
-    options?: Array<{ label: string; description?: string }>;
-    inputMode?: 'text' | 'secret';
-  } | null;
-  onRespondQuestion: (answer: string, selectedIndex?: number) => void;
+  pendingQuestion: PendingQuestion | null;
+  onRespondQuestion: (answer: string, selectedIndex?: number) => Promise<void>;
   pendingApproval: PendingApproval | null;
   onRespondApproval: (decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) => void;
   /** Sends an empty-state suggestion; omit to render suggestions disabled. */
@@ -255,6 +252,7 @@ export function ChatPanel({
               <div key={item.item.id} style={{ marginTop: needsGap ? 12 : 0 }}>
                 <MessageBubble
                   message={item.item}
+                  sessionId={conversationKey === 'live' ? getLiveSessionId() : conversationKey}
                   streaming={
                     isRunning
                     && item.item.role === 'assistant'
@@ -310,7 +308,7 @@ export function ChatPanel({
           />
         )}
 
-        {isRunning && !pendingApproval && (
+        {isRunning && !pendingApproval && !pendingQuestion && (
           <RunningIndicator toolCalls={toolCalls} currentStepInfo={currentStepInfo} />
         )}
 
@@ -770,48 +768,65 @@ function formatTokens(tokens: number): string {
 
 // ── Inline question card (ask_user) ──
 
-function InlineQuestionCard({
+export function InlineQuestionCard({
   toolCall,
   pendingQuestion,
   onRespond,
 }: {
   toolCall: ToolCall;
-  pendingQuestion: {
-    id: string;
-    question: string;
-    options?: Array<{ label: string; description?: string }>;
-    inputMode?: 'text' | 'secret';
-  } | null;
-  onRespond: (answer: string, selectedIndex?: number) => void;
+  pendingQuestion: PendingQuestion | null;
+  onRespond: (answer: string, selectedIndex?: number) => Promise<void>;
 }) {
   const [freeText, setFreeText] = useState('');
-  // `answered` locks the card on the first action so a rapid second click
-  // can't fire a duplicate RPC before the parent's result arrives.
-  const [answered, setAnswered] = useState(false);
-  const isPending = toolCall.result === undefined && !answered;
+  const [submitted, setSubmitted] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [submitError, setSubmitError] = useState('');
+  const inFlight = useRef(false);
+  const matchingQuestion = pendingQuestion && toolCall.result === undefined && (
+    pendingQuestion.callId && toolCall.callId
+      ? pendingQuestion.callId === toolCall.callId
+      : pendingQuestion.question === toolCall.args.question
+  ) ? pendingQuestion : null;
+  const isPending = !!matchingQuestion && !submitted;
+  const failed = toolCall.success === false;
+  const status = toolCall.result !== undefined
+    ? failed ? 'Failed' : toolCall.result.startsWith('User responded:') ? QUESTION_COPY.answeredLabel : 'Closed'
+    : sending ? 'Sending…' : submitted ? 'Sent' : isPending ? 'Awaiting answer' : 'Unavailable';
 
-  const questionText = pendingQuestion?.question
+  const questionText = matchingQuestion?.question
     || (toolCall.args.question as string)
     || '';
-  const options = pendingQuestion?.options
+  const options = matchingQuestion?.options
     || (toolCall.args.options as Array<{ label: string; description?: string }>)
     || [];
-  const inputMode = pendingQuestion?.inputMode
+  const inputMode = matchingQuestion?.inputMode
     || (toolCall.args.inputMode as 'text' | 'secret' | undefined)
     || 'text';
 
-  const handleOptionClick = (opt: { label: string; description?: string }, idx: number) => {
-    if (isPending) {
-      setAnswered(true);
-      onRespond(opt.label, idx);
+  const submit = async (answer: string, idx?: number) => {
+    if (!isPending || inFlight.current) return;
+    inFlight.current = true;
+    setSending(true);
+    setSubmitError('');
+    try {
+      await onRespond(answer, idx);
+      setSubmitted(true);
+      setFreeText('');
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : 'Could not send the answer. Try again.');
+    } finally {
+      inFlight.current = false;
+      setSending(false);
     }
+  };
+
+  const handleOptionClick = (opt: { label: string; description?: string }, idx: number) => {
+    void submit(opt.label, idx);
   };
 
   const handleFreeTextSubmit = () => {
     if (isPending && freeText.trim()) {
-      setAnswered(true);
-      onRespond(freeText.trim());
-      setFreeText('');
+      void submit(freeText.trim());
     }
   };
 
@@ -847,17 +862,17 @@ function InlineQuestionCard({
         <span style={{ fontWeight: 600, fontSize: 13, color: 'var(--accent)' }}>
           {QUESTION_COPY.title}
         </span>
-        {!isPending && (
+        {(!isPending || sending) && (
           <span style={{
             marginLeft: 'auto',
             fontSize: 11,
             padding: '2px 8px',
             borderRadius: 'var(--radius-sm)',
-            background: 'var(--success-subtle)',
-            color: 'var(--success)',
+            background: failed ? 'var(--danger-subtle)' : 'var(--bg-tertiary)',
+            color: failed ? 'var(--danger)' : 'var(--text-secondary)',
             fontWeight: 600,
           }}>
-            {QUESTION_COPY.answeredLabel}
+            {status}
           </span>
         )}
         {isPending && (
@@ -883,7 +898,7 @@ function InlineQuestionCard({
             <button
               key={idx}
               onClick={() => handleOptionClick(opt, idx)}
-              disabled={!isPending}
+              disabled={!isPending || sending}
               style={{
                 padding: '10px 14px',
                 background: isPending ? 'var(--bg-tertiary)' : 'var(--bg-primary)',
@@ -948,7 +963,7 @@ function InlineQuestionCard({
           />
           <button
             onClick={handleFreeTextSubmit}
-            disabled={!freeText.trim()}
+            disabled={!freeText.trim() || sending}
             style={{
               padding: '9px 16px',
               background: freeText.trim() ? 'var(--accent)' : 'var(--bg-tertiary)',
@@ -963,13 +978,15 @@ function InlineQuestionCard({
         </div>
       )}
 
-      {!isPending && toolCall.result && (
+      {submitError && <div role="alert" style={{ padding: '0 16px 12px', color: 'var(--danger)' }}>{submitError}</div>}
+
+      {toolCall.result !== undefined && toolCall.result && (
         <div style={{
           padding: '8px 16px 12px',
           fontSize: 12,
           color: 'var(--text-secondary)',
         }}>
-          <span style={{ fontWeight: 600, marginRight: 6, color: 'var(--text-muted)' }}>Answer:</span>
+          <span style={{ fontWeight: 600, marginRight: 6, color: 'var(--text-muted)' }}>{failed ? 'Error:' : 'Response:'}</span>
           {toolCall.result.length > 200 ? toolCall.result.slice(0, 200) + '...' : toolCall.result}
         </div>
       )}

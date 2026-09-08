@@ -21,6 +21,10 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from rune.api.questions import PendingQuestion, question_payload
+from rune.api.trust import build_cancelled_trust
+from rune.api.trust import build_trust_payload as build_trust_payload
+from rune.capabilities.ask_user import AskUserParams, UserResponse, user_response
 from rune.utils.fast_serde import json_decode, json_encode
 from rune.utils.logger import get_logger
 
@@ -172,46 +176,6 @@ def approval_granted(result: dict[str, Any] | None) -> bool:
     return str(result.get("decision", "")).strip().lower() in _APPROVE_DECISIONS
 
 
-def build_trust_payload(trace: Any) -> dict[str, Any]:
-    """Build the UI's verification summary and any follow-up guidance."""
-    reason = getattr(trace, "reason", "") or ""
-    from rune.agent.verification_state import verified_outcome
-
-    verified = reason == "completed" and verified_outcome(trace) is True
-    out: dict[str, Any] = {
-        "verified": verified,
-        "reason": reason,
-        # The tool-round limit may leave requested work unfinished.
-        "budgetExhausted": bool(getattr(trace, "tool_budget_exhausted", False)),
-        # A fresh test pass does not establish coverage of the whole task.
-        "testsPassedAfterEdit": getattr(trace, "tests_passed_after_edit", None),
-        "verification": getattr(trace, "verification", None),
-    }
-    gate = getattr(trace, "evidence_gate", None)
-    if isinstance(gate, dict):
-        out["evidenceGate"] = {
-            "hasCheck": gate.get("has_check", False),
-            "lastVerdict": gate.get("last_verdict", ""),
-            "verdictCounts": gate.get("verdict_counts", {}),
-            "lastEvidence": gate.get("last_evidence", ""),
-        }
-    if not verified:
-        try:
-            from rune.agent.escalation import (
-                escalation_hint,
-                honest_failure_note,
-                run_was_verifiable,
-            )
-
-            out["honestNote"] = honest_failure_note(
-                reason, run_was_verifiable(trace),
-            ) or ""
-            out["escalationHint"] = escalation_hint(reason) or ""
-        except Exception as exc:
-            log.debug("trust_payload_hint_failed", error=str(exc)[:100])
-    return out
-
-
 # SSE Client Manager
 
 
@@ -347,13 +311,12 @@ def create_app() -> Any:
 
     # Active tasks - declared early so the lifespan can reference them.
     _active_tasks: dict[str, asyncio.Task[Any]] = {}
-    # Runs whose abort already broadcast agent_aborted, so the run path doesn't
-    # broadcast it a second time as it winds down.
-    _aborted_runs: set[str] = set()
+    # A final snapshot may add receipts after the initial stop notification.
+    _aborted_runs: dict[str, dict[str, Any]] = {}
 
     def _finish_run(rid: str) -> None:
         _active_tasks.pop(rid, None)
-        _aborted_runs.discard(rid)
+        _aborted_runs.pop(rid, None)
     # Suggestion ids already broadcast, so the engine re-emitting the same
     # open suggestion each heartbeat does not re-send it.
     _broadcast_suggestion_ids: set[str] = set()
@@ -527,9 +490,10 @@ def create_app() -> Any:
         user_guidance: str | None = None
 
     class QuestionRequestModel(BaseModel):
+        model_config = ConfigDict(populate_by_name=True)
         id: str
         answer: str
-        selected_index: int | None = None
+        selected_index: int | None = Field(default=None, alias="selectedIndex", strict=True, ge=-1)
 
     # State
 
@@ -538,7 +502,7 @@ def create_app() -> Any:
     _sse_manager = SseClientManager()
     _ws_manager = WsClientManager()
     _pending_approvals: dict[str, asyncio.Future[dict[str, Any]]] = {}
-    _pending_questions: dict[str, asyncio.Future[dict[str, Any]]] = {}
+    _pending_questions: dict[str, PendingQuestion] = {}
 
     # Broadcast helper
 
@@ -549,6 +513,14 @@ def create_app() -> Any:
 
     def _trust_payload(trace: Any) -> dict[str, Any]:
         return build_trust_payload(trace)
+
+    async def _broadcast_aborted(run_id: str, trace: Any = None) -> None:
+        loop = _active_loops.get(run_id)
+        trust = build_cancelled_trust(trace, artifact_receipts=getattr(loop, "artifact_receipts", []))
+        payload = {"runId": run_id, "trust": trust}
+        if _aborted_runs.get(run_id) != payload:
+            _aborted_runs[run_id] = payload
+            await _broadcast("agent_aborted", payload)
 
     # Agent execution helpers (inside create_app for closure access)
 
@@ -583,6 +555,7 @@ def create_app() -> Any:
             session_id is given (browser live chat). Keep False for headless
             callers.
         """
+        trace = None
         try:
             from rune.agent.agent_context import (
                 PrepareContextOptions,
@@ -665,29 +638,25 @@ def create_app() -> Any:
 
             # 3. Wire ask_user callback (SSE/WS ↔ future)
             async def _web_ask_user_callback(
-                question: str, options: list[str] | None = None
-            ) -> str:
-                question_id = f"question:{run_id}:{int(time.monotonic() * 1000)}"
-                question_future: asyncio.Future[dict[str, Any]] = (
-                    asyncio.get_running_loop().create_future()
-                )
-                _pending_questions[question_id] = question_future
-                await _broadcast(
-                    "question",
-                    {
-                        "id": question_id,
-                        "question": question,
-                        "options": options or [],
-                        "runId": run_id,
-                    },
-                )
+                params: AskUserParams,
+            ) -> UserResponse:
+                from rune.agent.loop import current_tool_call_id
+
+                question_id = f"question:{run_id}:{uuid4().hex}"
+                pending = PendingQuestion(params)
+                _pending_questions[question_id] = pending
                 try:
-                    result = await asyncio.wait_for(question_future, timeout=300.0)
-                    return result.get("answer", "")
+                    await _broadcast("question", question_payload(
+                        params, question_id, run_id, current_tool_call_id(),
+                    ))
+                    return await asyncio.wait_for(pending.future, timeout=300.0)
                 except TimeoutError:
-                    return ""
+                    raise TimeoutError("Question expired without a user response") from None
                 finally:
                     _pending_questions.pop(question_id, None)
+                    if not pending.future.done():
+                        pending.future.cancel()
+                    await _broadcast("question_closed", {"id": question_id, "runId": run_id})
 
             loop.set_ask_user_callback(_web_ask_user_callback)
 
@@ -830,6 +799,7 @@ def create_app() -> Any:
                 message_history=agent_ctx.messages if agent_ctx.messages else None,
             )
             full_text, answer = split_answer(collected, _step_starts)
+            answer = getattr(loop, "_last_answer_text", "") or answer
             duration_ms = int((time.monotonic() - _run_start_time) * 1000)
 
             # 4b. Record the assistant turn for the next message's context.
@@ -842,13 +812,8 @@ def create_app() -> Any:
             # 5. Post-process (memory persistence)
             await _post_process(agent_ctx, trace, full_text, duration_ms, "web")
 
-            # A cancelled run is not a completion — emit the dedicated aborted
-            # event so the UI resets through its stop path, not the trust card.
-            # Skip it if /api/abort already broadcast it for this run.
-            if trace.reason == "cancelled":
-                if run_id not in _aborted_runs:
-                    await _broadcast("agent_aborted", {"runId": run_id})
-                _aborted_runs.discard(run_id)
+            if trace.reason == "cancelled" or run_id in _aborted_runs:
+                await _broadcast_aborted(run_id, trace)
                 return answer
 
             await _broadcast(
@@ -864,6 +829,9 @@ def create_app() -> Any:
 
             return answer
 
+        except asyncio.CancelledError:
+            await _broadcast_aborted(run_id, trace)
+            raise
         except Exception as exc:
             log.error("agent_execution_error", run_id=run_id, error=str(exc))
             await _broadcast(
@@ -888,6 +856,7 @@ def create_app() -> Any:
         conv_manager: Any | None = None
         conv_id: str | None = None
         loop = None
+        run_task: asyncio.Task[Any] | None = None
         collected: list[str] = []
         _step_starts = [0]
         _ws_joiner = StreamJoiner()
@@ -960,21 +929,16 @@ def create_app() -> Any:
             loop.set_approval_callback(_ndjson_approval_cb)
 
             async def _ndjson_ask_user_cb(
-                question: str, options: list[str] | None = None
-            ) -> str:
+                params: AskUserParams,
+            ) -> UserResponse:
                 await event_queue.put(
                     {
                         "event": "question",
-                        "data": {
-                            "id": f"ndjson:{run_id}",
-                            "question": question,
-                            "options": options or [],
-                            "runId": run_id,
-                            "autonomous": True,
-                        },
+                        "data": {**question_payload(params, f"ndjson:{run_id}", run_id),
+                                 "autonomous": True},
                     }
                 )
-                return ""
+                return user_response(params, "")
 
             loop.set_ask_user_callback(_ndjson_ask_user_cb)
 
@@ -1045,6 +1009,7 @@ def create_app() -> Any:
                     ),
                 )
             )
+            _active_tasks[run_id] = run_task
 
             while not run_task.done():
                 try:
@@ -1062,23 +1027,30 @@ def create_app() -> Any:
                 evt = event_queue.get_nowait()
                 yield json_encode(evt) + "\n"
 
-            trace = run_task.result()
+            trace = None if run_task.cancelled() else run_task.result()
+            cancelled = (run_task.cancelled() or getattr(trace, "reason", "") == "cancelled"
+                         or run_id in _aborted_runs)
             full_text, answer = split_answer(collected, _step_starts)
+            answer = getattr(loop, "_last_answer_text", "") or answer
             duration_ms = int((time.monotonic() - _run_start_time) * 1000)
 
             # Post-process (memory persistence)
-            await _post_process(agent_ctx, trace, full_text, duration_ms, "ndjson")
+            if trace is not None:
+                await _post_process(agent_ctx, trace, full_text, duration_ms, "ndjson")
+            if cancelled and run_id in _aborted_runs:
+                await _broadcast_aborted(run_id, trace)
 
             yield (
                 json_encode(
                     {
-                        "event": "agent_complete",
+                        "event": "agent_aborted" if cancelled else "agent_complete",
                         "data": {
                             "runId": run_id,
-                            "success": trace.reason == "completed",
+                            "success": not cancelled and getattr(trace, "reason", "") == "completed",
                             "answer": answer,
                             "durationMs": duration_ms,
-                            "trust": _trust_payload(trace),
+                            "trust": build_cancelled_trust(trace, artifact_receipts=getattr(loop, "artifact_receipts", []))
+                            if cancelled else _trust_payload(trace),
                         },
                     }
                 )
@@ -1097,7 +1069,16 @@ def create_app() -> Any:
                 + "\n"
             )
         finally:
+            if run_task is not None and not run_task.done():
+                run_task.cancel()
+                try:
+                    await run_task
+                except asyncio.CancelledError:
+                    log.debug("ndjson_run_cancelled", run_id=run_id)
+                except Exception as exc:
+                    log.warning("ndjson_cleanup_failed", run_id=run_id, error=str(exc))
             _active_loops.pop(run_id, None)
+            _finish_run(run_id)
             # Awaits are fine during aclose(); yields are not.
             if conv_manager is not None and conv_id and loop is not None:
                 _, last_step_text = split_answer(collected, _step_starts)
@@ -1142,6 +1123,14 @@ def create_app() -> Any:
         )
 
     # SSE Events endpoint (GET /api/v1/events)
+
+    from fastapi import Query
+
+    @app.get("/api/v1/files/download", dependencies=[Depends(auth)])
+    async def download_workspace_file(path: str, session_id: str = Query(alias="sessionId")) -> Any:
+        from rune.api.files import download_file
+
+        return await download_file(session_id, path)
 
     @app.get("/api/v1/events", dependencies=[Depends(auth)])
     @app.get("/api/events", dependencies=[Depends(auth)])
@@ -1375,14 +1364,12 @@ def create_app() -> Any:
 
                 elif msg_type == "question":
                     qid = msg.get("id", "")
-                    future = _pending_questions.get(qid)
-                    if future and not future.done():
-                        future.set_result(
-                            {
-                                "answer": msg.get("answer", ""),
-                                "selectedIndex": msg.get("selectedIndex"),
-                            }
-                        )
+                    pending = _pending_questions.get(qid)
+                    if pending:
+                        try:
+                            pending.resolve(str(msg.get("answer", "")), msg.get("selectedIndex"))
+                        except ValueError as exc:
+                            await ws.send_text(json_encode({"event": "error", "data": {"message": str(exc)}}))
 
                 elif msg_type == "ping":
                     await ws.send_text(
@@ -1580,8 +1567,7 @@ def create_app() -> Any:
             # steps) AND hard-cancel the task — the soft flag alone is only
             # checked between steps, so an in-flight LLM stream (a long single
             # answer) would keep going; cancelling the task interrupts it now.
-            _aborted_runs.add(rid)
-            await _broadcast("agent_aborted", {"runId": rid})
+            await _broadcast_aborted(rid)
             agent_loop = _active_loops.get(rid)
             if agent_loop:
                 with contextlib.suppress(Exception):
@@ -1619,14 +1605,13 @@ def create_app() -> Any:
 
     @app.post("/api/question", dependencies=[Depends(auth)])
     async def api_question(req: QuestionRequestModel) -> dict[str, Any]:
-        future = _pending_questions.get(req.id)
-        if future and not future.done():
-            future.set_result(
-                {
-                    "answer": req.answer,
-                    "selectedIndex": req.selected_index,
-                }
-            )
+        pending = _pending_questions.get(req.id)
+        if pending is None or pending.future.done():
+            raise HTTPException(status_code=410, detail="Question has already been answered or closed")
+        try:
+            pending.resolve(req.answer, req.selected_index)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"ok": True}
 
     # SSE streaming endpoint (legacy /stream/{request_id})

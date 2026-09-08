@@ -2,6 +2,7 @@ import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState
 import type { ActivitySummary, OrchestrationState, StepInfo, ToolCall, TrustInfo } from '../types';
 import { normalizeToolName, isCodingToolName, argString, inferWorkPhase, inferActivityMode, computeRunVerdict, type WorkPhase } from '../utils/tooling';
 import { RuneMark, type MarkState } from './RuneMark';
+import { checkSummary, describeTrust, trustColors } from '../utils/trust';
 import { fetchWorkspaceDiff, readWorkspaceFile } from '../api';
 import { HighlightedCode } from './Code';
 import { Markdown } from './Markdown';
@@ -272,7 +273,9 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
   if (isRunning) petState = phase === 'verifying' ? 'thinking' : 'working';
   else if (verdictOk !== null) petState = verdictOk ? 'passed' : 'failed';
 
-  const hasCheck = Boolean(trust?.evidenceGate?.hasCheck);
+  const trustView = trust ? describeTrust(trust) : null;
+  const verdictTitle = trustView?.title ?? (verdictOk ? 'Completed' : 'Failed');
+  const verdictColors = trustColors(trustView?.tone ?? (verdictOk ? 'neutral' : 'danger'));
   // One cascade for the footer so text and color can never disagree.
   const foot = awaiting
     ? { text: 'waiting for you', color: 'var(--warning)' }
@@ -280,16 +283,7 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
       ? { text: `${PHASE_LABEL[phase]}…`, color: 'var(--warning)' }
       : verdictOk === null
         ? { text: 'ready', color: 'var(--text-muted)' }
-        : verdictOk
-          ? {
-              text: hasCheck
-                ? 'verified'
-                : trust?.testsPassedAfterEdit === true
-                  ? 'tests passing'
-                  : 'completed',
-              color: 'var(--success)',
-            }
-          : { text: 'not verified', color: 'var(--warning)' };
+        : { text: verdictTitle.toLowerCase(), color: trustView?.tone === 'neutral' ? 'var(--text-muted)' : verdictColors.accent };
 
   return (
     <aside style={{
@@ -321,7 +315,7 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
           textTransform: 'uppercase',
           color: 'var(--text-muted)',
         }}>
-          {PHASE_LABEL[phase]}
+          {isRunning ? PHASE_LABEL[phase] : trust?.completionStatus === 'cancelled' ? 'stopped' : 'finished'}
         </span>
         {isRunning && startedAt !== null && <Elapsed startedAt={startedAt} />}
         <button
@@ -516,31 +510,21 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
         fontSize: 12.5,
         lineHeight: 1.5,
       }}>
-        {/* Evidence Gate verdict — RUNE's honest-completion signal. Prefer the
-            real trust verdict (same as the chat card) over the tool-activity
-            heuristic, so the two surfaces never disagree; fall back to the
-            heuristic only when no trust payload arrived. */}
         {!isRunning && (verdictOk !== null) && (
           <div style={{
             display: 'flex', alignItems: 'center', gap: 8,
             margin: '0 0 10px', padding: '8px 11px', borderRadius: 8,
-            border: `1px solid ${verdictOk ? (hasCheck ? 'var(--success)' : 'var(--border)') : 'var(--warning)'}`,
-            background: verdictOk
-              ? (hasCheck ? 'var(--success-subtle)' : 'var(--bg-secondary)')
-              : 'var(--warning-subtle, var(--danger-subtle))',
+            border: `1px solid ${verdictColors.accent}`,
+            background: verdictColors.background,
             fontSize: 12,
           }}>
-            <span aria-hidden="true">{verdictOk ? '✓' : '⚠'}</span>
+            <span aria-hidden="true">{trustView?.glyph ?? (verdictOk ? '✓' : '⚠')}</span>
             <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>
-              {verdictOk
-                ? hasCheck ? 'Verified' : 'Done — no checks ran'
-                : 'Not verified'}
+              {verdictTitle}
             </span>
             <span style={{ marginLeft: 'auto', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
               {trust?.evidenceGate?.hasCheck
-                ? (trust.evidenceGate.verdictCounts?.pass ?? 0) > 0
-                  ? `${trust.evidenceGate.verdictCounts.pass} passed`
-                  : trust.evidenceGate.lastVerdict
+                ? checkSummary(trust)
                 : activitySummary && activitySummary.filesWritten > 0
                   ? `${activitySummary.filesWritten} edited`
                   : ''}
