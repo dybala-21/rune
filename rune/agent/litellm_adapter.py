@@ -61,7 +61,6 @@ def __getattr__(name: str) -> Any:
 
 from rune.agent.message_utils import validate_tool_pairs
 from rune.agent.model_traits import (
-    supports_reasoning_effort,
     traits,
 )
 from rune.agent.obs_cap import mask_stale_tool_messages
@@ -238,6 +237,9 @@ async def _run_stop_check(
     if not targets:
         return None
     cmd = [*cmd, *targets]
+    from rune.agent.execution_journal import active_journal, record_check
+    if active_journal() is not None:
+        return await record_check({"command": cmd, "cwd": cwd}, lambda: _run_stop_check(cwd, edited, allowed))
     # The same recoverability layer a shell command gets: tests can write.
     try:
         from rune.safety.workspace_snapshot import take as _snap
@@ -961,6 +963,8 @@ class StreamResult:
         verification_callback: Callable[[str, bool, str], Any] | None = None,
     ) -> None:
         self._model = model
+        from rune.llm.reasoning import configured_reasoning_effort
+        self._reasoning_effort = configured_reasoning_effort(model)
         self._verification_callback = verification_callback
         self._workspace_root = os.path.abspath(os.path.expanduser(workspace_root or os.getcwd()))
         self._request = request if request is not None else next(
@@ -1179,18 +1183,13 @@ class StreamResult:
             _traits = traits(self._model)
             if not _traits.temperature:
                 _acompletion_kwargs.pop("temperature", None)
-            # Reasoning depth for models that accept it; litellm passes it to
-            # OpenAI and maps it to Claude's adaptive thinking. Gate on
-            # litellm's own capability DB so it's right per model.
-            _effort: str | None = None
-            if supports_reasoning_effort(self._model):
-                from rune.config import get_config
-                _effort = get_config().llm.reasoning_effort
-                if _effort:
-                    _acompletion_kwargs["reasoning_effort"] = _effort
+            _effort = self._reasoning_effort
+            if _effort is not None:
+                _acompletion_kwargs["reasoning_effort"] = _effort
             # Fast mode and deep reasoning pull opposite ways; don't ask for
             # speed:fast when the user asked for high effort.
-            if _env_flag(_FAST_MODE_ENV) and _traits.speed_param and _effort != "high":
+            if (_env_flag(_FAST_MODE_ENV) and _traits.speed_param
+                    and _effort not in {"high", "xhigh", "max"}):
                 _acompletion_kwargs["speed"] = "fast"
             if self._extra_headers:
                 _acompletion_kwargs["extra_headers"] = dict(self._extra_headers)

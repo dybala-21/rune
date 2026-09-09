@@ -295,28 +295,27 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
   return (
     <div
+      className="composer-dock"
       style={{
         position: 'absolute',
         bottom: 0,
         left: 0,
         right: 0,
-        padding: '0 20px 20px',
         pointerEvents: 'none',
         zIndex: 10,
       }}
     >
       <div
-        className="glass composer-shell"
+        className="composer-shell"
         onDrop={handleDrop}
         onDragEnter={handleDragEnter}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         style={{
-          maxWidth: 768,
+          maxWidth: 800,
           margin: '0 auto',
           borderRadius: 'var(--radius-xl)',
           border: isDragOver ? '2px solid var(--accent)' : '1px solid var(--border)',
-          boxShadow: 'var(--shadow-lg)',
           pointerEvents: 'auto',
           overflow: showCommands ? 'visible' : 'hidden',
           position: 'relative',
@@ -393,11 +392,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         )}
 
         {/* Input row */}
-        <div style={{
+        <div className="composer-input-row" style={{
           display: 'flex',
           alignItems: 'flex-end',
-          gap: 0,
-          padding: '8px 8px 8px 16px',
+          gap: 2,
+          padding: '12px 12px 8px',
           position: 'relative',
         }}>
           {showCommands && (
@@ -471,6 +470,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
           <textarea
             ref={textareaRef}
+            aria-label="Message RUNE"
             rows={1}
             placeholder={
               isDragOver
@@ -490,6 +490,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             onPaste={handlePaste}
             style={{
               flex: 1,
+              minWidth: 0,
               background: 'transparent',
               border: 'none',
               padding: '10px 8px',
@@ -541,11 +542,10 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             </button>
           )}
         </div>
-        <div style={{
+        <div className="composer-hint" style={{
           fontSize: 11,
           color: 'var(--text-muted)',
           padding: '0 16px 8px',
-          opacity: 0.7,
         }}>
           {isRunning || disabled
             ? ''

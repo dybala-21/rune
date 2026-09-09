@@ -16,6 +16,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from functools import lru_cache
 
+from rune.llm.reasoning import reasoning_control
+
 
 @dataclass(frozen=True)
 class ModelTraits:
@@ -44,7 +46,10 @@ _STATIC: tuple[tuple[tuple[str, ...], ModelTraits], ...] = (
     (("anthropic", "opus"), ModelTraits(anthropic_wire=True, speed_param=True)),
     (("claude",), ModelTraits(anthropic_wire=True)),
     (("anthropic",), ModelTraits(anthropic_wire=True)),
-    (("gpt-6-astra",), ModelTraits(max_completion_tokens=True, responses_api=True)),
+    (("gpt-6-astra",), ModelTraits(
+        temperature=False, max_completion_tokens=True, responses_api=True,
+    )),
+    (("gpt-5.6",), ModelTraits(temperature=False, max_completion_tokens=True, responses_api=True)),
     (("gpt-5",), ModelTraits(temperature=False)),
 )
 
@@ -73,21 +78,18 @@ def traits(model: str) -> ModelTraits:
 
 @lru_cache(maxsize=256)
 def supports_reasoning_effort(model: str) -> bool:
-    """Whether *model* accepts a ``reasoning_effort``.
+    """Reasoning capability alone does not imply an adjustable effort."""
+    return bool(reasoning_efforts(model))
 
-    Trusts litellm's model-capability DB rather than a hand-kept list: it is
-    correct per model where a static list drifts — o1 takes one but o1-mini
-    does not, claude-opus-4-5 reasons while claude-opus-4 does not, gemini-2.5
-    reasons, deepseek-reasoner reasons but takes no effort param. Unknown or
-    lookup failure → False (the selector simply won't show; the model still
-    runs). drop_params is on, so a stray effort on a model that reasons but
-    ignores it is dropped, not an error.
-    """
-    try:
-        import litellm
-        return bool(litellm.supports_reasoning(model=model))
-    except Exception:
-        return False
+
+@lru_cache(maxsize=256)
+def reasoning_efforts(model: str) -> tuple[str, ...]:
+    return reasoning_control(model).efforts
+
+
+def effective_reasoning_effort(model: str, configured: str | None) -> str | None:
+    """A setting from another model must not become an invalid API parameter."""
+    return configured if configured in reasoning_efforts(model) else None
 
 
 @lru_cache(maxsize=256)

@@ -214,6 +214,9 @@ async def file_write(params: FileWriteParams) -> CapabilityResult:
     if _tamper:
         return CapabilityResult(success=False, error=_tamper)
 
+    from rune.capabilities.file_changes import file_change, read_before
+    existed = file_path.exists()
+    before = read_before(file_path, params.encoding)
     file_path.write_text(params.content, encoding=params.encoding)
 
     from rune.safety.recoverable import verify_written
@@ -225,7 +228,8 @@ async def file_write(params: FileWriteParams) -> CapabilityResult:
         success=True,
         output=f"Written {len(params.content)} bytes to {params.path}",
         metadata={"path": str(file_path), "size": len(params.content),
-                  "changed": True, "verified": check.detail},
+                  "changed": True, "verified": check.detail,
+                  "fileChange": file_change(file_path, before, existed=existed, encoding=params.encoding)},
     )
 
 
@@ -339,11 +343,12 @@ async def file_edit(params: FileEditParams) -> CapabilityResult:
         f" (matched via {matched_via} fuzzy match — verify the edit landed "
         f"where intended with file_read if unsure)"
     )
+    from rune.capabilities.file_changes import file_change
     return CapabilityResult(
         success=True,
         output=f"Replaced {count} occurrence(s) in {params.path}{note}",
         metadata={"path": str(file_path), "replacements": count,
-                  "matched_via": matched_via},
+                  "matched_via": matched_via, "fileChange": file_change(file_path, content)},
     )
 
 
@@ -388,16 +393,17 @@ async def file_delete(params: FileDeleteParams) -> CapabilityResult:
             error=f"'{params.path}' is a directory. Use recursive=true to delete.",
         )
 
+    # Build output and OS cruft can be rebuilt, so they go for real.
+    # Anything else the user might not be able to recreate, so it goes to
+    # the workspace trash and stays recoverable.
+    from rune.capabilities.file_changes import file_change, read_before
     from rune.safety.recoverable import (
         is_regenerable,
         move_to_trash,
         trash_enabled,
         verify_gone,
     )
-
-    # Build output and OS cruft can be rebuilt, so they go for real.
-    # Anything else the user might not be able to recreate, so it goes to
-    # the workspace trash and stays recoverable.
+    before = read_before(file_path)
     recycled = is_regenerable(file_path) or not trash_enabled()
     stored: str | None = None
     if recycled:
@@ -418,12 +424,12 @@ async def file_delete(params: FileDeleteParams) -> CapabilityResult:
             success=True,
             output=(f"Moved to trash (recoverable): {params.path}\n"
                     f"Restore from: {stored}"),
-            metadata={"path": str(file_path), "trashed": stored},
+            metadata={"path": str(file_path), "trashed": stored, "fileChange": file_change(file_path, before)},
         )
     return CapabilityResult(
         success=True,
         output=f"Deleted: {params.path}",
-        metadata={"path": str(file_path), "trashed": None},
+        metadata={"path": str(file_path), "trashed": None, "fileChange": file_change(file_path, before)},
     )
 
 

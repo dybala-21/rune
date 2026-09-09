@@ -69,7 +69,8 @@ def _has_provider_key(provider: str) -> bool:
 # Hardcoded model lists (fallbacks / static providers)
 # OpenAI
 FALLBACK_OPENAI_MODELS: list[ModelInfo] = [
-    # GPT-5.6 family (newest) — three capability tiers: Sol > Terra > Luna
+    ModelInfo(id="gpt-6-astra", provider="openai", label="GPT-6 Astra"),
+    # GPT-5.6 family
     ModelInfo(id="gpt-5.6-sol", provider="openai", label="GPT-5.6 Sol"),
     ModelInfo(id="gpt-5.6-terra", provider="openai", label="GPT-5.6 Terra"),
     ModelInfo(id="gpt-5.6-luna", provider="openai", label="GPT-5.6 Luna"),
@@ -147,9 +148,12 @@ ANTHROPIC_MODELS: list[ModelInfo] = [
 # Google Gemini
 
 GEMINI_MODELS: list[ModelInfo] = [
-    ModelInfo(id="gemini-3-pro", provider="gemini", label="Gemini 3 Pro"),
+    ModelInfo(id="gemini-3.1-pro-preview", provider="gemini", label="Gemini 3.1 Pro Preview"),
+    ModelInfo(id="gemini-3-pro-preview", provider="gemini", label="Gemini 3 Pro Preview"),
+    ModelInfo(id="gemini-3-flash-preview", provider="gemini", label="Gemini 3 Flash Preview"),
     ModelInfo(id="gemini-2.5-pro", provider="gemini", label="Gemini 2.5 Pro"),
     ModelInfo(id="gemini-2.5-flash", provider="gemini", label="Gemini 2.5 Flash"),
+    ModelInfo(id="gemini-2.5-flash-lite", provider="gemini", label="Gemini 2.5 Flash Lite"),
     ModelInfo(id="gemini-2.0-flash", provider="gemini", label="Gemini 2.0 Flash"),
     ModelInfo(id="gemini-2.0-flash-lite", provider="gemini", label="Gemini 2.0 Flash Lite"),
 ]
@@ -226,7 +230,7 @@ _PROVIDER_LABELS: dict[str, str] = {
 
 
 # OpenAI dynamic fetch
-CHAT_MODEL_PREFIXES = ("gpt-5", "gpt-4", "gpt-4o", "gpt-4.1", "gpt-3.5", "gpt-oss", "o1", "o3", "o4", "chatgpt")
+CHAT_MODEL_PREFIXES = ("gpt-6", "gpt-5", "gpt-4", "gpt-4o", "gpt-4.1", "gpt-3.5", "gpt-oss", "o1", "o3", "o4", "chatgpt")
 EXCLUDED_KEYWORDS = (
     "instruct", "realtime", "audio", "search", "transcription",
     "tts", "whisper", "dall-e", "embedding",
@@ -243,6 +247,8 @@ def _is_chat_model(model_id: str) -> bool:
 
 def _model_sort_key(model_id: str) -> int:
     """Sort key for OpenAI models (lower = higher priority)."""
+    if model_id.startswith("gpt-6-astra"):
+        return -1
     if model_id.startswith("gpt-5.4"):
         return 0
     if model_id.startswith("gpt-5.2"):

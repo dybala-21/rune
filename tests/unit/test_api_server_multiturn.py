@@ -187,6 +187,42 @@ def _wait_for(predicate, timeout=5.0):
     return False
 
 
+def test_reasoning_rpc_validates_astra_options_and_updates_config(client):
+    def rpc(method, **params):
+        if method == 'reasoning.set':
+            params = {'provider': 'openai', 'model': 'gpt-6-astra', **params}
+        return client.post('/api/v1/rpc', json={'method': method, 'params': params}).json()
+
+    assert rpc('model.set', provider='openai', model='gpt-6-astra')['success']
+    for effort in ('xhigh', 'max'):
+        assert rpc('reasoning.set', effort=effort)['data']['reasoningEffort'] == effort
+        config = rpc('config.get')['data']
+        assert config['reasoningEffort'] == effort
+        assert config['reasoningOptions'] == ['low', 'medium', 'high', 'xhigh', 'max']
+    assert rpc('reasoning.set', effort='none')['success'] is False
+    assert rpc('config.get')['data']['reasoningEffort'] == 'max'
+    assert rpc('reasoning.set', effort='')['data']['reasoningEffort'] is None
+
+
+@pytest.mark.parametrize('path, payload', [
+    ('/api/message', {'text': 'hello', 'sessionId': 'reuse-classification'}),
+    ('/api/v1/agent/execute', {'goal': 'hello', 'stream': False}),
+    ('/api/v1/agent/execute', {'goal': 'hello', 'stream': True}),
+])
+def test_web_postprocessing_reuses_the_run_classification(client, monkeypatch, path, payload):
+    from rune.agent import agent_context
+
+    saved = []
+
+    async def capture(inp):
+        saved.append(inp)
+
+    monkeypatch.setattr(agent_context, 'post_process_agent_result', capture)
+    assert client.post(path, json=payload).status_code == 200
+    assert _wait_for(lambda: len(saved) == 1)
+    assert saved[0].classification_hint == 'chat'
+
+
 @pytest.fixture
 def question_flow(client, monkeypatch):
     import rune.agent.loop as loop_module
@@ -264,6 +300,91 @@ def test_aborting_a_question_removes_its_pending_response(question_flow):
     assert _wait_for(lambda: any(event == "question_closed" for event, _ in frames))
     assert client.post("/api/question", json={"id": question["id"], "answer": "late"}).status_code == 410
     assert not answers
+
+
+def test_snapshot_restores_question_and_lost_completion_without_duplicate_answers(question_flow):
+    client, frames, answers = question_flow
+    client.post("/api/message", json={"text": "restore question", "sessionId": "restore"})
+    assert _wait_for(lambda: any(event == "question" for event, _ in frames))
+    run = client.get("/api/runs/snapshot", params={"sessionId": "restore"}).json()["run"]
+    assert run["status"] == "waiting_input"
+    assert run["question"]["question"] == "restore question"
+    assert run["question"]["expiresAt"] > time.time() * 1000
+    assert client.get("/api/runs/snapshot", params={"sessionId": "other"}).json()["run"] is None
+    payload = {"id": run["question"]["id"], "answer": "시스템 확인", "selectedIndex": 1,
+               "responseId": "response-1"}
+    assert client.post("/api/question", json=payload).status_code == 200
+    assert _wait_for(lambda: any(event == "agent_complete" for event, _ in frames))
+    assert client.post("/api/question", json=payload).status_code == 200
+    assert client.post("/api/question", json={**payload, "answer": "changed"}).status_code == 409
+    complete = client.get("/api/runs/snapshot", params={"sessionId": "restore"}).json()["run"]
+    assert complete["seq"] > run["seq"]
+    assert complete["status"] == "completed" and complete["question"] is None
+    assert "시스템 확인" in complete["answer"]
+    assert complete["trust"]["verified"] is False
+    assert [turn["role"] for turn in complete["history"]] == ["user", "assistant"]
+    assert len(answers) == 1
+
+
+def test_cancel_during_context_preparation_is_visible_in_the_snapshot(client, monkeypatch):
+    import threading
+
+    entered = threading.Event()
+
+    async def prepare(*args, **kwargs):
+        entered.set()
+        await asyncio.Future()
+
+    monkeypatch.setattr("rune.agent.agent_context.prepare_agent_context", prepare)
+    response = client.post("/api/message", json={"text": "prepare", "sessionId": "early-stop"})
+    assert entered.wait(timeout=5)
+    assert client.post("/api/abort", json={"runId": response.json()["runId"]}).status_code == 200
+    run = client.get("/api/runs/snapshot", params={"sessionId": "early-stop"}).json()["run"]
+    assert run["status"] == "cancelled"
+    assert run["goal"] == "prepare"
+
+
+@pytest.mark.parametrize("decision,granted", [("approve_once", True), ("deny", False)])
+@pytest.mark.parametrize("requests", [1, 2])
+def test_snapshot_restores_approval_with_its_original_deadline(client, monkeypatch, decision, granted, requests):
+    import rune.agent.loop as loop_module
+
+    results = []
+
+    class ApprovalLoop(FakeLoop):
+        def set_approval_callback(self, cb):
+            self.approve = cb
+
+        async def run(self, goal, **kwargs):
+            results.extend(await asyncio.gather(*(
+                self.approve(f"write report-{index}.txt", "Requested report")
+                for index in range(requests)
+            )))
+            self._last_answer_text = "Decision received"
+            return SimpleNamespace(reason="completed", final_step=1, evidence_gate=None)
+
+    monkeypatch.setattr(loop_module, "NativeAgentLoop", ApprovalLoop)
+    client.post("/api/message", json={"text": "make report", "sessionId": "approval-restore"})
+
+    def snapshot():
+        return client.get("/api/runs/snapshot", params={"sessionId": "approval-restore"}).json()["run"]
+
+    seen = set()
+    for index in range(requests):
+        assert _wait_for(lambda: (snapshot() or {}).get("approval") is not None
+                         and snapshot()["approval"]["id"] not in seen)
+        approval = snapshot()["approval"]
+        seen.add(approval["id"])
+        assert snapshot()["approval"]["expiresAt"] == approval["expiresAt"]
+        payload = {"id": approval["id"], "decision": decision,
+                   "responseId": f"approval-response-{index}"}
+        assert client.post("/api/approval", json={**payload, "decision": "anything"}).status_code == 422
+        assert client.post("/api/approval", json=payload).status_code == 200
+        assert client.post("/api/approval", json=payload).status_code == 200
+    assert _wait_for(lambda: snapshot()["status"] == "completed")
+    assert client.post("/api/approval", json=payload).status_code == 200
+    assert results == [granted] * requests
+    assert snapshot()["approval"] is None
 
 
 def test_ndjson_question_is_serializable_and_returns_a_typed_empty_response(question_flow):

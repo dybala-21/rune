@@ -1,5 +1,5 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { ActivitySummary, OrchestrationState, StepInfo, ToolCall, TrustInfo } from '../types';
+import type { ActivitySummary, FileChange, OrchestrationState, StepInfo, ToolCall, TrustInfo } from '../types';
 import { normalizeToolName, isCodingToolName, argString, inferWorkPhase, inferActivityMode, computeRunVerdict, type WorkPhase } from '../utils/tooling';
 import { RuneMark, type MarkState } from './RuneMark';
 import { checkSummary, describeTrust, trustColors } from '../utils/trust';
@@ -10,17 +10,14 @@ import { langFromPath } from '../utils/highlight';
 // Terminal pulls in xterm (~330 KB). Load it only when the tab is opened.
 const TerminalPane = lazy(() => import('./TerminalPane').then(m => ({ default: m.TerminalPane })));
 import { ProgressPane } from './ProgressPane';
+import { DiffText, FileChangesPane } from './FileChangesPane';
+import { hasFileEdits, preferredWorkbenchTab } from '../utils/workbench';
 
-/**
- * Right-side supervision panel. Progress (default tab) shows the run's step
- * timeline, evidence, and verdict; Activity is the raw command log; Diff /
- * File / Terminal are coding surfaces (Diff hides on research-shaped runs).
- * Opened automatically by App once real work is visible — file edits for
- * coding runs, searches/pages for research runs.
- */
+/** Saved code changes, execution progress, and live workspace tools. */
 
 interface WorkbenchPanelProps {
   toolCalls: ToolCall[];
+  fileChanges?: FileChange[];
   isRunning: boolean;
   activitySummary: ActivitySummary | null;
   /** The run's verify-or-fail verdict — the real Evidence Gate result, same
@@ -32,6 +29,7 @@ interface WorkbenchPanelProps {
       status band and as an attention dot on the Progress tab. */
   awaiting?: 'approval' | 'question' | null;
   connected?: boolean;
+  historical?: boolean;
   onClose: () => void;
 }
 
@@ -202,7 +200,9 @@ const TABS: Array<[BenchTab, string]> = [
   ['terminal', 'Terminal'],
 ];
 
-export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, currentStep = null, orchestration = null, awaiting = null, connected = true, onClose }: WorkbenchPanelProps) {
+const NO_CHANGES: FileChange[] = [];
+
+export function WorkbenchPanel({ toolCalls, fileChanges = NO_CHANGES, isRunning, activitySummary, trust, currentStep = null, orchestration = null, awaiting = null, connected = true, historical = false, onClose }: WorkbenchPanelProps) {
   // Same run-verdict rule as the status pip and chat card (shared helper), so
   // the surfaces never disagree. null → no verdict to show yet.
   const verdictOk = computeRunVerdict(trust, activitySummary);
@@ -213,7 +213,9 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
     [toolCalls],
   );
 
-  const [tab, setTab] = useState<BenchTab>('progress');
+  const preferredTab = preferredWorkbenchTab(toolCalls, fileChanges);
+  const [tab, setTab] = useState<BenchTab>(preferredTab);
+  const [workspaceDiff, setWorkspaceDiff] = useState(false);
   const [diffText, setDiffText] = useState('');
   const [diffLoading, setDiffLoading] = useState(false);
   const [filePath, setFilePath] = useState('');
@@ -223,14 +225,17 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
   const [filePreview, setFilePreview] = useState(true);
 
   const loadDiff = useCallback(() => {
+    if (historical) return;
+    setWorkspaceDiff(true);
     setDiffLoading(true);
     fetchWorkspaceDiff()
       .then(r => setDiffText(r.diff))
       .catch(e => setDiffText(`diff unavailable: ${e instanceof Error ? e.message : e}`))
       .finally(() => setDiffLoading(false));
-  }, []);
+  }, [historical]);
 
   const openFile = useCallback((path: string) => {
+    if (historical) return;
     setTab('file');
     setFilePath(path);
     setFileError('');
@@ -239,24 +244,21 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
     readWorkspaceFile(path)
       .then(r => { setFileContent(r.content); setFileLoaded(true); })
       .catch(e => setFileError(e instanceof Error ? e.message : String(e)));
-  }, []);
+  }, [historical]);
 
-  useEffect(() => { if (tab === 'diff') loadDiff(); }, [tab, loadDiff]);
-
-  // Follow: while the agent works, snap back to the live Progress view when a
-  // new tool call lands, so a user parked on Diff/File isn't left behind.
+  // Follow opens code changes, but a tab chosen by the user stays put.
   const [follow, setFollow] = useState(true);
   const activityCount = toolCalls.length;
   useEffect(() => {
     // Don't yank the user out of an interactive terminal.
     if (follow && isRunning && activityCount > 0) {
-      setTab(t => (t === 'terminal' ? t : 'progress'));
+      setTab(t => (t === 'terminal' ? t : preferredTab));
     }
-  }, [follow, isRunning, activityCount]);
+  }, [follow, isRunning, activityCount, preferredTab]);
 
   // Diff is a coding surface; when the run turns out to be research work the
   // tab disappears, so a user parked there falls back to Progress.
-  const showDiffTab = mode !== 'research';
+  const showDiffTab = fileChanges.length > 0 || hasFileEdits(toolCalls) || !historical && mode !== 'research';
   useEffect(() => {
     if (!showDiffTab) setTab(t => (t === 'diff' ? 'progress' : t));
   }, [showDiffTab]);
@@ -296,7 +298,7 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
       minWidth: 0,
     }}>
       {/* Header */}
-      <div style={{
+      <div className="workbench-heading" style={{
         display: 'flex',
         alignItems: 'center',
         gap: 10,
@@ -315,7 +317,7 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
           textTransform: 'uppercase',
           color: 'var(--text-muted)',
         }}>
-          {isRunning ? PHASE_LABEL[phase] : trust?.completionStatus === 'cancelled' ? 'stopped' : 'finished'}
+          {isRunning ? PHASE_LABEL[phase] : trust?.completionStatus === 'cancelled' ? 'stopped' : toolCalls.length || trust ? 'finished' : 'ready'}
         </span>
         {isRunning && startedAt !== null && <Elapsed startedAt={startedAt} />}
         <button
@@ -338,15 +340,18 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
       </div>
 
       {/* Tabs */}
-      <div style={{
+      <div className="workbench-tabs" style={{
         display: 'flex', gap: 2, padding: '6px 10px 0',
         borderBottom: '1px solid var(--border)',
       }}>
-        {TABS.filter(([key]) => key !== 'diff' || showDiffTab).map(([key, label]) => (
+        {TABS.filter(([key]) => historical
+          ? key === 'progress' || key === 'activity' || key === 'diff' && showDiffTab
+          : key !== 'diff' || showDiffTab).map(([key, label]) => (
           <button
             key={key}
             type="button"
-            onClick={() => setTab(key)}
+            onClick={() => { setTab(key); setFollow(false); }}
+            aria-pressed={tab === key}
             style={{
               padding: '5px 12px', fontSize: 12, cursor: 'pointer',
               color: tab === key ? 'var(--text-primary)' : 'var(--text-muted)',
@@ -364,23 +369,23 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
             )}
           </button>
         ))}
-        {tab === 'diff' ? (
+        {tab === 'diff' && !historical ? (
           <button
             type="button"
-            onClick={loadDiff}
-            title="Refresh diff"
+            onClick={() => workspaceDiff ? setWorkspaceDiff(false) : loadDiff()}
+            title={workspaceDiff ? 'Show saved task changes' : 'Inspect current workspace Git diff'}
             style={{
               marginLeft: 'auto', background: 'none', border: 'none',
               color: 'var(--text-muted)', fontSize: 11, cursor: 'pointer', paddingBottom: 4,
             }}
           >
-            {diffLoading ? 'loading…' : '↻ refresh'}
+            {diffLoading ? 'Loading…' : workspaceDiff ? 'Task changes' : 'Workspace diff'}
           </button>
-        ) : (
+        ) : !historical && (
           <button
             type="button"
             onClick={() => setFollow(f => !f)}
-            title="Follow the agent — auto-switch to Activity as it works"
+            title="Follow code changes and tool activity"
             aria-pressed={follow}
             style={{
               marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6,
@@ -416,41 +421,25 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
           activitySummary={activitySummary}
           orchestration={orchestration}
           awaiting={awaiting}
-          onOpenFile={openFile}
+          onOpenFile={historical ? undefined : openFile}
         />
       )}
 
       {/* Diff view */}
-      {tab === 'diff' && (
+      {tab === 'diff' && !workspaceDiff && <FileChangesPane changes={fileChanges} toolCalls={toolCalls} historical={historical} />}
+      {tab === 'diff' && workspaceDiff && !historical && (
         <div style={{
           flex: 1, overflow: 'auto', padding: 14,
           fontFamily: 'var(--font-mono)', fontSize: 11.5, lineHeight: 1.6,
         }}>
-          {diffText ? diffText.replace(/^```diff\n|\n```$/g, '').split('\n').map((l, i) => {
-            const added = l.startsWith('+');
-            const removed = l.startsWith('-');
-            const hunk = l.startsWith('@@');
-            return (
-              <div key={i} style={{
-                whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-                margin: '0 -14px', padding: '0 14px',
-                background: added ? 'var(--success-subtle)'
-                  : removed ? 'var(--danger-subtle)'
-                  : hunk ? 'var(--accent-subtle)' : 'transparent',
-                color: added ? 'var(--success)'
-                  : removed ? 'var(--danger)'
-                  : hunk ? 'var(--accent)'
-                  : 'var(--text-muted)',
-              }}>{l || '\u00A0'}</div>
-            );
-          }) : (
+          {diffText ? <DiffText text={diffText.replace(/^```diff\n|\n```$/g, '')} /> : (
             <div style={{ color: 'var(--text-muted)' }}>{diffLoading ? 'Loading diff…' : 'No diff yet.'}</div>
           )}
         </div>
       )}
 
       {/* Terminal — mounted only when selected so no PTY opens otherwise */}
-      {tab === 'terminal' && (
+      {!historical && tab === 'terminal' && (
         <Suspense fallback={<div className="wb-loading">Loading terminal…</div>}>
           <TerminalPane />
         </Suspense>
@@ -534,7 +523,7 @@ export function WorkbenchPanel({ toolCalls, isRunning, activitySummary, trust, c
         {coding.length === 0 ? (
           <div style={{ color: 'var(--text-muted)' }}>Waiting for the first edit or command…</div>
         ) : (
-          coding.map(tc => <CommandLine key={tc.id} tc={tc} onOpenFile={openFile} />)
+          coding.map(tc => <CommandLine key={tc.id} tc={tc} onOpenFile={historical ? undefined : openFile} />)
         )}
       </div>
       )}

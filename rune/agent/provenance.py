@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,6 +40,14 @@ _ENV_FLAG = "RUNE_ARTIFACT_PROVENANCE"
 _PATH_RE = re.compile(
     r"(?:[\w./\\-]*[/\\])?[\w.-]+\.[A-Za-z][A-Za-z0-9]{0,7}(?![A-Za-z0-9])"
 )
+_WEB_LINK_RE = re.compile(r"\[[^\]\n]*\]\(\s*https?://[^)\n]*\)", re.IGNORECASE)
+_URL_RE = re.compile(r"https?://[^\s<>`\"']+", re.IGNORECASE)
+
+
+def _local_path_tokens(text: str) -> Iterator[str]:
+    # A page or download URL is not evidence that a local file should exist.
+    text = _URL_RE.sub(" ", _WEB_LINK_RE.sub(" ", text or ""))
+    return (match.group(0) for match in _PATH_RE.finditer(text))
 
 # Extensions that name a document/artifact rather than an inline example.
 _SKIP_SUFFIXES = frozenset({
@@ -56,8 +65,7 @@ def provenance_enabled() -> bool:
 def referenced_paths(text: str) -> set[str]:
     """File names the request talks about, keyed by base name."""
     out: set[str] = set()
-    for m in _PATH_RE.finditer(text or ""):
-        token = m.group(0)
+    for token in _local_path_tokens(text):
         name = os.path.basename(token.replace("\\", "/"))
         suffix = os.path.splitext(name)[1].lower()
         if not suffix or suffix in _SKIP_SUFFIXES:
@@ -95,8 +103,7 @@ class ArtifactLedger:
     @classmethod
     def for_request(cls, request: str, root: str = "") -> ArtifactLedger:
         ledger = cls(referenced=referenced_paths(request), root=root)
-        for match in _PATH_RE.finditer(request or ""):
-            path = match.group(0)
+        for path in _local_path_tokens(request):
             name = _key(path)
             if name in ledger.referenced:
                 ledger.requested_paths.setdefault(name, set()).add(path)

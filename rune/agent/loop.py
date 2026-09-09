@@ -212,6 +212,8 @@ def _tool_result_event_payload(cap_name: str, result: CapabilityResult) -> dict[
         # returned (the workbench activity feed); full output stays loop-side.
         "output_head": (result.output or "")[:2000],
     }
+    if cap_name in {"file_write", "file_edit", "file_delete"} and (result.metadata or {}).get("fileChange"):
+        payload["fileChange"] = result.metadata["fileChange"]
     if result.error:
         payload["error_length"] = len(result.error)
         payload["error_head"] = result.error[:500]
@@ -632,6 +634,7 @@ class NativeAgentLoop(EventEmitter):
         self._hard_failures: list[str] = []
         self._verification = VerificationState()
         self._artifact_receipts: list[dict[str, Any]] = []
+        self._table_acceptance = None
         self._structured_writes: int = 0
         self._budget_upgraded_for_code: bool = False
         self._unverified_completion_blocks: int = 0
@@ -707,6 +710,7 @@ class NativeAgentLoop(EventEmitter):
         self._hard_failures.clear()
         self._verification = VerificationState()
         self._artifact_receipts = []
+        self._table_acceptance = None
         self._structured_writes = 0
         self._budget_upgraded_for_code = False
         self._unverified_completion_blocks = 0
@@ -994,6 +998,13 @@ class NativeAgentLoop(EventEmitter):
         check there, so an LLM judgment is redundant and risks false-blocking.
         Output-integrity is deterministic and harmless, so it always runs when
         enabled."""
+        if self._table_acceptance is not None:
+            blocker = await self._table_acceptance.blocker()
+            if blocker:
+                self._record_completion_block("Table requirements", blocker)
+                messages = self._inject_system_message(messages, "[Table verification] " + blocker)
+                self._gate_blocked_count = blocked_count + 1
+                return False, messages, blocked_count + 1
         ok, messages, blocked_count = self._output_integrity_gate(messages, blocked_count)
         if not ok:
             return False, messages, blocked_count
@@ -1045,6 +1056,12 @@ class NativeAgentLoop(EventEmitter):
         self._cancel_event.clear()
         self._reset_run_state()
         self._workspace_root = (context or {}).get("workspace_root") or os.getcwd()
+        for path in (context or {}).get("recovery_written_files", []):
+            self._files_written.add(path)
+            if _structured_by_extension(os.path.splitext(path)[1].lower()) is True:
+                self._structured_writes += 1
+                self._verification.changed()
+                self._pending_verification_nudge = True
         self._replay_capture = None
         # T1-1: record the pre-task git ref now (before the agent
         # mutates the tree) so a distilled skill can later be A/B'd by replay.
@@ -1250,6 +1267,12 @@ class NativeAgentLoop(EventEmitter):
                 except Exception:  # observability must never break the run
                     trace.evidence_gate = None
             trace.verification = self._verification.snapshot()
+            if self._table_acceptance is not None:
+                blocker = await self._table_acceptance.blocker()
+                trace.table_acceptance = self._table_acceptance.snapshot()
+                if blocker and trace.reason in {"completed", "verified"}:
+                    self._record_completion_block("Table requirements", blocker)
+                    trace.reason = self._max_gate_reason()
             trace.artifact_receipts = list(self._artifact_receipts)
             trace.tests_passed_after_edit = self._verification.tests_passed_after_edit
             if trace.reason in ("completed_gate_warnings", "max_gate_blocked"):
@@ -1606,6 +1629,9 @@ class NativeAgentLoop(EventEmitter):
         async def _on_tool_end(cap_name: str, result: CapabilityResult) -> None:
             _last_tool_params = _tool_params.get() or {}
             self._last_activity = time.monotonic()  # (#30) activity on tool result
+            if (result.metadata or {}).get("replayed"):
+                await self.emit("tool_result", _tool_result_event_payload(cap_name, result))
+                return
 
             # A throwaway best-of-K sample (RUNE_IN_BEST_OF set in the attempt
             # subprocess) must not persist tool-call telemetry: the proactive
@@ -1658,7 +1684,9 @@ class NativeAgentLoop(EventEmitter):
                     pass  # Prediction recording must never break the agent loop
 
             # Update evidence counters
-            if cap_name in ("file_read", "document_read", "document_bundle_inspect"):
+            if cap_name == "table_verify" and result.success:
+                evidence.verifications += 1
+            elif cap_name in ("file_read", "document_read", "document_bundle_inspect", "table_requirements"):
                 evidence.file_reads += 1
                 evidence.reads += 1
                 self._consecutive_reads_without_write += 1  # (#27)
@@ -1721,7 +1749,8 @@ class NativeAgentLoop(EventEmitter):
                 evidence.executions += 1
                 self._consecutive_reads_without_write = 0  # (#27) reset
                 if self._verification.observe_command(
-                    _last_tool_params.get("command", ""), result.success, result.output or ""
+                    _last_tool_params.get("command", ""), result.success, result.output or "",
+                    cwd=_last_tool_params.get("cwd") or self._workspace_root,
                 ):
                     evidence.verifications += 1
             elif cap_name == "web_search":
@@ -1821,6 +1850,22 @@ class NativeAgentLoop(EventEmitter):
         if not supports_vision(model):
             tools = [t for t in tools if t != "browser_screenshot"]
 
+        from rune.agent.execution_journal import active_journal
+        from rune.agent.table_acceptance import TableAcceptance
+
+        journal = active_journal()
+        self._table_acceptance = TableAcceptance(
+            (context or {}).get("original_goal") or goal,
+            required="table" in classification.intent_categories,
+            prior=[m["content"] for m in message_history or [] if m.get("role") == "user" and m.get("content")],
+            previous=journal.previous if journal else None,
+        )
+        system_prompt += (
+            "\nFor source-derived aggregate CSV/XLSX deliverables, first call table_requirements with the original "
+            "source. Follow its fixed columns and data conditions, then call table_verify on every delivered table. "
+            "Repair reported differences and recheck after edits. Do not substitute generated data for the source. "
+            "Report unsupported conditions separately; table data checks do not verify prose or visual layout.\n"
+        )
         adapter_opts = ToolAdapterOptions(
             cognitive_cache=cache,
             stall_state=self._stall,
@@ -1831,6 +1876,7 @@ class NativeAgentLoop(EventEmitter):
             approval_callback=self._approval_callback,
             fast_lane_active=lambda: _fast_lane_active,
             workspace_root=(context or {}).get("workspace_root", ""),
+            table_acceptance=self._table_acceptance,
         )
         tool_functions = build_tool_set(adapter_opts)
 
@@ -2324,7 +2370,11 @@ class NativeAgentLoop(EventEmitter):
                     message_history=messages or None,
                     usage_limits=usage_limits,
                     workspace_root=self._workspace_root,
-                    verification_callback=self._verification.observe_command,
+                    verification_callback=lambda command, success, output: (
+                        self._verification.observe_command(
+                            command, success, output, cwd=self._workspace_root,
+                        )
+                    ),
                 ) as stream:
                     # Inject persistent fail streak into this step (#P4)
                     if self._persistent_fail_streak:
@@ -2712,7 +2762,8 @@ class NativeAgentLoop(EventEmitter):
                             f"#{self._verification.last_write}) but did not run "
                             f"a passing verification after that (last check call "
                             f"#{self._verification.last_pass}). Re-run the script and "
-                            f"show the real output before declaring done.",
+                            f"show the real output before declaring done. "
+                            + self._verification.guidance(),
                         )
                     elif _unverified_code():
                         self._record_completion_block(
@@ -2748,7 +2799,8 @@ class NativeAgentLoop(EventEmitter):
                             )
                             + " Run the tests now and make them pass before declaring"
                             " done. If they genuinely cannot pass, say so explicitly"
-                            " and do NOT claim the task is complete.",
+                            " and do NOT claim the task is complete. "
+                            + self._verification.guidance(),
                         )
                     else:
                         blocker = await self._benchmark_completion_blocker()
@@ -2940,7 +2992,8 @@ class NativeAgentLoop(EventEmitter):
                             if self._verification.last_check_failed
                             else "."
                         )
-                        + " Run the tests and make them pass before declaring done.",
+                        + " Run the tests and make them pass before declaring done. "
+                        + self._verification.guidance(),
                     )
                     continue
 

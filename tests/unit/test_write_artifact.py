@@ -10,6 +10,17 @@ from rune.agent.write_artifact import (
 
 @pytest.mark.asyncio
 class TestClassifyWriteArtifact:
+    async def test_csv_that_parses_as_python_does_not_require_code_tests(self):
+        from rune.agent.loop import _structured_by_extension
+
+        content = "team,amount\nA,12.01\nB,5.01\n"
+        compile(content, "<table>", "exec")
+        result = await classify_write_artifact(content, WriteArtifactOptions(path_hint="summary.csv"))
+        assert not result.is_structured
+        assert _structured_by_extension(".csv") is False
+        assert _structured_by_extension(".tsv") is False
+        assert _structured_by_extension(".py") is True
+
     async def test_python_code_classified_as_structured(self):
         content = "\n".join([
             "def sum(a: int, b: int) -> int:",

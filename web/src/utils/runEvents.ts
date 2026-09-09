@@ -1,5 +1,13 @@
 import type { AgentAbortedData, ChatMessage } from '../types';
 
+export function belongsToConversation(
+  event: { sessionId?: string | null; runId?: string }, sessionId: string, runId: string,
+): boolean {
+  if (event.sessionId) return event.sessionId === sessionId;
+  if (event.runId) return event.runId === runId;
+  return true;
+}
+
 export function abortedMessage(data: AgentAbortedData, fallbackId: string, timestamp: number): ChatMessage {
   return {
     id: data.runId ? `aborted-${data.runId}` : fallbackId,

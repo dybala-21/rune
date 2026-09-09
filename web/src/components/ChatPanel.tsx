@@ -17,8 +17,7 @@ import { ProactiveCard } from './ProactiveCard';
 import { ToolCallCard, getToolColor } from './ToolCallCard';
 import { ThinkingBlockView } from './ThinkingBlock';
 import { normalizeToolName, inferWorkPhase } from '../utils/tooling';
-import { RuneMark } from './RuneMark';
-import { WorkspaceSetupRow } from './WorkspaceSetupRow';
+import { WelcomePanel } from './WelcomePanel';
 import {
   APPROVAL_COPY,
   QUESTION_COPY,
@@ -43,7 +42,7 @@ interface ChatPanelProps {
   pendingQuestion: PendingQuestion | null;
   onRespondQuestion: (answer: string, selectedIndex?: number) => Promise<void>;
   pendingApproval: PendingApproval | null;
-  onRespondApproval: (decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) => void;
+  onRespondApproval: (decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) => Promise<void>;
   /** Sends an empty-state suggestion; omit to render suggestions disabled. */
   onSuggest?: (text: string) => void;
   /** Extra content rendered inside the scroll area, after the messages. */
@@ -71,44 +70,10 @@ export function ChatPanel({
 }: ChatPanelProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-  // Only auto-scroll when the user is already near the bottom, so scrolling up
-  // to read doesn't get yanked down by incoming content.
+  // Follow new content only while the user is near the bottom.
   const atBottomRef = useRef(true);
 
   const [showScrollBtn, setShowScrollBtn] = useState(false);
-
-  useEffect(() => {
-    if (!atBottomRef.current) return;
-    const timer = requestAnimationFrame(() => {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-    });
-    return () => cancelAnimationFrame(timer);
-  }, [messages, toolCalls, thinkingBlocks, delegateEvents, compactionEvents, pendingApproval, pendingQuestion]);
-
-  // On conversation switch, anchor scroll instead of inheriting the old position:
-  // live → latest turn, history replay → its start.
-  useEffect(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    const isLive = conversationKey === 'live';
-    atBottomRef.current = isLive;
-    const timer = requestAnimationFrame(() => {
-      container.scrollTop = isLive ? container.scrollHeight : 0;
-    });
-    return () => cancelAnimationFrame(timer);
-  }, [conversationKey]);
-
-  useEffect(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    const onScroll = () => {
-      const fromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-      atBottomRef.current = fromBottom < 80;
-      setShowScrollBtn(fromBottom > 200);
-    };
-    container.addEventListener('scroll', onScroll);
-    return () => container.removeEventListener('scroll', onScroll);
-  }, []);
 
   type TimelineItem =
     | { type: 'message'; item: ChatMessage }
@@ -125,9 +90,7 @@ export function ChatPanel({
     return null;
   }, [messages]);
 
-  // The answer currently streaming = the last assistant message that comes
-  // after the last user turn. Only this one is pinned; a previous turn's answer
-  // (before a newer user message) must keep its real position.
+  // Only the answer after the latest user turn can still be streaming.
   const streamingAnswerId = useMemo(() => {
     if (!isRunning) return null;
     let lastUserIdx = -1;
@@ -143,10 +106,7 @@ export function ChatPanel({
   const timeline = useMemo<TimelineItem[]>(() => [
     ...messages
       .filter(m => m.content?.trim() || m.trust || m.suggestion || m.attachments?.length)
-      // Pin the streaming answer to the end: it is created at the first token
-      // (an early timestamp) but its tools arrive after, so without this it
-      // renders above them and then jumps to the bottom when the run finishes.
-      // Keeping it last throughout gives a stable "tools, then answer" order.
+  // Keep the streaming answer below its tool calls to avoid reordering on completion.
       .map(m => ({
         type: 'message' as const,
         item: m,
@@ -176,9 +136,40 @@ export function ChatPanel({
 
   const isEmpty = timeline.length === 0;
 
-  // Render only the most recent slice so a long run does not put thousands of
-  // DOM nodes in the scroll container; older entries stay in state (search,
-  // export) and reveal on request. Rendering the tail keeps stick-to-bottom.
+  useEffect(() => {
+    if (!atBottomRef.current || isEmpty) return;
+    const timer = requestAnimationFrame(() => {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    });
+    return () => cancelAnimationFrame(timer);
+  }, [messages, toolCalls, thinkingBlocks, delegateEvents, compactionEvents, pendingApproval, pendingQuestion, isEmpty]);
+
+  // Open live chat at the latest turn and history at the start.
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const isLive = conversationKey === 'live';
+    atBottomRef.current = isLive;
+    const timer = requestAnimationFrame(() => {
+      container.scrollTop = isLive && !isEmpty ? container.scrollHeight : 0;
+    });
+    return () => cancelAnimationFrame(timer);
+  }, [conversationKey, isEmpty]);
+
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const onScroll = () => {
+      const fromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+      atBottomRef.current = fromBottom < 80;
+      setShowScrollBtn(fromBottom > 200);
+    };
+    container.addEventListener('scroll', onScroll);
+    return () => container.removeEventListener('scroll', onScroll);
+  }, []);
+
+
+  // Limit rendered rows; older entries remain available for search and export.
   const RENDER_STEP = 400;
   const [renderCap, setRenderCap] = useState(RENDER_STEP);
   useEffect(() => { setRenderCap(RENDER_STEP); }, [conversationKey]);
@@ -194,17 +185,17 @@ export function ChatPanel({
       flexDirection: 'column',
       position: 'relative',
     }}>
-      <div style={{
-        maxWidth: 768,
+      <div className="chat-content" style={{
+        maxWidth: 800,
         width: '100%',
         margin: '0 auto',
-        padding: '24px 24px 160px',
+
         flex: isEmpty ? 1 : undefined,
         display: 'flex',
         flexDirection: 'column',
         gap: 2,
       }}>
-        {isEmpty && <EmptyState onSuggest={onSuggest} />}
+        {isEmpty && <WelcomePanel onSuggest={onSuggest} />}
 
         {hiddenCount > 0 && (
           <button
@@ -303,6 +294,7 @@ export function ChatPanel({
 
         {pendingApproval && (
           <InlineApprovalCard
+            key={pendingApproval.id}
             approval={pendingApproval}
             onRespond={onRespondApproval}
           />
@@ -342,103 +334,6 @@ export function ChatPanel({
           </svg>
         </button>
       )}
-    </div>
-  );
-}
-
-// ── Empty state ──
-
-const SUGGESTIONS: Array<{ icon: React.ReactNode; text: string }> = [
-  {
-    icon: <path d="M9 8l-5 4 5 4M15 8l5 4-5 4" />,
-    text: 'Find and fix a failing test',
-  },
-  {
-    icon: (
-      <>
-        <path d="M7 3h8l4 4v14H7z" />
-        <path d="M14 3v5h5" />
-      </>
-    ),
-    text: 'Summarize this project',
-  },
-  {
-    icon: (
-      <>
-        <circle cx="12" cy="12" r="9" />
-        <path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18" />
-      </>
-    ),
-    text: "What's new with AI agents?",
-  },
-];
-
-function EmptyState({ onSuggest }: { onSuggest?: (text: string) => void }) {
-  return (
-    <div style={{
-      flex: 1,
-      display: 'flex',
-      flexDirection: 'column',
-      justifyContent: 'center',
-      maxWidth: 520,
-      width: '100%',
-      margin: '0 auto',
-      padding: '32px 8px',
-    }}>
-      <RuneMark state="idle" size={40} title="RUNE" />
-      <div style={{
-        fontSize: 19,
-        fontWeight: 600,
-        letterSpacing: '-0.015em',
-        color: 'var(--text-primary)',
-        margin: '14px 0 5px',
-      }}>
-        What should RUNE take on?
-      </div>
-      <div style={{
-        fontSize: 13.5,
-        color: 'var(--text-secondary)',
-        lineHeight: 1.6,
-        marginBottom: 20,
-      }}>
-        Code, commands, the web, your files — verified before it says done.
-      </div>
-
-      <div style={{ display: 'flex', flexDirection: 'column' }}>
-        {SUGGESTIONS.map(s => (
-          <button
-            key={s.text}
-            onClick={onSuggest ? () => onSuggest(s.text) : undefined}
-            disabled={!onSuggest}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 12,
-              padding: '11px 4px',
-              background: 'none',
-              border: 'none',
-              borderTop: '1px solid var(--border-subtle)',
-              color: 'var(--text-primary)',
-              fontSize: 14,
-              textAlign: 'left',
-              cursor: onSuggest ? 'pointer' : 'default',
-              borderRadius: 0,
-            }}
-            onMouseEnter={e => { e.currentTarget.style.paddingLeft = '10px'; }}
-            onMouseLeave={e => { e.currentTarget.style.paddingLeft = '4px'; }}
-          >
-            <svg
-              width="16" height="16" viewBox="0 0 24 24" fill="none"
-              stroke="var(--accent)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"
-              style={{ flexShrink: 0 }}
-            >
-              {s.icon}
-            </svg>
-            <span style={{ flex: 1 }}>{s.text}</span>
-          </button>
-        ))}
-        <WorkspaceSetupRow />
-      </div>
     </div>
   );
 }
@@ -1008,12 +903,13 @@ function InlineApprovalCard({
   onRespond,
 }: {
   approval: PendingApproval;
-  onRespond: (decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) => void;
+  onRespond: (decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) => Promise<void>;
 }) {
   const [showDenyInput, setShowDenyInput] = useState(false);
   const [guidance, setGuidance] = useState('');
   const [remaining, setRemaining] = useState(Math.ceil(approval.timeoutMs / 1000));
   const [submitted, setSubmitted] = useState(false);
+  const inFlight = useRef(false);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -1027,12 +923,19 @@ function InlineApprovalCard({
 
   const riskColor = RISK_COLORS[approval.riskLevel] || 'var(--text-secondary)';
   const progressPct = Math.max(0, (remaining / (approval.timeoutMs / 1000)) * 100);
-  // Locked after a response or once the timeout fired, to block a duplicate RPC.
   const locked = submitted || remaining <= 0;
-  const respond = (decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) => {
-    if (locked) return;
+  const respond = async (decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) => {
+    if (locked || inFlight.current) return;
+    inFlight.current = true;
     setSubmitted(true);
-    onRespond(decision, userGuidance);
+    try {
+      await onRespond(decision, userGuidance);
+    } catch {
+      // The hook reports the error. Unlock this card for retry.
+      setSubmitted(false);
+    } finally {
+      inFlight.current = false;
+    }
   };
 
   return (

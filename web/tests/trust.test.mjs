@@ -13,6 +13,7 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const home = mkdtempSync(resolve(tmpdir(), 'rune-trust-contract-'));
 const gate = last_verdict => ({ has_check: true, last_verdict, verdict_counts: { pass: 1 }, last_evidence: 'check output' });
 const cases = [
+  { name: 'table differences override passing command checks', trace: { mech_check: 'pass', table_acceptance: { required: true, status: 'fail', contracts: [], results: [], unverified: [] } }, title: 'Checks failed', tone: 'warning', ok: false, card: true },
   { name: 'web lookup completed without a checker', trace: {}, title: 'Completed', tone: 'neutral', ok: true, card: false },
   { name: 'ordinary chat', trace: { verification: { required: false, status: 'unverified' } }, title: 'Completed', tone: 'neutral', ok: true, card: false },
   { name: 'task check passed', trace: { evidence_gate: gate('pass') }, title: 'Checks passed', tone: 'success', ok: true, card: true },
@@ -44,7 +45,7 @@ const cases = [
   }] }, title: 'Stopped', tone: 'neutral', ok: false, card: true },
 ];
 
-let server, describeTrust, checkEvidence, computeRunVerdict, TrustCard, ProgressPane, payloads, abortedMessage, upsertRunMessage;
+let server, describeTrust, checkEvidence, computeRunVerdict, TrustCard, ProgressPane, WorkbenchPanel, payloads, abortedMessage, upsertRunMessage;
 before(async () => {
   const result = spawnSync(process.env.RUNE_TEST_PYTHON || resolve(root, '../.venv/bin/python'), ['-c', `
 import json, sys
@@ -65,11 +66,67 @@ print(json.dumps([build_trust_payload(SimpleNamespace(**trace)) for trace in jso
   ({ computeRunVerdict } = await server.ssrLoadModule('/src/utils/tooling.ts'));
   ({ TrustCard } = await server.ssrLoadModule('/src/components/TrustCard.tsx'));
   ({ ProgressPane } = await server.ssrLoadModule('/src/components/ProgressPane.tsx'));
+  ({ WorkbenchPanel } = await server.ssrLoadModule('/src/components/WorkbenchPanel.tsx'));
   ({ abortedMessage, upsertRunMessage } = await server.ssrLoadModule('/src/utils/runEvents.ts'));
 });
 after(async () => {
   await server?.close();
   rmSync(home, { recursive: true, force: true });
+});
+
+test('past executions expose saved evidence without live workspace controls', () => {
+  const props = {
+    toolCalls: [{ id: 'edit-1', toolName: 'file_edit', args: { path: 'report.py' }, timestamp: 0, result: 'edited', success: true }],
+    isRunning: false, activitySummary: null, onClose() {},
+  };
+  const past = renderToStaticMarkup(createElement(WorkbenchPanel, { ...props, historical: true }));
+  assert.match(past, />Progress</);
+  assert.match(past, />Activity</);
+  assert.match(past, /report\.py/);
+  assert.match(past, />Diff</);
+  assert.doesNotMatch(past, />(File|Terminal|Follow)</);
+  assert.doesNotMatch(past, /<button[^>]*title="report\.py"/);
+  const live = renderToStaticMarkup(createElement(WorkbenchPanel, props));
+  assert.match(live, />Terminal</);
+  assert.match(live, /Requested changes/);
+});
+
+test('table evidence shows fixed requirements, data differences and unverified scope', () => {
+  const html = renderToStaticMarkup(createElement(TrustCard, { trust: {
+    reason: 'completed', verified: false, completionStatus: 'completed',
+    verificationStatus: 'failed', verificationRequired: true,
+    tableAcceptance: {
+      required: true, status: 'fail', scope: 'tabular_data',
+      contracts: [{ id: 'fixed', source_path: '/work/orders.csv', source_sha256: 'a',
+        plan: { requirements: ['취소 주문 제외'], unverified: ['Report layout'] } }],
+      results: [{ contract_id: 'fixed', output_path: '/work/summary.xlsx', status: 'fail',
+        stats: { source_rows: 5, filtered_rows: 1, duplicates_removed: 1, output_rows: 2 },
+        issues: [{ check: 'missing_or_incorrect_rows', count: 1, examples: [['B', '5.01']] }] }],
+      unverified: ['Report layout'],
+    },
+  } }));
+  for (const text of ['Table data checks', '취소 주문 제외', 'Filtered out 1', 'Duplicates removed 1',
+    'Missing or incorrect rows: 1', 'B · 5.01', 'Not verified', 'Report layout']) {
+    assert.ok(html.includes(text), text);
+  }
+});
+
+test('code diffs stay available after research and in resumed history', async () => {
+  const { shouldOpenWorkbench, preferredWorkbenchTab } = await server.ssrLoadModule('/src/utils/workbench.ts');
+  const calls = ['web_search', 'web_fetch', 'web_search', 'file_edit'].map((toolName, index) => ({
+    id: String(index), toolName, args: { path: 'app.py' }, timestamp: index,
+  }));
+  assert.equal(shouldOpenWorkbench(calls, []), true);
+  assert.equal(preferredWorkbenchTab(calls, []), 'diff');
+  const changes = [{ id: 'change-1', path: '/workspace/app.py', kind: 'modified', patch: '-return 1\n+return 2\n' }];
+  assert.equal(shouldOpenWorkbench([], changes), true);
+  const html = renderToStaticMarkup(createElement(WorkbenchPanel, {
+    toolCalls: [], fileChanges: changes, historical: true, isRunning: false, activitySummary: null, onClose() {},
+  }));
+  assert.match(html, /Saved changes from this task/);
+  assert.match(html, /-return 1/);
+  assert.match(html, /\+return 2/);
+  assert.doesNotMatch(html, /Workspace diff|>Terminal<|>File</);
 });
 
 cases.forEach((c, i) => test(c.name, () => {

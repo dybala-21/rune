@@ -35,6 +35,14 @@ class TestReferencedPaths:
         assert referenced_paths("") == set()
         assert referenced_paths(None) == set()
 
+    def test_web_references_do_not_create_missing_local_inputs(self):
+        request = ('https://sqlite.org/wal.html 과 [sales.csv](https://example.com/sales.csv)를 참고해서 '
+                   'local/sales.csv를 검토하고 summary.csv를 만들어줘')
+        ledger = ArtifactLedger.for_request(request)
+        assert ledger.referenced == {"sales.csv", "summary.csv"}
+        assert ledger.requested_paths["sales.csv"] == {"local/sales.csv"}
+        assert referenced_paths('`HTTPS://example.com/report.pdf?download=raw.csv#section.html`') == set()
+
 
 class TestLedger:
     def _ledger(self):
@@ -653,4 +661,3 @@ class TestAnOutputMayAppear:
         note = res._revert_circumvented_writes()
         assert note != ""
         assert not (tmp_path / "BUGREPORT.md").exists()
-

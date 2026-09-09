@@ -1149,6 +1149,7 @@ class TestProactiveFullCycle:
             config=BridgeConfig(
                 max_retries=2,
                 backoff_base_seconds=0.01,  # fast for test
+                retry_safe=True,
                 auto_execute=True,
             ),
         )

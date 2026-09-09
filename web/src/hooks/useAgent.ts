@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { restoreRunMessages, type RunSnapshot } from '../utils/runSnapshot';
 import { toast } from '../utils/toast';
 import { useSSE } from './useSSE';
 import * as api from '../api';
 import { computeActivitySummary } from '../utils/tooling';
 import { describeTrust } from '../utils/trust';
-import { abortedMessage, upsertRunMessage } from '../utils/runEvents';
+import { abortedMessage, belongsToConversation, upsertRunMessage } from '../utils/runEvents';
 import type {
   AgentState,
   ChatMessage,
+  FileChange,
   ToolCall,
   ThinkingBlock,
   TokenUsage,
@@ -49,8 +51,7 @@ function nextId(): string {
   return `msg-${++idCounter}-${Date.now()}`;
 }
 
-/** Replace-or-append a delegated task by id — the one merge rule for every
-    orchestration event. */
+/** Merge progress updates for the same delegated task. */
 function upsertTask(
   tasks: OrchestrationTask[],
   taskId: string,
@@ -206,12 +207,7 @@ function loadPersistedLiveState(): LoadedLiveDraft {
   }
 }
 
-/**
- * Strip attachment image data before persisting. localStorage holds a few MB
- * total, so keeping base64 here would overflow the quota and — since the write
- * fails silently — take draft recovery down with it. Names survive so a
- * restored conversation still reads correctly.
- */
+/** Keep attachment names in drafts; base64 data can exceed localStorage's quota. */
 function withoutAttachmentData(messages: ChatMessage[]): ChatMessage[] {
   return messages.map(m => (
     m.attachments?.length
@@ -235,7 +231,7 @@ function persistLiveState(state: PersistedLiveState): void {
 }
 
 export function useAgent() {
-  const { connected, addEventListener: sseOn } = useSSE();
+  const { connected, addEventListener: sseOn, refresh } = useSSE();
   const initialStateRef = useRef<LoadedLiveDraft | null>(null);
   if (initialStateRef.current === null) {
     initialStateRef.current = loadPersistedLiveState();
@@ -252,21 +248,27 @@ export function useAgent() {
   const [toolCalls, setToolCalls] = useState<ToolCall[]>(initialLiveState.toolCalls);
   const [thinkingBlocks, setThinkingBlocks] = useState<ThinkingBlock[]>(initialLiveState.thinkingBlocks);
   const [tokenUsage, setTokenUsage] = useState<TokenUsage | null>(initialLiveState.tokenUsage);
-  const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
+  const [pendingApproval, setPendingApprovalState] = useState<PendingApproval | null>(null);
+  const pendingApprovalRef = useRef<PendingApproval | null>(null);
+  const setPendingApproval = useCallback((update: PendingApproval | null | ((current: PendingApproval | null) => PendingApproval | null)) => {
+    const next = typeof update === 'function' ? update(pendingApprovalRef.current) : update;
+    pendingApprovalRef.current = next;
+    setPendingApprovalState(next);
+  }, []);
   const [pendingQuestion, setPendingQuestion] = useState<PendingQuestion | null>(null);
   const pendingQuestionRef = useRef<PendingQuestion | null>(null);
   const [activitySummary, setActivitySummary] = useState<ActivitySummary | null>(initialLiveState.activitySummary);
   const [lastTrust, setLastTrust] = useState<TrustInfo | null>(null);
+  const [fileChanges, setFileChanges] = useState<FileChange[]>([]);
+  const [interruptedRun, setInterruptedRun] = useState<RunSnapshot | null>(null);
   const [delegateEvents, setDelegateEvents] = useState<DelegateItem[]>(initialLiveState.delegateEvents);
   const [compactionEvents, setCompactionEvents] = useState<CompactionItem[]>(initialLiveState.compactionEvents);
   const [currentStepInfo, setCurrentStepInfo] = useState<StepInfo | null>(null);
   const [orchestration, setOrchestration] = useState<OrchestrationState | null>(null);
   // tool_call 핸들러가 스텝 번호를 동기적으로 읽어야 하므로 state와 별도로 ref 유지
   const currentStepRef = useRef(0);
-  // Tool calls accumulate across turns while the server's step numbering
-  // restarts at 1 each run, so this counter keeps turns apart in the timeline.
-  // Seeded past the restored calls' highest run, or the next run would reuse a
-  // number and the timeline would merge the two turns.
+  // Step numbers restart each run. Continue from the restored run counter
+  // so the timeline keeps calls from different turns apart.
   const runSeqRef = useRef(
     initialState.state.toolCalls.reduce((max, tc) => Math.max(max, tc.run ?? 0), 0),
   );
@@ -275,24 +277,20 @@ export function useAgent() {
   );
   const [draftDecisionPending, setDraftDecisionPending] = useState<boolean>(hasSavedDraft);
 
-  // 현재 step의 텍스트를 보관 (교체 방식 — step.text는 delta가 아니라 해당 step 전체 텍스트)
+  // Accumulated text for the current answer.
   const pendingTextRef = useRef('');
-  // Trailing-debounced localStorage persistence (see the effect below).
   const pendingPersistRef = useRef<PersistedLiveState | null>(null);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 현재 run의 assistant 메시지 ID (하나의 run에 하나의 assistant 메시지만 유지)
   const assistantMsgIdRef = useRef<string | null>(null);
 
-  // Flush text into a message.
-  // NOTE: assistantMsgIdRef를 setMessages updater 안에서 읽어야 함.
-  // React batching으로 여러 setMessages가 큐잉되면, 바깥에서 캡처한 ref 값은
-  // 이전 updater가 설정한 값을 반영하지 못해 중복 메시지가 생김.
+  // Read the message ID inside the updater so batched deltas share one message.
   const flushTextDelta = useCallback(() => {
     const text = pendingTextRef.current;
     if (!text) return;
 
     setMessages(prev => {
-      const msgId = assistantMsgIdRef.current; // updater 안에서 읽기
+      const msgId = assistantMsgIdRef.current;
       if (msgId) {
         const idx = prev.findIndex(m => m.id === msgId);
         if (idx !== -1 && prev[idx].content !== text) {
@@ -308,9 +306,7 @@ export function useAgent() {
     });
   }, []);
 
-  // Read draft state via refs so beginLiveSession stays a stable dep of the SSE
-  // effect — otherwise its identity churns and the effect re-subscribes mid-run,
-  // dropping events.
+  // Refs keep beginLiveSession stable, avoiding SSE resubscriptions mid-run.
   const draftDecisionPendingRef = useRef(draftDecisionPending);
   const savedDraftAvailableRef = useRef(savedDraft.available);
   useEffect(() => { draftDecisionPendingRef.current = draftDecisionPending; }, [draftDecisionPending]);
@@ -327,8 +323,7 @@ export function useAgent() {
     const draft = savedDraftStateRef.current;
     if (!draft) return;
     const restoredCalls = trimTail(draft.toolCalls, MAX_TOOL_CALLS);
-    // Same reason as the initial seed: the next run must not reuse a run
-    // number these calls already carry, or the timeline merges the two turns.
+    // Reserve the run numbers already used by restored calls.
     runSeqRef.current = restoredCalls.reduce((max, tc) => Math.max(max, tc.run ?? 0), 0);
     setMessages(trimTail(draft.messages, MAX_MESSAGES));
     setToolCalls(restoredCalls);
@@ -351,9 +346,9 @@ export function useAgent() {
     persistLiveState(createEmptyLiveState());
   }, [savedDraft.available]);
 
-  // Everything tied to one conversation. /load swaps conversations too, so it
-  // needs this without the session-id rotation that starting a new chat does.
+  // Shared reset for New Chat and /load; callers choose the next session ID.
   const clearConversationState = useCallback(() => {
+    api.setCurrentRunId('');
     pendingTextRef.current = '';
     assistantMsgIdRef.current = null;
     savedDraftStateRef.current = null;
@@ -369,13 +364,14 @@ export function useAgent() {
     setPendingQuestion(null);
     setActivitySummary(null);
     setLastTrust(null);
+    setFileChanges([]);
+    setInterruptedRun(null);
     setDelegateEvents([]);
     setCompactionEvents([]);
     setCurrentStepInfo(null);
     setSavedDraft(EMPTY_SAVED_DRAFT);
     setDraftDecisionPending(false);
-    // Drop any debounced write in flight, or it would restore the cleared
-    // conversation 400ms after this immediate reset.
+    // Cancel any pending save of the conversation we just cleared.
     if (persistTimerRef.current) {
       clearTimeout(persistTimerRef.current);
       persistTimerRef.current = null;
@@ -385,15 +381,18 @@ export function useAgent() {
   }, []);
 
   const resetLiveConversation = useCallback(() => {
-    // New chat = new server-side conversation.
     api.rotateLiveSessionId();
     clearConversationState();
   }, [clearConversationState]);
 
-  // Serializing the whole live state (up to 1200 msgs + 3000 tool calls) on
-  // every streamed token would stringify megabytes many times a second. Hold
-  // the latest snapshot and write it on a trailing debounce; a pending write is
-  // flushed on unmount so the final state is never lost.
+  const followResumedRun = useCallback((sessionId: string) => {
+    api.setLiveSessionId(sessionId);
+    clearConversationState();
+    refresh();
+  }, [clearConversationState, refresh]);
+
+  // Debounce draft saves to avoid serializing the conversation on every token.
+  // Flush the pending save on unmount.
   useEffect(() => {
     if (draftDecisionPending) return;
     pendingPersistRef.current = {
@@ -422,41 +421,65 @@ export function useAgent() {
     if (pendingPersistRef.current) persistLiveState(pendingPersistRef.current);
   }, []);
 
-  // sseOn (addEventListener)은 useCallback([], [])로 항상 동일 참조.
-  // flushTextDelta도 useCallback([], [])로 안정.
-  // → effect는 마운트 시 1회만 실행되고, 언마운트 시 정리됨.
   useEffect(() => {
     const unsubs: (() => void)[] = [];
 
-    /**
-     * Subscribe to a run event, ignoring runs this chat did not start.
-     *
-     * The server broadcasts to every connected surface, so without this a run
-     * from another tab, the desktop app, or a scheduled/proactive job streams
-     * its answer into this conversation and resets its state. Events with no
-     * run identity at all are still delivered — older payloads and the
-     * single-surface case must keep working.
-     */
+    unsubs.push(sseOn('run_snapshot', (raw) => {
+      const run = raw as RunSnapshot;
+      if (!run) {
+        setInterruptedRun(null);
+        setFileChanges([]);
+        setState('idle');
+        pendingQuestionRef.current = null;
+        setPendingQuestion(null);
+        setPendingApproval(null);
+        return;
+      }
+      if (run.sessionId !== api.getLiveSessionId()) return;
+      setInterruptedRun(run.status === 'interrupted' ? run : null);
+      beginLiveSession();
+      api.setCurrentRunId(run.runId);
+      const active = !['completed', 'failed', 'cancelled', 'interrupted'].includes(run.status);
+      pendingTextRef.current = active ? run.text : '';
+      assistantMsgIdRef.current = active && run.text ? `${run.runId}:answer` : null;
+      currentStepRef.current = run.stepNumber;
+      runSeqRef.current = Math.max(runSeqRef.current, 1);
+      setMessages(previous => restoreRunMessages(previous, run));
+      const calls = run.toolCalls.map((call, index) => ({
+        ...call, id: call.callId || `${run.runId}:tool:${index}`, run: runSeqRef.current,
+      }));
+      setToolCalls(calls);
+      setLastTrust(run.trust);
+      setFileChanges(run.fileChanges ?? []);
+      pendingQuestionRef.current = run.question;
+      setPendingQuestion(run.question);
+      setPendingApproval(run.approval ? {
+        ...run.approval, receivedAt: Date.now(),
+        timeoutMs: Math.max(0, run.approval.expiresAt - Date.now()),
+      } : null);
+      setState(run.approval ? 'waiting_approval' : run.question ? 'waiting_question' : active ? 'running' : 'idle');
+      setCurrentStepInfo(active ? { stepNumber: run.stepNumber, tokens: 0 } : null);
+      setActivitySummary(active ? null : computeActivitySummary(calls, run.durationMs ?? 0, run.success === true));
+    }));
+
+    // Events are broadcast to all clients. Filter by conversation, while
+    // accepting untagged events from older daemons.
     const onOwnRun = <T,>(event: SseEventType, handler: (data: T) => void) =>
       sseOn(event, (raw) => {
         const d = raw as { runId?: string; sessionId?: string };
-        const tagged = Boolean(d?.runId) || Boolean(d?.sessionId);
-        const mine =
-          (Boolean(d?.sessionId) && d.sessionId === api.getLiveSessionId()) ||
-          (Boolean(d?.runId) && d.runId === api.getCurrentRunId());
-        if (tagged && !mine) return;
+        if (!belongsToConversation(d, api.getLiveSessionId(), api.getCurrentRunId())) return;
         handler(raw as T);
       });
 
     unsubs.push(sseOn('agent_start', (raw) => {
       const data = raw as AgentStartData;
-      // Events reach every connected surface. A run started elsewhere — another
-      // tab, the desktop app, a scheduled one — must not reset this chat: that
-      // abandons an in-flight answer and discards the unrestored draft.
-      const ownRun =
-        (Boolean(data.sessionId) && data.sessionId === api.getLiveSessionId()) ||
-        (Boolean(data.runId) && data.runId === api.getCurrentRunId());
+      // Require an identity before replacing this conversation's run state.
+      const ownRun = Boolean(data.sessionId || data.runId)
+        && belongsToConversation(data, api.getLiveSessionId(), api.getCurrentRunId());
       if (!ownRun) return;
+      setInterruptedRun(null);
+      setFileChanges(data.fileChanges ?? []);
+      if (data.runId) api.setCurrentRunId(data.runId);
 
       beginLiveSession();
       setState('running');
@@ -472,8 +495,7 @@ export function useAgent() {
     }));
 
     unsubs.push(sseOn('suggestion_created', (raw) => {
-      // RUNE noticed something on its own. Display only — the user replies in
-      // the chat, nothing auto-runs. Confidence maps to how loud the card is.
+      // Suggestions appear as cards; acting on them requires a user reply.
       const d = raw as {
         id?: string; type?: string; title?: string; description?: string;
         confidence?: number; source?: string;
@@ -483,9 +505,7 @@ export function useAgent() {
         conf >= 0.8 ? 'intervene' : conf >= 0.6 ? 'suggest' : 'nudge';
       const suggestionId = d.id || nextId();
       setMessages(prev => {
-        // The engine re-emits the same open suggestion on every heartbeat.
-        // Without this, each tick appended another identical card and buried
-        // the conversation. One card per suggestion id.
+        // Heartbeats can repeat an open suggestion.
         if (prev.some(m => m.suggestion?.id === suggestionId)) return prev;
         return appendWithLimit(prev, {
           id: nextId(),
@@ -515,28 +535,21 @@ export function useAgent() {
       setCurrentStepInfo(null);
       if (data.usage) setTokenUsage(data.usage);
 
-      // Notify when the run finishes while the tab is in the background — the
-      // one moment a toast earns its keep, since the user has looked away.
+      // Show a completion toast only when the tab is in the background.
       if (typeof document !== 'undefined' && document.hidden) {
         const ok = data.success !== false;
         toast[ok ? 'success' : 'error'](ok ? 'RUNE finished the task' : 'RUNE stopped — needs a look');
       }
 
-      // Compute activity summary from tool calls
       setToolCalls(prev => {
         setActivitySummary(computeActivitySummary(prev, data.durationMs ?? 0, data.success !== false));
         return prev;
       });
 
-      // 최종 answer로 assistant 메시지 교체/생성 (권위적 최종 답변)
-      // ref 정리를 setMessages updater 안에서 수행해야 함.
-      // React 18+ batching으로 updater들은 핸들러 완료 후 순서대로 실행되므로,
-      // 바깥에서 동기적으로 ref를 null로 리셋하면 flushTextDelta updater가
-      // null을 읽어 중복 메시지를 생성하는 버그 발생.
+      // Clear refs inside the updater so queued deltas still find their message.
       if (data.answer) {
         setMessages(prev => {
-          const msgId = assistantMsgIdRef.current; // updater 안에서 읽기
-          // 다음 run을 위해 리셋 (updater 안에서 해야 올바른 순서 보장)
+          const msgId = assistantMsgIdRef.current;
           pendingTextRef.current = '';
           assistantMsgIdRef.current = null;
 
@@ -556,7 +569,6 @@ export function useAgent() {
           }, MAX_MESSAGES);
         });
       } else {
-        // answer가 없어도 ref 정리는 updater 안에서 수행 (batching 순서 보장)
         setMessages(prev => {
           pendingTextRef.current = '';
           assistantMsgIdRef.current = null;
@@ -564,7 +576,6 @@ export function useAgent() {
         });
       }
 
-      // Ordinary completions need no extra chat card; checks and gaps do.
       const trust = data.trust;
       setLastTrust(trust ?? null);
       if (trust && describeTrust(trust).showCard) {
@@ -600,7 +611,8 @@ export function useAgent() {
 
     unsubs.push(sseOn('agent_aborted', (raw) => {
       const data = raw as AgentAbortedData;
-      if (data.runId && data.runId !== api.getCurrentRunId()) {
+      if ((data.runId && data.runId !== api.getCurrentRunId())
+          || !belongsToConversation(data, api.getLiveSessionId(), api.getCurrentRunId())) {
         setMessages(prev => upsertRunMessage(prev, abortedMessage(data, nextId(), Date.now()), true));
         return;
       }
@@ -624,9 +636,7 @@ export function useAgent() {
 
     unsubs.push(onOwnRun('text_delta', (raw) => {
       const data = raw as TextDeltaData;
-      // The server sends only what we have not seen; step separators arrive as
-      // part of that increment. `text` is the whole transcript and replaces the
-      // buffer — used on a reset, and by the WebSocket path.
+      // `delta` appends text; legacy `text` payloads replace the buffer.
       if (data.delta) {
         pendingTextRef.current += data.delta;
       } else if (data.text !== undefined) {
@@ -665,11 +675,13 @@ export function useAgent() {
 
     unsubs.push(onOwnRun('tool_result', (raw) => {
       const data = raw as ToolResultData;
+      if (data.fileChange) {
+        const change = data.fileChange;
+        setFileChanges(previous => [...previous.filter(item => item.id !== change.id), change].slice(-100));
+      }
       const now = Date.now();
       setToolCalls(prev => {
-        // Pair on the id the server sends. Tools run concurrently, so results
-        // arrive out of order and matching by name attaches one to whichever
-        // call of that tool happens to be waiting.
+        // Concurrent calls can finish out of order; prefer callId over tool name.
         const actualIdx = data.callId
           ? prev.findIndex(tc => tc.callId === data.callId)
           : prev.findIndex(
@@ -703,6 +715,13 @@ export function useAgent() {
         timeoutMs: data.timeoutMs,
         receivedAt: Date.now(),
       });
+    }));
+
+    unsubs.push(onOwnRun('approval_closed', (raw) => {
+      const { id } = raw as { id: string };
+      if (pendingApprovalRef.current?.id !== id) return;
+      setPendingApproval(null);
+      setState(current => current === 'waiting_approval' ? 'running' : current);
     }));
 
     unsubs.push(onOwnRun('question', (raw) => {
@@ -797,8 +816,7 @@ export function useAgent() {
 
     unsubs.push(sseOn('command_result', (raw) => {
       const data = raw as CommandResultData;
-      // This event reaches every client, so a command run in another tab used
-      // to replace this one's conversation. Act only on our own.
+      // Command results are also broadcast to every tab.
       if (data.requestSessionId && data.requestSessionId !== api.getLiveSessionId()) return;
       // /load: pin the live chat to the loaded conversation and show its turns.
       if (data.data?.action === 'load_session' && data.data.sessionId) {
@@ -811,8 +829,7 @@ export function useAgent() {
           content: t.content,
           timestamp: Date.now(),
         })));
-        // Restore the pinned workspace so a resumed coding conversation keeps
-        // its project folder; refresh the chip.
+        // Refresh the workspace picker after loading a conversation.
         if (data.data.workspace) {
           window.dispatchEvent(new CustomEvent('rune:workspace-changed'));
         }
@@ -854,7 +871,9 @@ export function useAgent() {
   }, []);
 
   const postToServer = useCallback((text: string, apiAttachments?: { name: string; mimeType: string; data: string }[]) => {
+    const sessionId = api.getLiveSessionId();
     api.sendMessage(text, apiAttachments).catch(err => {
+      if (sessionId !== api.getLiveSessionId()) return;
       setMessages(prev => appendWithLimit(prev, {
         id: nextId(),
         role: 'system',
@@ -996,31 +1015,6 @@ export function useAgent() {
     postToServer(text, apiAttachments);
   }, [beginLiveSession, handleClientCommand, postToServer]);
 
-  // Events emitted while the stream was down are gone, agent_complete among
-  // them, so a run that ended during the outage left the composer disabled
-  // until reload. On reconnect, ask whether our run is still going.
-  const stateRef = useRef(state);
-  stateRef.current = state;
-  useEffect(() => {
-    if (!connected || stateRef.current !== 'running') return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const { runIds } = await api.fetchActiveRuns();
-        if (cancelled || stateRef.current !== 'running') return;
-        const runId = api.getCurrentRunId();
-        if (runId && !runIds.includes(runId)) {
-          flushTextDelta();
-          setState('idle');
-          pushSystem('The connection dropped while this run was finishing — reopen the conversation to see the full answer.');
-        }
-      } catch {
-        // Offline again; the next reconnect retries.
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [connected, flushTextDelta, pushSystem]);
-
   const pushSystemError = useCallback((prefix: string, err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
     setMessages(prev => appendWithLimit(prev, {
@@ -1033,9 +1027,7 @@ export function useAgent() {
   }, []);
 
   const abort = useCallback(() => {
-    // Reflect the stop immediately — the backend only cancels between steps
-    // over the network, so without this the button feels dead until the run
-    // actually winds down. agent_aborted then confirms and cleans up.
+    // Release the input immediately; agent_aborted confirms the server's stop.
     flushTextDelta();
     setState('idle');
     pendingQuestionRef.current = null;
@@ -1043,18 +1035,22 @@ export function useAgent() {
     api.sendAbort().catch(err => pushSystemError('Failed to stop the run', err));
   }, [pushSystemError, flushTextDelta]);
 
-  const respondApproval = useCallback((decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) => {
-    if (!pendingApproval) return;
-    api.sendApproval(pendingApproval.id, decision, userGuidance)
-      .then(() => {
+  const respondApproval = useCallback(async (decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) => {
+    const approval = pendingApprovalRef.current;
+    if (!approval) return;
+    try {
+      await api.sendApproval(approval.id, decision, userGuidance);
+      if (pendingApprovalRef.current?.id === approval.id) {
         setPendingApproval(null);
-        setState('running');
-      })
-      .catch(err => {
-        setState('waiting_approval');
+        setState(current => current === 'waiting_approval' ? 'running' : current);
+      }
+    } catch (err) {
+      if (pendingApprovalRef.current?.id === approval.id) {
         pushSystemError('Approval response failed', err);
-      });
-  }, [pendingApproval, pushSystemError]);
+        throw err;
+      }
+    }
+  }, [setPendingApproval, pushSystemError]);
 
   const respondQuestion = useCallback(async (answer: string, selectedIndex?: number) => {
     const question = pendingQuestionRef.current;
@@ -1067,8 +1063,10 @@ export function useAgent() {
         setState(current => current === 'waiting_question' ? 'running' : current);
       }
     } catch (error) {
-      pushSystemError('Question response failed', error);
-      throw error;
+      if (pendingQuestionRef.current?.id === question.id) {
+        pushSystemError('Question response failed', error);
+        throw error;
+      }
     }
   }, [pushSystemError]);
 
@@ -1083,6 +1081,9 @@ export function useAgent() {
     pendingQuestion,
     activitySummary,
     lastTrust,
+    fileChanges,
+    interruptedRun,
+    followResumedRun,
     delegateEvents,
     compactionEvents,
     currentStepInfo,

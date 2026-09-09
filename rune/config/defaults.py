@@ -130,12 +130,14 @@ HEALTH_CHECK_CACHE_TTL_MS = 15_000
 # Tool Subsets by Goal Type
 
 TOOLS_CHAT = [
+    "table_requirements", "table_verify",
     "think", "memory_search", "memory_save", "ask_user",
     "web_search", "web_fetch", "file_read", "file_write", "file_edit",
     "document_read", "document_bundle_inspect", "document_create", "document_bundle", "document_bundle_update",
 ]
 
 TOOLS_WEB = [
+    "table_requirements", "table_verify",
     "think", "memory_search", "memory_save",
     "web_search", "web_fetch",
     "browser_navigate", "browser_observe", "browser_act",
@@ -145,6 +147,7 @@ TOOLS_WEB = [
 ]
 
 TOOLS_RESEARCH = [
+    "table_requirements", "table_verify",
     "think", "memory_search", "memory_save",
     "web_search", "web_fetch",
     "file_read", "file_list", "file_search",

@@ -97,7 +97,7 @@ class ConversationStore:
         self._db_path = Path(db_path)
         self._conn = _ensure_db(self._db_path)
 
-    async def save(self, conversation: Conversation) -> None:
+    async def save(self, conversation: Conversation, *, embed: bool = True) -> None:
         """Save or upsert a conversation and all its turns."""
         conn = self._conn
 
@@ -149,12 +149,17 @@ class ConversationStore:
 
         conn.commit()
         log.debug("conversation_saved", id=conversation.id)
-        await self._embed_new_turns(conversation.turns)
+        if embed:
+            await self._embed_new_turns(conversation.turns)
+
+    async def embed_turns(self, turns: list[ConversationTurn]) -> None:
+        """Update the search cache without rewriting conversation history."""
+        await self._embed_new_turns(turns)
 
     async def _embed_new_turns(self, turns: list[ConversationTurn]) -> None:
-        """Embed-on-write: cache embeddings for not-yet-seen turn content so the
-        transcript search never has to backfill on first use. Incremental (only
-        new content is embedded) and best-effort — a failure never breaks save.
+        """Cache missing turn embeddings for transcript search.
+
+        Embedding failures are logged and leave the saved conversation intact.
         """
         try:
             contents = {
@@ -248,15 +253,25 @@ class ConversationStore:
 
     async def delete(self, conversation_id: str) -> None:
         """Delete a conversation and its turns."""
-        self._conn.execute(
-            "DELETE FROM turns WHERE conversation_id = ?",
-            (conversation_id,),
-        )
-        self._conn.execute(
-            "DELETE FROM conversations WHERE id = ?",
-            (conversation_id,),
-        )
-        self._conn.commit()
+        with self._conn:
+            if self._conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'web_runs'").fetchone():
+                for table in ("web_run_maintenance", "web_tool_attempts", "web_run_resumptions",
+                              "web_run_events", "web_run_interactions"):
+                    if not self._conn.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (table,)).fetchone():
+                        continue
+                    if table == "web_run_resumptions":
+                        self._conn.execute(
+                            "DELETE FROM web_run_resumptions WHERE parent_id IN (SELECT run_id FROM web_runs WHERE session_id = ?)",
+                            (conversation_id,),
+                        )
+                        continue
+                    self._conn.execute(
+                        f"DELETE FROM {table} WHERE run_id IN (SELECT run_id FROM web_runs WHERE session_id = ?)",
+                        (conversation_id,),
+                    )
+                self._conn.execute("DELETE FROM web_runs WHERE session_id = ?", (conversation_id,))
+            self._conn.execute("DELETE FROM turns WHERE conversation_id = ?", (conversation_id,))
+            self._conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
         log.debug("conversation_deleted", id=conversation_id)
 
     async def get_recent_digests(

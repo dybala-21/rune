@@ -60,31 +60,30 @@ export function WorkspaceChip() {
     <div ref={rootRef} style={{ position: 'relative' }}>
       <button
         type="button"
+        className="toolbar-button workspace-trigger"
+        aria-label={path ? `Workspace: ${basename(path)}` : 'Choose workspace'}
+        aria-expanded={open}
         onClick={() => setOpen(o => !o)}
         title={path ? `Workspace: ${path}` : 'Choose the folder the agent works in'}
         style={{
           display: 'flex', alignItems: 'center', gap: 6,
           background: 'var(--bg-tertiary)',
-          // Unset reads as an empty slot waiting to be filled — a dashed accent
-          // outline — rather than a greyed-out label that scans as disabled.
-          border: path
-            ? '1px solid var(--border-strong, var(--border))'
-            : '1px dashed var(--accent)',
-          borderRadius: 99, padding: '3px 12px',
-          fontSize: 11.5, fontFamily: 'var(--font-mono)',
+          border: '1px solid var(--border)',
+          borderRadius: 9, padding: '6px 10px',
+          fontSize: 12,
           color: path ? 'var(--text-primary)' : 'var(--accent)',
           cursor: 'pointer', maxWidth: 220,
         }}
       >
         <FolderIcon size={13} />
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {path ? basename(path) : 'Set workspace'}
+        <span className="workspace-label" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {path ? basename(path) : 'Workspace'}
         </span>
-        <span style={{ color: 'var(--text-muted)', fontSize: 9 }}>▾</span>
+        <span className="workspace-label" style={{ color: 'var(--text-muted)', fontSize: 9 }}>▾</span>
       </button>
 
       {open && (
-        <div style={{
+        <div className="workspace-popover" style={{
           position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 60,
           width: 340, background: 'var(--bg-secondary)',
           border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',

@@ -57,17 +57,28 @@ def get_effective_model_selection() -> ActiveModelSelection:
     return ActiveModelSelection(provider=provider, model=default_model)
 
 
-def persist_active_model_selection(selection: ActiveModelSelection) -> ActiveModelSelection:
+def persist_active_model_selection(
+    selection: ActiveModelSelection, *, update_default: bool = False,
+) -> ActiveModelSelection:
     """Set the active model and write it to config.yaml."""
     llm_cfg = get_config().llm
-    llm_cfg.active_provider = selection.provider.value
-    llm_cfg.active_model = selection.model
-
     from rune.config import save_config_values
-    save_config_values({
+    updates = {
         "llm.activeProvider": selection.provider.value,
         "llm.activeModel": selection.model,
-    })
+        "llm.reasoningEfforts": llm_cfg.reasoning_efforts,
+        "llm.reasoningEffort": None,
+        "llm.reasoning_effort": None,
+    }
+    if update_default:
+        updates.update({"llm.defaultProvider": selection.provider.value, "llm.defaultModel": selection.model})
+    if save_config_values(updates) is None:
+        raise OSError("Could not save model settings. Please try again.")
+    llm_cfg.active_provider = selection.provider.value
+    llm_cfg.active_model = selection.model
+    if update_default:
+        llm_cfg.default_provider = selection.provider.value
+        llm_cfg.default_model = selection.model
 
     _reset_llm_client()
     log.info(
@@ -81,11 +92,15 @@ def persist_active_model_selection(selection: ActiveModelSelection) -> ActiveMod
 def clear_active_model_selection() -> ActiveModelSelection:
     """Drop the override and fall back to the configured default."""
     llm_cfg = get_config().llm
+    from rune.config import save_config_values
+    if save_config_values({
+        "llm.activeProvider": None, "llm.activeModel": None,
+        "llm.reasoningEfforts": llm_cfg.reasoning_efforts, "llm.reasoningEffort": None,
+        "llm.reasoning_effort": None,
+    }) is None:
+        raise OSError("Could not save model settings. Please try again.")
     llm_cfg.active_provider = None
     llm_cfg.active_model = None
-
-    from rune.config import save_config_values
-    save_config_values({"llm.activeProvider": None, "llm.activeModel": None})
 
     _reset_llm_client()
     log.info("model_selection_cleared")

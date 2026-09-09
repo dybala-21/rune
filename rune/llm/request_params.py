@@ -9,6 +9,7 @@ from rune.agent.model_traits import (
     note_temperature_rejected,
     traits,
 )
+from rune.llm.reasoning import apply_reasoning_control
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -19,6 +20,7 @@ async def compatible_completion(
     kwargs: dict[str, Any],
 ) -> Any:
     params = dict(kwargs)
+    apply_reasoning_control(params)
     model = params["model"]
     capabilities = traits(model)
     if not capabilities.temperature:
@@ -33,6 +35,17 @@ async def compatible_completion(
             params["model"] = f"{provider}/responses/{name}"
         if "responses/" in params["model"]:
             params.setdefault("store", False)
+            # LiteLLM's chat parameter filter drops newer reasoning levels.
+            # Pass the native Responses fields through its documented escape hatch.
+            body = dict(params.get("extra_body") or {})
+            body["store"] = params["store"]
+            effort = params.pop("reasoning_effort", None)
+            if effort is not None:
+                body["reasoning"] = {
+                    **(body.get("reasoning") or {}),
+                    **(effort if isinstance(effort, dict) else {"effort": effort}),
+                }
+            params["extra_body"] = body
     retries_left = 2
     while True:
         try:

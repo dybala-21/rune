@@ -43,6 +43,9 @@ export function describeTrust(trust: TrustInfo): TrustPresentation {
   if (completion === 'cancelled') {
     return { ...base, title: 'Stopped', note: 'This run was cancelled.', tone: 'neutral', glyph: '◼', ok: false };
   }
+  if (completion === 'interrupted') {
+    return { ...base, title: 'Interrupted', note: 'The server stopped before this run finished. Saved progress is shown; no tools were restarted.', tone: 'warning', glyph: '◼', ok: false };
+  }
   if (completion === 'failed') {
     return { ...base, title: 'Run failed', note: trust.honestNote || 'An execution error interrupted this run.', tone: 'danger', glyph: '✗', ok: false };
   }
@@ -68,13 +71,20 @@ export function describeTrust(trust: TrustInfo): TrustPresentation {
   if (required && verification !== 'passed') {
     return {
       ...base, title: verification === 'inconclusive' ? 'Verification inconclusive' : 'Verification required',
-      note: 'The latest changes still need a passing check.', tone: 'warning', glyph: '⚠', ok: false,
+      note: trust.tableAcceptance?.unverified.length
+        ? 'Some requested data conditions could not be checked. See the details below.'
+        : 'The latest changes still need a passing check.', tone: 'warning', glyph: '⚠', ok: false,
     };
   }
   if (completion === 'unknown') {
     return { ...base, title: 'Status unavailable', note: 'No completion status was reported.', tone: 'neutral', glyph: '·', ok: null, showCard: Boolean(trust.artifactReceipts?.length) };
   }
   if (verification === 'passed') {
+    if (trust.tableAcceptance?.status === 'pass' && !trust.testsPassedAfterEdit && !trust.evidenceGate?.hasCheck) {
+      return { ...base, title: 'Table data checked',
+        note: 'The saved table matches the interpreted data requirements. These checks do not cover prose or layout.',
+        tone: 'success', glyph: '✓', ok: true };
+    }
     const testsOnly = trust.testsPassedAfterEdit === true && !trust.evidenceGate?.hasCheck;
     return {
       ...base, title: testsOnly ? 'Tests passing' : 'Checks passed',

@@ -12,6 +12,8 @@ export interface TokenUsage {
     derives from it, so a new event can't be typed without being wired. */
 export const SSE_EVENT_TYPES = [
   'connected',
+  'run_snapshot',
+  'resync_required',
   'agent_start',
   'agent_complete',
   'agent_error',
@@ -22,6 +24,7 @@ export const SSE_EVENT_TYPES = [
   'tool_result',
   'text_delta',
   'approval_request',
+  'approval_closed',
   'question',
   'question_closed',
   'context_compaction',
@@ -42,6 +45,7 @@ export type SseEventType = typeof SSE_EVENT_TYPES[number];
 
 export interface ConnectedData { clientId: string }
 export interface AgentStartData {
+  fileChanges?: FileChange[];
   goal: string;
   /** Conversation that started the run — lets the originating tab skip the
       "Goal:" echo line while other surfaces still show it. */
@@ -51,16 +55,17 @@ export interface AgentStartData {
   runId?: string;
 }
 export interface TrustInfo {
+  tableAcceptance?: TableAcceptanceInfo | null;
   verified: boolean;
   reason: string;
-  completionStatus?: 'completed' | 'incomplete' | 'failed' | 'cancelled' | 'unknown';
+  completionStatus?: 'completed' | 'incomplete' | 'failed' | 'cancelled' | 'interrupted' | 'unknown';
   verificationStatus?: 'passed' | 'failed' | 'not_checked' | 'inconclusive';
   verificationRequired?: boolean;
   completionCheck?: { name: string; detail: string } | null;
   canEscalate?: boolean;
   verification?: {
     required: boolean;
-    status: 'pass' | 'fail' | 'unverified';
+    status: 'pass' | 'fail' | 'unverified' | 'inconclusive';
     command?: string;
   } | null;
   /** A step hit the tool-round cap and was cut off without a final LLM turn —
@@ -84,6 +89,26 @@ export interface TrustInfo {
   honestNote?: string;
   escalationHint?: string;
 }
+export interface TableAcceptanceInfo {
+  required: boolean;
+  status: 'pass' | 'fail' | 'inconclusive' | 'unverified';
+  scope: 'tabular_data';
+  contracts: Array<{
+    id: string;
+    source_path: string;
+    source_sha256: string;
+    plan: { requirements: string[]; unverified: string[] };
+  }>;
+  results: Array<{
+    contract_id: string;
+    output_path: string;
+    status: 'pass' | 'fail' | 'inconclusive' | 'stale';
+    stats?: Record<string, number>;
+    issues?: Array<{ check: string; detail?: string; count?: number; examples?: string[][]; expected?: string[]; actual?: string[] }>;
+  }>;
+  unverified: string[];
+  out_of_scope?: string[];
+}
 export interface AgentCompleteData { success: boolean; answer: string; durationMs: number; usage?: TokenUsage; trust?: TrustInfo }
 export interface AgentErrorData { error: string }
 export interface AgentAbortedData { runId?: string; trust?: TrustInfo }
@@ -96,6 +121,7 @@ export interface ToolCallData {
   callId?: string;
 }
 export interface ToolResultData {
+  fileChange?: FileChange | null;
   toolName: string;
   result: string;
   success: boolean;
@@ -226,6 +252,14 @@ export interface ProactiveSuggestion {
 }
 
 /** 도구 호출 (UI 표시용) */
+export interface FileChange {
+  id: string;
+  path: string;
+  kind: 'created' | 'modified' | 'deleted';
+  patch: string;
+  notice?: string;
+}
+
 export interface ToolCall {
   id: string;
   /** Server-side id of the call this row is waiting on. */

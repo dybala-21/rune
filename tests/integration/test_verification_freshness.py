@@ -1,7 +1,4 @@
-"""Exercise both completion paths with scripted tool events.
-
-The model and external execution are stubbed; loop callbacks and gates run normally.
-"""
+"""Completion gates with stubbed model responses and tool execution."""
 
 from contextlib import asynccontextmanager
 
@@ -73,3 +70,53 @@ async def test_stale_check_requires_another_verification(monkeypatch, tmp_path, 
     else:
         assert trace.reason != "completed"
         assert loop._verification.tests_passed_after_edit is False
+
+
+@pytest.mark.parametrize("later", ["ruff check .", "pytest tests/unit/test_one.py", "pytest || true"])
+async def test_failed_suite_blocks_both_completion_paths(monkeypatch, tmp_path, later):
+    monkeypatch.setenv("RUNE_HOME", str(tmp_path / "rune"))
+    monkeypatch.setenv("RUNE_IN_BEST_OF", "1")
+    monkeypatch.setenv("RUNE_REQUIRE_TEST_PASS", "1")
+    monkeypatch.setenv("RUNE_AUTO_VERIFY", "0")
+    monkeypatch.setenv("RUNE_REQUIREMENT_GATE", "0")
+    monkeypatch.setenv("RUNE_ADVISOR", "0")
+    options = None
+    rounds = 0
+
+    def build_tools(opts):
+        nonlocal options
+        options = opts
+        return {}
+
+    class Agent:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        @asynccontextmanager
+        async def run_stream(self, *args, **kwargs):
+            nonlocal rounds
+            rounds += 1
+            if rounds == 1:
+                for name, params, success, output in [
+                    ("file_write", {"path": "main.py", "content": "x = 2"}, True, "written"),
+                    ("bash_execute", {"command": "pytest"}, False, "1 failed, 3 passed"),
+                    ("bash_execute", {"command": later}, True, "1 passed"),
+                ]:
+                    await options.on_tool_start(name, params)
+                    await options.on_tool_end(name, CapabilityResult(success=success, output=output))
+            yield _FakeStream("Done." if rounds % 2 else "The requested change is complete and ready.")
+
+    monkeypatch.setattr("rune.agent.loop.build_tool_set", build_tools)
+    monkeypatch.setattr("rune.agent.loop.LiteLLMAgent", Agent)
+    loop = NativeAgentLoop(AgentConfig(model="test", max_iterations=6))
+    loop._token_budget.total = 300_000
+    loop._requires_execution = True
+    trace = await loop._execute_loop(
+        goal="Fix main.py", system_prompt="test", tools=[], max_iterations=6,
+        classification=ClassificationResult(
+            goal_type="code_modify", confidence=.99, tier=2,
+            requires_code=True, requires_execution=True, output_expectation="file",
+        ),
+    )
+    assert trace.reason not in {"completed", "verified"}
+    assert loop._verification.pending

@@ -25,8 +25,13 @@ def _verification_status(trace: Any) -> str:
     verification = getattr(trace, "verification", None) or {}
     gate = getattr(trace, "evidence_gate", None) or {}
     mech = getattr(trace, "mech_check", "")
+    table = getattr(trace, "table_acceptance", None) or {}
     if "fail" in (verification.get("status"), gate.get("last_verdict"), mech):
         return "failed"
+    if table.get("required") and table.get("status") != "pass":
+        return {"fail": "failed", "unverified": "not_checked"}.get(table.get("status"), "inconclusive")
+    if verification.get("status") == "inconclusive":
+        return "inconclusive"
 
     # Inspect check evidence without treating an interrupted run as a failed check.
     outcome = verified_outcome({
@@ -34,6 +39,7 @@ def _verification_status(trace: Any) -> str:
         "evidence_gate": gate,
         "mech_check": mech,
         "tests_passed_after_edit": getattr(trace, "tests_passed_after_edit", None),
+        "table_acceptance": table,
     })
     if outcome is True:
         return "passed"
@@ -62,7 +68,8 @@ def build_trust_payload(trace: Any) -> dict[str, Any]:
         "completionStatus": completion,
         "verificationStatus": status,
         "verificationRequired": bool((verification or {}).get("required"))
-        or getattr(trace, "tests_passed_after_edit", None) is False,
+        or getattr(trace, "tests_passed_after_edit", None) is False
+        or bool((getattr(trace, "table_acceptance", None) or {}).get("required")),
         "verified": completion == "completed" and status == "passed",
         "reason": reason,
         "budgetExhausted": capped,
@@ -71,6 +78,7 @@ def build_trust_payload(trace: Any) -> dict[str, Any]:
         "completionCheck": getattr(trace, "completion_check", None)
         if reason in ("completed_gate_warnings", "max_gate_blocked") else None,
         "artifactReceipts": getattr(trace, "artifact_receipts", []),
+        "tableAcceptance": getattr(trace, "table_acceptance", None),
         "canEscalate": can_escalate(reason),
         "honestNote": honest_failure_note(reason, run_was_verifiable(trace)) or "",
         "escalationHint": "",

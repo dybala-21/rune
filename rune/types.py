@@ -253,6 +253,7 @@ class CompletionTrace:
     # Tool-event verification state, when available.
     verification: dict[str, Any] | None = None
     artifact_receipts: list[dict[str, Any]] = field(default_factory=list)
+    table_acceptance: dict[str, Any] | None = None
     completion_check: dict[str, str] | None = None
 
 

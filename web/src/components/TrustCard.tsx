@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { fetchEscalationStatus, setEscalation, type EscalationStatus } from '../api';
 import type { TrustInfo } from '../types';
+import { TableChecks } from './TableChecks';
 import { checkEvidence, checkSummary, describeTrust, trustColors } from '../utils/trust';
 
 interface TrustCardProps {
@@ -169,6 +170,7 @@ export function TrustCard({ trust, onEscalate }: TrustCardProps) {
         )}
       </div>
 
+      <TableChecks data={trust.tableAcceptance} />
       {trust.artifactReceipts?.map(receipt => (
         <div key={receipt.revision} style={{ marginTop: 8, fontSize: 12, lineHeight: 1.6 }}>
           <div style={{ fontWeight: 600 }}>Document checks</div>

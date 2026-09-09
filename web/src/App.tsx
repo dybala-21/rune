@@ -14,12 +14,14 @@ const CronPanel = lazy(() => import('./components/CronPanel').then(m => ({ defau
 const MCPPanel = lazy(() => import('./components/MCPPanel').then(m => ({ default: m.MCPPanel })));
 const MarkdownPanel = lazy(() => import('./components/MarkdownPanel').then(m => ({ default: m.MarkdownPanel })));
 import { WorkbenchPanel } from './components/WorkbenchPanel';
+import { ResumeRunCard } from './components/ResumeRunCard';
 import { CommandK, type Command } from './components/CommandK';
 import { WorkspaceChip } from './components/WorkspaceChip';
 import { InlineWorkspacePicker } from './components/InlineWorkspacePicker';
 import { Toaster } from './components/Toaster';
-import { normalizeToolName, isCodingToolName, inferWorkPhase, inferActivityMode, computeRunVerdict } from './utils/tooling';
-import { fetchConfig, fetchSessions, type ConfigInfo, type SessionInfo } from './api';
+import { normalizeToolName, isCodingToolName, computeRunVerdict } from './utils/tooling';
+import { shouldOpenWorkbench } from './utils/workbench';
+import { fetchConfig, fetchSessions, getLiveSessionId, type ConfigInfo, type SessionInfo } from './api';
 
 type SidebarTab = 'chats' | 'settings';
 
@@ -80,21 +82,26 @@ export function App() {
   const displayActivitySummary = isViewingHistory ? (history.historyState?.activitySummary ?? null) : agent.activitySummary;
   const displayDelegateEvents = isViewingHistory ? (history.historyState?.delegateEvents ?? []) : agent.delegateEvents;
   const displayCompactionEvents = isViewingHistory ? (history.historyState?.compactionEvents ?? []) : agent.compactionEvents;
+  const displayTrust = isViewingHistory ? (history.historyState?.trust ?? null) : agent.lastTrust;
+  const displayFileChanges = isViewingHistory ? (history.historyState?.run?.fileChanges ?? []) : agent.fileChanges;
+  const viewedSessionRef = useRef('');
+  viewedSessionRef.current = history.viewingSessionId ?? getLiveSessionId();
+  const interruptedRun = isViewingHistory ? history.historyState?.run : agent.interruptedRun;
 
   // One verdict across every surface (status pip, workbench, chat card) via the
   // shared rule, so the pip never claims success while the trust card says it
   // couldn't verify.
-  const runVerdict = isViewingHistory
-    ? null
-    : computeRunVerdict(agent.lastTrust, agent.activitySummary);
+  const runVerdict = computeRunVerdict(displayTrust, displayActivitySummary);
 
   useEffect(() => {
     let cancelled = false;
+    let version = 0;
 
     const loadConfig = async () => {
+      const requestedVersion = ++version;
       try {
         const next = await fetchConfig();
-        if (!cancelled) {
+        if (!cancelled && requestedVersion === version) {
           setConfigInfo(next);
         }
       } catch (err) {
@@ -104,35 +111,32 @@ export function App() {
     };
 
     void loadConfig();
+    window.addEventListener('rune:config-changed', loadConfig);
     const timer = window.setInterval(loadConfig, 30000);
     return () => {
       cancelled = true;
+      window.removeEventListener('rune:config-changed', loadConfig);
       window.clearInterval(timer);
     };
   }, []);
 
-  // Workbench auto-open honors a per-run dismissal; a new run (empty toolCalls)
-  // clears it so the panel can open again.
+  const hasWorkbenchContent = displayToolCalls.length > 0 || displayFileChanges.length > 0;
+  // Reset when the task clears, without closing a panel the user just opened.
   useEffect(() => {
-    if (isViewingHistory) {
-      setWorkbenchOpen(false);
-      return;
-    }
-    if (agent.toolCalls.length === 0) {
+    if (!hasWorkbenchContent) {
       setWorkbenchOpen(false);
       setWorkbenchDismissed(false);
-      return;
     }
-    if (workbenchOpen || workbenchDismissed) return;
+  }, [hasWorkbenchContent, history.viewingSessionId]);
+
+  useEffect(() => {
+    if (!hasWorkbenchContent || workbenchOpen || workbenchDismissed) return;
     // Open once real work is visible: edits/commands for coding runs, or a
     // research-shaped run (searches/pages) that never touches files.
-    if (
-      inferWorkPhase(agent.toolCalls) !== 'analyzing'
-      || inferActivityMode(agent.toolCalls) === 'research'
-    ) {
+    if (shouldOpenWorkbench(displayToolCalls, displayFileChanges)) {
       setWorkbenchOpen(true);
     }
-  }, [agent.toolCalls, isViewingHistory, workbenchOpen, workbenchDismissed]);
+  }, [displayToolCalls, displayFileChanges, hasWorkbenchContent, workbenchOpen, workbenchDismissed]);
 
   // ⌘K opens the palette; ⌘J toggles the workbench; Esc aborts a live run
   // (the composer is blurred while running, so it can't catch Esc itself).
@@ -150,7 +154,6 @@ export function App() {
         setPaletteOpen(o => !o);
       } else if (key === 'j') {
         e.preventDefault();
-        if (isViewingHistory) return;
         setWorkbenchOpen(open => {
           // Closing counts as a dismissal so auto-open doesn't fight the user.
           setWorkbenchDismissed(open);
@@ -187,6 +190,7 @@ export function App() {
 
   const handleSelectSession = (sessionId: string | null) => {
     history.loadSession(sessionId);
+    if (window.matchMedia('(max-width: 820px)').matches) setSidebarOpen(false);
   };
 
   // Clearing is not undoable — resetLiveConversation also drops the saved
@@ -197,6 +201,7 @@ export function App() {
     if (hasContent && !window.confirm('Start a new chat? This clears the current one.')) return;
     history.loadSession(null);
     agent.resetLiveConversation();
+    if (window.matchMedia('(max-width: 820px)').matches) setSidebarOpen(false);
   };
 
   // Typing in a past conversation resumes it: load it live (restoring turns +
@@ -252,7 +257,7 @@ export function App() {
     <div style={{
       display: 'flex',
       flexDirection: 'column',
-      height: '100vh',
+      height: '100dvh',
       background: 'var(--bg-primary)',
     }}>
       <StatusBar
@@ -266,6 +271,8 @@ export function App() {
         activeModel={configInfo?.activeModel ?? null}
         reasoningSupported={configInfo?.reasoningSupported}
         reasoningEffort={configInfo?.reasoningEffort ?? null}
+        reasoningOptions={configInfo?.reasoningOptions}
+        reasoningBudgets={configInfo?.reasoningBudgets}
         approvalMode={configInfo?.approvalMode}
         lastRunSuccess={runVerdict}
         onOpenPalette={() => setPaletteOpen(true)}
@@ -297,9 +304,11 @@ export function App() {
         </div>
       )}
 
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+      <div className="app-body" style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+        {sidebarOpen && <button type="button" className="sidebar-backdrop" aria-label="Close sessions"
+          onClick={() => setSidebarOpen(false)} />}
         {/* Sidebar with slide animation */}
-        <div style={{
+        <div className="app-sidebar" inert={!sidebarOpen} aria-hidden={!sidebarOpen} style={{
           width: sidebarOpen ? 260 : 0,
           flexShrink: 0,
           overflow: 'hidden',
@@ -376,6 +385,7 @@ export function App() {
               display: 'flex',
               alignItems: 'center',
               gap: 10,
+              flexWrap: 'wrap',
               fontSize: 13,
               color: 'var(--text-secondary)',
             }}>
@@ -386,45 +396,56 @@ export function App() {
                 background: 'var(--warning)',
                 flexShrink: 0,
               }} />
-              <span style={{ flex: 1 }}>
+              <span style={{ flex: 1, minWidth: 130 }}>
                 Viewing past session
                 {history.loading && ' ...'}
               </span>
-              <button
-                onClick={() => {
-                  // /load pins the live chat to this conversation, then we
-                  // leave history view.
-                  const id = history.viewingSessionId;
-                  if (id) agent.sendMessage(`/load ${id}`);
-                  handleSelectSession(null);
-                }}
-                style={{
-                  padding: '5px 14px',
-                  background: 'var(--bg-tertiary)',
-                  color: 'var(--text-primary)',
-                  border: '1px solid var(--border)',
-                  borderRadius: 'var(--radius-md)',
-                  fontSize: 12,
-                  fontWeight: 600,
-                }}
-              >
-                Continue this chat
-              </button>
-              <button
-                onClick={() => handleSelectSession(null)}
-                style={{
-                  padding: '5px 14px',
-                  background: 'var(--accent)',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: 'var(--radius-md)',
-                  fontSize: 12,
-                  fontWeight: 600,
-                }}
-              >
-                Back to live
-              </button>
+              <div className="notice-actions">
+                <button
+                  onClick={() => {
+                    // /load pins the live chat to this conversation, then we
+                    // leave history view.
+                    const id = history.viewingSessionId;
+                    if (id) agent.sendMessage(`/load ${id}`);
+                    handleSelectSession(null);
+                  }}
+                  style={{
+                    padding: '5px 14px',
+                    background: 'var(--bg-tertiary)',
+                    color: 'var(--text-primary)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 'var(--radius-md)',
+                    fontSize: 12,
+                    fontWeight: 600,
+                  }}
+                >
+                  Continue this chat
+                </button>
+                <button
+                  onClick={() => handleSelectSession(null)}
+                  style={{
+                    padding: '5px 14px',
+                    background: 'var(--accent)',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: 'var(--radius-md)',
+                    fontSize: 12,
+                    fontWeight: 600,
+                  }}
+                >
+                  Back to live
+                </button>
+              </div>
             </div>
+          )}
+
+          {interruptedRun?.status === 'interrupted' && interruptedRun.sessionId === viewedSessionRef.current && (
+            <ResumeRunCard key={interruptedRun.runId} run={interruptedRun} connected={agent.connected}
+              onResumed={sessionId => {
+                if (viewedSessionRef.current !== interruptedRun.sessionId) return;
+                agent.followResumedRun(sessionId);
+                handleSelectSession(null);
+              }} />
           )}
 
           {!isViewingHistory && agent.savedDraft.available && (
@@ -444,41 +465,43 @@ export function App() {
                 background: 'var(--accent)',
                 flexShrink: 0,
               }} />
-              <span style={{ fontSize: 13, color: 'var(--text-secondary)', flex: 1, minWidth: 220 }}>
-                A previous live draft is available
+              <span style={{ fontSize: 13, color: 'var(--text-secondary)', flex: 1, minWidth: 150 }}>
+                Saved draft
                 {' · '}
                 {agent.savedDraft.messageCount} messages
                 {' · '}
                 {agent.savedDraft.toolCallCount} tools
               </span>
-              <button
-                onClick={agent.restoreSavedDraft}
-                style={{
-                  padding: '5px 12px',
-                  background: 'var(--accent)',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: 'var(--radius-md)',
-                  fontSize: 12,
-                  fontWeight: 600,
-                }}
-              >
-                Restore
-              </button>
-              <button
-                onClick={agent.discardSavedDraft}
-                style={{
-                  padding: '5px 12px',
-                  background: 'var(--bg-tertiary)',
-                  color: 'var(--text-primary)',
-                  border: '1px solid var(--border)',
-                  borderRadius: 'var(--radius-md)',
-                  fontSize: 12,
-                  fontWeight: 500,
-                }}
-              >
-                Dismiss
-              </button>
+              <div className="notice-actions">
+                <button
+                  onClick={agent.restoreSavedDraft}
+                  style={{
+                    padding: '5px 12px',
+                    background: 'var(--accent)',
+                    color: 'white',
+                    border: 'none',
+                    borderRadius: 'var(--radius-md)',
+                    fontSize: 12,
+                    fontWeight: 600,
+                  }}
+                >
+                  Restore
+                </button>
+                <button
+                  onClick={agent.discardSavedDraft}
+                  style={{
+                    padding: '5px 12px',
+                    background: 'var(--bg-tertiary)',
+                    color: 'var(--text-primary)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 'var(--radius-md)',
+                    fontSize: 12,
+                    fontWeight: 500,
+                  }}
+                >
+                  Dismiss
+                </button>
+              </div>
             </div>
           )}
 
@@ -487,7 +510,7 @@ export function App() {
               bubbles never move (grid tracks animate, content stays put). */}
           <div
             className="chat-workbench-grid"
-            data-bench={!isViewingHistory && workbenchOpen ? 'open' : 'closed'}
+            data-bench={workbenchOpen ? 'open' : 'closed'}
             style={{
               flex: 1,
               overflow: 'hidden',
@@ -573,8 +596,7 @@ export function App() {
                 }
               />
 
-              {!isViewingHistory && !workbenchOpen && agent.toolCalls.length > 0 &&
-                inferWorkPhase(agent.toolCalls) !== 'analyzing' && (
+              {!workbenchOpen && shouldOpenWorkbench(displayToolCalls, displayFileChanges) && (
                 <button
                   onClick={() => { setWorkbenchDismissed(false); setWorkbenchOpen(true); }}
                   title="Show the Work panel (⌘J)"
@@ -635,16 +657,19 @@ export function App() {
             {/* Workbench occupies the second grid track; always mounted so
                 the width can animate, but its body only renders when open. */}
             <div style={{ minWidth: 0, overflow: 'hidden' }}>
-              {!isViewingHistory && workbenchOpen && (
+              {workbenchOpen && (
                 <WorkbenchPanel
-                  toolCalls={agent.toolCalls}
-                  isRunning={agent.state === 'running'}
-                  activitySummary={agent.activitySummary}
-                  trust={agent.lastTrust}
-                  currentStep={agent.currentStepInfo}
-                  orchestration={agent.orchestration}
+                  key={history.viewingSessionId ?? getLiveSessionId()}
+                  historical={isViewingHistory}
+                  toolCalls={displayToolCalls}
+                  fileChanges={displayFileChanges}
+                  isRunning={!isViewingHistory && agent.state === 'running'}
+                  activitySummary={displayActivitySummary}
+                  trust={displayTrust}
+                  currentStep={isViewingHistory ? null : agent.currentStepInfo}
+                  orchestration={isViewingHistory ? null : agent.orchestration}
                   awaiting={
-                    agent.state === 'waiting_approval' ? 'approval'
+                    isViewingHistory ? null : agent.state === 'waiting_approval' ? 'approval'
                       : agent.state === 'waiting_question' ? 'question'
                       : null
                   }

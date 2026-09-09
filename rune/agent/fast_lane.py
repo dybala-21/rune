@@ -52,6 +52,8 @@ def _decide_fast_lane(classification: Any) -> FastLaneDecision:
     llm = get_config().llm
     if not getattr(llm, "route_simple_queries", True):
         return FastLaneDecision(active=False, reason="disabled")
+    if (getattr(llm, "active_model", None) or "").strip():
+        return FastLaneDecision(active=False, reason="explicit_model")
 
     goal_type = getattr(classification, "goal_type", "")
     if goal_type not in FAST_LANE_GOAL_TYPES:

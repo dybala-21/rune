@@ -234,8 +234,7 @@ def is_test_command(command: str) -> bool:
             words = words[1:]
             while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
                 words = words[1:]
-        if len(words) > 1 and words[:2] in (["uv", "run"], ["poetry", "run"]):
-            words = words[2:]
+        words = list(strip_runner_prefix(tuple(words)))
         if not words:
             continue
         head = PurePosixPath(words[0]).name
@@ -252,7 +251,7 @@ def is_test_command(command: str) -> bool:
                 return True
             if args and re.fullmatch(r"(?:.*/)?runtests?\.py", args[0]):
                 return True
-        elif head in {"pytest", "py.test", "tox"}:
+        elif head in {"pytest", "py.test", "tox", "vitest", "jest"} or (head == "node" and "--test" in args):
             return True
         elif head in {"make", "go", "cargo", "yarn", "pnpm", "npm"}:
             if args[:1] == ["test"] or args[:2] == ["run", "test"]:
@@ -273,6 +272,11 @@ def is_verification_command(command: str) -> bool:
         third = tokens[2] if len(tokens) > 2 else ""
 
         if first in VERIFICATION_SINGLE_WORD_COMMANDS:
+            return True
+        if first in {"npm", "pnpm", "yarn"} and (
+            second in {"lint", "typecheck", "check"}
+            or (second == "run" and third in {"lint", "typecheck", "check"})
+        ):
             return True
         if first == "go" and second in ("test", "build"):
             return True

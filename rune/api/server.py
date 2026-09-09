@@ -135,31 +135,6 @@ def split_answer(collected: list[str], step_starts: list[int]) -> tuple[str, str
     return full, full
 
 
-async def _post_process(
-    agent_ctx: Any, trace: Any, full_text: str, duration_ms: int, tag: str,
-) -> None:
-    """Memory persistence for a finished run; never lets a failure escape."""
-    try:
-        # Local import mirrors the handlers' pattern (avoids an import cycle).
-        from rune.agent.agent_context import (
-            PostProcessInput,
-            post_process_agent_result,
-        )
-
-        await post_process_agent_result(PostProcessInput(
-            verification=getattr(trace, "verification", None),
-            reason=getattr(trace, "reason", ""),
-            mech_check=getattr(trace, "mech_check", ""),
-            evidence_gate=getattr(trace, "evidence_gate", None),
-            context=agent_ctx,
-            success=trace.reason == "completed",
-            answer=full_text,
-            duration_ms=duration_ms,
-        ))
-    except Exception as exc:
-        log.warning(f"{tag}_post_process_failed", error=str(exc)[:100])
-
-
 # How long an approval card stays actionable before the run gives up.
 _APPROVAL_TIMEOUT_MS = 120_000
 
@@ -187,10 +162,7 @@ class SseClientManager:
         self._event_counter = 0
 
     def add_client(self, client_id: str) -> asyncio.Queue[str]:
-        # Unbounded on purpose: text_delta carries only the new text, so a
-        # dropped frame leaves that client short with no way to resync. Frames
-        # are small, so a slow reader costs kilobytes.
-        queue: asyncio.Queue[str] = asyncio.Queue()
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=512)
         self._clients[client_id] = queue
         return queue
 
@@ -213,10 +185,9 @@ class SseClientManager:
             try:
                 queue.put_nowait(formatted)
             except asyncio.QueueFull:
-                # Unreachable while the queue is unbounded; kept so a future
-                # bound fails loudly here rather than silently desyncing a
-                # client's incremental text.
-                log.warning("sse_event_dropped", event=event)
+                while not queue.empty():
+                    queue.get_nowait()
+                queue.put_nowait('event: resync_required\ndata: {}\n\n')
 
     def send_to(self, client_id: str, event: str, data: dict[str, Any]) -> None:
         """Send an SSE event to a specific client."""
@@ -255,9 +226,7 @@ class WsClientManager:
         """Broadcast a message to all connected WebSocket clients."""
         msg = json_encode({"event": event, "data": data})
         disconnected: list[str] = []
-        # Snapshot: send_text suspends, and a client connecting or dropping
-        # during that suspension would mutate the dict mid-iteration and take
-        # down a healthy run.
+        # Copy the clients before awaiting sends; connections may change meanwhile.
         for cid, ws in list(self._clients.items()):
             try:
                 await ws.send_text(msg)
@@ -317,22 +286,11 @@ def create_app() -> Any:
     def _finish_run(rid: str) -> None:
         _active_tasks.pop(rid, None)
         _aborted_runs.pop(rid, None)
-    # Suggestion ids already broadcast, so the engine re-emitting the same
-    # open suggestion each heartbeat does not re-send it.
+    # Heartbeats may repeat suggestions already sent to clients.
     _broadcast_suggestion_ids: set[str] = set()
 
     def _on_proactive_suggestion(suggestions: list[Any]) -> None:
-        """Push engine suggestions to the web timeline, display-only.
-
-        The engine already emits these; the bridge decides whether to
-        auto-execute, off by default. This path only shows them, so the user
-        sees them and chooses — the alert-and-suggest, defer-execution stance
-        the proactivity work settled on.
-
-        The engine re-emits the same open suggestion every heartbeat, so we
-        broadcast each id at most once per server; the frontend dedups too,
-        but a client connecting later would otherwise get the whole backlog.
-        """
+        """Broadcast each suggestion once for display in the chat."""
         for s in suggestions:
             sid = getattr(s, "id", "")
             if sid and sid in _broadcast_suggestion_ids:
@@ -353,29 +311,9 @@ def create_app() -> Any:
             })
 
     @asynccontextmanager
-    def _on_proactive_suggestion(suggestions: list[Any]) -> None:
-        """Push engine suggestions to the web timeline, display-only.
-
-        The engine already emits these; the bridge decides whether to
-        auto-execute, off by default. This path only shows them, so the user
-        sees them and chooses — the alert-and-suggest, defer-execution stance
-        the proactivity work settled on.
-        """
-        for s in suggestions:
-            conf = getattr(s, "confidence", 0.0)
-            priority = ("high" if conf >= 0.8
-                        else "medium" if conf >= 0.6 else "low")
-            _sse_manager.broadcast("suggestion_created", {
-                "id": getattr(s, "id", ""),
-                "type": getattr(s, "type", "insight"),
-                "title": getattr(s, "title", ""),
-                "description": getattr(s, "description", ""),
-                "priority": priority,
-                "confidence": conf,
-                "source": getattr(s, "source", ""),
-            })
-
     async def lifespan(app: FastAPI):  # type: ignore[arg-type]
+        _run_snapshots.open()
+        _maintenance.start()
         log.info("api_server_started")
         _proactive_engine = None
         try:
@@ -384,17 +322,22 @@ def create_app() -> Any:
             _proactive_engine.on("suggestion", _on_proactive_suggestion)
         except Exception as exc:
             log.debug("proactive_sse_subscribe_failed", error=str(exc))
-        yield
-        if _proactive_engine is not None:
-            with contextlib.suppress(Exception):
-                _proactive_engine.off("suggestion", _on_proactive_suggestion)
-        for task in list(_active_tasks.values()):
-            task.cancel()
-        if _active_tasks:
-            await asyncio.gather(
-                *list(_active_tasks.values()), return_exceptions=True
-            )
-        log.info("api_server_stopped")
+        try:
+            yield
+        finally:
+            if _proactive_engine is not None:
+                with contextlib.suppress(Exception):
+                    _proactive_engine.off("suggestion", _on_proactive_suggestion)
+            try:
+                _run_snapshots.interrupt_active("server_shutdown")
+            finally:
+                tasks = list(_active_tasks.values())
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                await _maintenance.close()
+                _run_snapshots.close()
+                log.info("api_server_stopped")
 
     app = FastAPI(
         title="RUNE API",
@@ -485,15 +428,18 @@ def create_app() -> Any:
         model_config = ConfigDict(populate_by_name=True)
 
     class ApprovalRequestModel(BaseModel):
+        model_config = ConfigDict(populate_by_name=True)
         id: str
         decision: str
-        user_guidance: str | None = None
+        user_guidance: str | None = Field(default=None, alias="userGuidance")
+        response_id: str = Field(default="", alias="responseId", max_length=128)
 
     class QuestionRequestModel(BaseModel):
         model_config = ConfigDict(populate_by_name=True)
         id: str
         answer: str
         selected_index: int | None = Field(default=None, alias="selectedIndex", strict=True, ge=-1)
+        response_id: str = Field(default="", alias="responseId", max_length=128)
 
     # State
 
@@ -503,11 +449,29 @@ def create_app() -> Any:
     _ws_manager = WsClientManager()
     _pending_approvals: dict[str, asyncio.Future[dict[str, Any]]] = {}
     _pending_questions: dict[str, PendingQuestion] = {}
+    from rune.agent.execution_journal import (
+        ExecutionJournal,
+        RecoveryBlocked,
+        journal_scope,
+        recovery_context,
+        recovery_written_files,
+    )
+    from rune.api.run_maintenance import RunMaintenance
+    from rune.api.run_recovery import ResumeRequest, RunRecovery
+    from rune.api.run_snapshot import RunSnapshots
+    from rune.api.run_store import RunStore
+    _run_store = RunStore()
+    _run_snapshots = RunSnapshots(_run_store)
+    _run_recovery = RunRecovery(_run_snapshots, _run_store)
+    _maintenance = RunMaintenance(_run_store)
 
     # Broadcast helper
 
     async def _broadcast(event: str, data: dict[str, Any]) -> None:
         """Broadcast to both SSE and WebSocket clients."""
+        data = _run_snapshots.record(event, data)
+        if data is None:
+            return
         _sse_manager.broadcast(event, data)
         await _ws_manager.broadcast(event, data)
 
@@ -532,28 +496,13 @@ def create_app() -> Any:
         session_id: str | None = None,
         sticky: bool = False,
         agent_config: Any = None,
+        resume_from: dict[str, Any] | None = None,
+        resume_records: list[dict[str, Any]] | None = None,
     ) -> str:
-        """Run the agent loop, broadcasting events to SSE/WS clients.
+        """Run the agent and broadcast progress to SSE/WS clients.
 
-        Parameters
-        ----------
-        goal:
-            The user's goal / prompt text.
-        run_id:
-            Unique identifier for this execution run.
-        client_id:
-            Optional client id to direct messages to.  When *None*,
-            events are broadcast to all connected clients.
-        attachments:
-            Optional list of attachment dicts (name, mimeType, data).
-        session_id:
-            Optional conversation id for multi-turn continuity. When set,
-            turns are recorded under it and prior turns are passed to the
-            loop as message history.
-        sticky:
-            Fall back to the server-side sticky web conversation when no
-            session_id is given (browser live chat). Keep False for headless
-            callers.
+        session_id selects the conversation used for history. With no ID,
+        sticky reuses the default web conversation; headless callers leave it off.
         """
         trace = None
         try:
@@ -564,7 +513,6 @@ def create_app() -> Any:
             from rune.agent.loop import NativeAgentLoop
             from rune.api import conversation_wiring as conv_wiring
 
-            # 0. Resolve the conversation and record the user turn
             conv_manager = conv_wiring.get_conv_manager()
             conv_id: str | None = None
             if conv_manager is not None:
@@ -575,20 +523,23 @@ def create_app() -> Any:
                 except Exception as exc:
                     log.debug("web_conv_resolve_failed", error=str(exc)[:100])
                     conv_manager = None
-            if conv_manager is not None and conv_id:
+            if conv_manager is not None and conv_id and resume_from is None:
                 conv_wiring.record_user_turn(conv_manager, conv_id, goal, attachments)
+                await conv_manager._store.save(conv_manager._active[conv_id], embed=False)
 
-            # Workspace pinned to this conversation (picker in the app);
-            # an @path in the message still overrides for the turn.
+            _run_snapshots.start(run_id, conv_id or session_id or "", goal)
+
             workspace = await conv_wiring.get_workspace(conv_id or "")
-            # Unpinned turns would otherwise resolve relative paths against the
-            # daemon's launch dir and drop the user's files into the install
-            # directory; fall back to the user workspace. pinned_cwd stays None
-            # so an @path in the message can still override for the turn.
+            # Use the user workspace rather than the daemon's launch directory.
+            # Leave pinned_cwd unset so @path can still override it.
             from rune.utils.paths import user_workspace
             turn_cwd = workspace or str(user_workspace())
+            if resume_from is not None:
+                turn_cwd = resume_from["workspace"]
+                workspace = turn_cwd
+            _run_recovery.workspace_available(run_id, turn_cwd, resuming=resume_from is not None)
+            _run_snapshots.record("run_context", {"runId": run_id, "workspace": turn_cwd})
 
-            # 1. Prepare agent context (loads prior turns as history)
             agent_ctx = await prepare_agent_context(
                 PrepareContextOptions(
                     goal=goal,
@@ -600,13 +551,15 @@ def create_app() -> Any:
                 ),
                 conversation_manager=conv_manager,
             )
+            _run_recovery.workspace_available(run_id, agent_ctx.workspace_root, resuming=resume_from is not None)
 
             loop = NativeAgentLoop(config=agent_config) if agent_config else NativeAgentLoop()
             _active_loops[run_id] = loop
 
-            # 2. Wire approval callback (SSE/WS ↔ future)
-            async def _web_approval_callback(command: str, reason: str) -> bool:
-                approval_id = f"approval:{run_id}:{int(time.monotonic() * 1000)}"
+            approval_lock = asyncio.Lock()
+
+            async def _request_approval(command: str, reason: str) -> bool:
+                approval_id = f"approval:{run_id}:{uuid4().hex}"
                 approval_future: asyncio.Future[dict[str, Any]] = (
                     asyncio.get_running_loop().create_future()
                 )
@@ -616,11 +569,11 @@ def create_app() -> Any:
                     {
                         "id": approval_id,
                         "command": command,
-                        # Callers pass a reason, not a level — the card shows it
-                        # as text and hides the level chip when it is empty.
+                        # No risk level is supplied by this callback.
                         "riskLevel": "",
                         "reason": reason,
                         "timeoutMs": _APPROVAL_TIMEOUT_MS,
+                        "expiresAt": time.time() * 1000 + _APPROVAL_TIMEOUT_MS,
                         "runId": run_id,
                     },
                 )
@@ -633,10 +586,14 @@ def create_app() -> Any:
                     return False
                 finally:
                     _pending_approvals.pop(approval_id, None)
+                    await _broadcast("approval_closed", {"id": approval_id, "runId": run_id})
+
+            async def _web_approval_callback(command: str, reason: str) -> bool:
+                async with approval_lock:
+                    return await _request_approval(command, reason)
 
             loop.set_approval_callback(_web_approval_callback)
 
-            # 3. Wire ask_user callback (SSE/WS ↔ future)
             async def _web_ask_user_callback(
                 params: AskUserParams,
             ) -> UserResponse:
@@ -646,9 +603,10 @@ def create_app() -> Any:
                 pending = PendingQuestion(params)
                 _pending_questions[question_id] = pending
                 try:
-                    await _broadcast("question", question_payload(
-                        params, question_id, run_id, current_tool_call_id(),
-                    ))
+                    await _broadcast("question", {
+                        **question_payload(params, question_id, run_id, current_tool_call_id()),
+                        "expiresAt": time.time() * 1000 + 300_000,
+                    })
                     return await asyncio.wait_for(pending.future, timeout=300.0)
                 except TimeoutError:
                     raise TimeoutError("Question expired without a user response") from None
@@ -660,19 +618,21 @@ def create_app() -> Any:
 
             loop.set_ask_user_callback(_web_ask_user_callback)
 
+            journal = ExecutionJournal(_run_store, run_id, agent_ctx.workspace_root,
+                                       previous=resume_records if resume_from is not None else None,
+                                       approval=_web_approval_callback)
+            _run_snapshots.record("run_context", {
+                "runId": run_id, "workspace": agent_ctx.workspace_root, "recoveryVersion": 1,
+                "execution": {"attachments": attachments or []},
+            })
+
             collected: list[str] = []
 
-            # -- wire event callbacks ------------------------------------
-
             _run_start_time = time.monotonic()
-            # Offsets in `collected` where each step's text begins. split_answer
-            # slices the answer from the last step that produced text, so a
-            # multi-pass run's intermediate commentary is never replayed.
+            # split_answer uses these offsets to separate the final answer from commentary.
             _step_starts = [0]
 
-            # Sends only what the client has not seen. Re-broadcasting the whole
-            # transcript per token cost hundreds of megabytes on a long answer,
-            # and re-joining it per token cost O(n^2) CPU on top.
+            # Send deltas to avoid rebuilding and broadcasting the full text per token.
             _joiner = StreamJoiner()
 
             async def _on_step(step: int) -> None:
@@ -697,8 +657,7 @@ def create_app() -> Any:
                     {
                         "toolName": info.get("name", ""),
                         "args": info.get("params", {}),
-                        # Pairs this call with its result; tools run
-                        # concurrently, so name order is not call order.
+                        # Concurrent tool results can arrive out of order.
                         "callId": info.get("callId", ""),
                         "runId": run_id,
                     },
@@ -714,6 +673,8 @@ def create_app() -> Any:
                         "success": info.get("success", True),
                         "callId": info.get("callId", ""),
                         "runId": run_id,
+                        "artifactReceipts": getattr(loop, "artifact_receipts", []),
+                        "fileChange": info.get("fileChange"),
                     },
                 )
 
@@ -780,37 +741,46 @@ def create_app() -> Any:
                 "agent_start",
                 {
                     "runId": run_id,
-                    # Display the goal as typed — agent_ctx.goal may carry
-                    # @-reference expansions (whole file bodies) the UI must
-                    # never echo. sessionId lets the originating tab skip the
-                    # "Goal:" line while other surfaces still show it.
+                    # Use the original goal; expanded @references can contain whole files.
                     "goal": agent_ctx.original_goal or agent_ctx.goal,
-                    "sessionId": session_id,
+                    "sessionId": conv_id or session_id,
+                    "fileChanges": (_run_snapshots.get(run_id) or {}).get("fileChanges", []),
                 },
             )
 
-            # 4. Run with context + conversation history
-            trace = await loop.run(
-                agent_ctx.goal,
-                context={
-                    "workspace_root": agent_ctx.workspace_root,
-                    "attachments": agent_ctx.metadata.get("attachments") or [],
-                },
-                message_history=agent_ctx.messages if agent_ctx.messages else None,
-            )
+            continuation = {}
+            run_context = {"workspace_root": agent_ctx.workspace_root,
+                           "original_goal": agent_ctx.original_goal or agent_ctx.goal,
+                           "attachments": agent_ctx.metadata.get("attachments") or []}
+            if resume_from is not None:
+                continuation["extra_system_context"] = recovery_context(resume_from, resume_records or [])
+                run_context["recovery_written_files"] = recovery_written_files(resume_records or [])
+            with journal_scope(journal):
+                trace = await loop.run(
+                    agent_ctx.goal, context=run_context,
+                    message_history=agent_ctx.messages if agent_ctx.messages else None,
+                    **continuation,
+                )
+                journal.check()
+            loop_finished = time.monotonic()
             full_text, answer = split_answer(collected, _step_starts)
             answer = getattr(loop, "_last_answer_text", "") or answer
             duration_ms = int((time.monotonic() - _run_start_time) * 1000)
 
-            # 4b. Record the assistant turn for the next message's context.
             if conv_manager is not None and conv_id:
                 await conv_wiring.record_assistant_turn(
                     conv_manager, conv_id, loop, answer,
                     reason=trace.reason or "",
+                    embed=False, require_save=True,
                 )
 
-            # 5. Post-process (memory persistence)
-            await _post_process(agent_ctx, trace, full_text, duration_ms, "web")
+            _maintenance.enqueue(
+                run_id, agent_ctx, trace, full_text, duration_ms,
+                classification_hint=getattr(loop, "_last_goal_type", "") or None,
+            )
+            duration_ms = int((time.monotonic() - _run_start_time) * 1000)
+            log.info("agent_delivery_ready", run_id=run_id,
+                     completion_tail_ms=round((time.monotonic() - loop_finished) * 1000, 1))
 
             if trace.reason == "cancelled" or run_id in _aborted_runs:
                 await _broadcast_aborted(run_id, trace)
@@ -845,21 +815,24 @@ def create_app() -> Any:
     async def _ndjson_execution(
         goal: str, run_id: str, session_id: str | None = None
     ) -> AsyncGenerator[str]:
-        """NDJSON streaming generator for agent execution.
+        """Stream a run as NDJSON, sharing history only with an explicit session.
 
-        ``session_id`` pins a conversation for multi-turn continuity (explicit
-        only — streaming callers never fall back to the sticky web chat). The
-        assistant turn is recorded in ``finally``: a client disconnect raises
-        GeneratorExit at a ``yield``, so code after the drain loop may never
-        run, which would leave a dangling user turn in the history.
+        Save the answer before emitting completion. The finally block also
+        saves partial answers when a disconnect interrupts the stream.
         """
         conv_manager: Any | None = None
         conv_id: str | None = None
         loop = None
         run_task: asyncio.Task[Any] | None = None
+        assistant_save_attempted = False
         collected: list[str] = []
         _step_starts = [0]
         _ws_joiner = StreamJoiner()
+
+        def _encode_event(frame: dict[str, Any]) -> str:
+            data = _run_snapshots.record(frame["event"], frame["data"])
+            return json_encode({**frame, "data": data}) if data is not None else ""
+
         try:
             from rune.agent.agent_context import (
                 PrepareContextOptions,
@@ -880,6 +853,7 @@ def create_app() -> Any:
                     conv_manager = None
             if conv_manager is not None and conv_id:
                 conv_wiring.record_user_turn(conv_manager, conv_id, goal)
+                await conv_manager._store.save(conv_manager._active[conv_id], embed=False)
 
             # 1. Prepare agent context (loads prior turns as history)
             agent_ctx = await prepare_agent_context(
@@ -889,8 +863,13 @@ def create_app() -> Any:
                 conversation_manager=conv_manager,
             )
 
+            _run_snapshots.record("run_context", {
+                "runId": run_id, "sessionId": conv_id or session_id or "",
+                "workspace": agent_ctx.workspace_root,
+            })
+
             yield (
-                json_encode(
+                _encode_event(
                     {
                         "event": "agent_start",
                         "data": {
@@ -907,16 +886,21 @@ def create_app() -> Any:
             _active_loops[run_id] = loop
 
             # Use a queue so event callbacks can feed the generator
-            event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+            event_queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
+
+            async def _enqueue(frame: dict[str, Any]) -> None:
+                data = _run_snapshots.record(frame["event"], frame["data"])
+                if data is not None:
+                    await event_queue.put({**frame, "data": data})
 
             # 2. NDJSON is unidirectional (server→client) - no way to receive
             #    approval/question responses. Use auto-approve + autonomous mode.
             async def _ndjson_approval_cb(command: str, risk_level: str) -> bool:
-                await event_queue.put(
+                await _enqueue(
                     {
                         "event": "approval_request",
                         "data": {
-                            "id": f"ndjson:{run_id}",
+                            "id": f"ndjson:{run_id}:{uuid4().hex}",
                             "command": command,
                             "riskLevel": risk_level,
                             "runId": run_id,
@@ -931,10 +915,10 @@ def create_app() -> Any:
             async def _ndjson_ask_user_cb(
                 params: AskUserParams,
             ) -> UserResponse:
-                await event_queue.put(
+                await _enqueue(
                     {
                         "event": "question",
-                        "data": {**question_payload(params, f"ndjson:{run_id}", run_id),
+                        "data": {**question_payload(params, f"ndjson:{run_id}:{uuid4().hex}", run_id),
                                  "autonomous": True},
                     }
                 )
@@ -945,7 +929,7 @@ def create_app() -> Any:
             async def _on_step(step: int) -> None:
                 _step_starts.append(len(collected))
                 _ws_joiner.start_step()
-                await event_queue.put(
+                await _enqueue(
                     {
                         "event": "step_start",
                         "data": {"stepNumber": step, "tokens": 0, "runId": run_id},
@@ -960,7 +944,7 @@ def create_app() -> Any:
                 collected.append(delta)
                 if not _ws_joiner.append(delta):
                     return
-                await event_queue.put(
+                await _enqueue(
                     {
                         "event": "text_delta",
                         "data": {"text": _ws_joiner.text, "runId": run_id},
@@ -968,19 +952,20 @@ def create_app() -> Any:
                 )
 
             async def _on_tool(info: dict[str, Any]) -> None:
-                await event_queue.put(
+                await _enqueue(
                     {
                         "event": "tool_call",
                         "data": {
                             "toolName": info.get("name", ""),
                             "args": info.get("params", {}),
+                            "callId": info.get("callId", ""),
                             "runId": run_id,
                         },
                     }
                 )
 
             async def _on_tool_result(info: dict[str, Any]) -> None:
-                await event_queue.put(
+                await _enqueue(
                     {
                         "event": "tool_result",
                         "data": {
@@ -988,6 +973,8 @@ def create_app() -> Any:
                             "result": info.get("output_head", "")
                             or info.get("error_head", ""),
                             "success": info.get("success", True),
+                            "callId": info.get("callId", ""),
+                            "artifactReceipts": getattr(loop, "artifact_receipts", []),
                             "runId": run_id,
                         },
                     }
@@ -1003,29 +990,28 @@ def create_app() -> Any:
                 loop.run(
                     agent_ctx.goal,
                     # No attachments here: this endpoint takes text only.
-                    context={"workspace_root": agent_ctx.workspace_root},
+                    context={"workspace_root": agent_ctx.workspace_root,
+                             "original_goal": agent_ctx.original_goal or agent_ctx.goal},
                     message_history=(
                         agent_ctx.messages if agent_ctx.messages else None
                     ),
                 )
             )
             _active_tasks[run_id] = run_task
+            run_task.add_done_callback(lambda _: event_queue.put_nowait(None))
 
-            while not run_task.done():
+            while True:
                 try:
                     evt = await asyncio.wait_for(
                         event_queue.get(), timeout=2.0
                     )
+                    if evt is None:
+                        break
                     yield json_encode(evt) + "\n"
                 except TimeoutError:
                     yield (
                         json_encode({"event": "heartbeat", "data": {}}) + "\n"
                     )
-
-            # Drain any remaining events
-            while not event_queue.empty():
-                evt = event_queue.get_nowait()
-                yield json_encode(evt) + "\n"
 
             trace = None if run_task.cancelled() else run_task.result()
             cancelled = (run_task.cancelled() or getattr(trace, "reason", "") == "cancelled"
@@ -1034,14 +1020,25 @@ def create_app() -> Any:
             answer = getattr(loop, "_last_answer_text", "") or answer
             duration_ms = int((time.monotonic() - _run_start_time) * 1000)
 
-            # Post-process (memory persistence)
+            if conv_manager is not None and conv_id:
+                assistant_save_attempted = True
+                await conv_wiring.record_assistant_turn(
+                    conv_manager, conv_id, loop, answer,
+                    reason=getattr(trace, "reason", "cancelled"),
+                    embed=False, require_save=True,
+                )
+
             if trace is not None:
-                await _post_process(agent_ctx, trace, full_text, duration_ms, "ndjson")
+                _maintenance.enqueue(
+                    run_id, agent_ctx, trace, full_text, duration_ms,
+                    classification_hint=getattr(loop, "_last_goal_type", "") or None,
+                )
+            duration_ms = int((time.monotonic() - _run_start_time) * 1000)
             if cancelled and run_id in _aborted_runs:
                 await _broadcast_aborted(run_id, trace)
 
             yield (
-                json_encode(
+                _encode_event(
                     {
                         "event": "agent_aborted" if cancelled else "agent_complete",
                         "data": {
@@ -1060,7 +1057,7 @@ def create_app() -> Any:
         except Exception as exc:
             log.error("agent_stream_error", run_id=run_id, error=str(exc))
             yield (
-                json_encode(
+                _encode_event(
                     {
                         "event": "agent_error",
                         "data": {"runId": run_id, "error": f"Agent execution failed: {type(exc).__name__}"},
@@ -1069,6 +1066,7 @@ def create_app() -> Any:
                 + "\n"
             )
         finally:
+            _run_snapshots.record("agent_interrupted", {"runId": run_id, "interruptionReason": "stream_disconnected"})
             if run_task is not None and not run_task.done():
                 run_task.cancel()
                 try:
@@ -1079,14 +1077,15 @@ def create_app() -> Any:
                     log.warning("ndjson_cleanup_failed", run_id=run_id, error=str(exc))
             _active_loops.pop(run_id, None)
             _finish_run(run_id)
-            # Awaits are fine during aclose(); yields are not.
-            if conv_manager is not None and conv_id and loop is not None:
+            # A disconnect can skip the save before the completion event.
+            if not assistant_save_attempted and conv_manager is not None and conv_id and loop is not None:
                 _, last_step_text = split_answer(collected, _step_starts)
                 from rune.api import conversation_wiring as conv_wiring
 
                 await conv_wiring.record_assistant_turn(
                     conv_manager, conv_id, loop, last_step_text,
                     reason="stream interrupted",
+                    embed=False,
                 )
 
     def _make_action_run_agent(session_id: str | None) -> Any:
@@ -1172,6 +1171,40 @@ def create_app() -> Any:
                 "X-Accel-Buffering": "no",
             },
         )
+
+    @app.get("/api/runs/snapshot", dependencies=[Depends(auth)])
+    async def run_snapshot(session_id: str = Query(alias="sessionId", min_length=1)) -> dict[str, Any]:
+        snapshot = _run_snapshots.latest(session_id)
+        if snapshot:
+            from rune.api.conversation_wiring import get_conv_manager
+
+            manager = get_conv_manager()
+            conversation = manager._active.get(session_id) if manager else None
+            if conversation is None and manager is not None:
+                conversation = await manager._store.load(session_id)
+            if conversation is not None:
+                snapshot["history"] = [
+                    {"id": f"history:{session_id}:{index}", "role": turn.role,
+                     "content": turn.content, "timestamp": turn.timestamp.timestamp() * 1000}
+                    for index, turn in enumerate(conversation.turns[-1200:])
+                ]
+        return {"run": snapshot}
+
+    @app.post("/api/runs/resume", dependencies=[Depends(auth)])
+    async def resume_run(req: ResumeRequest) -> dict[str, Any]:
+        try:
+            child, source, records = _run_recovery.begin(req.run_id)
+        except (RecoveryBlocked, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if source is not None:
+            task = asyncio.create_task(_run_agent_for_client(
+                goal=source["goal"], run_id=child["runId"], client_id=None,
+                session_id=source["sessionId"], resume_from=source, resume_records=records,
+                attachments=source.get("execution", {}).get("attachments") or None,
+            ))
+            _active_tasks[child["runId"]] = task
+            task.add_done_callback(lambda _t, rid=child["runId"]: _finish_run(rid))
+        return {"ok": True, "runId": child["runId"], "sessionId": child["sessionId"]}
 
     # Embedded terminal WebSocket (/ws/terminal) — opt-in, token-gated.
     # Protocol (terminado-style JSON arrays): client→ ["stdin", text] /
@@ -1318,6 +1351,7 @@ def create_app() -> Any:
                     text = msg.get("text", "")
                     if text:
                         run_id = uuid4().hex[:16]
+                        _run_snapshots.start(run_id, msg.get("sessionId") or "", text)
                         ws_attachments = msg.get("attachments") or None
                         task = asyncio.create_task(
                             _run_agent_for_client(
@@ -1350,26 +1384,16 @@ def create_app() -> Any:
                         await agent_loop.cancel()
 
                 elif msg_type == "approval":
-                    aid = msg.get("id", "")
-                    future = _pending_approvals.get(aid)
-                    if future and not future.done():
-                        future.set_result(
-                            {
-                                "decision": msg.get("decision", "deny"),
-                                "userGuidance": msg.get(
-                                    "userGuidance", ""
-                                ),
-                            }
-                        )
+                    try:
+                        await api_approval(ApprovalRequestModel.model_validate(msg))
+                    except (HTTPException, ValueError) as exc:
+                        await ws.send_text(json_encode({"event": "error", "data": {"message": str(exc)}}))
 
                 elif msg_type == "question":
-                    qid = msg.get("id", "")
-                    pending = _pending_questions.get(qid)
-                    if pending:
-                        try:
-                            pending.resolve(str(msg.get("answer", "")), msg.get("selectedIndex"))
-                        except ValueError as exc:
-                            await ws.send_text(json_encode({"event": "error", "data": {"message": str(exc)}}))
+                    try:
+                        await api_question(QuestionRequestModel.model_validate(msg))
+                    except (HTTPException, ValueError) as exc:
+                        await ws.send_text(json_encode({"event": "error", "data": {"message": str(exc)}}))
 
                 elif msg_type == "ping":
                     await ws.send_text(
@@ -1397,6 +1421,7 @@ def create_app() -> Any:
     @app.post("/api/v1/agent/execute", dependencies=[Depends(auth)])
     async def execute(req: ExecuteRequest) -> Any:
         run_id = uuid4().hex[:16]
+        _run_snapshots.start(run_id, req.session_id or "", req.goal)
 
         if req.stream:
             # NDJSON streaming response
@@ -1410,9 +1435,7 @@ def create_app() -> Any:
                 },
             )
 
-        # Non-streaming: run and broadcast events via SSE/WS. Multi-turn only
-        # with an explicit session_id; headless callers never touch the
-        # sticky web chat.
+        # Headless calls share conversation history only with an explicit session_id.
         task = asyncio.create_task(
             _run_agent_for_client(
                 goal=req.goal, run_id=run_id, client_id=None,
@@ -1426,9 +1449,10 @@ def create_app() -> Any:
         finally:
             _active_tasks.pop(run_id, None)
 
+        snapshot = _run_snapshots.get(run_id)
         return ExecuteResponse(
             request_id=run_id,
-            status="completed",
+            status=snapshot["status"] if snapshot else "failed",
             result=result,
         )
 
@@ -1478,8 +1502,7 @@ def create_app() -> Any:
                             {
                                 "command": cmd_name,
                                 "output": output,
-                                # Named so other tabs can tell whose command
-                                # this was; the event goes to every client.
+                                # Let clients filter commands from other conversations.
                                 "requestSessionId": req.session_id,
                             },
                         )
@@ -1494,6 +1517,7 @@ def create_app() -> Any:
             }
             for i, a in enumerate(req.attachments or [])
         ]
+        _run_snapshots.start(run_id, req.session_id or "", req.text)
         task = asyncio.create_task(
             _run_agent_for_client(
                 goal=req.text, run_id=run_id, client_id=None,
@@ -1504,8 +1528,7 @@ def create_app() -> Any:
         )
         _active_tasks[run_id] = task
         task.add_done_callback(lambda _t, _rid=run_id: _finish_run(_rid))
-        # Hand back the run id so a caller can tell its own run's SSE events
-        # (which carry runId) apart from a concurrent turn on the same session.
+        # The client uses runId to route events and target Stop.
         return {"ok": True, "runId": run_id}
 
     @app.post("/api/voice/transcribe", dependencies=[Depends(auth)])
@@ -1560,13 +1583,8 @@ def create_app() -> Any:
             pass
 
         async def _stop(rid: str) -> None:
-            # Broadcast the terminal event from here, not from the run path: a
-            # hard task cancel re-delivers CancelledError on the run's next
-            # await, which would skip its own broadcast. Emitting here makes the
-            # UI reset regardless. Then soft-cancel the loop (graceful between
-            # steps) AND hard-cancel the task — the soft flag alone is only
-            # checked between steps, so an in-flight LLM stream (a long single
-            # answer) would keep going; cancelling the task interrupts it now.
+            # Notify clients first; cancelling the task can skip its final event.
+            # Cancel the task as well as the loop to interrupt an active LLM stream.
             await _broadcast_aborted(rid)
             agent_loop = _active_loops.get(rid)
             if agent_loop:
@@ -1577,8 +1595,7 @@ def create_app() -> Any:
                 task.cancel()
 
         if run_id:
-            # A caller that named a run means that run. If it is already gone,
-            # say so rather than cancelling whichever one happens to be newest.
+            # Never fall back to another run when the requested run has already ended.
             if run_id in _active_loops or run_id in _active_tasks:
                 await _stop(run_id)
                 return {"ok": True}
@@ -1593,25 +1610,44 @@ def create_app() -> Any:
 
     @app.post("/api/approval", dependencies=[Depends(auth)])
     async def api_approval(req: ApprovalRequestModel) -> dict[str, Any]:
+        if req.decision not in _APPROVE_DECISIONS | {"deny"}:
+            raise HTTPException(status_code=422, detail="Unknown approval decision")
+        payload = {"decision": req.decision, "userGuidance": req.user_guidance or ""}
+        try:
+            if _run_snapshots.replay(req.id, req.response_id, payload):
+                return {"ok": True}
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         future = _pending_approvals.get(req.id)
-        if future and not future.done():
-            future.set_result(
-                {
-                    "decision": req.decision,
-                    "userGuidance": req.user_guidance or "",
-                }
-            )
+        if future is None or future.done():
+            raise HTTPException(status_code=410, detail="Approval has already been answered or closed")
+        try:
+            _run_snapshots.accept(req.id, req.response_id, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=410, detail=str(exc)) from exc
+        future.set_result(payload)
         return {"ok": True}
 
     @app.post("/api/question", dependencies=[Depends(auth)])
     async def api_question(req: QuestionRequestModel) -> dict[str, Any]:
+        payload = {"answer": req.answer, "selectedIndex": req.selected_index}
+        try:
+            if _run_snapshots.replay(req.id, req.response_id, payload):
+                return {"ok": True}
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         pending = _pending_questions.get(req.id)
         if pending is None or pending.future.done():
             raise HTTPException(status_code=410, detail="Question has already been answered or closed")
         try:
-            pending.resolve(req.answer, req.selected_index)
+            response = user_response(pending.params, req.answer, req.selected_index)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        try:
+            _run_snapshots.accept(req.id, req.response_id, payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=410, detail=str(exc)) from exc
+        pending.future.set_result(response)
         return {"ok": True}
 
     # SSE streaming endpoint (legacy /stream/{request_id})
@@ -1753,6 +1789,7 @@ def create_app() -> Any:
                         for t in conv.turns
                         if t.role in ("user", "assistant")
                     ],
+                    "run": _run_snapshots.latest(conv.id),
                 })
 
             elif method == "sessions.events":
@@ -2152,10 +2189,10 @@ def create_app() -> Any:
                 return _ok(providers)
 
             elif method == "model.set":
-                # Switch the model new runs use. Set both active_* (what the
-                # resolver runs) and default_* (what config.get reports and the
-                # status bar shows) so the picker and the run agree.
-                from rune.config import get_config as _gc
+                from rune.llm.model_selection import (
+                    ActiveModelSelection,
+                    persist_active_model_selection,
+                )
 
                 _prov = str(params.get("provider", "")).strip()
                 _model = str(params.get("model", "")).strip()
@@ -2169,34 +2206,24 @@ def create_app() -> Any:
                 except ValueError:
                     _known = ", ".join(sorted(p.value for p in _Provider))
                     return _err("invalid", f"unknown provider '{_prov}'; known: {_known}")
-                _lcfg = _gc().llm
-                _lcfg.active_provider = _prov
-                _lcfg.active_model = _model
-                _lcfg.default_provider = _prov
-                _lcfg.default_model = _model
-                # Survive a restart. The daemon holds config in memory, so
-                # without this the picker silently reverts on every restart.
-                from rune.config import save_config_values
-                save_config_values({
-                    "llm.activeProvider": _prov,
-                    "llm.activeModel": _model,
-                    "llm.defaultProvider": _prov,
-                    "llm.defaultModel": _model,
-                })
+                try:
+                    persist_active_model_selection(
+                        ActiveModelSelection(provider=_Provider(_prov), model=_model), update_default=True,
+                    )
+                except OSError as exc:
+                    return _err("storage", str(exc))
                 return _ok({"provider": _prov, "model": _model})
 
             elif method == "reasoning.set":
-                # Set the reasoning depth new runs use (low/medium/high, or
-                # empty to clear back to the provider default).
-                from rune.config import get_config as _gc
-
-                _eff = str(params.get("effort", "")).strip().lower()
-                if _eff and _eff not in ("low", "medium", "high"):
-                    return _err("invalid", "effort must be low, medium, or high")
-                _gc().llm.reasoning_effort = _eff or None
-                from rune.config import save_config_values
-                save_config_values({"llm.reasoningEffort": _eff or None})
-                return _ok({"reasoningEffort": _eff or None})
+                from rune.api.handlers.config import set_reasoning_effort
+                try:
+                    return _ok(await set_reasoning_effort(
+                        params.get("effort", ""), provider=params.get("provider", ""), model=params.get("model", ""),
+                    ))
+                except ValueError as exc:
+                    return _err("invalid", str(exc))
+                except OSError as exc:
+                    return _err("storage", str(exc))
 
             # Markdown file editor (HEARTBEAT.md, MEMORY.md, learned.md, user-profile.md)
             elif method == "markdown.list":

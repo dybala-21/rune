@@ -6,7 +6,9 @@ All 145 config fields with defaults.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from rune.llm.reasoning import ReasoningEffort, reasoning_model_key
 
 # LLM Configuration
 
@@ -61,12 +63,9 @@ class LLMConfig(BaseModel):
     default_model: str = Field(default="gpt-5.4", alias="defaultModel")
     active_provider: str | None = Field(default=None, alias="activeProvider")
     active_model: str | None = Field(default=None, alias="activeModel")
-    # Reasoning depth for reasoning-capable models (low/medium/high). None
-    # leaves the provider default (GPT-5.6 defaults to medium). Only sent when
-    # the model's traits say it accepts reasoning_effort.
-    reasoning_effort: str | None = Field(
-        default=None, pattern="^(low|medium|high)$", alias="reasoningEffort"
-    )
+    # Read the old global setting once, attaching it to the previously selected model.
+    reasoning_effort: ReasoningEffort | None = Field(default=None, alias="reasoningEffort")
+    reasoning_efforts: dict[str, ReasoningEffort | None] = Field(default_factory=dict, alias="reasoningEfforts")
     # Cloud-escalation profile for /escalate: data leaves the machine only when
     # the user invokes it (never auto-routed). Model is optional; defaults to the
     # provider's best tier.
@@ -85,6 +84,17 @@ class LLMConfig(BaseModel):
     routing_mode: str = Field(default="cloud-first", alias="routingMode")
     request_timeout_ms: int = Field(default=600_000, alias="requestTimeoutMs")
     max_retries: int = Field(default=2, alias="maxRetries")
+
+    @model_validator(mode="after")
+    def migrate_reasoning_preference(self):
+        if self.reasoning_effort is not None:
+            provider = self.active_provider if self.active_provider and self.active_model else self.default_provider
+            tiers = getattr(self.models, provider, None)
+            model = self.active_model if self.active_provider and self.active_model else getattr(tiers, "best", "unknown")
+            key = reasoning_model_key(model if provider == "openai" else f"{provider}/{model}")
+            self.reasoning_efforts.setdefault(key, self.reasoning_effort)
+            self.reasoning_effort = None
+        return self
 
 
 # Approval Configuration

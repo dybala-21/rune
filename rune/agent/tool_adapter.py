@@ -269,6 +269,7 @@ class ToolAdapterOptions:
     budget_percent: float = 0.0  # current budget consumption ratio (0.0-1.0)
     # Callable, not a bool: the in-run upshift turns the lane off mid-run.
     fast_lane_active: Callable[[], bool] | None = None
+    table_acceptance: Any = None
 
 
 # web_fetch maxLength while the fast lane is active: a simple lookup
@@ -525,11 +526,11 @@ def _build_typed_tool(
         # paths against the process cwd, which is the daemon's start dir when
         # serving the app — a bare "app.py" must mean the pinned project.
         if opts.workspace_root:
-            if (cap_name.startswith(("file_", "document_", "code_"))
+            if (cap_name.startswith(("file_", "document_", "code_", "table_"))
                     or cap_name == "project_map"):
                 if cap_name == "project_map" and not effective_params.get("path"):
                     effective_params["path"] = "."
-                for _pk in ("file_path", "path", "target", "source_path", "directory"):
+                for _pk in ("file_path", "path", "target", "source_path", "output_path", "directory"):
                     _pv = effective_params.get(_pk)
                     if (
                         isinstance(_pv, str) and _pv
@@ -597,6 +598,17 @@ def _build_typed_tool(
 
         if cap_name == _BASH_CAPABILITY:
             effective_params = _cap_benchmark_bash_timeout(effective_params)
+
+        from rune.agent.execution_journal import active_journal
+        journal = active_journal()
+        if journal is not None and journal.previous is not None and reg.is_allowed(cap_name):
+            normalized = (cap_def.parameters_model.model_validate(effective_params).model_dump(mode="json", by_alias=True)
+                          if cap_def.parameters_model is not None else effective_params)
+            recorded = await journal.replay_completed(cap_name, normalized)
+            if recorded is not None:
+                if opts.on_tool_end is not None:
+                    await opts.on_tool_end(cap_name, recorded)
+                return "[RECORDED RESULT — not executed again; not a fresh verification]\n" + (recorded.output or recorded.error or "")
 
         # 1. Cognitive cache check
         if cache is not None:
@@ -739,11 +751,16 @@ def _build_typed_tool(
         # 3. Execute
         start_time = time.monotonic()
         try:
-            if approval_cleared:
-                with approval_granted():
+            from rune.agent.table_acceptance import acceptance_scope
+
+            with acceptance_scope(opts.table_acceptance):
+                if approval_cleared:
+                    with approval_granted():
+                        result = await reg.execute(cap_name, effective_params)
+                else:
                     result = await reg.execute(cap_name, effective_params)
-            else:
-                result = await reg.execute(cap_name, effective_params)
+            if opts.table_acceptance is not None:
+                opts.table_acceptance.observe(cap_name, effective_params, result)
         except Exception as exc:
             result = CapabilityResult(success=False, error=f"Execution error: {exc}")
         # A capability can refuse and ask to be asked. The execution policy's
@@ -775,8 +792,10 @@ def _build_typed_tool(
             if granted:
                 _consecutive_denials[0] = 0
                 try:
-                    with approval_granted():
+                    with acceptance_scope(opts.table_acceptance), approval_granted():
                         result = await reg.execute(cap_name, effective_params)
+                    if opts.table_acceptance is not None:
+                        opts.table_acceptance.observe(cap_name, effective_params, result)
                 except Exception as exc:
                     result = CapabilityResult(
                         success=False, error=f"Execution error: {exc}"
@@ -786,6 +805,10 @@ def _build_typed_tool(
                 result = CapabilityResult(success=False, error=f"Denied: {reason}")
 
         elapsed_ms = (time.monotonic() - start_time) * 1000
+        if (result.metadata or {}).get("replayed"):
+            if opts.on_tool_end is not None:
+                await opts.on_tool_end(cap_name, result)
+            return "[RECORDED RESULT — not executed again; not a fresh verification]\n" + (result.output or result.error or "")
         if cap_name == _BASH_CAPABILITY:
             result = _enforce_benchmark_status_markers(result)
 

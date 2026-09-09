@@ -85,8 +85,14 @@ class CapabilityRegistry:
             # Validate parameters if model is defined
             if cap.parameters_model is not None:
                 validated = cap.parameters_model.model_validate(params)
-                return await cap.execute(validated)
-            return await cap.execute(params)
+                normalized = validated.model_dump(mode="json", by_alias=True)
+            else:
+                validated, normalized = params, params
+            from rune.agent.execution_journal import active_journal
+            journal = active_journal()
+            if journal is not None:
+                return await journal.execute(name, normalized, lambda: cap.execute(validated))
+            return await cap.execute(validated)
         except Exception as exc:
             return CapabilityResult(
                 success=False, error=f"Capability '{name}' failed: {exc}"
@@ -150,6 +156,7 @@ def _register_all_capabilities(registry: CapabilityRegistry) -> None:
     from rune.capabilities.safety_cap import register_safety_capabilities
     from rune.capabilities.service import register_service_capabilities
     from rune.capabilities.skill_ops import register_skill_ops_capabilities
+    from rune.capabilities.table_checks import register_table_checks
     from rune.capabilities.task_ops import register_task_ops_capabilities
     from rune.capabilities.think import register_think_capabilities
     from rune.capabilities.web import register_web_capabilities
@@ -157,6 +164,7 @@ def _register_all_capabilities(registry: CapabilityRegistry) -> None:
     register_file_capabilities(registry)
     register_document_capability(registry)
     register_document_bundle_capability(registry)
+    register_table_checks(registry)
     register_bash_capabilities(registry)
     register_think_capabilities(registry)
     register_web_capabilities(registry)

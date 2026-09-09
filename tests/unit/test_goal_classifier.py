@@ -103,6 +103,15 @@ class TestRequiresExecutionParsing:
 class TestIntentCategoryParsing:
     """LLM-emitted intent_categories survive into ClassificationResult."""
 
+    async def test_table_intent_survives_classification_and_wire_format(self, monkeypatch):
+        from rune.agent.goal_classifier import classify_goal, from_wire, to_wire
+
+        _patch_llm_client(monkeypatch, {"goal_type": "full", "confidence": 0.9,
+                                      "intent_categories": ["document", "table"]})
+        result = await classify_goal("Summarize orders into a workbook")
+        assert "table" in result.intent_categories
+        assert from_wire(to_wire(result)).intent_categories == result.intent_categories
+
     async def test_email_intent_extracted_from_llm_response(
         self, monkeypatch: pytest.MonkeyPatch,
     ):
