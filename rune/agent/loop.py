@@ -42,6 +42,7 @@ from rune.agent.advisor.loop_integration import (
     build_policy_input,
     maybe_consult,
 )
+from rune.agent.attachments import content_text
 from rune.agent.checkpoint import CheckpointData, CheckpointManager
 from rune.agent.citation_support import (
     averify_unsupported,
@@ -71,6 +72,7 @@ from rune.agent.requirement_gate import RequirementGate, requirement_gate_enable
 from rune.agent.tool_adapter import STALL_LIMITS, ToolAdapterOptions, build_tool_set
 from rune.agent.verification_state import VerificationState, verified_outcome
 from rune.capabilities.ask_user import AskUserCallback
+from rune.capabilities.browser.session import with_browser_session
 from rune.config.defaults import (
     ACTIVE_TOOLS_REDUCTION_STEP,
     COGNITIVE_CACHE_MAX,
@@ -329,7 +331,7 @@ def _cap_handoff_facts(msgs: list[Any]) -> str:
             label = pending[consumed] if consumed < len(pending) else "?"
             consumed += 1
             # Slice before normalizing — tool outputs can be huge.
-            content = " ".join(str(m.get("content", ""))[:500].split())
+            content = " ".join(content_text(m.get("content", ""))[:500].split())
             failed = content.lower().startswith(("error", "failed", "traceback"))
             lines.append(f"- {label} → {'FAILED: ' if failed else 'ok: '}{content[:140]}")
     lines.extend(
@@ -1108,6 +1110,7 @@ class NativeAgentLoop(EventEmitter):
             return True, messages, blocked_count
         return await self._requirement_gate(messages, blocked_count)
 
+    @with_browser_session
     async def run(
         self,
         goal: str,
@@ -3536,7 +3539,7 @@ class NativeAgentLoop(EventEmitter):
     def _extract_paths_from_message(msg: Any) -> set[str]:
         """Extract file paths from a message's tool calls."""
         paths: set[str] = set()
-        text = str(msg) if not isinstance(msg, dict) else str(msg.get("content", ""))
+        text = str(msg) if not isinstance(msg, dict) else content_text(msg.get("content", ""))
         for match in re.finditer(r'["\']?(/[\w./\-]+\.\w+)["\']?', text):
             paths.add(match.group(1))
         return paths

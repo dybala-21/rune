@@ -7,7 +7,6 @@ cognitive caching integration, and Guardian validation wrappers.
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import math
 import os
@@ -16,10 +15,10 @@ import time
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
-from pathlib import Path
 from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 from rune.agent.cognitive_cache import WEB_FETCH_DEFAULT_MAX_LENGTH, SessionToolCache
+from rune.agent.tool_output import ToolOutput, output_for_model
 from rune.capabilities.output_prefixes import (
     BASH_CMD_PREFIX,
     BASH_EXIT_PREFIX,
@@ -47,7 +46,7 @@ class ToolWrapper:
     name: str
     description: str
     json_schema: dict[str, Any] = field(default_factory=lambda: {"type": "object", "properties": {}})
-    function: Any = None  # async callable(**kwargs) -> str
+    function: Any = None  # async callable(**kwargs) -> str | ToolOutput
 
 
 # Stall limits - frozen constant thresholds for stall detection
@@ -96,85 +95,6 @@ STALL_LIMITS: dict[str, Any] = {
 
 # Multiplier applied when "extended" stall mode is active
 EXTENDED_MULTIPLIER: float = 1.5
-
-# Multimodal output - image/media MIME mapping and size limits
-
-# Supported image extensions to MIME types for multimodal tool output
-_IMAGE_EXTENSIONS: dict[str, str] = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-    ".svg": "image/svg+xml",
-}
-
-# Max image file size we'll inline as base64 (~10 MB)
-_MAX_IMAGE_INLINE_BYTES: int = 10 * 1024 * 1024
-
-# Regex to detect image file paths in tool output text
-_IMAGE_PATH_RE = re.compile(
-    r"""(?:^|[\s"'=])(/[^\s"']+\.(?:png|jpe?g|gif|webp|svg))""",
-    re.IGNORECASE,
-)
-
-
-def _mime_for_image(path: str) -> str | None:
-    """Return MIME type if *path* is a supported image extension, else None."""
-    ext = Path(path).suffix.lower()
-    return _IMAGE_EXTENSIONS.get(ext)
-
-
-def _build_multimodal_output(
-    text: str,
-    image_base64: str | None = None,
-    image_mime_type: str = "image/jpeg",
-) -> str:
-    """Embed image data inline when present, otherwise return plain text.
-
-    For SVG, appends the SVG source as text.
-    For raster images, appends a base64 data-URI reference so the LLM
-    can receive the image via the OpenAI content_parts format if the
-    caller decides to post-process it.
-    """
-    if not image_base64:
-        return text
-
-    try:
-        image_bytes = base64.b64decode(image_base64)
-    except Exception:
-        log.warning("multimodal_decode_failed", mime=image_mime_type)
-        return text
-
-    if image_mime_type == "image/svg+xml":
-        svg_text = image_bytes.decode("utf-8", errors="replace")
-        return f"{text}\n\n[SVG image]\n{svg_text}"
-
-    return f"{text}\n\n[image: data:{image_mime_type};base64,{image_base64[:80]}... ({len(image_bytes)} bytes)]"
-
-
-def _extract_image_from_file(file_path: str) -> tuple[str, str] | None:
-    """Read an image file and return ``(base64_data, mime_type)`` or None.
-
-    Only reads files that exist, are within size limits, and have a
-    supported image extension.
-    """
-    mime = _mime_for_image(file_path)
-    if mime is None:
-        return None
-    try:
-        size = os.path.getsize(file_path)
-    except OSError:
-        return None
-    if size > _MAX_IMAGE_INLINE_BYTES or size == 0:
-        return None
-    try:
-        with open(file_path, "rb") as f:
-            data = f.read()
-        return base64.b64encode(data).decode("ascii"), mime
-    except OSError:
-        return None
-
 
 # StallState - unified type lives in loop.py (#15)
 # To avoid circular imports (loop.py imports from tool_adapter.py), we use
@@ -527,6 +447,7 @@ def _build_typed_tool(
         # serving the app — a bare "app.py" must mean the pinned project.
         if opts.workspace_root:
             if (cap_name.startswith(("file_", "document_", "code_", "table_"))
+                    or cap_name == "browser_screenshot"
                     or cap_name == "project_map"):
                 if cap_name == "project_map" and not effective_params.get("path"):
                     effective_params["path"] = "."
@@ -816,8 +737,15 @@ def _build_typed_tool(
         if cap_name == _BASH_CAPABILITY and result.success:
             _consecutive_denials[0] = 0
 
+        try:
+            output = output_for_model(_format_tool_output(cap_name, effective_params, result), cap_name, result)
+        except (ValueError, OSError) as exc:
+            log.warning("tool_image_delivery_failed", capability=cap_name, error=str(exc))
+            result = CapabilityResult(success=False, error=f"Image delivery failed: {exc}", metadata=result.metadata)
+            output = _format_tool_output(cap_name, effective_params, result)
+
         # 4. Cache store
-        if cache is not None and result.success:
+        if cache is not None and result.success and not isinstance(output, ToolOutput):
             cache_key = cache.generate_key(cap_name, effective_params)
             if cache_key is not None:
                 cache.set(cache_key, cap_name, effective_params, result, current_step)
@@ -839,35 +767,7 @@ def _build_typed_tool(
         if opts.on_tool_end is not None:
             await opts.on_tool_end(cap_name, result)
 
-        # -- Feature 5: Wire output prefixes --------------------
-        output = _format_tool_output(cap_name, effective_params, result)
-
-        # -- Feature 6: Multimodal output (images/media) --------
-        # Mirrors TS toModelOutput: when result.metadata contains
-        # image_base64/image_mime_type (e.g. from browser screenshots),
-        # return a ToolReturn with BinaryContent so the LLM sees the image.
-        image_b64: str | None = None
-        image_mime: str = "image/jpeg"
-
-        if result.metadata and isinstance(result.metadata, dict):
-            # Source 1: capability explicitly provides base64 image data
-            image_b64 = result.metadata.get("image_base64") or result.metadata.get("imageBase64")
-            image_mime = (
-                result.metadata.get("image_mime_type")
-                or result.metadata.get("imageMimeType")
-                or "image/jpeg"
-            )
-
-        # Source 2: detect image file paths in the output text and inline them
-        if not image_b64 and result.success:
-            matches = _IMAGE_PATH_RE.findall(output)
-            for match_path in matches:
-                extracted = _extract_image_from_file(match_path)
-                if extracted is not None:
-                    image_b64, image_mime = extracted
-                    break  # Only inline the first detected image
-
-        return _build_multimodal_output(output, image_b64, image_mime)
+        return output
 
     # --- Wrapper that receives **kwargs from LiteLLMAgent's tool executor ---
     async def _wrapper(**kwargs: Any) -> str | Any:

@@ -92,6 +92,21 @@ async def test_unknown_external_effect_blocks_resumption(recovery, tmp_path):
     assert (tmp_path / "external-effect").read_text() == "sent"
 
 
+@pytest.mark.parametrize("state", ["unknown", "dispatched"])
+async def test_browser_effect_cannot_be_replayed_in_a_new_session(recovery, tmp_path, state):
+    from unittest.mock import AsyncMock
+
+    store, runs, service = recovery
+    invoke = AsyncMock(return_value=CapabilityResult(success=state == "dispatched",
+                                                   metadata={"action_status": state}))
+    await ExecutionJournal(store, "first", str(tmp_path)).execute("browser_act", {"selector": "e1"}, invoke)
+    assert store.attempts("first")[0]["state"] == ("done" if state == "dispatched" else "unknown")
+    runs.interrupt_active("server_shutdown")
+    with pytest.raises(RecoveryBlocked):
+        service.begin("first")
+    invoke.assert_awaited_once()
+
+
 def test_resume_excludes_overlapping_workspaces(recovery, tmp_path):
     store, runs, service = recovery
     runs.interrupt_active("server_shutdown")

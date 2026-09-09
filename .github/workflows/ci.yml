@@ -47,8 +47,15 @@ jobs:
         run: cd web && npm ci && npm run build
       - name: Install dependencies
         run: uv sync --extra dev
+      - name: Install test browser
+        run: uv run playwright install --with-deps chromium
       - name: Run tests
+        # Browser action regressions use Chromium, including its actionability checks.
         run: uv run pytest tests/ -q --tb=short
+      - name: Run web regression tests
+        env:
+          RUNE_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
+        run: cd web && npm test
 
   # Fresh install with no dev extras, then import. lint and test both run
   # on `uv sync --extra dev`, so a runtime dependency missing from the base

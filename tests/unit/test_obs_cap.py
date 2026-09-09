@@ -86,3 +86,15 @@ def test_keep_last_zero_truncates_all_old() -> None:
         msgs, keep_last=0, trunc=1000, activate_over=80_000
     )
     assert all(len(m["content"]) < 90_000 for m in out)
+
+
+def test_old_screenshots_are_masked_without_losing_history_or_call_ids():
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,complete-image"}}
+    messages = [tool(str(i), [{"type": "text", "text": f"Screen {i}"}, image]) for i in range(4)]
+    messages.insert(0, {"role": "user", "content": [image]})
+    out = mask_stale_tool_messages(messages)
+    assert out[0] is messages[0]
+    assert [m.get("tool_call_id") for m in out] == [m.get("tool_call_id") for m in messages]
+    assert all(image in m["content"] for m in messages)
+    assert all(image not in m["content"] for m in out[1:3])
+    assert all(image in m["content"] for m in out[3:])

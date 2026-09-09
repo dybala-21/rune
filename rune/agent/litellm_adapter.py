@@ -64,6 +64,7 @@ from rune.agent.model_traits import (
     traits,
 )
 from rune.agent.obs_cap import mask_stale_tool_messages
+from rune.agent.tool_output import ToolOutput, tool_content
 from rune.capabilities.output_prefixes import looks_like_failure_output
 from rune.utils.env import env_flag as _env_flag
 from rune.utils.env import env_int as _env_int
@@ -267,8 +268,8 @@ async def _run_stop_check(
     return " ".join(cmd), out[-_VOS_OUTPUT_CAP:], proc.returncode or 0
 
 
-def _looks_like_tool_failure(result: str) -> bool:
-    return looks_like_failure_output(result)
+def _looks_like_tool_failure(result: str | ToolOutput) -> bool:
+    return looks_like_failure_output(str(result))
 
 
 def _redirect_edit_to_write(fn: str, args: dict[str, Any]) -> str:
@@ -1811,7 +1812,7 @@ class StreamResult:
 
             if is_concurrent and len(batch) > 1:
                 # Run read-only tools concurrently
-                async def _run_one(tc_data: dict[str, Any]) -> tuple[str, str, str]:
+                async def _run_one(tc_data: dict[str, Any]) -> tuple[str, str, str | ToolOutput]:
                     fn = tc_data["function"]["name"]
                     args_str = tc_data["function"]["arguments"]
                     tc_id = tc_data["id"]
@@ -1827,14 +1828,14 @@ class StreamResult:
 
                 _sem = _aio.Semaphore(self._MAX_CONCURRENT_TOOLS)
 
-                async def _limited(tc_data: dict[str, Any], sem: _aio.Semaphore = _sem) -> tuple[str, str, str]:
+                async def _limited(tc_data: dict[str, Any], sem: _aio.Semaphore = _sem) -> tuple[str, str, str | ToolOutput]:
                     async with sem:
                         return await _run_one(tc_data)
 
                 results = await _aio.gather(*[_limited(tc) for tc in batch])
                 for tc_id, fn, res in results:
                     self._messages.append({
-                        "role": "tool", "tool_call_id": tc_id, "content": res,
+                        "role": "tool", "tool_call_id": tc_id, "content": tool_content(res),
                     })
                     nudge = self._policy.record_tool_call(fn)
                     if nudge:
@@ -1882,7 +1883,7 @@ class StreamResult:
                     else:
                         res = await self._execute_tool(fn, args)
                     self._messages.append({
-                        "role": "tool", "tool_call_id": tc_id, "content": res,
+                        "role": "tool", "tool_call_id": tc_id, "content": tool_content(res),
                     })
                     # The check verdict is recorded whichever way it went —
                     # the failing case is the one the end-of-run gate exists
@@ -1950,8 +1951,7 @@ class StreamResult:
                     if nudge:
                         deferred_nudges.append(nudge)
                     if (
-                        stop_after_failure
-                        and fn in _STOP_BATCH_FAILURE_TOOLS
+                        (fn.startswith("browser_") or stop_after_failure and fn in _STOP_BATCH_FAILURE_TOOLS)
                         and _looks_like_tool_failure(res)
                     ):
                         batch_failure_seen = True
@@ -2162,12 +2162,12 @@ class StreamResult:
         if name in _WRITE_TOOLS and target:
             ledger.record_write(str(target), path_exists(str(target), self._workspace_root))
 
-    async def _execute_tool(self, name: str, params: dict[str, Any]) -> str:
-        """Execute a tool by name and return string result.
+    async def _execute_tool(self, name: str, params: dict[str, Any]) -> str | ToolOutput:
+        """Execute a tool, preserving any model-visible images.
 
         Identical (name, params) calls within the same stream_text()
-        session return a cached result to prevent wasteful repetition
-        (e.g. same URL fetched 26 times).
+        session can reuse text results. Browser state and screenshots must
+        be read again because earlier actions may have changed the page.
         """
         # TAFC: strip 'think' reasoning parameter before execution
         params.pop("think", None)
@@ -2178,18 +2178,15 @@ class StreamResult:
             f"{name}:{json.dumps(params, sort_keys=True)}".encode(),
             usedforsecurity=False,
         ).hexdigest()[:16]
-        if _cache_key in self._tool_result_cache:
+        if not name.startswith("browser_") and _cache_key in self._tool_result_cache:
             return (
                 "[CACHED — identical call already executed. "
                 "Use the result above or try a different approach.]\n"
                 + self._tool_result_cache[_cache_key][:500]
             )
 
-        # Block tool after 3 consecutive failures.  When a tool like
-        # browser_act fails 3 times, block the ENTIRE tool group
-        # (all browser_* tools) since navigate+observe without
-        # working act is just burning tokens.
-        _group = self._TOOL_GROUPS.get(name, "")
+        # A failed browser action must leave observation tools available.
+        _group = "" if name.startswith("browser_") else self._TOOL_GROUPS.get(name, "")
 
         _MAX_FAILS = 3
 
@@ -2246,29 +2243,26 @@ class StreamResult:
             _reverted = self._revert_circumvented_writes()
             if _reverted:
                 result_str += "\n" + _reverted
-            self._tool_result_cache[_cache_key] = result_str
+            if not name.startswith("browser_") and not isinstance(result, ToolOutput):
+                self._tool_result_cache[_cache_key] = result_str
             self._record_provenance(name, params, result_str)
-            # Reset fail streak on success.
-            # Also treat "NO CHANGES DETECTED" as failure — the action
-            # technically executed but had no effect (phantom click).
             is_failure = _looks_like_tool_failure(result_str)
             if is_failure:
                 streak = self._tool_fail_streak.get(name, 0) + 1
                 self._tool_fail_streak[name] = streak
-                # At 2 failures: hint to try URL construction before
-                # the group gets blocked at 3.
                 if streak == 2 and name == "browser_act":
                     result_str += (
-                        "\n\n[HINT] browser_act failed twice. Before trying again, "
-                        "construct the target URL directly with browser_navigate. "
-                        "Example: browser_navigate(url='https://site.com/search?q=keyword&sort=review')"
+                        "\n\nRead the current page before another action. "
+                        "An old reference must not be replaced by a guessed target."
                     )
                 # Block entire group immediately when threshold reached
                 if streak >= _MAX_FAILS and _group:
                     self._blocked_groups.add(_group)
             else:
                 self._tool_fail_streak[name] = 0
-            return result_str
+                if name in {"browser_observe", "browser_navigate", "browser_open"}:
+                    self._tool_fail_streak.pop("browser_act", None)
+            return result.with_text(result_str) if isinstance(result, ToolOutput) else result_str
         except Exception as exc:
             streak = self._tool_fail_streak.get(name, 0) + 1
             self._tool_fail_streak[name] = streak

@@ -1,19 +1,17 @@
-"""Browser core — singleton management, navigation, and open.
-
-Split from browser.py to keep files under 800 lines. This module owns
-the Playwright browser/page lifecycle and the two navigation capabilities
-(``browser_navigate`` for headless, ``browser_open`` for visible).
-"""
+"""Launch and navigate browsers owned by the current run."""
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 from typing import Any
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
+from rune.capabilities.browser.session import (
+    browser_operation,
+    close_browser_sessions,
+    current_session,
+)
 from rune.types import CapabilityResult
 from rune.utils.logger import get_logger
 
@@ -35,153 +33,48 @@ def _validate_browser_url(url: str) -> str | None:
         return f"Blocked URL scheme '{parsed.scheme}' — only http/https allowed"
     return None
 
-# Browser singleton management
-_browser_instance: Any = None
-_page_instance: Any = None
-_pw_instance: Any = None
-_active_profile: str = "managed"
-_lock = asyncio.Lock()
-
-
 async def _get_browser(profile: str | None = None) -> tuple[Any, Any]:
-    """Get or create a singleton Playwright browser and page.
-
-    Args:
-        profile: ``"managed"`` (headless) or ``"relay"`` (user's Chrome
-                 via CDP, fallback to headed Playwright).  If *None*,
-                 reuses the current profile.
-
-    Returns (browser, page) tuple.
-    """
-    global _browser_instance, _page_instance, _pw_instance, _active_profile
-
-    async with _lock:
-        # Profile switch - close existing browser.
-        if profile and profile != _active_profile and _browser_instance is not None:
-            log.info("browser_profile_switch", old=_active_profile, new=profile)
-            with contextlib.suppress(Exception):
-                await _browser_instance.close()
-            _browser_instance = None
-            _page_instance = None
-            _active_profile = profile
-
-        if profile:
-            _active_profile = profile
-
-        if _page_instance is not None:
-            try:
-                await _page_instance.evaluate("1")
-                return _browser_instance, _page_instance
-            except Exception:
-                _page_instance = None
-                _browser_instance = None
-
+    session = current_session()
+    async with session.init_lock:
+        if profile is not None and profile not in {"managed", "visible"}:
+            raise RuntimeError("Attached Chrome requires an authenticated, explicitly selected tab")
+        if session.page is not None:
+            if session.page.is_closed() or not session.browser.is_connected():
+                if profile is None:
+                    raise RuntimeError("The browser was closed. Open it again and read fresh element references")
+            elif profile is None or profile == session.profile:
+                return session.browser, session.page
+            await session.release_resources()
+        if profile is None:
+            raise RuntimeError("No browser is open in this run. Use browser_navigate or browser_open first")
         try:
             from playwright.async_api import async_playwright
         except ImportError:
-            raise RuntimeError(
-                "Playwright is not installed. Browser tools require it.\n"
-                "Install with: pip install rune-ai[browser]\n"
-                "Then run: playwright install chromium"
-            ) from None
-
+            raise RuntimeError("Install rune-ai[browser] and run playwright install chromium") from None
+        from rune.config.loader import get_config
+        config = get_config().browser
+        session.profile = profile
         try:
-            if _pw_instance is None:
-                _pw_instance = await async_playwright().start()
-
-            from rune.config.loader import get_config
-            browser_cfg = get_config().browser
-
-            if _active_profile == "relay":
-                # Try CDP relay (user's Chrome via Extension).
-                _browser_instance, _page_instance = await _try_relay_connect(
-                    _pw_instance, browser_cfg,
-                )
-                if _browser_instance is not None:
-                    return _browser_instance, _page_instance
-                # Fallback: launch headed Playwright so user can see.
-                log.info("relay_unavailable_falling_back_to_headed")
-
-            # Managed (headless) or relay fallback (headed).
-            headless = _active_profile == "managed"
-            _browser_instance = await _pw_instance.chromium.launch(
-                headless=headless,
-                args=[
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-gpu",
-                ],
+            session.playwright = await async_playwright().start()
+            session.browser = await session.playwright.chromium.launch(
+                headless=profile == "managed", chromium_sandbox=True,
             )
-
-            context = await _browser_instance.new_context(
-                viewport={
-                    "width": browser_cfg.viewport_width,
-                    "height": browser_cfg.viewport_height,
-                },
-                user_agent=(
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                ),
+            context = await session.browser.new_context(
+                viewport={"width": config.viewport_width, "height": config.viewport_height},
             )
-            _page_instance = await context.new_page()
-
-            return _browser_instance, _page_instance
-
-        except ImportError:
-            raise RuntimeError(
-                "Playwright is not installed. "
-                "Run: pip install playwright && playwright install chromium"
-            ) from None
-
-
-async def _try_relay_connect(pw: Any, browser_cfg: Any) -> tuple[Any, Any] | tuple[None, None]:
-    """Try to connect to the user's Chrome via the CDP relay server."""
-    try:
-        import httpx
-
-        from rune.browser.relay_server import DISCOVERY_PORT_END, DISCOVERY_PORT_START
-
-        for port in range(DISCOVERY_PORT_START, DISCOVERY_PORT_END + 1):
-            try:
-                resp = httpx.get(f"http://127.0.0.1:{port}/health", timeout=0.5)
-                if resp.status_code == 200 and resp.json().get("extensionConnected"):
-                    cdp_url = f"http://127.0.0.1:{port}/cdp"
-                    browser = await pw.chromium.connect_over_cdp(cdp_url)
-                    contexts = browser.contexts
-                    if contexts:
-                        pages = contexts[0].pages
-                        if pages:
-                            page = pages[-1]
-                            log.info("relay_connected", port=port)
-                            return browser, page
-                    page = await browser.new_page()
-                    log.info("relay_connected_new_page", port=port)
-                    return browser, page
-            except Exception:
-                continue
-    except Exception as exc:
-        log.debug("relay_connect_failed", error=str(exc))
-    return None, None
-
-
-def _is_same_domain(current_url: str, target_url: str) -> bool:
-    """Check if two URLs share the same effective domain."""
-    try:
-        current = urlparse(current_url).netloc.replace("www.", "")
-        target = urlparse(target_url).netloc.replace("www.", "")
-        if not current or not target:
-            return False
-        return current == target or current.endswith("." + target) or target.endswith("." + current)
-    except Exception:
-        return False
+            session.page = await context.new_page()
+            return session.browser, session.page
+        except BaseException:
+            await session.release_resources()
+            raise
 
 
 def _current_page_hint() -> str:
     """Return a hint about the currently open page for error messages."""
-    if _page_instance is not None:
+    page = current_session().page
+    if page is not None:
         try:
-            url = _page_instance.url
+            url = page.url
             if url and url != "about:blank":
                 return (
                     f"\n\U0001f4a1 Browser is currently on: {url}\n"
@@ -194,25 +87,8 @@ def _current_page_hint() -> str:
 
 
 async def _close_browser() -> None:
-    """Close the singleton browser instance."""
-    global _browser_instance, _page_instance, _pw_instance
-
-    async with _lock:
-        # Detach network monitor before closing browser (#P2)
-        with contextlib.suppress(Exception):
-            from rune.capabilities.browser.network import get_network_monitor
-            await get_network_monitor().detach()
-
-        if _browser_instance is not None:
-            with contextlib.suppress(Exception):
-                await _browser_instance.close()
-            _browser_instance = None
-            _page_instance = None
-
-        if _pw_instance is not None:
-            with contextlib.suppress(Exception):
-                await _pw_instance.stop()
-            _pw_instance = None
+    """Release managed browser resources when the daemon shuts down."""
+    await close_browser_sessions()
 
 
 # Accessibility snapshot (shared utility)
@@ -258,10 +134,10 @@ class BrowserOpenParams(BaseModel):
 
 
 # Capability implementations
+@browser_operation
 async def browser_navigate(params: BrowserNavigateParams) -> CapabilityResult:
     """Navigate to a URL in a headless background browser for data extraction."""
     from rune.capabilities.browser.helpers import (
-        dismiss_blocking_overlays,
         extract_interactive_elements,
         format_interactive_elements,
         wait_for_dom_settle,
@@ -284,7 +160,6 @@ async def browser_navigate(params: BrowserNavigateParams) -> CapabilityResult:
         response = await page.goto(params.url, wait_until="domcontentloaded", timeout=30_000)
 
         await wait_for_dom_settle(page)
-        await dismiss_blocking_overlays(page)
         elements = await extract_interactive_elements(page)
 
         status = response.status if response else 0
@@ -339,10 +214,10 @@ async def browser_navigate(params: BrowserNavigateParams) -> CapabilityResult:
         )
 
 
+@browser_operation
 async def browser_open(params: BrowserOpenParams) -> CapabilityResult:
     """Open a URL in a visible browser the user can see and interact with."""
     from rune.capabilities.browser.helpers import (
-        dismiss_blocking_overlays,
         extract_interactive_elements,
         format_interactive_elements,
         wait_for_dom_settle,
@@ -355,13 +230,13 @@ async def browser_open(params: BrowserOpenParams) -> CapabilityResult:
         return CapabilityResult(success=False, error=url_err)
 
     try:
-        _, page = await _get_browser("relay")
+        _, page = await _get_browser("visible")
 
-        # Skip navigation if already on the same domain.
-        if _is_same_domain(page.url, params.url):
+        # Preserve in-page work only when this exact URL is already open.
+        if page.url == params.url:
             title = await page.title()
             url = page.url
-            log.debug("browser_open_same_domain_skipped", current=url, requested=params.url)
+            log.debug("browser_open_same_url", current=url, requested=params.url)
             return CapabilityResult(
                 success=True,
                 output=(
@@ -375,7 +250,6 @@ async def browser_open(params: BrowserOpenParams) -> CapabilityResult:
         response = await page.goto(params.url, wait_until="domcontentloaded", timeout=30_000)
 
         await wait_for_dom_settle(page)
-        await dismiss_blocking_overlays(page)
         elements = await extract_interactive_elements(page)
 
         status = response.status if response else 0
@@ -392,7 +266,7 @@ async def browser_open(params: BrowserOpenParams) -> CapabilityResult:
                 "url": url,
                 "title": title,
                 "status": status,
-                "profile": _active_profile,
+                "profile": current_session().profile,
                 "interactive_count": len(elements),
             },
         )

@@ -32,6 +32,7 @@ _READS = frozenset({
     "code_impact", "project_map", "document_read", "document_bundle_inspect", "web_search",
     "think", "memory_search", "task_list", "cron_list", "service_status", "service_list",
     "table_requirements", "table_verify",
+    "browser_observe", "browser_find", "browser_extract", "browser_discover_apis",
 })
 _MAX_FILE = 16 * 1024 * 1024
 
@@ -57,7 +58,7 @@ async def record_check(params: dict[str, Any], invoke: Callable[[], Awaitable[An
 
 
 def _is_read(name: str, params: dict[str, Any]) -> bool:
-    return name in _READS or name == "web_fetch" and str(params.get("method", "GET")).upper() in {"GET", "HEAD"}
+    return (name in _READS or name == "browser_screenshot" and not params.get("path")) or name == "web_fetch" and str(params.get("method", "GET")).upper() in {"GET", "HEAD"}
 
 
 def _request_key(name: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -159,6 +160,13 @@ def reconcile(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         record = {**original, "effect": dict(original["effect"])}
         effect = record["effect"]
         state = record["state"]
+        if state == "done" and record["tool"] in {
+            "browser_act", "browser_navigate", "browser_open", "browser_batch", "browser_workflow",
+        }:
+            raise RecoveryBlocked(
+                "The earlier browser session cannot be restored. Its completed actions will not be replayed. "
+                "Inspect their effects before starting a new browser task."
+            )
         if effect.get("untracked"):
             raise RecoveryBlocked(f"No comparable file revision was saved: {effect['untracked']}")
         if state not in {"done", "not_executed"}:
@@ -320,7 +328,10 @@ class ExecutionJournal:
         finally:
             _active.reset(token)
         record["state"] = "done" if result.success else "failed"
-        if (result.metadata or {}).get("requires_approval"):
+        if (result.metadata or {}).get("action_status") == "unknown":
+            record["state"] = "unknown"
+        if ((result.metadata or {}).get("requires_approval")
+                or (result.metadata or {}).get("action_status") == "not_executed"):
             record["state"] = "not_executed"
         if result.success and name in {"document_create", "document_bundle", "document_bundle_update", "document_read"}:
             metadata = result.metadata or {}

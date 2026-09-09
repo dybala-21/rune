@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from rune.capabilities.browser.session import browser_operation
 from rune.types import CapabilityResult
 from rune.utils.logger import get_logger
 
@@ -40,6 +41,7 @@ class BrowserDiscoverApisParams(BaseModel):
     )
 
 
+@browser_operation
 async def browser_discover_apis(params: BrowserDiscoverApisParams) -> CapabilityResult:
     """List API endpoints discovered via CDP network monitoring.
 

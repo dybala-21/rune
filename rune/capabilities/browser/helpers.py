@@ -10,6 +10,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from uuid import uuid4
 
 from rune.utils.logger import get_logger
 
@@ -91,134 +92,6 @@ async def wait_for_dom_settle(page: Any) -> None:
         log.debug("dom_settle_mutation_failed", error=str(exc))
 
 
-# 2. Overlay / modal dismissal
-
-_DISMISS_OVERLAYS_JS = """
-() => {
-    const results = [];
-
-    // --- Tier 1: CSS selector targeting ---
-    const closeSelectors = [
-        '[class*="cookie"] button[class*="accept"]',
-        '[class*="consent"] button[class*="agree"]',
-        '[class*="modal"] [class*="close"]',
-        '[role="dialog"] button[aria-label*="close"]',
-        '[role="dialog"] button[aria-label*="닫기"]',
-        '[class*="app-banner"] [class*="close"]',
-        'button[class*="dismiss"]',
-        'button.close',
-    ];
-
-    for (const sel of closeSelectors) {
-        try {
-            const btn = document.querySelector(sel);
-            if (btn && btn.offsetParent !== null) {
-                btn.click();
-                results.push('css:' + sel);
-            }
-        } catch {}
-    }
-
-    // --- Tier 2: text-based detection ---
-    const closeTexts = [
-        '닫기', '확인', '동의', '다음에', '나중에',
-        'Close', 'Dismiss', 'Accept', 'Got it', 'No thanks',
-        '×', '✕', '✖', '╳',
-    ];
-    const overlayParents = '[class*="modal"],[class*="overlay"],[role="dialog"],[role="alertdialog"]';
-
-    function isFixed(el) {
-        let cur = el;
-        while (cur && cur !== document.body) {
-            const s = getComputedStyle(cur);
-            if (s.position === 'fixed' || s.position === 'sticky') return true;
-            cur = cur.parentElement;
-        }
-        return false;
-    }
-
-    for (const btn of document.querySelectorAll('button, [role="button"]')) {
-        const text = (btn.textContent || '').trim();
-        const ariaLabel = btn.getAttribute('aria-label') || '';
-        const match = closeTexts.some(t => t === text || t === ariaLabel);
-        if (match) {
-            const inOverlay = btn.closest(overlayParents) || isFixed(btn);
-            if (inOverlay && btn.offsetParent !== null) {
-                try { btn.click(); results.push('text:' + text); } catch {}
-            }
-        }
-    }
-
-    // --- Tier 3: high z-index blocking overlays ---
-    for (const el of document.querySelectorAll('div, section, aside')) {
-        try {
-            const s = getComputedStyle(el);
-            const z = parseInt(s.zIndex);
-            if (z > 1000 && (s.position === 'fixed' || s.position === 'absolute')) {
-                const r = el.getBoundingClientRect();
-                if (r.width > window.innerWidth * 0.5 && r.height > window.innerHeight * 0.3) {
-                    const closeBtn = el.querySelector(
-                        '[class*="close"], [aria-label*="close"], [aria-label*="닫기"]'
-                    );
-                    if (closeBtn) {
-                        closeBtn.click();
-                        results.push('zindex:' + z);
-                    }
-                }
-            }
-        } catch {}
-    }
-
-    // --- Tier 4: force-hide if nothing else worked ---
-    if (results.length === 0) {
-        for (const el of document.querySelectorAll('div, section, aside')) {
-            try {
-                const s = getComputedStyle(el);
-                const z = parseInt(s.zIndex);
-                if (z > 1000 && (s.position === 'fixed' || s.position === 'absolute')) {
-                    const r = el.getBoundingClientRect();
-                    if (r.width > window.innerWidth * 0.8 && r.height > window.innerHeight * 0.5) {
-                        el.style.display = 'none';
-                        results.push('force-hidden:zindex-' + z);
-                    }
-                }
-            } catch {}
-        }
-        // Also hide any dimmed/backdrop overlays
-        for (const el of document.querySelectorAll('[class*="dim"], [class*="backdrop"], [class*="mask"]')) {
-            try {
-                const s = getComputedStyle(el);
-                if (s.position === 'fixed' || s.position === 'absolute') {
-                    el.style.display = 'none';
-                    results.push('force-hidden:backdrop');
-                }
-            } catch {}
-        }
-    }
-
-    return results;
-}
-"""
-
-
-async def dismiss_blocking_overlays(page: Any) -> list[str]:
-    """Attempt to dismiss blocking overlays, modals, and cookie banners.
-
-    Returns a list of identifiers for dismissed elements.
-    """
-    try:
-        dismissed: list[str] = await page.evaluate(_DISMISS_OVERLAYS_JS)
-        if dismissed:
-            log.debug("overlays_dismissed", count=len(dismissed), details=dismissed)
-            await page.wait_for_timeout(300)  # animation settle
-        return dismissed
-    except Exception as exc:
-        log.debug("dismiss_overlays_failed", error=str(exc))
-        return []
-
-
-# 3. Element store & multi-selector location
-
 @dataclass(slots=True)
 class ElementMeta:
     """Metadata for an interactive page element."""
@@ -242,16 +115,26 @@ class ElementStore:
         self._last_url: str = ""
         self._last_observe_time: float = 0.0
         self._ref_counter: int = 0
+        self._ref_prefix = uuid4().hex
+        self.page: Any = None
+        self.document: Any = None
+        self.handles: dict[str, Any] = {}
 
     def clear(self) -> None:
-        """Clear element cache but keep ref counter incrementing.
-
-        This ensures refs from different observe calls never collide
-        (e.g., observe 1: e0-e12, observe 2: e13-e25), preventing
-        stale-ref confusion when the LLM references an old element.
-        """
+        """Clear metadata without ever reusing a retired reference."""
         self._elements.clear()
-        # Do NOT reset _ref_counter — monotonic refs prevent collisions
+
+    async def release(self) -> None:
+        handles = [*self.handles.values(), self.document]
+        self.handles.clear()
+        self.document = self.page = None
+        self.clear()
+        for handle in handles:
+            if handle is not None:
+                try:
+                    await handle.dispose()
+                except Exception as exc:
+                    log.debug("browser_reference_release_failed", error=str(exc))
 
     def get(self, ref: str) -> ElementMeta | None:
         return self._elements.get(ref)
@@ -276,31 +159,22 @@ class ElementStore:
         self._last_observe_time = t
 
     def next_ref(self) -> str:
-        ref = f"e{self._ref_counter}"
+        ref = f"e{self._ref_prefix}_{self._ref_counter}"
         self._ref_counter += 1
         return ref
-
-    def find_similar(self, role: str, name: str) -> ElementMeta | None:
-        """Find an element with the same role and overlapping name."""
-        prefix = name[:20] if name else ""
-        if not prefix:
-            return None
-        for meta in self._elements.values():
-            if meta.role == role and prefix in meta.name:
-                return meta
-        return None
 
     @property
     def all(self) -> dict[str, ElementMeta]:
         return self._elements
 
 
-# Module-level element store (shared across calls within a session).
-_element_store = ElementStore()
-
-
 def get_element_store() -> ElementStore:
-    return _element_store
+    from rune.capabilities.browser.session import current_session
+
+    session = current_session()
+    if session.elements is None:
+        session.elements = ElementStore()
+    return session.elements
 
 
 async def extract_interactive_elements(page: Any, root_selector: str = "") -> list[ElementMeta]:
@@ -310,25 +184,62 @@ async def extract_interactive_elements(page: Any, root_selector: str = "") -> li
     Uses Playwright 1.58+ ``aria_snapshot()`` which returns a YAML-formatted
     accessibility tree.  Interactive roles are parsed from the YAML lines.
     """
-    store = _element_store
+    store = get_element_store()
+    previous = {(meta.role, meta.name): (meta, store.handles[meta.ref])
+                for meta in store.all.values() if meta.ref in store.handles}
+    previous_handles = [*store.handles.values(), store.document]
+    previous_document = store.document
+    same_page = store.page is page and store.last_url == page.url
     store.clear()
-
+    store.handles = {}
+    store.document = None
     try:
+        same_document = False
+        if same_page and previous_document is not None:
+            try:
+                same_document = await previous_document.evaluate("doc => doc === document")
+            except Exception as exc:
+                log.debug("browser_document_changed", error=str(exc))
+        store.page = page
+        store.document = await page.evaluate_handle("document")
         root = page.locator(root_selector) if root_selector else page.locator(":root")
         snapshot_text = await root.aria_snapshot()
+        elements: list[ElementMeta] = []
+        _parse_aria_snapshot(snapshot_text or "", elements, store)
+        for meta in elements:
+            locator = page.get_by_role(meta.role, name=meta.name, exact=True)
+            try:
+                if await locator.count() != 1:
+                    continue
+                handle = await locator.element_handle(timeout=1000)
+                if handle is None:
+                    continue
+                store.handles[meta.ref] = handle
+                observed = previous.get((meta.role, meta.name)) if same_document else None
+                if observed and await handle.evaluate("(node, old) => node === old", observed[1]):
+                    # A fresh observation does not invalidate an unchanged node.
+                    # Replacements with the same label still receive a new ref.
+                    store.handles.pop(meta.ref)
+                    store.all.pop(meta.ref)
+                    meta.ref = observed[0].ref
+                    store.handles[meta.ref] = handle
+                    store.put(meta)
+            except Exception as exc:
+                log.debug("browser_reference_unavailable", ref=meta.ref, error=str(exc))
+        store.last_url = page.url
+        store.last_observe_time = time.monotonic()
+        return elements
     except Exception as exc:
         log.warning("ax_snapshot_failed", error=str(exc))
+        await store.release()
         return []
-
-    if not snapshot_text:
-        return []
-
-    elements: list[ElementMeta] = []
-    _parse_aria_snapshot(snapshot_text, elements, store)
-
-    store.last_url = page.url
-    store.last_observe_time = time.monotonic()
-    return elements
+    finally:
+        for handle in previous_handles:
+            if handle is not None:
+                try:
+                    await handle.dispose()
+                except Exception as exc:
+                    log.debug("browser_reference_release_failed", error=str(exc))
 
 
 # Regex to parse aria_snapshot YAML lines at ANY indent level.
@@ -460,108 +371,34 @@ def format_interactive_elements(
     return "\n".join(lines)
 
 
+def is_element_ref(value: str) -> bool:
+    return re.fullmatch(r"e(?:[0-9a-f]{32}_)?\d+", value) is not None
+
+
 async def find_element_locator(page: Any, ref: str) -> Any | None:
-    """Resolve an element ref to a Playwright Locator using multi-selector strategy.
-
-    Tries selectors in confidence-descending order. Returns the first
-    locator that resolves to exactly one visible element, or ``None``.
-    """
-    store = _element_store
-    meta = store.get(ref)
-    if meta is None:
+    """Return the observed node, never a replacement selected by a similar name."""
+    store = get_element_store()
+    meta, handle = store.get(ref), store.handles.get(ref)
+    if meta is None or handle is None or store.page is not page or store.last_url != page.url:
         return None
-
-    sorted_selectors = sorted(meta.selectors, key=lambda s: s["confidence"], reverse=True)
-
-    for sel in sorted_selectors:
-        try:
-            locator = _selector_to_locator(page, sel)
-            if locator is None:
-                continue
-            count = await locator.count()
-            if count == 1:
-                return locator
-            if count > 1:
-                first = locator.first
-                try:
-                    if await first.is_visible():
-                        return first
-                except Exception:
-                    pass
-        except Exception:
-            continue
-
+    try:
+        if not await store.document.evaluate("doc => doc === document"):
+            return None
+        if not await handle.evaluate("el => el.isConnected && el.ownerDocument === document"):
+            return None
+        locator = page.get_by_role(meta.role, name=meta.name, exact=True)
+        if await locator.count() != 1:
+            return None
+        if await locator.evaluate("(el, observed) => el === observed", handle, timeout=1000):
+            return handle
+    except Exception as exc:
+        log.debug("browser_reference_stale", ref=ref, error=str(exc))
     return None
 
-
-def _selector_to_locator(page: Any, sel: dict[str, Any]) -> Any | None:
-    """Convert a selector dict to a Playwright Locator."""
-    sel_type = sel["type"]
-    value = sel["value"]
-
-    if sel_type == "role":
-        return page.get_by_role(sel["role"], name=value)
-    if sel_type == "text":
-        return page.get_by_text(value, exact=False)
-    if sel_type == "label":
-        return page.get_by_label(value)
-    if sel_type == "placeholder":
-        return page.get_by_placeholder(value)
-    if sel_type == "testid":
-        return page.get_by_test_id(value)
-    if sel_type == "css":
-        return page.locator(value)
-    return None
-
-
-# 4. Self-healing element find
 
 async def self_healing_find(page: Any, ref: str) -> Any | None:
-    """Find an element with automatic recovery on stale references.
-
-    Three-phase strategy (matching TS selfHealingFind):
-    1. Try current element store.
-    2. If URL changed or >5s since last observe, re-extract and retry.
-    3. Similarity match - find element with same role and partial name.
-    """
-    store = _element_store
-
-    # Phase 1: direct lookup in current store.
-    locator = await find_element_locator(page, ref)
-    if locator is not None:
-        return locator
-
-    original_meta = store.get(ref)
-
-    # Phase 2: re-extract unconditionally — a phase-1 miss is itself evidence
-    # the snapshot diverged (SPA re-renders keep the URL and can beat any
-    # freshness window; state divergence is the documented failure class,
-    # arXiv:2511.19477). One extract here costs ~100ms and no LLM round.
-    current_url = page.url
-    from rune.capabilities.browser.network import hybrid_api_enabled
-    elapsed = time.monotonic() - store.last_observe_time
-    if hybrid_api_enabled() or current_url != store.last_url or elapsed > 5.0:
-        log.debug(
-            "self_heal_re_extract",
-            reason="url_change" if current_url != store.last_url else "phase1_miss",
-        )
-        await wait_for_dom_settle(page)
-        await extract_interactive_elements(page)
-        locator = await find_element_locator(page, ref)
-        if locator is not None:
-            return locator
-
-    # Phase 3: similarity match.
-    if original_meta and original_meta.name:
-        similar = store.find_similar(original_meta.role, original_meta.name)
-        if similar and similar.ref != ref:
-            log.debug("self_heal_similar_match", original=ref, matched=similar.ref)
-            locator = await find_element_locator(page, similar.ref)
-            if locator is not None:
-                return locator
-
-    log.warning("self_healing_find_failed", ref=ref)
-    return None
+    # Kept for callers using the old helper name. Recovery requires a new observation.
+    return await find_element_locator(page, ref)
 
 
 # 5. Scroll helpers
