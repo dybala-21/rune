@@ -242,22 +242,19 @@ class CompletionTrace:
     final_step: int = 0
     total_tokens_used: int = 0
     evidence_score: float = 0.0
-    # Evidence Gate decision history (None when the gate is disabled). Surfaced
-    # here because structlog events are not captured in benchmark containers.
+    # Gate decisions are included in the trace even when logs are unavailable.
     evidence_gate: dict[str, Any] | None = None
-    # Verdict of the last mechanical check the run saw ("pass"/"fail"/"").
-    # reason says how the run ended; this says whether anything executable
-    # ever vouched for the work. Declared, not injected: the class is
-    # slots-based, which the integration suite noticed before anyone did.
+    # Last mechanical check verdict: "pass", "fail", or "" when absent.
     mech_check: str = ""
-    # Some step hit the adapter's tool-round cap and was cut off without a
-    # final LLM turn — the answer may silently omit work that never ran.
+    # A step reached the tool-round limit before its final LLM turn.
     tool_budget_exhausted: bool = False
-    # The project's own tests ran green after the last code change (the
-    # default require-test-pass guard). Weaker than the Evidence Gate: the
-    # suite may have passed before the change too, so this is "tests passing",
-    # never "verified". None when the guard did not apply to this task.
+    # Test freshness after code changes, not task coverage. None if no code changed.
     tests_passed_after_edit: bool | None = None
+    # Tool-event verification state, when available.
+    verification: dict[str, Any] | None = None
+    artifact_receipts: list[dict[str, Any]] = field(default_factory=list)
+    table_acceptance: dict[str, Any] | None = None
+    completion_check: dict[str, str] | None = None
     # Commands ran outside the declared workspace. Not a failure — temp dirs
     # and worktrees are routine — but the workspace snapshot cannot roll back
     # anything outside it, so the run should say where it worked.

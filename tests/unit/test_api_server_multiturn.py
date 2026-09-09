@@ -8,6 +8,7 @@ message_history to the agent loop, so a turn-2 follow-up had no context.
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 import time
 from datetime import datetime, timedelta
@@ -186,6 +187,252 @@ def _wait_for(predicate, timeout=5.0):
     return False
 
 
+def test_reasoning_rpc_validates_astra_options_and_updates_config(client):
+    def rpc(method, **params):
+        if method == 'reasoning.set':
+            params = {'provider': 'openai', 'model': 'gpt-6-astra', **params}
+        return client.post('/api/v1/rpc', json={'method': method, 'params': params}).json()
+
+    assert rpc('model.set', provider='openai', model='gpt-6-astra')['success']
+    for effort in ('xhigh', 'max'):
+        assert rpc('reasoning.set', effort=effort)['data']['reasoningEffort'] == effort
+        config = rpc('config.get')['data']
+        assert config['reasoningEffort'] == effort
+        assert config['reasoningOptions'] == ['low', 'medium', 'high', 'xhigh', 'max']
+    assert rpc('reasoning.set', effort='none')['success'] is False
+    assert rpc('config.get')['data']['reasoningEffort'] == 'max'
+    assert rpc('reasoning.set', effort='')['data']['reasoningEffort'] is None
+
+
+@pytest.mark.parametrize('path, payload', [
+    ('/api/message', {'text': 'hello', 'sessionId': 'reuse-classification'}),
+    ('/api/v1/agent/execute', {'goal': 'hello', 'stream': False}),
+    ('/api/v1/agent/execute', {'goal': 'hello', 'stream': True}),
+])
+def test_web_postprocessing_reuses_the_run_classification(client, monkeypatch, path, payload):
+    from rune.agent import agent_context
+
+    saved = []
+
+    async def capture(inp):
+        saved.append(inp)
+
+    monkeypatch.setattr(agent_context, 'post_process_agent_result', capture)
+    assert client.post(path, json=payload).status_code == 200
+    assert _wait_for(lambda: len(saved) == 1)
+    assert saved[0].classification_hint == 'chat'
+
+
+@pytest.fixture
+def question_flow(client, monkeypatch):
+    import rune.agent.loop as loop_module
+    from rune.api.server import SseClientManager
+    from rune.capabilities.ask_user import ask_user, set_ask_user_callback
+    from rune.utils.fast_serde import json_encode
+
+    frames, answers = [], []
+    broadcast = SseClientManager.broadcast
+
+    def capture(manager, event, data):
+        json_encode(data)
+        frames.append((event, data))
+        return broadcast(manager, event, data)
+
+    class QuestionLoop(FakeLoop):
+        def set_ask_user_callback(self, cb):
+            self.callback = cb
+
+        async def run(self, goal, **kwargs):
+            from rune.capabilities.ask_user import AskUserParams
+
+            set_ask_user_callback(self.callback)
+            result = await ask_user(AskUserParams(question=goal, reason="test",
+                                   options=[{"label": "개념 설명"}, {"label": "시스템 확인"}]))
+            answers.append((goal, result))
+            self._last_answer_text = result.output or result.error
+            return SimpleNamespace(reason="completed", final_step=1, evidence_gate=None)
+
+    monkeypatch.setattr(loop_module, "NativeAgentLoop", QuestionLoop)
+    monkeypatch.setattr(SseClientManager, "broadcast", capture)
+    return client, frames, answers
+
+
+@pytest.mark.parametrize("selected_key", ["selectedIndex", "selected_index"])
+def test_web_question_selection_contract(question_flow, selected_key):
+    client, frames, answers = question_flow
+    client.post("/api/message", json={"text": "TCP 소켓 질문", "sessionId": "question-test"})
+    assert _wait_for(lambda: any(event == "question" for event, _ in frames))
+    payload = next(data for event, data in frames if event == "question")
+    assert payload["question"] == "TCP 소켓 질문"
+    assert payload["options"][1]["label"] == "시스템 확인"
+    assert client.post("/api/question", json={"id": payload["id"], "answer": "wrong", selected_key: 9}).status_code == 422
+    response = client.post("/api/question", json={"id": payload["id"], "answer": "시스템 확인", selected_key: 1})
+    assert response.status_code == 200
+    assert _wait_for(lambda: len(answers) == 1)
+    result = answers[0][1]
+    assert result.success and result.metadata["selectedIndex"] == 1
+    assert result.metadata["freeText"] is False
+    assert '시스템 확인' in result.output
+    assert _wait_for(lambda: any(event == "question_closed" for event, _ in frames))
+    assert client.post("/api/question", json={"id": payload["id"], "answer": "duplicate"}).status_code == 410
+
+
+def test_web_questions_stay_separate_and_support_free_text(question_flow):
+    client, frames, answers = question_flow
+    for name in ["first", "second"]:
+        client.post("/api/message", json={"text": name, "sessionId": name})
+    assert _wait_for(lambda: sum(event == "question" for event, _ in frames) == 2)
+    questions = {data["question"]: data for event, data in frames if event == "question"}
+    for name in ["second", "first"]:
+        assert client.post("/api/question", json={"id": questions[name]["id"], "answer": name + " 답변"}).status_code == 200
+    assert _wait_for(lambda: len(answers) == 2)
+    for name, result in answers:
+        assert result.output == f'User responded: "{name} 답변"'
+        assert result.metadata["freeText"] is True
+
+
+def test_aborting_a_question_removes_its_pending_response(question_flow):
+    client, frames, answers = question_flow
+    client.post("/api/message", json={"text": "cancel question", "sessionId": "cancel-question"})
+    assert _wait_for(lambda: any(event == "question" for event, _ in frames))
+    question = next(data for event, data in frames if event == "question")
+    assert client.post("/api/abort", json={"runId": question["runId"]}).status_code == 200
+    assert _wait_for(lambda: any(event == "question_closed" for event, _ in frames))
+    assert client.post("/api/question", json={"id": question["id"], "answer": "late"}).status_code == 410
+    assert not answers
+
+
+def test_snapshot_restores_question_and_lost_completion_without_duplicate_answers(question_flow):
+    client, frames, answers = question_flow
+    client.post("/api/message", json={"text": "restore question", "sessionId": "restore"})
+    assert _wait_for(lambda: any(event == "question" for event, _ in frames))
+    run = client.get("/api/runs/snapshot", params={"sessionId": "restore"}).json()["run"]
+    assert run["status"] == "waiting_input"
+    assert run["question"]["question"] == "restore question"
+    assert run["question"]["expiresAt"] > time.time() * 1000
+    assert client.get("/api/runs/snapshot", params={"sessionId": "other"}).json()["run"] is None
+    payload = {"id": run["question"]["id"], "answer": "시스템 확인", "selectedIndex": 1,
+               "responseId": "response-1"}
+    assert client.post("/api/question", json=payload).status_code == 200
+    assert _wait_for(lambda: any(event == "agent_complete" for event, _ in frames))
+    assert client.post("/api/question", json=payload).status_code == 200
+    assert client.post("/api/question", json={**payload, "answer": "changed"}).status_code == 409
+    complete = client.get("/api/runs/snapshot", params={"sessionId": "restore"}).json()["run"]
+    assert complete["seq"] > run["seq"]
+    assert complete["status"] == "completed" and complete["question"] is None
+    assert "시스템 확인" in complete["answer"]
+    assert complete["trust"]["verified"] is False
+    assert [turn["role"] for turn in complete["history"]] == ["user", "assistant"]
+    assert len(answers) == 1
+
+
+def test_cancel_during_context_preparation_is_visible_in_the_snapshot(client, monkeypatch):
+    import threading
+
+    entered = threading.Event()
+
+    async def prepare(*args, **kwargs):
+        entered.set()
+        await asyncio.Future()
+
+    monkeypatch.setattr("rune.agent.agent_context.prepare_agent_context", prepare)
+    response = client.post("/api/message", json={"text": "prepare", "sessionId": "early-stop"})
+    assert entered.wait(timeout=5)
+    assert client.post("/api/abort", json={"runId": response.json()["runId"]}).status_code == 200
+    run = client.get("/api/runs/snapshot", params={"sessionId": "early-stop"}).json()["run"]
+    assert run["status"] == "cancelled"
+    assert run["goal"] == "prepare"
+
+
+@pytest.mark.parametrize("decision,granted", [("approve_once", True), ("deny", False)])
+@pytest.mark.parametrize("requests", [1, 2])
+def test_snapshot_restores_approval_with_its_original_deadline(client, monkeypatch, decision, granted, requests):
+    import rune.agent.loop as loop_module
+
+    results = []
+
+    class ApprovalLoop(FakeLoop):
+        def set_approval_callback(self, cb):
+            self.approve = cb
+
+        async def run(self, goal, **kwargs):
+            results.extend(await asyncio.gather(*(
+                self.approve(f"write report-{index}.txt", "Requested report")
+                for index in range(requests)
+            )))
+            self._last_answer_text = "Decision received"
+            return SimpleNamespace(reason="completed", final_step=1, evidence_gate=None)
+
+    monkeypatch.setattr(loop_module, "NativeAgentLoop", ApprovalLoop)
+    client.post("/api/message", json={"text": "make report", "sessionId": "approval-restore"})
+
+    def snapshot():
+        return client.get("/api/runs/snapshot", params={"sessionId": "approval-restore"}).json()["run"]
+
+    seen = set()
+    for index in range(requests):
+        assert _wait_for(lambda: (snapshot() or {}).get("approval") is not None
+                         and snapshot()["approval"]["id"] not in seen)
+        approval = snapshot()["approval"]
+        seen.add(approval["id"])
+        assert snapshot()["approval"]["expiresAt"] == approval["expiresAt"]
+        payload = {"id": approval["id"], "decision": decision,
+                   "responseId": f"approval-response-{index}"}
+        assert client.post("/api/approval", json={**payload, "decision": "anything"}).status_code == 422
+        assert client.post("/api/approval", json=payload).status_code == 200
+        assert client.post("/api/approval", json=payload).status_code == 200
+    assert _wait_for(lambda: snapshot()["status"] == "completed")
+    assert client.post("/api/approval", json=payload).status_code == 200
+    assert results == [granted] * requests
+    assert snapshot()["approval"] is None
+
+
+def test_ndjson_question_is_serializable_and_returns_a_typed_empty_response(question_flow):
+    client, _, answers = question_flow
+    response = client.post("/api/v1/agent/execute", json={"goal": "headless question", "stream": True})
+    assert response.status_code == 200
+    frames = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    payload = next(frame["data"] for frame in frames if frame["event"] == "question")
+    assert payload["question"] == "headless question"
+    assert payload["autonomous"] is True
+    assert answers[0][1].success
+    assert "skipped" in answers[0][1].output
+
+
+def test_websocket_can_answer_a_web_question(question_flow):
+    client, frames, answers = question_flow
+    with client.websocket_connect("/ws") as ws:
+        assert ws.receive_json()["event"] == "connected"
+        client.post("/api/message", json={"text": "websocket question", "sessionId": "websocket-question"})
+        assert _wait_for(lambda: any(event == "question" for event, _ in frames))
+        payload = next(data for event, data in frames if event == "question")
+        ws.send_json({"type": "question", "id": payload["id"], "answer": "개념 설명", "selectedIndex": 0})
+        assert _wait_for(lambda: len(answers) == 1)
+        assert answers[0][1].metadata["selectedIndex"] == 0
+        assert answers[0][1].success
+
+
+def test_expired_question_is_closed_without_inventing_an_answer(question_flow, monkeypatch):
+    client, frames, answers = question_flow
+    wait_for = asyncio.wait_for
+
+    async def expire_question(awaitable, timeout):
+        if timeout == 300.0:
+            awaitable.cancel()
+            raise TimeoutError
+        return await wait_for(awaitable, timeout)
+
+    monkeypatch.setattr(asyncio, "wait_for", expire_question)
+    client.post("/api/message", json={"text": "expired question", "sessionId": "expired-question"})
+    assert _wait_for(lambda: len(answers) == 1)
+    result = answers[0][1]
+    assert not result.success
+    assert "expired" in result.error
+    payload = next(data for event, data in frames if event == "question")
+    assert any(event == "question_closed" for event, _ in frames)
+    assert client.post("/api/question", json={"id": payload["id"], "answer": "late"}).status_code == 410
+
+
 def test_api_message_threads_history_across_turns(client, tmp_path):
     r1 = client.post(
         "/api/message",
@@ -262,6 +509,34 @@ def test_execute_with_session_threads_history(client, tmp_path):
     )
     assert r2.status_code == 200
     assert "heron" in str(FakeLoop.captured[1]["history"])
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_completed_web_turn_transports_separate_check_status(client, monkeypatch, stream):
+    from rune.api.server import WsClientManager
+
+    events = []
+
+    async def capture(self, event, data):
+        events.append({"event": event, "data": data})
+
+    monkeypatch.setattr(WsClientManager, "broadcast", capture)
+    if stream:
+        response = client.post("/api/v1/agent/execute", json={"goal": "read a page", "stream": True})
+        assert response.status_code == 200
+        events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    else:
+        response = client.post("/api/message", json={"text": "read a page"})
+        assert response.status_code == 200
+        assert _wait_for(lambda: any(e["event"] == "agent_complete" for e in events))
+    completion = next(e["data"] for e in events if e["event"] == "agent_complete")
+    assert completion["success"] is True
+    trust = completion["trust"]
+    assert trust["completionStatus"] == "completed"
+    assert trust["verificationStatus"] == "not_checked"
+    assert trust["verified"] is False
+    assert trust["canEscalate"] is False
+    assert trust["honestNote"] == ""
 
 
 def test_workspace_pin_flows_into_agent_run(client, tmp_path):
@@ -518,7 +793,7 @@ def test_build_trust_payload_budget_exhausted():
         reason="completed", evidence_gate=None, tool_budget_exhausted=True,
     )
     p = build_trust_payload(trace)
-    assert p["verified"] is True
+    assert p["verified"] is False  # Completion without check evidence is not verification.
     assert p["budgetExhausted"] is True
 
     trace2 = SimpleNamespace(reason="completed", evidence_gate=None)
@@ -603,3 +878,38 @@ def test_suggest_local_escalation_single_jump():
     finally:
         httpx.AsyncClient = orig
     assert got == "qwen2.5-coder:32b"  # single largest local, cloud excluded
+
+
+def test_artifact_download_uses_conversation_workspace(client, tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    workspace = tmp_path / "selected"
+    workspace.mkdir()
+    payload = b"%PDF-1.7\nfixture\n%%EOF"
+    (workspace / "검토 보고서.pdf").write_bytes(payload)
+    lookup = AsyncMock(return_value=str(workspace))
+    monkeypatch.setattr("rune.api.conversation_wiring.get_workspace", lookup)
+    response = client.get("/api/v1/files/download", params={"sessionId": "saved-office", "path": "검토 보고서.pdf"})
+    assert response.status_code == 200
+    assert response.content == payload
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.headers["content-disposition"].startswith("attachment;")
+    lookup.assert_awaited_once_with("saved-office")
+
+
+def test_artifact_download_rejects_escape_and_unknown_session(client, tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    workspace = tmp_path / "selected"
+    workspace.mkdir()
+    outside = tmp_path / "outside.pdf"
+    outside.write_bytes(b"private")
+    (workspace / "escape.pdf").symlink_to(outside)
+    monkeypatch.setattr("rune.api.conversation_wiring.get_workspace", AsyncMock(return_value=str(workspace)))
+    for path in ("../outside.pdf", str(outside), "escape.pdf"):
+        response = client.get("/api/v1/files/download", params={"sessionId": "office", "path": path})
+        assert response.status_code == 403
+        assert b"private" not in response.content
+    monkeypatch.setattr("rune.api.conversation_wiring.get_workspace", AsyncMock(return_value=None))
+    response = client.get("/api/v1/files/download", params={"sessionId": "missing", "path": "outside.pdf"})
+    assert response.status_code == 404

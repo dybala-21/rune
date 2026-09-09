@@ -1,4 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { checkEvidence, describeTrust, trustColors } from '../utils/trust';
 import type {
   ActivitySummary,
   OrchestrationState,
@@ -10,7 +11,6 @@ import {
   normalizeToolName,
   isBrowserToolName,
   computeRunVerdict,
-  passedChecks,
   argString,
   truncate,
   basename,
@@ -199,18 +199,13 @@ function SectionTitle({ label, count }: { label: string; count?: number }) {
       color: 'var(--text-muted)',
       margin: '16px 0 6px',
     }}>
-      <span>{label}</span>
+      <span>{label}</span>{' '}
       {count !== undefined && count > 0 && (
-        <span style={{ fontFamily: 'var(--font-mono)' }}>{count}</span>
+        <span style={{ fontFamily: 'var(--font-mono)' }}>({count})</span>
       )}
     </div>
   );
 }
-
-const CAP_NOTE = 'stopped at tool budget';
-const CAP_DETAIL =
-  'The tool-round budget ran out — some planned steps never executed, so the answer may be incomplete.';
-
 /** One band shape for every terminal state, so the layout can't drift. */
 interface BandSpec {
   color: string;
@@ -239,15 +234,7 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
   trust?: TrustInfo | null;
 }) {
   const [showEvidence, setShowEvidence] = useState(false);
-  const evidence = trust?.evidenceGate?.lastEvidence?.trim() || null;
-  const capped = Boolean(trust?.budgetExhausted);
-  // A line, not a verdict — running in a temp dir is ordinary.
-  const outsideWorkspace = trust?.workspaceWarning?.trim() || null;
-  // A caveat, not a verdict — see TrustInfo.unsourcedNumbers.
-  const unsourced = trust?.unsourcedNumbers?.length
-    ? `unsourced figures: ${trust.unsourcedNumbers.slice(0, 5).join(', ')} — not found in anything read`
-    : null;
-  const passes = passedChecks(trust);
+  const evidence = trust ? checkEvidence(trust) : '';
 
   let spec: BandSpec | null = null;
   if (awaiting) {
@@ -269,62 +256,30 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
     };
   } else if (verdictOk === null) {
     return null;
-  } else if (verdictOk && trust?.evidenceGate?.hasCheck) {
+  } else if (trust) {
+    const view = describeTrust(trust);
+    const colors = trustColors(view.tone);
     spec = {
-      color: 'var(--success)', bg: 'var(--success-subtle)',
-      glyph: <span style={{ color: 'var(--success)' }}>✓</span>,
-      title: 'Verified',
-      note: passes > 0 ? `${passes} checks passed` : undefined,
-      showEvidence: true,
-    };
-  } else if (verdictOk && trust?.testsPassedAfterEdit === true && !capped) {
-    // A rung below Verified: the project's own tests went green after the
-    // edit, but nothing checked the task's success criteria — and a suite
-    // that passed before the change would look identical.
-    spec = {
-      color: 'var(--success)', bg: 'var(--success-subtle)',
-      glyph: <span style={{ color: 'var(--success)' }}>✓</span>,
-      title: 'Tests passing',
-      note: 'project tests, not a task check',
-    };
-  } else if (verdictOk) {
-    // Completion is not verification — a run that finished without any
-    // Evidence Gate check gets a neutral band, amber when it was cut off
-    // at the tool budget (the answer may omit steps that never ran), and
-    // amber too when code was edited and its tests never went green.
-    const testsRed = trust?.testsPassedAfterEdit === false;
-    const warn = capped || testsRed;
-    spec = {
-      color: warn ? 'var(--warning)' : 'var(--border)',
-      bg: warn ? 'var(--warning-subtle, var(--bg-secondary))' : 'var(--bg-secondary)',
-      glyph: <span style={{ color: warn ? 'var(--warning)' : 'var(--text-muted)' }}>✓</span>,
-      title: 'Completed',
-      note: capped
-        ? CAP_NOTE
-        : testsRed
-          ? 'tests not green after the last edit'
-          : 'no verification checks ran',
+      color: colors.accent, bg: colors.background,
+      glyph: <span>{view.glyph}</span>,
+      title: view.title,
+      note: view.note,
       details: [
-        ...(capped ? [CAP_DETAIL] : []),
-        ...(unsourced ? [unsourced] : []),
-        ...(outsideWorkspace ? [outsideWorkspace] : []),
+        ...(trust.escalationHint ? [trust.escalationHint] : []),
+        ...(trust.unsourcedNumbers?.length
+          ? [`Figures not found in retrieved sources: ${trust.unsourcedNumbers.slice(0, 5).join(', ')}. These may be calculated or rounded.`]
+          : []),
+        ...(trust.workspaceWarning?.trim() ? [trust.workspaceWarning.trim()] : []),
       ],
+      showEvidence: Boolean(evidence),
     };
   } else {
-    const honest = Boolean(trust && !trust.verified);
     spec = {
-      color: honest ? 'var(--warning)' : 'var(--danger)',
-      bg: honest ? 'var(--warning-subtle, var(--danger-subtle))' : 'var(--danger-subtle)',
-      glyph: <span style={{ color: honest ? 'var(--warning)' : 'var(--danger)' }}>✗</span>,
-      title: honest ? 'Not verified' : 'Failed',
-      details: [
-        ...(trust?.honestNote ? [trust.honestNote] : []),
-        ...(capped ? [CAP_DETAIL] : []),
-        ...(unsourced ? [unsourced] : []),
-        ...(outsideWorkspace ? [outsideWorkspace] : []),
-        ...(trust?.escalationHint ? [trust.escalationHint] : []),
-      ],
-      showEvidence: true,
+      color: verdictOk ? 'var(--border)' : 'var(--danger)',
+      bg: verdictOk ? 'var(--bg-secondary)' : 'var(--danger-subtle)',
+      glyph: <span>{verdictOk ? '✓' : '✗'}</span>,
+      title: verdictOk ? 'Completed' : 'Failed',
+      note: verdictOk ? 'No verification status was reported.' : undefined,
     };
   }
 
@@ -332,14 +287,16 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
     <div style={{
       display: 'flex',
       flexDirection: 'column',
-      gap: 3,
+      gap: 6,
+      minWidth: 0,
+      overflowWrap: 'anywhere',
       padding: '9px 12px',
       borderRadius: 8,
       border: `1px solid ${spec.color}`,
       background: spec.bg,
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
-        {spec.glyph}
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 9, minWidth: 0 }}>
+        <span aria-hidden="true" style={{ flexShrink: 0 }}>{spec.glyph}</span>
         {spec.live && (
           <span style={{
             fontSize: 9, fontWeight: 700, letterSpacing: '0.1em',
@@ -351,19 +308,24 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
           </span>
         )}
         <span style={{
-          color: 'var(--text-primary)', flex: 1, wordBreak: 'break-word',
+          color: 'var(--text-primary)', flex: 1, minWidth: 0,
           fontSize: 12.5,
           fontWeight: spec.titleMono ? undefined : 600,
           fontFamily: spec.titleMono ? 'var(--font-mono)' : undefined,
         }}>
           {spec.title}
         </span>
-        {spec.note && (
+        {spec.live && spec.note && (
           <span style={{ color: 'var(--text-muted)', fontSize: 11, flexShrink: 0 }}>
             {spec.note}
           </span>
         )}
       </div>
+      {!spec.live && spec.note && (
+        <div style={{ color: 'var(--text-secondary)', fontSize: 12, lineHeight: 1.6 }}>
+          {spec.note}
+        </div>
+      )}
       {spec.details?.map(d => (
         <div key={d} style={{ color: 'var(--text-primary)', fontSize: 11.5, paddingLeft: 21 }}>
           {d}
@@ -391,7 +353,7 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
               fontSize: 10.5, lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
               maxHeight: 140, overflow: 'auto',
             }}>
-              {trust?.evidenceGate?.lastVerdict ? `verdict: ${trust.evidenceGate.lastVerdict}\n` : ''}{evidence}
+              {evidence}
             </pre>
           )}
         </>
@@ -412,7 +374,7 @@ export const ProgressPane = memo(function ProgressPane({
     if (el && isRunning) el.scrollTop = el.scrollHeight;
   }, [toolCalls.length, isRunning]);
 
-  if (toolCalls.length === 0 && !orchestration) {
+  if (toolCalls.length === 0 && !orchestration && !trust && !activitySummary && !isRunning && !awaiting) {
     return (
       <div style={{ flex: 1, padding: 14, color: 'var(--text-muted)', fontSize: 12.5 }}>
         Waiting for the agent to start working…
@@ -432,6 +394,8 @@ export const ProgressPane = memo(function ProgressPane({
   return (
     <div ref={listRef} style={{
       flex: 1,
+      minWidth: 0,
+      minHeight: 0,
       overflow: 'auto',
       padding: '12px 14px',
       fontSize: 12,

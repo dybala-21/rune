@@ -201,9 +201,12 @@ def test_the_trust_payload_carries_them_to_the_app():
     payload = build_trust_payload(trace)
 
     assert payload["unsourcedNumbers"] == ["22", "15"]
-    assert payload["verified"] is True, (
-        "an unsourced figure is a caveat on the answer, not a failed run"
-    )
+    assert payload["completionStatus"] == "completed"
+    assert payload["verificationStatus"] == "not_checked"
+    assert payload["verified"] is False
+
+    trace.mech_check = "pass"
+    assert build_trust_payload(trace)["verified"] is True
 
 
 def test_a_clean_answer_carries_nothing():
@@ -211,6 +214,24 @@ def test_a_clean_answer_carries_nothing():
     from rune.types import CompletionTrace
 
     assert build_trust_payload(CompletionTrace(reason="completed"))["unsourcedNumbers"] == []
+
+
+@pytest.mark.parametrize("nudges", [0, 2])
+def test_corrected_answer_clears_old_figures_even_after_nudge_budget(monkeypatch, nudges):
+    from rune.agent.loop import NativeAgentLoop
+
+    monkeypatch.setenv("RUNE_OUTPUT_INTEGRITY", "1")
+    loop = object.__new__(NativeAgentLoop)
+    loop._step = 1
+    loop._output_integrity_fired = nudges
+    loop._unsourced_numbers = []
+    loop._gather_citation_text = lambda: "Growth is 22%."
+    messages = _fetched("Growth is 8%.")
+    assert loop._output_integrity_gate(messages, 0)[0] is True
+    assert loop._unsourced_numbers == ["22"]
+    loop._gather_citation_text = lambda: "Growth is 8%."
+    assert loop._output_integrity_gate(messages, 0)[0] is True
+    assert loop._unsourced_numbers == []
 
 
 def test_a_number_dump_cannot_blow_up_the_check():

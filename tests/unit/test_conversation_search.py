@@ -13,6 +13,7 @@ from rune.capabilities.memory_capability import (
     conversation_search,
 )
 from rune.conversation.store import ConversationStore
+from rune.llm.embedding_models import EmbeddingVector
 
 
 @pytest.fixture
@@ -99,7 +100,7 @@ async def test_search_semantic_ranks_paraphrase_and_caches(monkeypatch, store):
             for t in texts:
                 tl = t.lower()
                 hit = any(k in tl for k in ("postgres", "mysql", "database", "json", "relational"))
-                out.append([1.0, 0.0] if hit else [0.0, 1.0])
+                out.append(EmbeddingVector([1.0, 0.0] if hit else [0.0, 1.0], 'a' * 64))
             return out
 
     import rune.memory.manager as mgr_mod
@@ -148,8 +149,10 @@ async def test_embed_on_write_populates_cache(monkeypatch, tmp_dir):
     import rune.llm.local_embedding as le
 
     class _Prov:
+        fingerprint = 'a' * 64
+
         async def embed(self, texts):
-            return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
+            return [EmbeddingVector([0.1, 0.2, 0.3, 0.4], self.fingerprint) for _ in texts]
 
     monkeypatch.setattr(le, "get_embedding_provider", lambda: _Prov())
     from rune.conversation.manager import ConversationManager

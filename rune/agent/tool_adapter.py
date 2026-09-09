@@ -269,6 +269,7 @@ class ToolAdapterOptions:
     budget_percent: float = 0.0  # current budget consumption ratio (0.0-1.0)
     # Callable, not a bool: the in-run upshift turns the lane off mid-run.
     fast_lane_active: Callable[[], bool] | None = None
+    table_acceptance: Any = None
 
 
 # web_fetch maxLength while the fast lane is active: a simple lookup
@@ -304,6 +305,7 @@ def _cap_fast_lane_fetch(params: dict[str, Any]) -> dict[str, Any]:
 
 _FILE_MUTATING_CAPABILITIES = frozenset({
     "file_write", "file_edit", "file_delete",
+    "document_create", "document_bundle", "document_bundle_update",
 })
 
 _BASH_CAPABILITY = "bash_execute"
@@ -524,8 +526,11 @@ def _build_typed_tool(
         # paths against the process cwd, which is the daemon's start dir when
         # serving the app — a bare "app.py" must mean the pinned project.
         if opts.workspace_root:
-            if cap_name.startswith("file_"):
-                for _pk in ("file_path", "path", "target"):
+            if (cap_name.startswith(("file_", "document_", "code_", "table_"))
+                    or cap_name == "project_map"):
+                if cap_name == "project_map" and not effective_params.get("path"):
+                    effective_params["path"] = "."
+                for _pk in ("file_path", "path", "target", "source_path", "output_path", "directory"):
                     _pv = effective_params.get(_pk)
                     if (
                         isinstance(_pv, str) and _pv
@@ -534,6 +539,12 @@ def _build_typed_tool(
                         effective_params[_pk] = os.path.join(
                             opts.workspace_root, _pv,
                         )
+                if cap_name == "document_bundle_update" and isinstance(effective_params.get("changes"), dict):
+                    changes = dict(effective_params["changes"])
+                    source = changes.get("source_path")
+                    if isinstance(source, str) and source and not os.path.isabs(os.path.expanduser(source)):
+                        changes["source_path"] = os.path.join(opts.workspace_root, source)
+                    effective_params["changes"] = changes
             elif cap_name == _BASH_CAPABILITY and not effective_params.get("cwd"):
                 effective_params["cwd"] = opts.workspace_root
         if (
@@ -588,6 +599,17 @@ def _build_typed_tool(
         if cap_name == _BASH_CAPABILITY:
             effective_params = _cap_benchmark_bash_timeout(effective_params)
 
+        from rune.agent.execution_journal import active_journal
+        journal = active_journal()
+        if journal is not None and journal.previous is not None and reg.is_allowed(cap_name):
+            normalized = (cap_def.parameters_model.model_validate(effective_params).model_dump(mode="json", by_alias=True)
+                          if cap_def.parameters_model is not None else effective_params)
+            recorded = await journal.replay_completed(cap_name, normalized)
+            if recorded is not None:
+                if opts.on_tool_end is not None:
+                    await opts.on_tool_end(cap_name, recorded)
+                return "[RECORDED RESULT — not executed again; not a fresh verification]\n" + (recorded.output or recorded.error or "")
+
         # 1. Cognitive cache check
         if cache is not None:
             cache_key = cache.generate_key(cap_name, effective_params)
@@ -598,6 +620,7 @@ def _build_typed_tool(
                     return hit.output
 
         # 2. Guardian validation
+        approval_cleared = False
         if opts.enable_guardian:
             guard_result = _validate_with_guardian(cap_name, effective_params)
             if guard_result.blocked:
@@ -605,7 +628,6 @@ def _build_typed_tool(
                 if opts.on_tool_end is not None:
                     await opts.on_tool_end(cap_name, err)
                 return f"[BLOCKED] {guard_result.reason}"
-            approval_cleared = False
             if guard_result.requires_approval and approval_mode() == "bypass":
                 log.info("approval_bypassed", capability=cap_name, gate="guardian")
                 guard_result = _GuardianResult()
@@ -729,11 +751,16 @@ def _build_typed_tool(
         # 3. Execute
         start_time = time.monotonic()
         try:
-            if approval_cleared:
-                with approval_granted():
+            from rune.agent.table_acceptance import acceptance_scope
+
+            with acceptance_scope(opts.table_acceptance):
+                if approval_cleared:
+                    with approval_granted():
+                        result = await reg.execute(cap_name, effective_params)
+                else:
                     result = await reg.execute(cap_name, effective_params)
-            else:
-                result = await reg.execute(cap_name, effective_params)
+            if opts.table_acceptance is not None:
+                opts.table_acceptance.observe(cap_name, effective_params, result)
         except Exception as exc:
             result = CapabilityResult(success=False, error=f"Execution error: {exc}")
         # A capability can refuse and ask to be asked. The execution policy's
@@ -765,8 +792,10 @@ def _build_typed_tool(
             if granted:
                 _consecutive_denials[0] = 0
                 try:
-                    with approval_granted():
+                    with acceptance_scope(opts.table_acceptance), approval_granted():
                         result = await reg.execute(cap_name, effective_params)
+                    if opts.table_acceptance is not None:
+                        opts.table_acceptance.observe(cap_name, effective_params, result)
                 except Exception as exc:
                     result = CapabilityResult(
                         success=False, error=f"Execution error: {exc}"
@@ -776,6 +805,10 @@ def _build_typed_tool(
                 result = CapabilityResult(success=False, error=f"Denied: {reason}")
 
         elapsed_ms = (time.monotonic() - start_time) * 1000
+        if (result.metadata or {}).get("replayed"):
+            if opts.on_tool_end is not None:
+                await opts.on_tool_end(cap_name, result)
+            return "[RECORDED RESULT — not executed again; not a fresh verification]\n" + (result.output or result.error or "")
         if cap_name == _BASH_CAPABILITY:
             result = _enforce_benchmark_status_markers(result)
 
@@ -795,6 +828,8 @@ def _build_typed_tool(
                 fp = effective_params.get("file_path") or effective_params.get("path", "")
                 if fp:
                     cache.invalidate_file(fp)
+                for path in (result.metadata or {}).get("paths", []):
+                    cache.invalidate_file(path)
             if cap_name == _BASH_CAPABILITY:
                 cache.invalidate_from_bash(effective_params.get("command", ""), result.success)
 
@@ -847,12 +882,8 @@ def _build_typed_tool(
     if param_model is not None:
         try:
             json_schema = param_model.model_json_schema()
-            schema = {
-                "type": "object",
-                "properties": json_schema.get("properties", {}),
-            }
-            if "required" in json_schema:
-                schema["required"] = json_schema["required"]
+            # Nested fields refer to root $defs; keep their validation contract intact.
+            schema = json_schema
             # Add field descriptions from model_fields
             for fname, finfo in param_model.model_fields.items():
                 if fname in schema["properties"]:
@@ -862,13 +893,9 @@ def _build_typed_tool(
             log.debug("tool_schema_fallback", tool=cap_name, error=str(exc)[:100])
     elif cap_def.raw_json_schema is not None:
         # MCP tools provide raw JSON schema without Pydantic model
-        raw = cap_def.raw_json_schema
-        schema = {
-            "type": "object",
-            "properties": raw.get("properties", {}),
-        }
-        if "required" in raw:
-            schema["required"] = raw["required"]
+        from copy import deepcopy
+
+        schema = deepcopy(cap_def.raw_json_schema)
 
     return ToolWrapper(
         name=cap_name,
@@ -1534,14 +1561,18 @@ def _validate_with_guardian(cap_name: str, params: dict[str, Any]) -> _GuardianR
             if result.requires_approval:
                 return _GuardianResult(requires_approval=True, reason=result.reason)
 
-        elif cap_name in ("file_write", "file_edit", "file_delete"):
-            file_path = params.get("file_path") or params.get("path", "")
+        elif cap_name in _FILE_MUTATING_CAPABILITIES:
+            file_path = params.get("file_path") or params.get("path") or params.get("directory", "")
             result = guardian.validate_file_path(file_path)
             if not result.allowed:
                 return _GuardianResult(blocked=True, reason=f"Guardian blocked file write: {result.reason}")
+            if cap_name == "document_bundle":
+                result = guardian.validate_file_read_path(params.get("source_path", ""))
+                if not result.allowed:
+                    return _GuardianResult(blocked=True, reason=f"Guardian blocked source read: {result.reason}")
 
-        elif cap_name == "file_read":
-            file_path = params.get("file_path") or params.get("path", "")
+        elif cap_name in ("file_read", "document_read", "document_bundle_inspect"):
+            file_path = params.get("file_path") or params.get("path") or params.get("directory", "")
             result = guardian.validate_file_read_path(file_path)
             if not result.allowed:
                 return _GuardianResult(blocked=True, reason=f"Guardian blocked file read: {result.reason}")

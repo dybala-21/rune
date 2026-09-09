@@ -63,11 +63,10 @@ export function SessionSidebar({ currentSessionId, onSelectSession, onNewChat }:
   const groupOrder: DateGroup[] = ['Today', 'Yesterday', 'Previous 7 days', 'Older'];
 
   return (
-    <div style={{
+    <div className="session-sidebar" style={{
       display: 'flex',
       flexDirection: 'column',
       height: '100%',
-      background: 'var(--bg-primary)',
     }}>
       {/* Header + New Chat */}
       <div style={{ padding: '14px 14px 10px' }}>
@@ -161,6 +160,7 @@ export function SessionSidebar({ currentSessionId, onSelectSession, onNewChat }:
                 </div>
                 {items.map(s => (
                   <button
+                    className="session-item"
                     key={s.id}
                     onClick={() => onSelectSession(s.id)}
                     style={{

@@ -105,6 +105,9 @@ async def run_verify(
     - ``"skip"`` — could not run (spawn error / timeout); inconclusive, never
       treated as failure.
     """
+    from rune.agent.execution_journal import active_journal, record_check
+    if active_journal() is not None:
+        return await record_check({"command": cmd, "cwd": cwd}, lambda: run_verify(cmd, cwd, timeout))
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -143,10 +146,9 @@ def passed_test_count(summary: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-# Structured runner summaries (a documented-format parse, not NL matching).
-# ``passed_test_count`` can't serve here: it returns None both for "no tests
-# ran" and for summaries it can't parse — opposite meanings, hence three states.
+# An empty test run and an unrecognized summary need different outcomes.
 _VACUOUS_SUMMARY_PATTERNS: tuple[str, ...] = (
+    r"^(?:#|ℹ)\s*(?:tests|pass)\s+0\b",  # Node TAP/spec
     r"\bno tests ran\b",            # pytest
     r"\bcollected 0 items\b",       # pytest
     r"\b0\s+passed\b",              # pytest / cargo / jest ("0 passed")
@@ -156,6 +158,7 @@ _VACUOUS_SUMMARY_PATTERNS: tuple[str, ...] = (
     r"\btests?:\s*0\b",             # jest-style "Tests: 0"
 )
 _ASSERTED_SUMMARY_PATTERNS: tuple[str, ...] = (
+    r"^(?:#|ℹ)\s*pass\s+[1-9]\d*\b",  # Node TAP/spec
     r"\b[1-9]\d*\s+passed\b",       # pytest / cargo / jest
     r"\bran\s+[1-9]\d*\s+tests?\b",  # unittest
     r"\bok\b.*\bcoverage:",          # go test with coverage
@@ -164,15 +167,10 @@ _ASSERTED_SUMMARY_PATTERNS: tuple[str, ...] = (
 
 
 def assertions_ran(summary: str) -> bool | None:
-    """Did this verification actually assert anything?
+    """Read whether tests ran from the runner's summary.
 
-    ``True``  — at least one test executed.
-    ``False`` — an empty/zero-test run: exit 0 but nothing was checked, so it is
-                not evidence of correctness.
-    ``None``  — unrecognized summary. Callers must keep their previous behaviour
-                here; many runners print nothing parseable, and reading
-                "unknown" as "vacuous" would block correct work — a worse
-                failure than the leak this closes.
+    True means tests ran, False means the suite was empty, and None means
+    the summary was not recognized.
     """
     import re
 
@@ -186,3 +184,15 @@ def assertions_ran(summary: str) -> bool | None:
         if re.search(pat, text, re.IGNORECASE | re.MULTILINE):
             return False
     return None
+
+
+def tests_failed(summary: str) -> bool:
+    """Read failure counts even when a shell wrapper hides the runner's exit code."""
+    import re
+
+    return any(re.search(pattern, summary, re.IGNORECASE | re.MULTILINE) for pattern in (
+        r"\b[1-9]\d*\s+(?:failed|errors?)\b",
+        r"^FAILED\s*\((?:failures|errors)=[1-9]\d*",
+        r"^(?:FAIL\s|test result: FAILED|not ok\s+\d+)",
+        r"^(?:#|ℹ)\s*fail\s+[1-9]\d*\b",
+    ))

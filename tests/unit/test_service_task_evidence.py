@@ -268,7 +268,12 @@ def test_the_trust_payload_carries_it_to_the_app():
     payload = build_trust_payload(trace)
 
     assert payload["workspaceWarning"] == trace.workspace_warning
-    assert payload["verified"] is True, "a temp dir must not flip the verdict"
+    assert payload["completionStatus"] == "completed"
+    assert payload["verificationStatus"] == "not_checked"
+    assert payload["verified"] is False
+
+    trace.mech_check = "pass"
+    assert build_trust_payload(trace)["verified"] is True
 
 
 def test_a_clean_run_sends_no_warning():

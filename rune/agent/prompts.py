@@ -300,9 +300,10 @@ PROMPT_BROWSER = """
 PROMPT_FILE_OUTPUT = """
 ## File Output Required
 
-This task expects file output. You MUST call file_write to produce at least one file.
+This task expects file output. Produce a real file using file_write, document_create,
+or document_bundle as appropriate for the requested format.
 - Path: `{cwd}/{descriptive_filename}.md` (or appropriate extension)
-- Announce-only responses ("I will write it") without file_write = TASK FAILURE
+- Announce-only responses ("I will write it") without a successful file tool = TASK FAILURE
 - For research tasks: do ALL research first, THEN write the complete file in one file_write call. Do NOT write a TODO draft first and edit later - that wastes tool rounds.
 - For simple tasks: write the file directly."""
 
@@ -311,22 +312,20 @@ PROMPT_DOCUMENT = """
 
 For non-code document tasks (business plans, reports, proposals, etc.):
 
-1. **Research first, write once**: Complete all research (web_search, web_fetch) BEFORE writing the file. Do NOT write a TODO/placeholder draft then edit - that wastes tool rounds.
-   - Path: `{cwd}/{descriptive_filename}.md`
-   - Format: Markdown with clear section headings
-2. **Research-backed**: Use web_search/web_fetch for real data, statistics, and trends - never fabricate numbers.
-3. **Single write**: After research is done, write the complete document in one file_write call with all sections filled.
-4. **Completion**: At least one file_write must execute with substantive content (not placeholders).
+1. **Inspect sources first**: Read supplied office files with document_read. Use web_search/web_fetch when external facts are needed. Never fabricate numbers.
+2. **Match the requested format**: Use document_create for XLSX, DOCX, PPTX, PDF, CSV or HTML. Use file_write for Markdown/text. Save under `{cwd}` unless another location was requested.
+3. **Keep related files consistent**: For multiple documents derived from tabular data, use document_bundle with explicit filters and metrics. Reference shared values as {{metric_id}} in text and cells. When conditions change, inspect the existing bundle with document_bundle_inspect. If document_bundle_update is available, pass its revision and current source hash with the changed fields; otherwise pass the revised full specification to document_bundle. Preserve unspecified documents and fields. On a revision conflict, inspect again before deciding how to apply the requested change. Link the returned version paths.
+4. **Verify saved content**: Reopen documents using document_read and check source totals, units and requested sections. Bundle native readback is automatic; visual layout still needs inspection when a renderer is available. Report a missing font or unsupported formula instead of claiming success.
 
 ### Self-Review (mandatory before final output)
 Before writing the file, verify:
-1. **All research incorporated**: Every useful search result appears in the document.
+1. **Claims supported**: Include evidence relevant to the task and preserve source scope.
 2. **No placeholders**: No [TODO], [TBD], or empty sections.
 3. **Sources included**: Key claims have source URLs.
-4. **Counterarguments**: Analysis documents include rebuttals.
+4. **Consistency**: Related artifacts use the same source version, filters and metric definitions.
 
 ### FORBIDDEN
-- Saying "I will write it" without calling file_write
+- Saying "I will write it" without producing a real artifact
 - Outputting document content as inline text instead of writing to a file
 - Writing a TODO/placeholder draft then editing it (wastes tool rounds)
 - Writing numbers/statistics without source verification"""

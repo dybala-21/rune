@@ -343,11 +343,13 @@ class DaemonServer:
             loop.set_approval_callback(_daemon_approval_cb)
 
             # Daemon ask_user: return empty (agent proceeds autonomously)
+            from rune.capabilities.ask_user import AskUserParams, UserResponse, user_response
+
             async def _daemon_ask_user_cb(
-                question: str, options: list[str] | None = None
-            ) -> str:
-                log.info("daemon_ask_user_autonomous", question=question[:100])
-                return ""
+                params: AskUserParams,
+            ) -> UserResponse:
+                log.info("daemon_ask_user_autonomous", question=params.question[:100])
+                return user_response(params, "")
 
             loop.set_ask_user_callback(_daemon_ask_user_cb)
 
@@ -375,6 +377,10 @@ class DaemonServer:
             try:
                 answer = "".join(collected) if collected else (trace.reason or "")
                 await post_process_agent_result(PostProcessInput(
+                    verification=getattr(trace, "verification", None),
+                    reason=getattr(trace, "reason", ""),
+                    mech_check=getattr(trace, "mech_check", ""),
+                    evidence_gate=getattr(trace, "evidence_gate", None),
                     context=agent_ctx,
                     success=trace.reason == "completed",
                     answer=answer,

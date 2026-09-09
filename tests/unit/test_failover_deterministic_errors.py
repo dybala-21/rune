@@ -21,17 +21,19 @@ OTHER = LLMProfile(name="b", provider="anthropic", model="m2")
 
 
 @pytest.mark.parametrize(
-    "message",
+    "message,expected",
     [
-        "litellm.BadRequestError: OpenAIException - Function tools with "
-        "reasoning_effort are not supported for gpt-5.6-sol",
-        "400 BadRequest: unsupported parameter 'speed'",
-        "404 - The model 'foo' does not exist",
-        "422 Unprocessable Entity: invalid parameter",
+        ("litellm.BadRequestError: OpenAIException - Function tools with "
+         "reasoning_effort are not supported for gpt-5.6-sol", "bad_request"),
+        ("400 BadRequest: unsupported parameter 'speed'", "invalid_request"),
+        ("404 - The model 'foo' does not exist", "bad_request"),
+        ("422 Unprocessable Entity: invalid parameter", "invalid_request"),
     ],
 )
-def test_deterministic_client_errors_are_classified(message):
-    assert classify_error(message) == "bad_request", message
+def test_deterministic_client_errors_are_classified(message, expected):
+    assert classify_error(message) == expected, message
+    strategy = determine_strategy(expected, PROFILE, 3, [PROFILE, OTHER])
+    assert strategy.action not in ("retry", "compact")
 
 
 @pytest.mark.parametrize(

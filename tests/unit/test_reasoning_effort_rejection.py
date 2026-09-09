@@ -25,8 +25,12 @@ REAL_ERROR = (
 
 
 @pytest.fixture(autouse=True)
-def _clear_learned_state():
+def _clear_learned_state(monkeypatch):
+    from rune.llm.reasoning import ReasoningControl
+
+    monkeypatch.setattr("rune.llm.reasoning.reasoning_control", lambda model: ReasoningControl(("high",)))
     mt._REASONING_EFFORT_REJECTED.clear()
+    mt._TEMPERATURE_REJECTED.clear()
     yield
     mt._REASONING_EFFORT_REJECTED.clear()
 
@@ -121,9 +125,9 @@ class _FakeLiteLLM:
 
 async def _drive(fake, kwargs, model="fake-model"):
     """Drive the real adapter helper, not a copy of it."""
-    from rune.agent.litellm_adapter import _complete_dropping_rejected_params
+    from rune.llm.request_params import compatible_completion
 
-    return await _complete_dropping_rejected_params(fake, model, kwargs)
+    return await compatible_completion(fake.acompletion, fake.BadRequestError, kwargs)
 
 
 @pytest.mark.asyncio

@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { SSE_EVENT_TYPES, type SseEventType } from '../types';
 import { ensureWebAuth, resetWebAuth, setClientId as setApiClientId } from '../api';
+import { fetchRunSnapshot, getLiveSessionId } from '../api';
+import { RunRecovery } from '../utils/runRecovery';
 
 export interface SseConnection {
   connected: boolean;
   clientId: string | null;
   addEventListener: (event: SseEventType, handler: (data: unknown) => void) => () => void;
+  refresh: () => void;
 }
 
 export function useSSE(): SseConnection {
@@ -13,13 +16,38 @@ export function useSSE(): SseConnection {
   const [clientId, setClientId] = useState<string | null>(null);
   const listenersRef = useRef(new Map<SseEventType, Set<(data: unknown) => void>>());
   const sourceRef = useRef<EventSource | null>(null);
+  const restoreRef = useRef<() => void>(() => {});
+  const refresh = useCallback(() => restoreRef.current(), []);
 
   useEffect(() => {
     let disposed = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let recoveryVersion = 0;
+    const emit = (type: SseEventType, data: unknown) => {
+      for (const handler of listenersRef.current.get(type) ?? []) handler(data);
+    };
+    const recovery = new RunRecovery(emit);
+    const restore = async () => {
+      const version = ++recoveryVersion;
+      const sessionId = getLiveSessionId();
+      recovery.begin();
+      try {
+        const { run, available } = await fetchRunSnapshot(sessionId);
+        if (disposed || version !== recoveryVersion) return;
+        if (sessionId !== getLiveSessionId() || !recovery.finish(available === false ? undefined : run)) {
+          void restore();
+        }
+      } catch {
+        if (disposed || version !== recoveryVersion) return;
+        sourceRef.current?.close();
+        setConnected(false);
+        scheduleReconnect();
+      }
+    };
 
-    // The browser retries transient errors itself but gives up at CLOSED (e.g.
-    // daemon restart). Re-auth and open a fresh stream ourselves after a backoff.
+    restoreRef.current = () => { void restore(); };
+
+    // EventSource stops retrying once CLOSED; open a new stream after a backoff.
     const scheduleReconnect = () => {
       if (disposed || retryTimer) return;
       retryTimer = setTimeout(() => {
@@ -50,40 +78,34 @@ export function useSSE(): SseConnection {
           setClientId(data.clientId);
           setApiClientId(data.clientId);
           setConnected(true);
+          void restore();
         } catch { /* ignore */ }
       });
 
-      // Register forwarding for every event type ('connected' is handled
-      // separately above with its own auth bookkeeping).
       for (const eventType of SSE_EVENT_TYPES.filter(e => e !== 'connected')) {
         source.addEventListener(eventType, (e) => {
           try {
             const data = JSON.parse((e as MessageEvent).data);
-            const handlers = listenersRef.current.get(eventType);
-            if (handlers) {
-              for (const handler of handlers) {
-                handler(data);
-              }
-            }
+            if (eventType === 'resync_required') void restore();
+            else recovery.receive(eventType, data);
           } catch { /* ignore parse errors */ }
         });
       }
 
       source.onerror = () => {
         setConnected(false);
-        // CONNECTING → native retry in flight, leave it. CLOSED → browser gave
-        // up, so tear down and re-establish ourselves after a short backoff.
+        // Leave CONNECTING alone while the browser retries.
         if (source.readyState === EventSource.CLOSED) {
           source.close();
           if (sourceRef.current === source) sourceRef.current = null;
-          // The close may be an expired session; re-bootstrap auth on reconnect.
+          // Refresh auth in case the session expired.
           resetWebAuth();
           scheduleReconnect();
         }
       };
 
       source.onopen = () => {
-        // connected event will set state
+        // Wait for `connected` to supply the client ID.
       };
     };
 
@@ -91,6 +113,8 @@ export function useSSE(): SseConnection {
 
     return () => {
       disposed = true;
+      restoreRef.current = () => {};
+      recoveryVersion += 1;
       if (retryTimer) clearTimeout(retryTimer);
       sourceRef.current?.close();
       sourceRef.current = null;
@@ -111,7 +135,7 @@ export function useSSE(): SseConnection {
   }, []);
 
   return useMemo(
-    () => ({ connected, clientId, addEventListener }),
-    [connected, clientId, addEventListener],
+    () => ({ connected, clientId, addEventListener, refresh }),
+    [connected, clientId, addEventListener, refresh],
   );
 }

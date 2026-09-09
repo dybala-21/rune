@@ -4,6 +4,7 @@ Ported from src/api/handlers/config.ts - retrieve and update
 daemon/runtime configuration.
 """
 
+import asyncio
 import re
 from typing import Any
 
@@ -45,6 +46,8 @@ class ConfigGetResponse(BaseModel):
     # (so the UI only shows the selector for reasoning-capable models).
     reasoning_effort: str | None = Field(None, alias="reasoningEffort")
     reasoning_supported: bool = Field(False, alias="reasoningSupported")
+    reasoning_options: list[str] = Field(default_factory=list, alias="reasoningOptions")
+    reasoning_budgets: dict[str, int] = Field(default_factory=dict, alias="reasoningBudgets")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -155,10 +158,32 @@ def _memory_tuning_state() -> dict[str, Any]:
     return state
 
 
-def _reasoning_supported(model: str) -> bool:
-    """Whether the model accepts a reasoning_effort (litellm capability DB)."""
-    from rune.agent.model_traits import supports_reasoning_effort
-    return supports_reasoning_effort(model or "")
+async def set_reasoning_effort(effort: str, *, provider: str, model: str) -> dict[str, str | None]:
+    """Validate against the selected model before persisting the preference."""
+    from rune.agent.model_traits import reasoning_efforts
+    from rune.config import save_config_values
+    from rune.llm.client import loop_model_string
+    from rune.llm.model_selection import get_effective_model_selection
+    from rune.llm.reasoning import reasoning_model_key
+
+    effective = get_effective_model_selection()
+    if provider != effective.provider.value or model != effective.model:
+        raise ValueError("The model changed. Select reasoning depth again.")
+    resolved = loop_model_string(provider, model)
+    options = await asyncio.to_thread(reasoning_efforts, resolved)
+    if get_effective_model_selection() != effective:
+        raise ValueError("The model changed. Select reasoning depth again.")
+    if not isinstance(effort, str) or (effort and effort not in options):
+        raise ValueError(f"{effective.model} supports: {', '.join(options) or 'provider default only'}")
+    cfg = _get_rune_config()
+    preferences = {**cfg.llm.reasoning_efforts, reasoning_model_key(resolved): effort or None}
+    if save_config_values({
+        "llm.reasoningEfforts": preferences, "llm.reasoningEffort": None, "llm.reasoning_effort": None,
+    }) is None:
+        raise OSError("Could not save reasoning settings. Please try again.")
+    cfg.llm.reasoning_efforts = preferences
+    cfg.llm.reasoning_effort = None
+    return {"reasoningEffort": effort or None}
 
 
 @router.get("", response_model=ConfigGetResponse, dependencies=[Depends(auth)])
@@ -166,10 +191,16 @@ async def get_config_endpoint() -> ConfigGetResponse:
     """Retrieve the current daemon configuration."""
     from rune.agent.advisor.runtime_toggle import is_advisor_enabled
     from rune.agent.tool_adapter import approval_mode
+    from rune.llm.client import loop_model_string
     from rune.llm.model_selection import get_effective_model_selection
+    from rune.llm.reasoning import reasoning_control, reasoning_model_key
 
     cfg = _get_rune_config()
     effective = get_effective_model_selection()
+    model = loop_model_string(effective.provider.value, effective.model)
+    control = await asyncio.to_thread(reasoning_control, model)
+    options = control.efforts
+    effort = cfg.llm.reasoning_efforts.get(reasoning_model_key(model))
     return ConfigGetResponse(
         proactiveEnabled=cfg.proactive.enabled,
         gatewayChannels=["api"],
@@ -185,8 +216,10 @@ async def get_config_endpoint() -> ConfigGetResponse:
             "model": effective.model,
             "source": "active" if cfg.llm.active_model else "default",
         },
-        reasoningEffort=cfg.llm.reasoning_effort,
-        reasoningSupported=_reasoning_supported(effective.model),
+        reasoningEffort=effort if effort in options else None,
+        reasoningSupported=bool(options),
+        reasoningOptions=list(options),
+        reasoningBudgets=dict(control.budgets),
         memoryTuning=_memory_tuning_state(),
         safetyTuning={
             "preset": None,
@@ -284,6 +317,11 @@ async def patch_config(req: ConfigPatchRequest) -> ConfigPatchResponse:
     if to_persist:
         from rune.config import save_config_values
 
+        if provider or model:
+            to_persist.update({
+                "llm.reasoningEfforts": cfg.llm.reasoning_efforts,
+                "llm.reasoningEffort": None, "llm.reasoning_effort": None,
+            })
         if save_config_values(to_persist) is None:
             raise HTTPException(
                 status_code=500,

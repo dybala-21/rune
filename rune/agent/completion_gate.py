@@ -157,6 +157,8 @@ class CompletionGateInput:
     verify_freshness_enabled: bool = False
     last_code_write_step: int = 0
     last_verify_step: int = 0
+    # Explicit state from the execution loop; None for legacy callers.
+    verification_passed: bool | None = None
 
 
 @dataclass(slots=True)
@@ -365,7 +367,10 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
         missing.append(r05.id)
 
     # R06: Verification
-    r06_ok = (not inp.requires_code_verification) or ev.verifications > 0
+    r06_ok = (not inp.requires_code_verification) or (
+        inp.verification_passed if inp.verification_passed is not None
+        else ev.verifications > 0
+    )
     r06 = RequirementTraceItem(
         id=REQUIREMENT_IDS["VERIFICATION"],
         description="Code verification (tests/lint)",
@@ -581,7 +586,10 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
     r19_required = inp.verify_freshness_enabled and inp.last_code_write_step > 0
     r19_ok = (
         not r19_required
-        or inp.last_verify_step >= inp.last_code_write_step
+        or (
+            inp.last_verify_step >= inp.last_code_write_step
+            and inp.verification_passed is not False
+        )
     )
     r19 = RequirementTraceItem(
         id=REQUIREMENT_IDS["VERIFY_FRESHNESS"],
@@ -594,7 +602,7 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
         ),
         failure_reason="" if r19_ok else (
             f"Code modified at step {inp.last_code_write_step} but no "
-            f"bash_execute ran after that step (last verify step "
+            f"passing verification ran after that step (last verify step "
             f"{inp.last_verify_step}). Re-run the modified script before "
             f"declaring done."
         ),

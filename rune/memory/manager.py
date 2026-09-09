@@ -445,8 +445,8 @@ class MemoryManager:
             vec_results = self._vectors.search(embedding, k=len(episodes))
             for r in vec_results:
                 vector_scores[r.id] = max(0.0, min(1.0, r.score))
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("episode_vector_scoring_failed", error=type(exc).__name__)
 
         if not vector_scores:
             # Keyword overlap, whenever the vector side produced nothing —

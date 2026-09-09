@@ -26,7 +26,7 @@ VALID_GOAL_TYPES: set[str] = {
 }
 
 
-_KNOWN_INTENT_CATEGORIES: frozenset[str] = frozenset({"email", "document"})
+_KNOWN_INTENT_CATEGORIES: frozenset[str] = frozenset({"email", "document", "table"})
 
 
 @dataclass(slots=True)
@@ -106,10 +106,11 @@ _INTENT_FLAGS = """\
 Intent flags (default: empty list. Only set a flag when the goal explicitly mentions it. Detect across all languages.):
 - email: ONLY when the goal is about email itself — sending mail, reading inbox, replying, drafting an email message. Examples: "check my inbox", "send a mail to X", "メールを書いて", "回复邮件". NOT for: writing a report, generating a file.
 - document: ONLY when the goal is about producing a standalone document — report, proposal, business plan, formal write-up. Examples: "write a project report", "기획서 작성", "報告書を書いて". NOT for: sending an email, code generation.
+- table: When creating or updating a CSV/XLSX deliverable by aggregating existing source data: totals, grouped summaries, counts, filtering or duplicate removal. Also set for follow-up changes to such a table. Do not set for writing software that processes tables, blank templates, or explanations without a table deliverable.
 
 If the goal combines both (e.g. "email the report"), set both. If neither clearly applies, return []."""
 
-_INTENT_JSON_FIELD = '"intent_categories": [<zero or more of: "email", "document">]'
+_INTENT_JSON_FIELD = '"intent_categories": [<zero or more of: "email", "document", "table">]'
 
 _REQUIRES_EXECUTION_FLAG = """\
 requires_execution: true ONLY when verifying this output's correctness requires \

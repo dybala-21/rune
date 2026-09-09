@@ -8,15 +8,16 @@ import type {
   CompactionItem,
   StepInfo,
   PendingApproval,
+  PendingQuestion,
 } from '../types';
 import { MessageBubble } from './MessageBubble';
+import { getLiveSessionId } from '../api';
 import { TrustCard } from './TrustCard';
 import { ProactiveCard } from './ProactiveCard';
 import { ToolCallCard, getToolColor } from './ToolCallCard';
 import { ThinkingBlockView } from './ThinkingBlock';
 import { normalizeToolName, inferWorkPhase } from '../utils/tooling';
-import { RuneMark } from './RuneMark';
-import { WorkspaceSetupRow } from './WorkspaceSetupRow';
+import { WelcomePanel } from './WelcomePanel';
 import {
   APPROVAL_COPY,
   QUESTION_COPY,
@@ -38,15 +39,10 @@ interface ChatPanelProps {
   delegateEvents: DelegateItem[];
   compactionEvents: CompactionItem[];
   currentStepInfo: StepInfo | null;
-  pendingQuestion: {
-    id: string;
-    question: string;
-    options?: Array<{ label: string; description?: string }>;
-    inputMode?: 'text' | 'secret';
-  } | null;
-  onRespondQuestion: (answer: string, selectedIndex?: number) => void;
+  pendingQuestion: PendingQuestion | null;
+  onRespondQuestion: (answer: string, selectedIndex?: number) => Promise<void>;
   pendingApproval: PendingApproval | null;
-  onRespondApproval: (decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) => void;
+  onRespondApproval: (decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) => Promise<void>;
   /** Sends an empty-state suggestion; omit to render suggestions disabled. */
   onSuggest?: (text: string) => void;
   /** Extra content rendered inside the scroll area, after the messages. */
@@ -74,44 +70,10 @@ export function ChatPanel({
 }: ChatPanelProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
-  // Only auto-scroll when the user is already near the bottom, so scrolling up
-  // to read doesn't get yanked down by incoming content.
+  // Follow new content only while the user is near the bottom.
   const atBottomRef = useRef(true);
 
   const [showScrollBtn, setShowScrollBtn] = useState(false);
-
-  useEffect(() => {
-    if (!atBottomRef.current) return;
-    const timer = requestAnimationFrame(() => {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-    });
-    return () => cancelAnimationFrame(timer);
-  }, [messages, toolCalls, thinkingBlocks, delegateEvents, compactionEvents, pendingApproval, pendingQuestion]);
-
-  // On conversation switch, anchor scroll instead of inheriting the old position:
-  // live → latest turn, history replay → its start.
-  useEffect(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    const isLive = conversationKey === 'live';
-    atBottomRef.current = isLive;
-    const timer = requestAnimationFrame(() => {
-      container.scrollTop = isLive ? container.scrollHeight : 0;
-    });
-    return () => cancelAnimationFrame(timer);
-  }, [conversationKey]);
-
-  useEffect(() => {
-    const container = scrollContainerRef.current;
-    if (!container) return;
-    const onScroll = () => {
-      const fromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
-      atBottomRef.current = fromBottom < 80;
-      setShowScrollBtn(fromBottom > 200);
-    };
-    container.addEventListener('scroll', onScroll);
-    return () => container.removeEventListener('scroll', onScroll);
-  }, []);
 
   type TimelineItem =
     | { type: 'message'; item: ChatMessage }
@@ -128,9 +90,7 @@ export function ChatPanel({
     return null;
   }, [messages]);
 
-  // The answer currently streaming = the last assistant message that comes
-  // after the last user turn. Only this one is pinned; a previous turn's answer
-  // (before a newer user message) must keep its real position.
+  // Only the answer after the latest user turn can still be streaming.
   const streamingAnswerId = useMemo(() => {
     if (!isRunning) return null;
     let lastUserIdx = -1;
@@ -146,10 +106,7 @@ export function ChatPanel({
   const timeline = useMemo<TimelineItem[]>(() => [
     ...messages
       .filter(m => m.content?.trim() || m.trust || m.suggestion || m.attachments?.length)
-      // Pin the streaming answer to the end: it is created at the first token
-      // (an early timestamp) but its tools arrive after, so without this it
-      // renders above them and then jumps to the bottom when the run finishes.
-      // Keeping it last throughout gives a stable "tools, then answer" order.
+  // Keep the streaming answer below its tool calls to avoid reordering on completion.
       .map(m => ({
         type: 'message' as const,
         item: m,
@@ -179,9 +136,40 @@ export function ChatPanel({
 
   const isEmpty = timeline.length === 0;
 
-  // Render only the most recent slice so a long run does not put thousands of
-  // DOM nodes in the scroll container; older entries stay in state (search,
-  // export) and reveal on request. Rendering the tail keeps stick-to-bottom.
+  useEffect(() => {
+    if (!atBottomRef.current || isEmpty) return;
+    const timer = requestAnimationFrame(() => {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    });
+    return () => cancelAnimationFrame(timer);
+  }, [messages, toolCalls, thinkingBlocks, delegateEvents, compactionEvents, pendingApproval, pendingQuestion, isEmpty]);
+
+  // Open live chat at the latest turn and history at the start.
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const isLive = conversationKey === 'live';
+    atBottomRef.current = isLive;
+    const timer = requestAnimationFrame(() => {
+      container.scrollTop = isLive && !isEmpty ? container.scrollHeight : 0;
+    });
+    return () => cancelAnimationFrame(timer);
+  }, [conversationKey, isEmpty]);
+
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const onScroll = () => {
+      const fromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+      atBottomRef.current = fromBottom < 80;
+      setShowScrollBtn(fromBottom > 200);
+    };
+    container.addEventListener('scroll', onScroll);
+    return () => container.removeEventListener('scroll', onScroll);
+  }, []);
+
+
+  // Limit rendered rows; older entries remain available for search and export.
   const RENDER_STEP = 400;
   const [renderCap, setRenderCap] = useState(RENDER_STEP);
   useEffect(() => { setRenderCap(RENDER_STEP); }, [conversationKey]);
@@ -197,17 +185,17 @@ export function ChatPanel({
       flexDirection: 'column',
       position: 'relative',
     }}>
-      <div style={{
-        maxWidth: 768,
+      <div className="chat-content" style={{
+        maxWidth: 800,
         width: '100%',
         margin: '0 auto',
-        padding: '24px 24px 160px',
+
         flex: isEmpty ? 1 : undefined,
         display: 'flex',
         flexDirection: 'column',
         gap: 2,
       }}>
-        {isEmpty && <EmptyState onSuggest={onSuggest} />}
+        {isEmpty && <WelcomePanel onSuggest={onSuggest} />}
 
         {hiddenCount > 0 && (
           <button
@@ -255,6 +243,7 @@ export function ChatPanel({
               <div key={item.item.id} style={{ marginTop: needsGap ? 12 : 0 }}>
                 <MessageBubble
                   message={item.item}
+                  sessionId={conversationKey === 'live' ? getLiveSessionId() : conversationKey}
                   streaming={
                     isRunning
                     && item.item.role === 'assistant'
@@ -305,12 +294,13 @@ export function ChatPanel({
 
         {pendingApproval && (
           <InlineApprovalCard
+            key={pendingApproval.id}
             approval={pendingApproval}
             onRespond={onRespondApproval}
           />
         )}
 
-        {isRunning && !pendingApproval && (
+        {isRunning && !pendingApproval && !pendingQuestion && (
           <RunningIndicator toolCalls={toolCalls} currentStepInfo={currentStepInfo} />
         )}
 
@@ -344,103 +334,6 @@ export function ChatPanel({
           </svg>
         </button>
       )}
-    </div>
-  );
-}
-
-// ── Empty state ──
-
-const SUGGESTIONS: Array<{ icon: React.ReactNode; text: string }> = [
-  {
-    icon: <path d="M9 8l-5 4 5 4M15 8l5 4-5 4" />,
-    text: 'Find and fix a failing test',
-  },
-  {
-    icon: (
-      <>
-        <path d="M7 3h8l4 4v14H7z" />
-        <path d="M14 3v5h5" />
-      </>
-    ),
-    text: 'Summarize this project',
-  },
-  {
-    icon: (
-      <>
-        <circle cx="12" cy="12" r="9" />
-        <path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18" />
-      </>
-    ),
-    text: "What's new with AI agents?",
-  },
-];
-
-function EmptyState({ onSuggest }: { onSuggest?: (text: string) => void }) {
-  return (
-    <div style={{
-      flex: 1,
-      display: 'flex',
-      flexDirection: 'column',
-      justifyContent: 'center',
-      maxWidth: 520,
-      width: '100%',
-      margin: '0 auto',
-      padding: '32px 8px',
-    }}>
-      <RuneMark state="idle" size={40} title="RUNE" />
-      <div style={{
-        fontSize: 19,
-        fontWeight: 600,
-        letterSpacing: '-0.015em',
-        color: 'var(--text-primary)',
-        margin: '14px 0 5px',
-      }}>
-        What should RUNE take on?
-      </div>
-      <div style={{
-        fontSize: 13.5,
-        color: 'var(--text-secondary)',
-        lineHeight: 1.6,
-        marginBottom: 20,
-      }}>
-        Code, commands, the web, your files — verified before it says done.
-      </div>
-
-      <div style={{ display: 'flex', flexDirection: 'column' }}>
-        {SUGGESTIONS.map(s => (
-          <button
-            key={s.text}
-            onClick={onSuggest ? () => onSuggest(s.text) : undefined}
-            disabled={!onSuggest}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 12,
-              padding: '11px 4px',
-              background: 'none',
-              border: 'none',
-              borderTop: '1px solid var(--border-subtle)',
-              color: 'var(--text-primary)',
-              fontSize: 14,
-              textAlign: 'left',
-              cursor: onSuggest ? 'pointer' : 'default',
-              borderRadius: 0,
-            }}
-            onMouseEnter={e => { e.currentTarget.style.paddingLeft = '10px'; }}
-            onMouseLeave={e => { e.currentTarget.style.paddingLeft = '4px'; }}
-          >
-            <svg
-              width="16" height="16" viewBox="0 0 24 24" fill="none"
-              stroke="var(--accent)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"
-              style={{ flexShrink: 0 }}
-            >
-              {s.icon}
-            </svg>
-            <span style={{ flex: 1 }}>{s.text}</span>
-          </button>
-        ))}
-        <WorkspaceSetupRow />
-      </div>
     </div>
   );
 }
@@ -770,48 +663,65 @@ function formatTokens(tokens: number): string {
 
 // ── Inline question card (ask_user) ──
 
-function InlineQuestionCard({
+export function InlineQuestionCard({
   toolCall,
   pendingQuestion,
   onRespond,
 }: {
   toolCall: ToolCall;
-  pendingQuestion: {
-    id: string;
-    question: string;
-    options?: Array<{ label: string; description?: string }>;
-    inputMode?: 'text' | 'secret';
-  } | null;
-  onRespond: (answer: string, selectedIndex?: number) => void;
+  pendingQuestion: PendingQuestion | null;
+  onRespond: (answer: string, selectedIndex?: number) => Promise<void>;
 }) {
   const [freeText, setFreeText] = useState('');
-  // `answered` locks the card on the first action so a rapid second click
-  // can't fire a duplicate RPC before the parent's result arrives.
-  const [answered, setAnswered] = useState(false);
-  const isPending = toolCall.result === undefined && !answered;
+  const [submitted, setSubmitted] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [submitError, setSubmitError] = useState('');
+  const inFlight = useRef(false);
+  const matchingQuestion = pendingQuestion && toolCall.result === undefined && (
+    pendingQuestion.callId && toolCall.callId
+      ? pendingQuestion.callId === toolCall.callId
+      : pendingQuestion.question === toolCall.args.question
+  ) ? pendingQuestion : null;
+  const isPending = !!matchingQuestion && !submitted;
+  const failed = toolCall.success === false;
+  const status = toolCall.result !== undefined
+    ? failed ? 'Failed' : toolCall.result.startsWith('User responded:') ? QUESTION_COPY.answeredLabel : 'Closed'
+    : sending ? 'Sending…' : submitted ? 'Sent' : isPending ? 'Awaiting answer' : 'Unavailable';
 
-  const questionText = pendingQuestion?.question
+  const questionText = matchingQuestion?.question
     || (toolCall.args.question as string)
     || '';
-  const options = pendingQuestion?.options
+  const options = matchingQuestion?.options
     || (toolCall.args.options as Array<{ label: string; description?: string }>)
     || [];
-  const inputMode = pendingQuestion?.inputMode
+  const inputMode = matchingQuestion?.inputMode
     || (toolCall.args.inputMode as 'text' | 'secret' | undefined)
     || 'text';
 
-  const handleOptionClick = (opt: { label: string; description?: string }, idx: number) => {
-    if (isPending) {
-      setAnswered(true);
-      onRespond(opt.label, idx);
+  const submit = async (answer: string, idx?: number) => {
+    if (!isPending || inFlight.current) return;
+    inFlight.current = true;
+    setSending(true);
+    setSubmitError('');
+    try {
+      await onRespond(answer, idx);
+      setSubmitted(true);
+      setFreeText('');
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : 'Could not send the answer. Try again.');
+    } finally {
+      inFlight.current = false;
+      setSending(false);
     }
+  };
+
+  const handleOptionClick = (opt: { label: string; description?: string }, idx: number) => {
+    void submit(opt.label, idx);
   };
 
   const handleFreeTextSubmit = () => {
     if (isPending && freeText.trim()) {
-      setAnswered(true);
-      onRespond(freeText.trim());
-      setFreeText('');
+      void submit(freeText.trim());
     }
   };
 
@@ -847,17 +757,17 @@ function InlineQuestionCard({
         <span style={{ fontWeight: 600, fontSize: 13, color: 'var(--accent)' }}>
           {QUESTION_COPY.title}
         </span>
-        {!isPending && (
+        {(!isPending || sending) && (
           <span style={{
             marginLeft: 'auto',
             fontSize: 11,
             padding: '2px 8px',
             borderRadius: 'var(--radius-sm)',
-            background: 'var(--success-subtle)',
-            color: 'var(--success)',
+            background: failed ? 'var(--danger-subtle)' : 'var(--bg-tertiary)',
+            color: failed ? 'var(--danger)' : 'var(--text-secondary)',
             fontWeight: 600,
           }}>
-            {QUESTION_COPY.answeredLabel}
+            {status}
           </span>
         )}
         {isPending && (
@@ -883,7 +793,7 @@ function InlineQuestionCard({
             <button
               key={idx}
               onClick={() => handleOptionClick(opt, idx)}
-              disabled={!isPending}
+              disabled={!isPending || sending}
               style={{
                 padding: '10px 14px',
                 background: isPending ? 'var(--bg-tertiary)' : 'var(--bg-primary)',
@@ -948,7 +858,7 @@ function InlineQuestionCard({
           />
           <button
             onClick={handleFreeTextSubmit}
-            disabled={!freeText.trim()}
+            disabled={!freeText.trim() || sending}
             style={{
               padding: '9px 16px',
               background: freeText.trim() ? 'var(--accent)' : 'var(--bg-tertiary)',
@@ -963,13 +873,15 @@ function InlineQuestionCard({
         </div>
       )}
 
-      {!isPending && toolCall.result && (
+      {submitError && <div role="alert" style={{ padding: '0 16px 12px', color: 'var(--danger)' }}>{submitError}</div>}
+
+      {toolCall.result !== undefined && toolCall.result && (
         <div style={{
           padding: '8px 16px 12px',
           fontSize: 12,
           color: 'var(--text-secondary)',
         }}>
-          <span style={{ fontWeight: 600, marginRight: 6, color: 'var(--text-muted)' }}>Answer:</span>
+          <span style={{ fontWeight: 600, marginRight: 6, color: 'var(--text-muted)' }}>{failed ? 'Error:' : 'Response:'}</span>
           {toolCall.result.length > 200 ? toolCall.result.slice(0, 200) + '...' : toolCall.result}
         </div>
       )}
@@ -991,12 +903,13 @@ function InlineApprovalCard({
   onRespond,
 }: {
   approval: PendingApproval;
-  onRespond: (decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) => void;
+  onRespond: (decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) => Promise<void>;
 }) {
   const [showDenyInput, setShowDenyInput] = useState(false);
   const [guidance, setGuidance] = useState('');
   const [remaining, setRemaining] = useState(Math.ceil(approval.timeoutMs / 1000));
   const [submitted, setSubmitted] = useState(false);
+  const inFlight = useRef(false);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -1010,12 +923,19 @@ function InlineApprovalCard({
 
   const riskColor = RISK_COLORS[approval.riskLevel] || 'var(--text-secondary)';
   const progressPct = Math.max(0, (remaining / (approval.timeoutMs / 1000)) * 100);
-  // Locked after a response or once the timeout fired, to block a duplicate RPC.
   const locked = submitted || remaining <= 0;
-  const respond = (decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) => {
-    if (locked) return;
+  const respond = async (decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) => {
+    if (locked || inFlight.current) return;
+    inFlight.current = true;
     setSubmitted(true);
-    onRespond(decision, userGuidance);
+    try {
+      await onRespond(decision, userGuidance);
+    } catch {
+      // The hook reports the error. Unlock this card for retry.
+      setSubmitted(false);
+    } finally {
+      inFlight.current = false;
+    }
   };
 
   return (

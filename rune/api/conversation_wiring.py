@@ -231,14 +231,11 @@ def record_user_turn(
     text: str,
     attachments: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Record the user turn (before prepare_agent_context, which drops the
-    trailing user message from loaded history — the goal is passed to the
-    loop separately).
+    """Record the user turn before preparing context.
 
-    Attachments are noted by name, never stored: history is replayed into every
-    later turn, so keeping the image data here would grow the conversation
-    without bound. The note is what stops a follow-up question about "the
-    image" from being answered about the workspace instead.
+    Context preparation removes this last turn from history because the loop
+    receives the goal separately. Attachment names stay in the transcript so
+    later turns can refer to them; attachment contents belong to this run.
     """
     if attachments:
         names = ", ".join(str(a.get("name") or "file") for a in attachments)
@@ -255,15 +252,15 @@ async def record_assistant_turn(
     loop: Any,
     streamed_text: str,
     reason: str = "",
+    *,
+    embed: bool = True,
+    require_save: bool = False,
 ) -> None:
-    """Record the assistant turn and persist the conversation.
+    """Save the final answer, falling back to streamed text.
 
-    Uses the loop's final answer when available; falls back to streamed text.
-    An empty answer still records a short placeholder: a user turn with no
-    assistant reply makes the next turn's model re-answer the previous
-    question instead of treating it as done.
-    Persisting here (not on the user turn) matches the gateway: an aborted run
-    leaves no half-written conversation on disk.
+    Keep a placeholder for an empty answer so the next turn sees that the
+    previous request ended. Web callers defer embeddings and require a
+    successful save before reporting completion.
     """
     try:
         from rune.agent.agent_context import resolve_assistant_answer
@@ -279,6 +276,8 @@ async def record_assistant_turn(
         )
         conv = conv_manager._active.get(conversation_id)
         if conv is not None:
-            await conv_manager._store.save(conv)
+            await conv_manager._store.save(conv, embed=embed)
     except Exception as exc:
+        if require_save:
+            raise
         log.debug("api_conv_assistant_turn_failed", error=str(exc)[:100])

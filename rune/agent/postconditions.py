@@ -82,7 +82,7 @@ def derive(roles: dict[str, str], workspace: str | Path) -> list[Postcondition]:
     ws = Path(workspace).expanduser().resolve()
     out = [Postcondition(name, "present")
            for name, role in sorted(roles.items())
-           if role == "input" and _candidates(ws, name)]
+           if role in {"input", "preserve"} and _candidates(ws, name)]
     if out:
         log.info("postconditions_derived", present=[c.name for c in out])
     return out

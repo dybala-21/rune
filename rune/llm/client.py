@@ -337,8 +337,6 @@ class LLMClient:
         # below handle models litellm's DB gets wrong (see model_traits).
         from rune.agent.litellm_adapter import _clamp_max_tokens
         from rune.agent.model_traits import (
-            is_temperature_error,
-            note_temperature_rejected,
             traits,
         )
         effective_max_tokens = _clamp_max_tokens(resolved_model, max_tokens)
@@ -355,17 +353,9 @@ class LLMClient:
         if tools:
             kwargs["tools"] = tools
 
-        try:
-            response = await litellm.acompletion(**kwargs)
-        except litellm.BadRequestError as e:
-            # model rejected temperature; drop it and retry, remember for next time
-            if "temperature" in kwargs and is_temperature_error(e):
-                note_temperature_rejected(resolved_model)
-                kwargs.pop("temperature", None)
-                log.warning("temperature_unsupported_retry", model=resolved_model)
-                response = await litellm.acompletion(**kwargs)
-            else:
-                raise
+        from rune.llm.request_params import compatible_completion
+
+        response = await compatible_completion(litellm.acompletion, litellm.BadRequestError, kwargs)
         return response  # type: ignore[return-value]
 
 

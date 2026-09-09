@@ -44,7 +44,7 @@ class WriteArtifactOptions:
 
 MAX_SAMPLE_CHARS = 48_000
 
-DOC_EXTENSIONS = frozenset([".md", ".markdown", ".txt", ".rst", ".adoc", ".log"])
+DOC_EXTENSIONS = frozenset([".md", ".markdown", ".txt", ".rst", ".adoc", ".log", ".csv", ".tsv"])
 JSON_EXTENSIONS = frozenset([".json"])
 YAML_EXTENSIONS = frozenset([".yml", ".yaml"])
 GENERIC_CODE_EXTENSIONS = frozenset([

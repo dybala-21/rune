@@ -20,7 +20,7 @@ async function bootstrapWebAuth(): Promise<void> {
 
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error((err as { error?: string }).error || res.statusText);
+    throw new Error((err as { error?: string }).error || (typeof err.detail === 'string' ? err.detail : res.statusText));
   }
 
   _webAuthReady = true;
@@ -50,7 +50,7 @@ export function resetWebAuth(): void {
   _webAuthPromise = null;
 }
 
-async function post<T>(path: string, body?: unknown, retried = false): Promise<T> {
+async function post<T>(path: string, body?: unknown, retried = false, signal?: AbortSignal): Promise<T> {
   await ensureWebAuth();
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -63,15 +63,16 @@ async function post<T>(path: string, body?: unknown, retried = false): Promise<T
     headers,
     credentials: 'include',
     body: body ? JSON.stringify(body) : undefined,
+    signal,
   });
   // Auth expired: re-bootstrap once and retry, so the app recovers without a reload.
   if ((res.status === 401 || res.status === 403) && !retried) {
     resetWebAuth();
-    return post<T>(path, body, true);
+    return post<T>(path, body, true, signal);
   }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error((err as { error?: string }).error || res.statusText);
+    throw new Error((err as { error?: string }).error || (typeof err.detail === 'string' ? err.detail : res.statusText));
   }
   return res.json() as Promise<T>;
 }
@@ -94,12 +95,11 @@ export interface MessageAttachment {
   data: string;  // base64
 }
 
-// Per-tab conversation key so the server threads multi-turn history for the
-// live chat. sessionStorage scope = continuity across reloads in one tab,
-// isolation between tabs. Rotated by "New chat".
+// Keep the conversation across reloads in this tab. New Chat rotates the ID.
 const LIVE_SESSION_KEY = 'rune.live.sessionId';
 
 export function rotateLiveSessionId(): string {
+  setCurrentRunId('');
   const id = typeof crypto !== 'undefined' && crypto.randomUUID
     ? `web_${crypto.randomUUID()}`
     : `web_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
@@ -117,6 +117,7 @@ function liveSessionId(): string {
 
 // Pin the live chat to an existing conversation (used by /load).
 export function setLiveSessionId(id: string): void {
+  setCurrentRunId('');
   try { sessionStorage.setItem(LIVE_SESSION_KEY, id); } catch { /* storage unavailable */ }
 }
 
@@ -124,13 +125,27 @@ export function getLiveSessionId(): string {
   return liveSessionId();
 }
 
-// The run id of the most recent message this tab sent, echoed back by
-// /api/message. Agent events carry runId, so this lets the tab recognise its
-// own run even when several turns share a session. It only ever adds a match,
-// never removes one — the POST can resolve after the first SSE event arrives.
+// Set by the message response or agent_start, whichever arrives first.
+// Cleared when the tab switches conversations.
 let _currentRunId = '';
 export function setCurrentRunId(id: string): void { _currentRunId = id; }
 export function getCurrentRunId(): string { return _currentRunId; }
+
+export async function fetchRunSnapshot(sessionId: string): Promise<{ run: import('./utils/runSnapshot').RunSnapshot | null; available?: boolean }> {
+  await ensureWebAuth();
+  const response = await fetch(`/api/runs/snapshot?sessionId=${encodeURIComponent(sessionId)}`, {
+    credentials: 'include', signal: AbortSignal.timeout(5000),
+  });
+  if (response.status === 404 || (response.ok && response.headers.get('content-type')?.includes('text/html'))) {
+    return { run: null, available: false };
+  }
+  if (!response.ok) throw new Error(`Could not restore run (${response.status}).`);
+  return response.json();
+}
+
+export function resumeRun(runId: string): Promise<{ runId: string; sessionId: string }> {
+  return post('/api/runs/resume', { runId }, false, AbortSignal.timeout(15000));
+}
 
 // ── Workspace API (directory pinned per conversation) ──
 
@@ -191,26 +206,34 @@ export async function fetchModels(): Promise<Record<string, string[]>> {
 
 /** Switch the model new runs use. */
 export async function setActiveModel(provider: string, model: string): Promise<{ provider: string; model: string }> {
-  return rpc('model.set', { provider, model });
+  const result = await rpc<{ provider: string; model: string }>('model.set', { provider, model });
+  window.dispatchEvent(new Event('rune:config-changed'));
+  return result;
 }
 
+export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
 /** Set reasoning depth for reasoning-capable models ('' clears to default). */
-export async function setReasoningEffort(effort: '' | 'low' | 'medium' | 'high'): Promise<{ reasoningEffort: string | null }> {
-  return rpc('reasoning.set', { effort });
+export async function setReasoningEffort(
+  effort: '' | ReasoningEffort, model: { provider: string; model: string },
+): Promise<{ reasoningEffort: ReasoningEffort | null }> {
+  const result = await rpc<{ reasoningEffort: ReasoningEffort | null }>('reasoning.set', { ...model, effort });
+  window.dispatchEvent(new Event('rune:config-changed'));
+  return result;
 }
 
 export function sendMessage(text: string, attachments?: MessageAttachment[]) {
+  const sessionId = liveSessionId();
   return post<{ ok: boolean; runId?: string }>(
-    '/api/message', { text, attachments, sessionId: liveSessionId() },
+    '/api/message', { text, attachments, sessionId },
   ).then(res => {
-    if (res?.runId) setCurrentRunId(res.runId);
+    if (res?.runId && sessionId === liveSessionId()) setCurrentRunId(res.runId);
     return res;
   });
 }
 
 export function sendAbort() {
-  // Without the id the server falls back to the newest run, so Stop in one tab
-  // could cancel a run started somewhere else.
+  // Without a run ID, the server may stop a run from another tab.
   return post('/api/abort', { runId: getCurrentRunId() });
 }
 
@@ -221,12 +244,26 @@ export function transcribeAudio(audioBase64: string, mimeType: string) {
   );
 }
 
+const interactionResponses = new Map<string, { body: string; responseId: string }>();
+function interactionResponseId(id: string, payload: unknown): string {
+  const body = JSON.stringify(payload);
+  let previous = interactionResponses.get(id);
+  if (previous?.body !== body) {
+    previous = { body, responseId: crypto.randomUUID() };
+    interactionResponses.set(id, previous);
+    if (interactionResponses.size > 64) interactionResponses.delete(interactionResponses.keys().next().value!);
+  }
+  return previous.responseId;
+}
+
 export function sendApproval(id: string, decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) {
-  return post('/api/approval', { id, decision, userGuidance });
+  const payload = { id, decision, userGuidance };
+  return post('/api/approval', { ...payload, responseId: interactionResponseId(id, payload) });
 }
 
 export function sendQuestion(id: string, answer: string, selectedIndex?: number) {
-  return post('/api/question', { id, answer, selectedIndex });
+  const payload = { id, answer, selectedIndex };
+  return post('/api/question', { ...payload, responseId: interactionResponseId(id, payload) });
 }
 
 // ── Sessions API ──
@@ -262,7 +299,7 @@ export interface SessionTurn {
   timestamp: string;
 }
 
-export async function fetchSessionTurns(sessionId: string): Promise<{ turns: SessionTurn[] }> {
+export async function fetchSessionTurns(sessionId: string): Promise<{ turns: SessionTurn[]; run?: import('./utils/runSnapshot').RunSnapshot | null }> {
   return rpc('sessions.turns', { sessionId });
 }
 
@@ -362,8 +399,10 @@ export interface ConfigInfo {
     source: 'active' | 'default';
   };
   /** Reasoning depth for the active model, when it accepts one. */
-  reasoningEffort?: 'low' | 'medium' | 'high' | null;
+  reasoningEffort?: ReasoningEffort | null;
   reasoningSupported?: boolean;
+  reasoningOptions?: ReasoningEffort[];
+  reasoningBudgets?: Partial<Record<ReasoningEffort, number>>;
   /** Only knobs the memory pipeline actually reads are listed here. */
   memoryTuning: {
     preset: 'speed' | 'balanced' | 'accuracy' | null;

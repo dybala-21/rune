@@ -501,13 +501,25 @@ async def conversation_search(params: ConversationSearchParams) -> CapabilityRes
             import numpy as np
 
             manager = get_memory_manager()
-            cached = store.get_cached_embeddings([c["content_hash"] for c in cands])
+            query_vectors = await manager.embed_batch([params.query])
+            if len(query_vectors) != 1:
+                raise ValueError("Embedding query count mismatch")
+            identity = getattr(query_vectors[0], "fingerprint", None)
+            if not identity:
+                raise ValueError("Embedding provenance is missing")
+            cached = store.get_cached_embeddings([c["content_hash"] for c in cands], fingerprint=identity)
             todo = {
                 c["content_hash"]: c["content"][:500]
                 for c in cands
                 if c["content_hash"] not in cached
             }
-            vecs = await manager.embed_batch([params.query] + list(todo.values()))
+            vecs = list(query_vectors)
+            values = list(todo.values())
+            for start in range(0, len(values), 64):
+                batch = await manager.embed_batch(values[start:start + 64])
+                if any(getattr(v, "fingerprint", None) != identity for v in batch):
+                    raise ValueError("Embedding model changed during search")
+                vecs.extend(batch)
             if len(vecs) != len(todo) + 1:
                 raise ValueError("embedding count mismatch")
             qv = np.asarray(vecs[0], dtype=np.float32)
@@ -516,7 +528,7 @@ async def conversation_search(params: ConversationSearchParams) -> CapabilityRes
                 for h, v in zip(todo.keys(), vecs[1:], strict=True)
             }
             if fresh:
-                store.cache_embeddings(fresh)
+                store.cache_embeddings(fresh, fingerprint=identity)
             emb = {**cached, **fresh}
             rows = [c for c in cands if c["content_hash"] in emb]
             # Vectorized cosine: one matrix-vector product over all turns.
@@ -525,7 +537,8 @@ async def conversation_search(params: ConversationSearchParams) -> CapabilityRes
                 np.linalg.norm(mat, axis=1) * (float(np.linalg.norm(qv)) + 1e-9) + 1e-9
             )
             ranked = list(zip(sims.tolist(), rows, strict=True))
-        except Exception:
+        except Exception as exc:
+            log.debug("conversation_vector_search_failed", error=type(exc).__name__)
             ranked = _keyword_rank()
 
         ranked.sort(key=lambda t: t[0], reverse=True)

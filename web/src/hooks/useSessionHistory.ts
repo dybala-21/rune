@@ -1,5 +1,7 @@
 import { useCallback, useRef, useState } from 'react';
 import { fetchSessionTurns, type SessionTurn } from '../api';
+import { restoreRunMessages, type RunSnapshot } from '../utils/runSnapshot';
+import { computeActivitySummary } from '../utils/tooling';
 import type {
   ChatMessage,
   ToolCall,
@@ -7,6 +9,7 @@ import type {
   ActivitySummary,
   DelegateItem,
   CompactionItem,
+  TrustInfo,
 } from '../types';
 
 let idCounter = 10000;
@@ -21,26 +24,27 @@ export interface SessionHistoryState {
   activitySummary: ActivitySummary | null;
   delegateEvents: DelegateItem[];
   compactionEvents: CompactionItem[];
+  trust: TrustInfo | null;
+  run: RunSnapshot | null;
 }
 
-/**
- * 대화 턴(canonical conversation store)을 표시용 상태로 변환한다.
- * 툴콜/씽킹 로그는 대화 저장소에 없으므로 히스토리 뷰는 메시지만 보여준다.
- */
-function hydrateTurns(turns: SessionTurn[]): SessionHistoryState {
+function hydrateTurns(turns: SessionTurn[], run?: RunSnapshot | null): SessionHistoryState {
   const messages: ChatMessage[] = turns.map(t => ({
     id: nextId(),
     role: t.role === 'assistant' ? 'assistant' as const : 'user' as const,
     content: t.content,
     timestamp: new Date(t.timestamp).getTime() || Date.now(),
   }));
+  const toolCalls = run ? run.toolCalls.map((call, index) => ({ ...call, id: call.callId || `${run.runId}:tool:${index}` })) : [];
   return {
-    messages,
-    toolCalls: [],
+    messages: run ? restoreRunMessages(messages, run) : messages,
+    toolCalls,
     thinkingBlocks: [],
-    activitySummary: null,
+    activitySummary: run ? computeActivitySummary(toolCalls, run.durationMs ?? 0, run.success === true) : null,
     delegateEvents: [],
     compactionEvents: [],
+    trust: run?.trust ?? null,
+    run: run ?? null,
   };
 }
 
@@ -64,7 +68,7 @@ export function useSessionHistory() {
     try {
       const result = await fetchSessionTurns(sessionId);
       if (reqId !== reqRef.current) return; // superseded by a newer selection
-      setHistoryState(hydrateTurns(result.turns));
+      setHistoryState(hydrateTurns(result.turns, result.run));
     } catch {
       if (reqId !== reqRef.current) return;
       setHistoryState({
@@ -74,6 +78,8 @@ export function useSessionHistory() {
         activitySummary: null,
         delegateEvents: [],
         compactionEvents: [],
+        trust: null,
+        run: null,
       });
     } finally {
       if (reqId === reqRef.current) setLoading(false);

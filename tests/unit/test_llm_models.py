@@ -93,10 +93,11 @@ class TestModelSortKey:
         model_ids = [
             "gpt-3.5-turbo", "o4-mini", "gpt-4o-latest", "gpt-4.1-nano",
             "o3-mini", "o3-pro", "gpt-5-turbo", "gpt-5.1-codex",
-            "gpt-5.2", "gpt-5.4",
+            "gpt-5.2", "gpt-5.4", "gpt-6-astra",
         ]
         sorted_ids = sorted(model_ids, key=_model_sort_key)
         assert sorted_ids == [
+            "gpt-6-astra",
             "gpt-5.4",
             "gpt-5.2",
             "gpt-5.1-codex",

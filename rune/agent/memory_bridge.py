@@ -464,6 +464,7 @@ def _select_crisp_signal(
 def rule_eval_allowed(
     success: bool, domain: str | None,
     mech_check: str, evidence_gate: dict | None,
+    verification: dict | None = None,
 ) -> bool:
     """Whether this outcome may be counted against the rules.
 
@@ -478,6 +479,8 @@ def rule_eval_allowed(
     """
     if not success:
         return True
+    if verification and verification.get("required"):
+        return verification.get("status") == "pass"
     if domain not in ("code_modify", "execution", "full"):
         return True
     if mech_check == "pass":
@@ -531,6 +534,12 @@ async def save_agent_result_to_memory(
             evidence_gate = _eg if isinstance(_eg, dict) else None
         else:
             result_text = str(result)
+
+        # Stale or failed checks override the caller's success flag.
+        from rune.agent.verification_state import verified_outcome
+
+        if verified_outcome(result) is False:
+            success = False
 
         # Extract intent
         intent = extract_intent_from_goal(goal, classification_hint)
@@ -643,12 +652,17 @@ async def save_agent_result_to_memory(
             _mech = str(result.get("mech_check", "") or "") \
                 if isinstance(result, dict) else ""
             _eg = result.get("evidence_gate") if isinstance(result, dict) else None
-            if not rule_eval_allowed(success, domain, _mech, _eg):
+            _verification = result.get("verification") if isinstance(result, dict) else getattr(
+                result, "verification", None
+            )
+            if not rule_eval_allowed(success, domain, _mech, _eg, _verification):
                 log.debug("rule_eval_skipped_no_evidence", domain=domain)
             else:
                 _keys = await semantic_relevant_rule_keys(goal, result_text[:300])
                 _executed_evidence = _mech == "pass" or (
                     isinstance(_eg, dict) and _eg.get("last_verdict") == "pass"
+                ) or (
+                    isinstance(_verification, dict) and _verification.get("status") == "pass"
                 )
                 if success and not _executed_evidence and deferred_truth_enabled():
                     # Admitted without an executed check — only non-code
@@ -939,6 +953,10 @@ def compute_auto_skill_quality_score(result: Any) -> float:
     Higher scores indicate the result is a good candidate for
     auto-skill extraction.
     """
+    from rune.agent.verification_state import verified_outcome
+
+    if verified_outcome(result) is False:
+        return 0.0
     score = 0.0
 
     # Success is the primary factor

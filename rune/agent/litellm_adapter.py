@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -61,16 +61,6 @@ def __getattr__(name: str) -> Any:
 
 from rune.agent.message_utils import validate_tool_pairs
 from rune.agent.model_traits import (
-    is_max_tokens_rename_error,
-    is_reasoning_effort_error,
-    is_responses_only_error,
-    is_temperature_error,
-    needs_responses_api,
-    note_reasoning_effort_rejected,
-    note_responses_only,
-    note_temperature_rejected,
-    reasoning_effort_rejected,
-    supports_reasoning_effort,
     traits,
 )
 from rune.agent.obs_cap import mask_stale_tool_messages
@@ -132,32 +122,7 @@ _VERIFY_ON_STOP_ENV = "RUNE_VERIFY_ON_STOP"
 _MSG_CACHE_ENV = "RUNE_MSG_CACHE"
 # Anthropic fast mode (research preview, Opus-class models only). Opt-in.
 _FAST_MODE_ENV = "RUNE_FAST_MODE"
-# Structured match on the bash command string (documented runner invocations,
-# not NL). Matching is per shell segment and anchored at the command head, so
-# "grep -r pytest" or "pip install pytest" never count as running tests.
-_TEST_HEAD_RE = None  # compiled lazily
-
-
-def _is_test_command(command: str) -> bool:
-    import re
-    global _TEST_HEAD_RE
-    if _TEST_HEAD_RE is None:
-        _TEST_HEAD_RE = re.compile(
-            r"^(pytest|py\.test|tox"
-            r"|make\s+test|go\s+test|cargo\s+test|yarn\s+test"
-            r"|npm\s+(run\s+)?test"
-            r"|python3?\s+-m\s+(pytest|unittest)"
-            r"|python3?\s+\S*runtests?\.py"
-            r"|\S*bin/test)\b"
-        )
-    for seg in re.split(r"[;&|]+", command or ""):
-        words = seg.strip().split()
-        while words and "=" in words[0]:  # skip leading env assignments
-            words = words[1:]
-        if words and _TEST_HEAD_RE.match(" ".join(words[:4])):
-            return True
-    return False
-
+from rune.agent.bash_parsing import is_test_command as _is_test_command
 
 _VERIFY_ON_STOP_MSG = (
     "You edited code this run but have not run any test since the last edit. "
@@ -272,6 +237,9 @@ async def _run_stop_check(
     if not targets:
         return None
     cmd = [*cmd, *targets]
+    from rune.agent.execution_journal import active_journal, record_check
+    if active_journal() is not None:
+        return await record_check({"command": cmd, "cwd": cwd}, lambda: _run_stop_check(cwd, edited, allowed))
     # The same recoverability layer a shell command gets: tests can write.
     try:
         from rune.safety.workspace_snapshot import take as _snap
@@ -990,8 +958,19 @@ class StreamResult:
         provider_extra: dict[str, str] | None = None,
         extra_headers: dict[str, str] | None = None,
         explore_budget: int = 0,
+        workspace_root: str = "",
+        request: str | None = None,
+        verification_callback: Callable[[str, bool, str], Any] | None = None,
     ) -> None:
         self._model = model
+        from rune.llm.reasoning import configured_reasoning_effort
+        self._reasoning_effort = configured_reasoning_effort(model)
+        self._verification_callback = verification_callback
+        self._workspace_root = os.path.abspath(os.path.expanduser(workspace_root or os.getcwd()))
+        self._request = request if request is not None else next(
+            (content_text(m.get("content", "")) for m in reversed(messages)
+             if m.get("role") == "user"), "",
+        )
         self._messages = list(messages)
         self._tool_schemas = tool_schemas
         self._tool_lookup = tool_lookup
@@ -1204,20 +1183,13 @@ class StreamResult:
             _traits = traits(self._model)
             if not _traits.temperature:
                 _acompletion_kwargs.pop("temperature", None)
-            # Reasoning depth for models that accept it; litellm passes it to
-            # OpenAI and maps it to Claude's adaptive thinking. Gate on
-            # litellm's own capability DB so it's right per model.
-            _effort: str | None = None
-            if supports_reasoning_effort(self._model) and not reasoning_effort_rejected(
-                self._model
-            ):
-                from rune.config import get_config
-                _effort = get_config().llm.reasoning_effort
-                if _effort:
-                    _acompletion_kwargs["reasoning_effort"] = _effort
+            _effort = self._reasoning_effort
+            if _effort is not None:
+                _acompletion_kwargs["reasoning_effort"] = _effort
             # Fast mode and deep reasoning pull opposite ways; don't ask for
             # speed:fast when the user asked for high effort.
-            if _env_flag(_FAST_MODE_ENV) and _traits.speed_param and _effort != "high":
+            if (_env_flag(_FAST_MODE_ENV) and _traits.speed_param
+                    and _effort not in {"high", "xhigh", "max"}):
                 _acompletion_kwargs["speed"] = "fast"
             if self._extra_headers:
                 _acompletion_kwargs["extra_headers"] = dict(self._extra_headers)
@@ -1254,9 +1226,9 @@ class StreamResult:
                 }
 
             _ll = _litellm()
-            self._stream = await _complete_dropping_rejected_params(
-                _ll, self._model, _acompletion_kwargs
-            )
+            from rune.llm.request_params import compatible_completion
+
+            self._stream = await compatible_completion(_ll.acompletion, _ll.BadRequestError, _acompletion_kwargs)
 
             text_this_turn = ""
             tool_calls_by_index: dict[int, dict[str, Any]] = {}
@@ -1528,14 +1500,13 @@ class StreamResult:
                     # nothing runnable.
                     _stop_check = None
                     if os.environ.get(_VOS_EXEC_ENV, "1") != "0":
-                        import os as _os2
                         _stop_check = await _run_stop_check(
-                            _os2.getcwd(),
+                            self._workspace_root,
                             getattr(self, "_vos_edited_paths", set()),
                         )
                     if _stop_check is not None:
                         _cmd, _out, _rc = _stop_check
-                        _MECH_CHECK.set("fail" if _rc != 0 else "pass")
+                        self._record_mechanical_check(_cmd, _out, _rc)
                         self._messages.append({
                             "role": "user", "content": (
                                 "You edited code and stopped without running "
@@ -1597,7 +1568,7 @@ class StreamResult:
                             "role": "assistant", "content": text_this_turn,
                         })
                     self._messages.append({
-                        "role": "user", "content": unresolved_stop_note(_missing),
+                        "role": "user", "content": unresolved_stop_note(_missing, self._request),
                     })
                     self._collected_text = ""
                     log.info("unresolved_artifact_nudge", missing=_missing)
@@ -1621,7 +1592,7 @@ class StreamResult:
                     from rune.agent.reobservation import observation_note
 
                     self._reobs_nudges = 1
-                    _note = observation_note(_reobs, os.getcwd())
+                    _note = observation_note(_reobs, self._workspace_root)
                     if _note:
                         if text_this_turn:
                             self._messages.append({
@@ -1767,15 +1738,19 @@ class StreamResult:
             getattr(self, "_vos_edited_paths", None)
             and os.environ.get(_VOS_EXEC_ENV, "1") != "0"
         ):
-            import os as _os4
             _final = await _run_stop_check(
-                _os4.getcwd(), self._vos_edited_paths,
+                self._workspace_root, self._vos_edited_paths,
                 getattr(self, "_vos_pretest_files", None),
             )
             if _final is not None:
                 _fcmd, _fout, _frc = _final
-                _MECH_CHECK.set("fail" if _frc != 0 else "pass")
+                self._record_mechanical_check(_fcmd, _fout, _frc)
                 log.info("final_check_executed", cmd=_fcmd, rc=_frc)
+
+    def _record_mechanical_check(self, command: str, output: str, returncode: int) -> None:
+        _MECH_CHECK.set("fail" if returncode else "pass")
+        if self._verification_callback is not None:
+            self._verification_callback(command, returncode == 0, output)
 
     _TOOL_GROUPS: dict[str, str] = {
         "browser_act": "browser", "browser_navigate": "browser",
@@ -1926,7 +1901,7 @@ class StreamResult:
                             from rune.agent.reobservation import bulk_targets
 
                             _bulk = bulk_targets(
-                                str(args.get("command", "")), os.getcwd()
+                                str(args.get("command", "")), self._workspace_root
                             )
                             if _bulk:
                                 if not hasattr(self, "_reobs_dirs"):
@@ -1936,7 +1911,7 @@ class StreamResult:
                             from rune.agent.reobservation import mutation_dir
 
                             _md = mutation_dir(
-                                str(args.get("path", "")), os.getcwd()
+                                str(args.get("path", "")), self._workspace_root
                             )
                             if _md:
                                 if not hasattr(self, "_reobs_removed"):
@@ -1958,13 +1933,11 @@ class StreamResult:
                                     # Which test files exist BEFORE the work
                                     # starts editing. Only these can answer
                                     # for it at the end.
-                                    import os as _os3
-
                                     from rune.agent.rejection_sampler import (
                                         _enumerate_test_files,
                                     )
                                     self._vos_pretest_files = set(
-                                        _enumerate_test_files(_os3.getcwd())
+                                        _enumerate_test_files(self._workspace_root)
                                     )
                                 self._vos_edited_paths.add(str(_vp))
                             elif not _vp:
@@ -1994,19 +1967,10 @@ class StreamResult:
         if not provenance_enabled():
             return None
         if getattr(self, "_artifact_ledger", None) is None:
-            # Every user turn, not just the first: memory and context get
-            # injected ahead of the goal, so "the first user message" is
-            # often not the request.
-            parts = [
-                m["content"] for m in self._messages
-                if isinstance(m, dict) and m.get("role") == "user"
-                and isinstance(m.get("content"), str)
-            ]
-            import os as _os
             self._artifact_ledger = ArtifactLedger.for_request(
-                "\n".join(parts), root=_os.getcwd()
+                self._request, root=self._workspace_root,
             )
-            self._artifact_request = "\n".join(parts)
+            self._artifact_request = self._request
             log.info("artifact_ledger_init",
                      referenced=sorted(self._artifact_ledger.referenced)[:10])
         return self._artifact_ledger
@@ -2070,11 +2034,17 @@ class StreamResult:
         )
         if roles:
             ledger.roles.update(roles)
+            for name, paths in ledger.requested_paths.items():
+                if roles.get(name) != "input":
+                    continue
+                for path in paths:
+                    if "/" in path and not ledger.resolve_path(path).exists():
+                        ledger.record_read(path, False)
             log.info("artifact_roles", roles=roles)
             from pathlib import Path as _FsPath
 
             from rune.agent.postconditions import derive
-            self._postconditions = derive(roles, _FsPath.cwd())
+            self._postconditions = derive(roles, _FsPath(self._workspace_root))
 
     def _revert_circumvented_writes(self) -> str:
         """Undo a refused artifact that appeared anyway.
@@ -2107,7 +2077,7 @@ class StreamResult:
             return ""
         notes: list[str] = []
         for name in sorted(candidates):
-            p = _PathT.cwd() / name
+            p = _PathT(ledger.observed_paths.get(name, self._workspace_root + "/" + name))
             if not p.exists():
                 continue
             try:
@@ -2132,7 +2102,7 @@ class StreamResult:
         from pathlib import Path as _FsPath
 
         from rune.agent.postconditions import check
-        return check(conds, _FsPath.cwd())
+        return check(conds, _FsPath(self._workspace_root))
 
     def _unresolved_artifacts(self) -> list[str]:
         ledger = self._ledger()
@@ -2152,13 +2122,14 @@ class StreamResult:
         if ledger is None:
             return None
         target = params.get("path") or params.get("file_path") or ""
-        if not target or path_exists(str(target)):
+        if not target or path_exists(str(target), self._workspace_root):
             return None
         if not ledger.is_phantom(str(target)):
             return None
         import os as _os
         _name = _os.path.basename(str(target))
         ledger.refused.add(_name)
+        ledger.observed_paths[_name] = str(ledger.resolve_path(str(target)))
         log.info("phantom_write_blocked", path=str(target))
         return phantom_write_error(_name)
 
@@ -2184,9 +2155,12 @@ class StreamResult:
         if name in _READ_TOOLS and target:
             # Whether the read found anything is a question about the
             # filesystem, not about how the tool phrased its answer.
-            ledger.record_read(str(target), path_exists(str(target)))
+            exists = path_exists(str(target), self._workspace_root)
+            ledger.record_read(
+                str(target), exists and not _looks_like_tool_failure(result), missing=not exists,
+            )
         if name in _WRITE_TOOLS and target:
-            ledger.record_write(str(target), path_exists(str(target)))
+            ledger.record_write(str(target), path_exists(str(target), self._workspace_root))
 
     async def _execute_tool(self, name: str, params: dict[str, Any]) -> str:
         """Execute a tool by name and return string result.
@@ -2246,6 +2220,16 @@ class StreamResult:
         # write tools, and the revert needs the classification to exist by
         # then. Self-guarded, so this costs one call per run at most.
         await self._classify_artifact_roles()
+        ledger = self._ledger()
+        if ledger is not None and ledger.known_absent & set(ledger.unresolved()):
+            target = params.get("path") or params.get("file_path") or params.get("directory")
+            if (target and name in self._READ_ONLY_TOOLS | {"document_read"}
+                    and not ledger._within_root(str(target))):
+                return (
+                    "BLOCKED: a required input is missing in the selected workspace. "
+                    "Do not search unrelated directories for a replacement. "
+                    "Report the missing input and ask the user for its location."
+                )
         _phantom = self._phantom_write_check(name, params)
         if _phantom:
             return _phantom
@@ -2356,68 +2340,6 @@ class StreamResult:
 
 # LiteLLMAgent - mirrors PydanticAI Agent interface
 
-# Tuning parameters a provider can refuse. Both are quality knobs: dropping one
-# costs depth, keeping one the model rejects costs the whole run.
-_DROPPABLE_PARAMS = (
-    ("temperature", is_temperature_error, note_temperature_rejected),
-    ("reasoning_effort", is_reasoning_effort_error, note_reasoning_effort_rejected),
-)
-
-
-async def _stream_via_responses(client: Any, kwargs: dict[str, Any]) -> Any:
-    """Run the request on /v1/responses, shaped like a chat-completions stream."""
-    from rune.agent.responses_bridge import (
-        ResponsesToChatStream,
-        build_responses_kwargs,
-    )
-
-    stream = await client.aresponses(**build_responses_kwargs(kwargs))
-    return ResponsesToChatStream(stream)
-
-
-async def _complete_dropping_rejected_params(
-    client: Any, model: str, kwargs: dict[str, Any]
-) -> Any:
-    """Call ``acompletion``, dropping any tuning parameter the model refuses.
-
-    A rejected parameter is deterministic — the identical request can only fail
-    again — so retrying it unchanged burns the failover budget and trips the
-    circuit breaker before a real recovery is ever tried. Each refusal is
-    recorded so later steps never send that parameter again. Loops because one
-    request can carry more than one parameter a model will not take, and an
-    unrecognised 400 is re-raised rather than swallowed.
-
-    *kwargs* is mutated: the caller's dict is the request that finally worked.
-    """
-    # Some models serve tool calls only on /v1/responses. Once one has said so,
-    # go straight there instead of spending a refusal to relearn it.
-    if needs_responses_api(model):
-        return await _stream_via_responses(client, kwargs)
-
-    # +2: one turn for the max_tokens rename, one for the final success.
-    for _ in range(len(_DROPPABLE_PARAMS) + 2):
-        try:
-            return await client.acompletion(**kwargs)
-        except client.BadRequestError as exc:
-            if is_max_tokens_rename_error(exc) and "max_tokens" in kwargs:
-                kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
-                log.warning("max_tokens_renamed", model=model)
-                continue
-            if is_responses_only_error(exc):
-                note_responses_only(model)
-                log.warning("responses_api_required", model=model)
-                return await _stream_via_responses(client, kwargs)
-            for param, matches, note in _DROPPABLE_PARAMS:
-                if param in kwargs and matches(exc):
-                    note(model)
-                    kwargs.pop(param, None)
-                    log.warning("param_unsupported_retry", model=model, param=param)
-                    break
-            else:
-                raise
-    raise RuntimeError("parameter-drop retries exhausted")
-
-
 class LiteLLMAgent:
     """Drop-in replacement for ``pydantic_ai.Agent``.
 
@@ -2476,6 +2398,8 @@ class LiteLLMAgent:
         *,
         message_history: list[Any] | None = None,
         usage_limits: Any = None,
+        workspace_root: str = "",
+        verification_callback: Callable[[str, bool, str], Any] | None = None,
     ) -> AsyncIterator[StreamResult]:
         """Start a streaming run. Mirrors ``Agent.run_stream()``."""
         # Build messages list
@@ -2540,6 +2464,9 @@ class LiteLLMAgent:
             provider_extra=self._provider_extra,
             extra_headers=self._extra_headers,
             explore_budget=self._explore_budget,
+            workspace_root=workspace_root,
+            request=goal,
+            verification_callback=verification_callback,
         )
         self._last_stream_result = stream_result
 

@@ -818,6 +818,10 @@ async def _run_agent(options: BenchRunOptions, attempt_dir: Path) -> None:
 
                 await post_process_agent_result(
                     PostProcessInput(
+                        verification=getattr(trace, "verification", None),
+                        reason=getattr(trace, "reason", ""),
+                        mech_check=getattr(trace, "mech_check", ""),
+                        evidence_gate=getattr(trace, "evidence_gate", None),
                         context=AgentContext(
                             goal=agent_instruction,
                             original_goal=options.instruction,

@@ -1,19 +1,18 @@
-"""Proactive Agent Bridge for RUNE.
-
-Connects the proactive engine's suggestions to actual agent execution,
-providing polling, retry logic, rate limiting, and execution history.
-"""
+"""Deliver proactive suggestions and manage their execution."""
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
 from rune.proactive.engine import ProactiveEngine
+from rune.proactive.execution_store import ExecutionStore
 from rune.proactive.feedback import FeedbackLearner
 from rune.proactive.types import Suggestion
 from rune.utils.logger import get_logger
@@ -27,12 +26,9 @@ class ExecutionStatus(StrEnum):
     SUCCESS = "success"
     FAILURE = "failure"
     SKIPPED = "skipped"
-    # Surfaced to the user instead of auto-executed (auto_execute off). The
-    # default proactive outcome: RUNE alerts/suggests, the user decides.
+    # Shown to the user; execution has not started.
     DELIVERED = "delivered"
-    # Ran and the agent claimed done, but no objective check could confirm it.
-    # Not a success: kept out of success-learning and autonomy promotion so a
-    # proactive action is never trusted on its self-report alone.
+    # Execution was claimed, but its outcome could not be confirmed.
     UNVERIFIED = "unverified"
 
 
@@ -60,34 +56,21 @@ class BridgeConfig:
     backoff_base_seconds: float = 2.0
     max_steps: int = 50
     timeout_ms: int = 180_000
-    # Off by default: proactive suggestions are DELIVERED for the user to act on,
-    # not auto-executed. Acting on its own (even when verified) is the most
-    # intrusive mode and is unwanted by default; opt in to let the bridge run
-    # suggestions itself. The HCI evidence is that semi-automation (suggest)
-    # beats full automation (act) on control, ownership, and trust.
+    # When disabled, suggestions need an explicit accept before execution.
     auto_execute: bool = False
+    # Enable only if replaying the whole goal cannot duplicate external actions.
+    retry_safe: bool = False
 
 
-# Type alias for agent factory: takes a goal string (and optional verification
-# commands that confirm the work) and returns a coroutine resolving to a result
-# dict. The factory should set ``verified`` in the result when those commands
-# passed, so the bridge can tell a confirmed success from a self-reported one.
+# Factories accept a goal and optionally verification commands. Results include
+# success and, when checked, verified or tests_passed.
 AgentFactory = Callable[..., Coroutine[Any, Any, dict[str, Any]]]
 
 
 # ProactiveAgentBridge
 
 class ProactiveAgentBridge:
-    """Bridge that polls the proactive engine and executes actionable suggestions.
-
-    The bridge runs a background polling loop that:
-    1. Asks the engine for new suggestions.
-    2. Filters by confidence threshold.
-    3. Rate-limits executions (max N per hour).
-    4. Creates an agent session via the agent factory for each suggestion.
-    5. Retries on failure with exponential backoff (max 2 retries).
-    6. Tracks execution history.
-    """
+    """Dispatch suggestions with shared execution claims and an hourly limit."""
 
     __slots__ = (
         "_engine",
@@ -99,6 +82,10 @@ class ProactiveAgentBridge:
         "_context",
         "_feedback_learner",
         "_autonomous_executor",
+        "_execution_store",
+        "_inflight",
+        "_delivered",
+        "_subscribed",
     )
 
     def __init__(
@@ -109,6 +96,7 @@ class ProactiveAgentBridge:
         context: dict[str, Any] | None = None,
         feedback_learner: FeedbackLearner | None = None,
         autonomous_executor: Any | None = None,
+        execution_store: ExecutionStore | None = None,
     ) -> None:
         self._engine = engine
         self._agent_factory = agent_factory
@@ -120,9 +108,16 @@ class ProactiveAgentBridge:
         self._feedback_learner = feedback_learner
         self._autonomous_executor = autonomous_executor
 
-        # Subscribe to engine events for auto-execution dispatch
-        self._engine.on("suggestion", self._on_suggestion_event)
-        self._engine.on("intervention", self._on_intervention_event)
+        self._execution_store = execution_store or ExecutionStore()
+        self._inflight: dict[str, asyncio.Task[ExecutionRecord]] = {}
+        self._delivered: dict[str, ExecutionRecord] = {}
+        self._subscribed = False
+        self._subscribe()
+
+    def _subscribe(self) -> None:
+        if not self._subscribed:
+            self._engine.on("suggestion", self._on_suggestion_event)
+            self._subscribed = True
 
     # Properties
 
@@ -146,6 +141,7 @@ class ProactiveAgentBridge:
             log.warning("bridge_already_running")
             return
 
+        self._subscribe()
         self._running = True
         self._poll_task = asyncio.create_task(self._poll_loop())
         log.info(
@@ -156,45 +152,22 @@ class ProactiveAgentBridge:
 
     def stop(self) -> None:
         """Stop polling and cancel the background task."""
-        if not self._running:
-            return
-
         self._running = False
         if self._poll_task and not self._poll_task.done():
             self._poll_task.cancel()
-            self._poll_task = None
-
-        # Unsubscribe from engine events
-        self._engine.off("suggestion", self._on_suggestion_event)
-        self._engine.off("intervention", self._on_intervention_event)
+        self._poll_task = None
+        for task in self._inflight.values():
+            task.cancel()
+        if self._subscribed:
+            self._engine.off("suggestion", self._on_suggestion_event)
+            self._subscribed = False
         log.info("bridge_stopped", history_size=len(self._history))
 
-    # Engine event handlers (auto-execution dispatch)
-
     def _on_suggestion_event(self, suggestions: list[Suggestion]) -> None:
-        """Handle suggestions emitted by the engine.
-
-        Dispatches high-confidence suggestions for automatic execution
-        if the bridge is running.
-        """
-        if not self._running:
-            return
-        for suggestion in suggestions:
-            if suggestion.confidence >= self._config.min_confidence:
-                if not self._is_rate_limited():
-                    asyncio.create_task(self.execute_suggestion(suggestion))
-
-    def _on_intervention_event(self, interventions: list[Suggestion]) -> None:
-        """Handle high-confidence intervention suggestions.
-
-        Interventions bypass the normal confidence threshold and are executed
-        immediately if the bridge is running.
-        """
-        if not self._running:
-            return
-        for suggestion in interventions:
-            if not self._is_rate_limited():
-                asyncio.create_task(self.execute_suggestion(suggestion))
+        if self._running:
+            for suggestion in suggestions:
+                if suggestion.confidence >= self._config.min_confidence:
+                    self._dispatch(suggestion)
 
     # Polling
 
@@ -235,31 +208,30 @@ class ProactiveAgentBridge:
     # Execution with retry
 
     async def _call_factory(self, goal: str, verification: list[str]) -> object:
-        """Call the agent factory, passing verification commands when it accepts
-        them; fall back to goal-only for factories with the older signature."""
+        """Pass verification commands when the factory supports the argument."""
+        import inspect
+
+        # Check the signature first to avoid retrying after an internal TypeError.
         try:
-            coro = self._agent_factory(goal, verification=verification)
-        except TypeError:
-            coro = self._agent_factory(goal)
+            signature = inspect.signature(self._agent_factory)
+        except (TypeError, ValueError):
+            signature = None
+        accepts_verification = True
+        if signature is not None:
+            try:
+                signature.bind(goal, verification=verification)
+            except TypeError:
+                accepts_verification = False
+        coro = self._agent_factory(goal, verification=verification) if accepts_verification else (
+            self._agent_factory(goal)
+        )
         return await coro
 
     def _outcome_from_result(self, result: object) -> ExecutionStatus:
-        """Classify a proactive execution from the agent result, conservatively.
+        """Require a success flag and a passing check to record SUCCESS.
 
-        Trusting ``result['success']`` (and defaulting it to True) is the
-        fabricated-success hole: a missing/ambiguous flag was being recorded as a
-        win. So:
-
-        - explicit ``success: True`` AND a verification signal we can trust
-          (``verified``/``tests_passed``) -> SUCCESS
-        - explicit ``success: True`` with no objective signal -> UNVERIFIED
-          (it ran and claims done, but nothing confirmed it; kept out of
-          success-learning and autonomy promotion)
-        - anything else (no claim, or explicit failure) -> FAILURE
-
-        Scoped verification (running the action's own tests via the goal loop) is
-        the next stage; this stage stops self-report alone from counting as a
-        verified success.
+        A truthy success flag without a passing check is UNVERIFIED.
+        Missing or false success flags, and non-dict results, are FAILURE.
         """
         if not isinstance(result, dict) or not bool(result.get("success", False)):
             return ExecutionStatus.FAILURE
@@ -273,30 +245,108 @@ class ProactiveAgentBridge:
     async def execute_suggestion(
         self, suggestion: Suggestion, *, force: bool = False
     ) -> ExecutionRecord:
-        """Execute a suggestion by creating an agent session.
+        """Deliver a suggestion, or execute it when auto_execute or force is set.
 
-        Gated by ``auto_execute``: unless the user opted into autonomous action
-        (or ``force=True`` from an explicit accept), the suggestion is DELIVERED
-        for the user to act on, not run. Acting unsolicited is the most intrusive
-        mode, so the default is to surface, not execute. Retries up to
-        ``max_retries`` times with exponential backoff on failure once executing.
+        Concurrent callers share the execution. Failed attempts are retried only
+        when retry_safe is enabled, up to max_retries with exponential backoff.
+        """
+        return await asyncio.shield(self._dispatch(suggestion, force=force))
+
+    @staticmethod
+    def _ready(record: ExecutionRecord) -> asyncio.Future[ExecutionRecord]:
+        future: asyncio.Future[ExecutionRecord] = asyncio.get_running_loop().create_future()
+        future.set_result(record)
+        return future
+
+    def _dispatch(
+        self, suggestion: Suggestion, *, force: bool = False
+    ) -> asyncio.Future[ExecutionRecord]:
+        """Claim execution before yielding so concurrent callers can join it.
+
+        Delivered suggestions remain eligible for a later explicit accept.
         """
         if not (self._config.auto_execute or force):
-            log.info("proactive_delivered", suggestion=suggestion.title)
-            return self._record(
-                suggestion, ExecutionStatus.DELIVERED, attempt=0,
-            )
+            record = self._delivered.get(suggestion.id)
+            if record is None:
+                record = self._record(suggestion, ExecutionStatus.DELIVERED, attempt=0)
+                self._delivered[suggestion.id] = record
+            return self._ready(record)
 
-        max_attempts = 1 + self._config.max_retries
+        fingerprint = hashlib.sha256(json.dumps(
+            [suggestion.title, suggestion.description, suggestion.verification],
+            ensure_ascii=False, separators=(",", ":"),
+        ).encode()).hexdigest()
+        decision = self._execution_store.claim(
+            suggestion.id, fingerprint, self._config.max_executions_per_hour
+        )
+        if decision == "rate_limited":
+            return self._ready(self._record(
+                suggestion, ExecutionStatus.SKIPPED, error="Hourly execution limit", attempt=0,
+            ))
+        if decision == "exists":
+            existing = self._execution_store.get(suggestion.id)
+            assert existing is not None
+            previous_fingerprint, saved = existing
+            if previous_fingerprint != fingerprint:
+                return self._ready(self._record(
+                    suggestion, ExecutionStatus.SKIPPED,
+                    error="Operation ID already belongs to different work", attempt=0,
+                ))
+            if suggestion.id in self._inflight:
+                return self._inflight[suggestion.id]
+            if saved is not None:
+                return self._ready(ExecutionRecord(
+                    suggestion_id=suggestion.id, suggestion_title=suggestion.title,
+                    status=ExecutionStatus(saved["status"]), error=saved.get("error"),
+                    attempt=saved["attempt"], duration_ms=saved["duration_ms"],
+                    timestamp=datetime.fromisoformat(saved["timestamp"]),
+                ))
+            return self._ready(ExecutionRecord(
+                suggestion_id=suggestion.id, suggestion_title=suggestion.title,
+                status=ExecutionStatus.UNVERIFIED, attempt=0,
+                error="An execution was already claimed. Inspect its outcome before retrying.",
+            ))
+
+        snapshot = replace(suggestion, verification=list(suggestion.verification))
+        task = asyncio.create_task(self._run_claimed(snapshot))
+        self._inflight[suggestion.id] = task
+
+        def finished(done: asyncio.Task[ExecutionRecord]) -> None:
+            self._inflight.pop(suggestion.id, None)
+            if not done.cancelled() and (error := done.exception()) is not None:
+                log.error("proactive_execution_error", suggestion_id=suggestion.id, error=str(error))
+
+        task.add_done_callback(finished)
+        return task
+
+    async def _run_claimed(self, suggestion: Suggestion) -> ExecutionRecord:
+        try:
+            record = await self._execute_attempts(suggestion)
+        except asyncio.CancelledError:
+            record = self._record(
+                suggestion, ExecutionStatus.UNVERIFIED,
+                error="Execution interrupted; inspect external state before retrying.",
+            )
+            self._save_record(record)
+            raise
+        self._save_record(record)
+        return record
+
+    def _save_record(self, record: ExecutionRecord) -> None:
+        self._execution_store.finish(record.suggestion_id, {
+            "status": record.status.value, "error": record.error,
+            "attempt": record.attempt, "duration_ms": record.duration_ms,
+            "timestamp": record.timestamp.isoformat(),
+        })
+
+    async def _execute_attempts(self, suggestion: Suggestion) -> ExecutionRecord:
+        max_attempts = 1 + (self._config.max_retries if self._config.retry_safe else 0)
         last_record: ExecutionRecord | None = None
 
         for attempt in range(1, max_attempts + 1):
             start = datetime.now(UTC)
             try:
                 goal = f"{suggestion.title}: {suggestion.description}"
-                # Pass the suggestion's own verification commands so the factory
-                # can run a scoped verified loop; factories that don't accept the
-                # kwarg still work (self-reported result -> UNVERIFIED).
                 result = await self._call_factory(goal, suggestion.verification)
 
                 duration = (datetime.now(UTC) - start).total_seconds() * 1000
@@ -312,7 +362,6 @@ class ProactiveAgentBridge:
                     self._engine.record_feedback(suggestion.id, True)
                     if self._feedback_learner is not None:
                         self._feedback_learner.record_feedback(suggestion, "accepted")
-                    # Reflexion: record successful task outcome
                     try:
                         from rune.proactive.reflexion import get_reflexion_learner
                         get_reflexion_learner().record_task_outcome({
@@ -330,9 +379,7 @@ class ProactiveAgentBridge:
                     )
                     return record
                 elif outcome == ExecutionStatus.UNVERIFIED:
-                    # Ran but could not be confirmed. Surface for review; do NOT
-                    # feed success-learning or autonomy promotion, and do not
-                    # retry (it executed; there is just nothing to verify against).
+                    # An unknown outcome must not trigger retries or success learning.
                     log.info("proactive_unverified", suggestion=suggestion.title)
                     return self._record(
                         suggestion,
@@ -364,7 +411,6 @@ class ProactiveAgentBridge:
                     duration_ms=duration,
                 )
 
-            # Exponential backoff before retry (unless this was the last attempt)
             if attempt < max_attempts:
                 backoff = self._config.backoff_base_seconds * (2 ** (attempt - 1))
                 log.debug(
@@ -375,12 +421,10 @@ class ProactiveAgentBridge:
                 )
                 await asyncio.sleep(backoff)
 
-        # All attempts exhausted
         self._engine.record_feedback(suggestion.id, False)
         if self._feedback_learner is not None:
             self._feedback_learner.record_feedback(suggestion, "dismissed")
 
-        # Reflexion learning: record rejection + failed outcome
         try:
             from rune.proactive.reflexion import get_reflexion_learner
             learner = get_reflexion_learner()
@@ -419,12 +463,7 @@ class ProactiveAgentBridge:
         duration_ms: float = 0.0,
         result_summary: str = "",
     ) -> None:
-        """Record a full execution to the AutonomousExecutor ledger.
-
-        Mirrors TS proactive-agent-bridge.ts lines 140-183 which builds
-        a 12-field ``AutonomousExecution`` and calls
-        ``autonomy.recordExecution(execution)``.
-        """
+        """Record the outcome for autonomy promotion and demotion decisions."""
         executor = self._autonomous_executor
         if executor is None:
             try:
@@ -481,16 +520,8 @@ class ProactiveAgentBridge:
 
     def _is_rate_limited(self) -> bool:
         """Check if we have exceeded the hourly execution limit."""
-        now = datetime.now(UTC)
-        one_hour_ago = now.timestamp() - 3600.0
-
-        recent_count = sum(
-            1
-            for r in self._history
-            if r.status == ExecutionStatus.SUCCESS
-            and r.timestamp.timestamp() > one_hour_ago
-        )
-        return recent_count >= self._config.max_executions_per_hour
+        since = datetime.now(UTC).timestamp() - 3600
+        return self._execution_store.started_since(since) >= self._config.max_executions_per_hour
 
     # History
 
@@ -551,6 +582,7 @@ def initialize_proactive_bridge(
     context: dict[str, Any] | None = None,
     feedback_learner: FeedbackLearner | None = None,
     autonomous_executor: Any | None = None,
+    execution_store: ExecutionStore | None = None,
 ) -> ProactiveAgentBridge:
     """Create or replace the singleton ProactiveAgentBridge.
 
@@ -572,12 +604,13 @@ def initialize_proactive_bridge(
         recording execution outcomes (feeds promotion/demotion logic).
     """
     global _bridge
-    if _bridge is not None and _bridge.is_running:
+    if _bridge is not None:
         _bridge.stop()
 
     _bridge = ProactiveAgentBridge(
         engine, agent_factory, config, context, feedback_learner,
         autonomous_executor=autonomous_executor,
+        execution_store=execution_store,
     )
     log.info("proactive_bridge_initialized")
     return _bridge

@@ -210,8 +210,61 @@ def _parsed_tokens(command: str) -> tuple[tuple[str, ...], ...]:
 
 # Command classification
 
+def is_test_command(command: str) -> bool:
+    """Recognize runner invocations, including interpreter and launcher options."""
+    import re
+    import shlex
+    from pathlib import PurePosixPath
+
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()")
+        lexer.whitespace_split = True
+        segments: list[list[str]] = [[]]
+        for token in lexer:
+            if token and all(char in ";&|()" for char in token):
+                segments.append([])
+            else:
+                segments[-1].append(token)
+    except ValueError:
+        return False
+    for words in segments:
+        while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
+            words = words[1:]
+        if words[:1] == ["env"]:
+            words = words[1:]
+            while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
+                words = words[1:]
+        words = list(strip_runner_prefix(tuple(words)))
+        if not words:
+            continue
+        head = PurePosixPath(words[0]).name
+        args = words[1:]
+        if re.fullmatch(r"python(?:[23](?:\.\d+)?)?", head):
+            while args and args[0].startswith("-") and args[0] != "-m":
+                flag = args.pop(0)
+                if flag in {"-c", "--help", "--version"}:
+                    args = []
+                    break
+                if flag in {"-W", "-X"} and args:
+                    args.pop(0)
+            if args[:2] in (["-m", "pytest"], ["-m", "unittest"]):
+                return True
+            if args and re.fullmatch(r"(?:.*/)?runtests?\.py", args[0]):
+                return True
+        elif head in {"pytest", "py.test", "tox", "vitest", "jest"} or (head == "node" and "--test" in args):
+            return True
+        elif head in {"make", "go", "cargo", "yarn", "pnpm", "npm"}:
+            if args[:1] == ["test"] or args[:2] == ["run", "test"]:
+                return True
+        elif words[0].endswith("bin/test"):
+            return True
+    return False
+
+
 def is_verification_command(command: str) -> bool:
     """Detect test / build / check / lint commands."""
+    if is_test_command(command):
+        return True
     for raw_tokens in _parsed_tokens(command):
         tokens = strip_runner_prefix(raw_tokens)
         first = tokens[0] if len(tokens) > 0 else ""
@@ -219,6 +272,11 @@ def is_verification_command(command: str) -> bool:
         third = tokens[2] if len(tokens) > 2 else ""
 
         if first in VERIFICATION_SINGLE_WORD_COMMANDS:
+            return True
+        if first in {"npm", "pnpm", "yarn"} and (
+            second in {"lint", "typecheck", "check"}
+            or (second == "run" and third in {"lint", "typecheck", "check"})
+        ):
             return True
         if first == "go" and second in ("test", "build"):
             return True

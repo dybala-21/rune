@@ -83,7 +83,8 @@ class _FakeAgentFactory:
 def anthropic_lane(monkeypatch):
     cfg = get_config()
     monkeypatch.setattr(cfg.llm, "active_provider", "anthropic")
-    monkeypatch.setattr(cfg.llm, "active_model", "claude-opus-4-6")
+    monkeypatch.setattr(cfg.llm, "active_model", None)
+    monkeypatch.setattr(cfg.llm.models.anthropic, "best", "claude-opus-4-6")
     monkeypatch.setattr(cfg.llm, "route_simple_queries", True)
     monkeypatch.setattr(cfg.llm, "simple_query_confidence", 0.8)
     return cfg
@@ -160,7 +161,7 @@ async def test_light_primary_upshift_still_lifts_round_cap(anthropic_lane, monke
     """On a light-primary session the upshift can't change the model,
     but it must still lift the 3-round cap."""
     cfg = get_config()
-    monkeypatch.setattr(cfg.llm, "active_model", cfg.llm.models.anthropic.fast)
+    monkeypatch.setattr(cfg.llm.models.anthropic, "best", cfg.llm.models.anthropic.fast)
     factory = _FakeAgentFactory(step_texts=["", "", ANSWER])
     loop = _loop()
 

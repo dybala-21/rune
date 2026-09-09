@@ -52,6 +52,7 @@ class DocumentCreateParams(BaseModel):
     path: str = Field(description="Output file path; extension should match format")
     format: DocFormat = Field(description="xlsx, pptx, docx, pdf, csv, or html")
     title: str = Field(default="", description="Document or first-slide title")
+    font_family: str = Field(default="", description="Optional locally installed font family for Word/PowerPoint")
     blocks: list[DocBlock] = Field(
         default_factory=list,
         description="Content blocks for pptx/docx/pdf/html",
@@ -86,7 +87,8 @@ def _missing_dep_error(fmt: str, mod: str) -> CapabilityResult:
 
 def _render_xlsx(p: Path, params: DocumentCreateParams) -> None:
     from openpyxl import Workbook
-    from openpyxl.styles import Font
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
 
     wb = Workbook()
     wb.remove(wb.active)
@@ -99,7 +101,19 @@ def _render_xlsx(p: Path, params: DocumentCreateParams) -> None:
             ws.append(list(row))
         if s.rows:
             for cell in ws[1]:
-                cell.font = Font(bold=True)
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = PatternFill("solid", fgColor="17365D")
+            ws.freeze_panes = "A2"
+            ws.auto_filter.ref = ws.dimensions
+            for column in ws.columns:
+                width = min(55, max(14, max(len(str(c.value or "")) * 1.6 for c in column) + 3))
+                ws.column_dimensions[get_column_letter(column[0].column)].width = width
+                for cell in column:
+                    cell.alignment = Alignment(vertical="center", wrap_text=True)
+                    if isinstance(cell.value, (int, float)):
+                        cell.number_format = "#,##0" if cell.value == int(cell.value) else "#,##0.######"
+            for row in ws:
+                ws.row_dimensions[row[0].row].height = 30
     wb.save(str(p))
 
 
@@ -112,8 +126,26 @@ def _render_csv(p: Path, params: DocumentCreateParams) -> None:
 
 def _render_docx(p: Path, params: DocumentCreateParams) -> None:
     from docx import Document
+    from docx.oxml.ns import qn
+    from docx.shared import RGBColor
 
     doc = Document()
+    for name in ("Normal", "Title", "Heading 1", "Heading 2", "Heading 3", "Heading 4", "List Bullet"):
+        style = doc.styles[name]
+        if params.font_family:
+            style.font.name = params.font_family
+            fonts = style.element.get_or_add_rPr().get_or_add_rFonts()
+            for attr in list(fonts.attrib):
+                if "theme" in attr.lower():
+                    del fonts.attrib[attr]
+            for attr in ("ascii", "hAnsi", "eastAsia", "cs"):
+                fonts.set(qn(f"w:{attr}"), params.font_family)
+        if name == "Title" or name.startswith("Heading"):
+            style.font.color.rgb = RGBColor(0, 0, 0)
+            ppr = style.element.pPr
+            if ppr is not None:
+                for border in list(ppr.findall(qn("w:pBdr"))):
+                    ppr.remove(border)
     if params.title:
         doc.add_heading(params.title, level=0)
     for b in params.blocks:
@@ -138,88 +170,56 @@ def _render_docx(p: Path, params: DocumentCreateParams) -> None:
 
 
 def _render_pptx(p: Path, params: DocumentCreateParams) -> None:
-    from pptx import Presentation
-    from pptx.util import Inches
+    from rune.capabilities.document_slides import render_slides
 
-    prs = Presentation()
-    if params.title:
-        slide = prs.slides.add_slide(prs.slide_layouts[0])
-        slide.shapes.title.text = params.title
-        if len(slide.placeholders) > 1:
-            slide.placeholders[1].text = ""
-
-    current_body = None
-
-    def _new_content_slide(heading: str) -> None:
-        nonlocal current_body
-        slide = prs.slides.add_slide(prs.slide_layouts[1])
-        slide.shapes.title.text = heading
-        current_body = slide.placeholders[1].text_frame
-        current_body.clear()
-
-    for b in params.blocks:
-        if b.type == "heading":
-            _new_content_slide(b.text)
-        elif b.type in ("paragraph", "bullets"):
-            if current_body is None:
-                _new_content_slide(params.title or "Slide")
-            texts = b.items if b.type == "bullets" else [b.text]
-            for txt in texts:
-                para = current_body.add_paragraph()
-                para.text = txt
-        elif b.type == "table" and b.rows:
-            slide = prs.slides.add_slide(prs.slide_layouts[5])
-            rows, cols = len(b.rows), max(len(r) for r in b.rows)
-            shape = slide.shapes.add_table(
-                rows, cols, Inches(0.5), Inches(1.5), Inches(9), Inches(0.4 * rows)
-            )
-            for i, r in enumerate(b.rows):
-                for j in range(cols):
-                    shape.table.cell(i, j).text = str(r[j]) if j < len(r) else ""
-            current_body = None
-    if not prs.slides:
-        prs.slides.add_slide(prs.slide_layouts[6])
-    prs.save(str(p))
+    render_slides(p, params)
 
 
 def _render_pdf(p: Path, params: DocumentCreateParams) -> None:
     from fpdf import FPDF
 
+    from rune.capabilities.document_fonts import pdf_font
+
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
-    # Core fonts are latin-1 only.
-    def _s(text: str) -> str:
-        return text.encode("latin-1", "replace").decode("latin-1")
+    texts = [params.title, "- "]
+    for b in params.blocks:
+        texts.extend([b.text, *b.items, *(str(c) for r in b.rows for c in r)])
+    font_path = pdf_font("\n".join(texts))
+    family = "RuneDocument" if font_path else "Helvetica"
+    if font_path:
+        pdf.add_font(family, fname=str(font_path))
+        pdf.add_font(family, style="B", fname=str(font_path))
+    pdf.set_font(family, size=11)
 
     # Return to the left margin so the next multi_cell has room.
     def _mcell(h: float, text: str) -> None:
-        pdf.multi_cell(0, h, text, new_x="LMARGIN", new_y="NEXT")
+        pdf.multi_cell(0, h, text, new_x="LMARGIN", new_y="NEXT", wrapmode="CHAR")
 
     if params.title:
-        pdf.set_font("Helvetica", "B", 20)
-        _mcell(10, _s(params.title))
+        pdf.set_font(family, "B", 20)
+        _mcell(10, params.title)
         pdf.ln(2)
     for b in params.blocks:
         if b.type == "heading":
-            pdf.set_font("Helvetica", "B", 16 - min(b.level, 3) * 2)
-            _mcell(8, _s(b.text))
+            pdf.set_font(family, "B", 16 - min(b.level, 3) * 2)
+            _mcell(8, b.text)
         elif b.type == "paragraph":
-            pdf.set_font("Helvetica", "", 11)
-            _mcell(6, _s(b.text))
+            pdf.set_font(family, "", 11)
+            _mcell(6, b.text)
         elif b.type == "bullets":
-            pdf.set_font("Helvetica", "", 11)
+            pdf.set_font(family, "", 11)
             for item in b.items:
-                _mcell(6, _s(f"- {item}"))
+                _mcell(6, f"- {item}")
         elif b.type == "table" and b.rows:
-            pdf.set_font("Helvetica", "", 10)
+            pdf.set_font(family, "", 10)
             cols = max(len(r) for r in b.rows)
-            w = pdf.epw / max(cols, 1)  # effective page width / columns
-            for r in b.rows:
-                for j in range(cols):
-                    cell = _s(str(r[j]) if j < len(r) else "")
-                    pdf.cell(w, 7, cell[:24], border=1)
-                pdf.ln(7)
+            with pdf.table(line_height=7, wrapmode="CHAR") as table:
+                for r in b.rows:
+                    row = table.row()
+                    for j in range(cols):
+                        row.cell(str(r[j]) if j < len(r) else "")
         elif b.type == "page_break":
             pdf.add_page()
         pdf.ln(1)
@@ -343,12 +343,17 @@ def _read_xlsx(p: Path) -> str:
 
 def _read_docx(p: Path) -> str:
     from docx import Document
+    from docx.text.paragraph import Paragraph
 
     doc = Document(str(p))
-    out = [para.text for para in doc.paragraphs if para.text]
-    for t in doc.tables:
-        for row in t.rows:
-            out.append("\t".join(c.text for c in row.cells))
+    out = []
+    for block in doc.iter_inner_content():
+        if isinstance(block, Paragraph):
+            if block.text:
+                out.append(block.text)
+        else:
+            for row in block.rows:
+                out.append("\t".join(c.text for c in row.cells))
     return "\n".join(out)
 
 
@@ -397,7 +402,7 @@ async def document_read(params: DocumentReadParams) -> CapabilityResult:
         return CapabilityResult(success=False, error="Empty file path")
 
     guardian = get_guardian()
-    validation = guardian.validate_file_path(params.path)
+    validation = guardian.validate_file_read_path(params.path)
     if not validation.allowed:
         return CapabilityResult(success=False, error=validation.reason)
 

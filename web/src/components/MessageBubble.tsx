@@ -5,6 +5,7 @@ import { CopyButton } from './CopyButton';
 
 interface MessageBubbleProps {
   message: ChatMessage;
+  sessionId?: string;
   /** True while this assistant message is still streaming in. */
   streaming?: boolean;
   /** Re-run the last turn; passed only to the latest assistant message. */
@@ -14,7 +15,7 @@ interface MessageBubbleProps {
 }
 
 // memo: only the streaming message's ref changes, so other bubbles skip re-parsing markdown.
-export const MessageBubble = memo(function MessageBubble({ message, streaming = false, onRegenerate, onEdit }: MessageBubbleProps) {
+export const MessageBubble = memo(function MessageBubble({ message, sessionId, streaming = false, onRegenerate, onEdit }: MessageBubbleProps) {
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
   const [editing, setEditing] = useState(false);
@@ -127,7 +128,7 @@ export const MessageBubble = memo(function MessageBubble({ message, streaming = 
             wordBreak: 'break-word',
           }}
         >
-          <Markdown content={message.content} />
+          <Markdown content={message.content} sessionId={sessionId} />
         </div>
         {!streaming && (
           <div className="msg-actions" style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 10 }}>

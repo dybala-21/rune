@@ -26,6 +26,7 @@ FailoverReason = Literal[
     "timeout",
     "context_overflow",
     "format",
+    "invalid_request",
     "bad_request",
     "unknown",
 ]
@@ -176,6 +177,10 @@ def classify_error(error: Exception | str) -> FailoverReason:
     if any(k in msg for k in ("timeout", "timed out", "deadline", "504", "408")):
         return "timeout"
 
+    if (any(k in msg for k in ("unsupported parameter", "unsupported value", "unknown parameter", "invalid parameter"))
+            or ("/v1/chat/completions" in msg and "not supported" in msg)):
+        return "invalid_request"
+
     if any(k in msg for k in (
         "context", "token limit", "max_tokens", "too long",
         "context_length_exceeded", "maximum context",
@@ -207,6 +212,8 @@ def determine_strategy(
 ) -> FailoverStrategy:
     """Determine the failover strategy based on reason and current state."""
     match reason:
+        case "invalid_request":
+            return FailoverStrategy(action="abort")
         case "auth" | "billing":
             # Non-recoverable with retry - switch profile immediately
             return _find_next_profile(current_profile, profiles)

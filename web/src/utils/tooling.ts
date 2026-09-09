@@ -1,4 +1,5 @@
 import type { ActivitySummary, ToolCall, TrustInfo } from '../types';
+import { describeTrust } from './trust';
 
 /**
  * Canonical tool name: wire names use underscores (`file_read`), and the shell
@@ -104,19 +105,12 @@ export function inferActivityMode(toolCalls: ToolCall[]): ActivityMode {
   return 'research';
 }
 
-/**
- * The single run-verdict rule shared by every surface (status pip, workbench,
- * chat card) so they never disagree. Prefer the real trust result; count a
- * "verified" only when an Evidence Gate check actually ran — a plain completion
- * with no check must not claim verified, so it falls back to the tool-activity
- * heuristic. Returns null when there's no verdict to show yet.
- */
+/** Completion status for compact indicators; passing checks are shown separately. */
 export function computeRunVerdict(
   trust: TrustInfo | null | undefined,
   activitySummary: ActivitySummary | null | undefined,
 ): boolean | null {
-  if (trust && !trust.verified) return false;
-  if (trust?.verified && trust.evidenceGate?.hasCheck) return true;
+  if (trust) return describeTrust(trust).ok;
   return activitySummary ? activitySummary.success : null;
 }
 

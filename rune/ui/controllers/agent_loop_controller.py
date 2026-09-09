@@ -1039,8 +1039,12 @@ class AgentLoopController:
                         post_process_agent_result,
                     )
                     learned = await post_process_agent_result(PostProcessInput(
+                        verification=getattr(trace, "verification", None),
+                        reason=getattr(trace, "reason", ""),
+                        mech_check=getattr(trace, "mech_check", ""),
+                        evidence_gate=getattr(trace, "evidence_gate", None),
                         context=ctx,
-                        success=getattr(trace, "success", True),
+                        success=getattr(trace, "reason", "") in ("completed", "verified"),
                         answer=answer,
                     ))
                     from rune.agent.memory_bridge import format_learned_rules_note

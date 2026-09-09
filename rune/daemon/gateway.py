@@ -943,20 +943,18 @@ class ChannelGateway:
             loop.set_approval_callback(_gw_approval_cb)
 
             # Wire ask_user callback via gateway's channel pipeline
+            from rune.capabilities.ask_user import AskUserParams, UserResponse, user_response
+
             async def _gw_ask_user_cb(
-                question: str, options: list[str] | None = None
-            ) -> str:
-                try:
-                    return await self.ask_user(
-                        session_key,
-                        channel_name,
-                        message.sender_id,
-                        question,
-                        options=options,
-                    )
-                except Exception as exc:
-                    log.warning("gateway_ask_user_cb_error", error=str(exc)[:100])
-                    return ""
+                params: AskUserParams,
+            ) -> UserResponse:
+                labels = [option.label for option in params.options or []]
+                answer = await self.ask_user(
+                    session_key, channel_name, message.sender_id,
+                    params.question, options=labels or None,
+                )
+                index = labels.index(answer) if answer in labels else None
+                return user_response(params, answer, index)
 
             loop.set_ask_user_callback(_gw_ask_user_cb)
 
@@ -1037,6 +1035,10 @@ class ChannelGateway:
             # 6. Post-process (memory persistence)
             try:
                 learned = await post_process_agent_result(PostProcessInput(
+                    verification=getattr(trace, "verification", None),
+                    reason=getattr(trace, "reason", ""),
+                    mech_check=getattr(trace, "mech_check", ""),
+                    evidence_gate=getattr(trace, "evidence_gate", None),
                     context=agent_ctx,
                     success=trace.reason == "completed",
                     answer=response,

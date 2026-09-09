@@ -30,7 +30,7 @@ def _classification(goal_type: str, confidence: float) -> ClassificationResult:
 def anthropic_session(monkeypatch):
     cfg = get_config()
     monkeypatch.setattr(cfg.llm, "active_provider", "anthropic")
-    monkeypatch.setattr(cfg.llm, "active_model", "claude-opus-4-6")
+    monkeypatch.setattr(cfg.llm, "active_model", None)
     monkeypatch.setattr(cfg.llm, "route_simple_queries", True)
     monkeypatch.setattr(cfg.llm, "simple_query_tier", "fast")
     monkeypatch.setattr(cfg.llm, "simple_query_confidence", 0.8)
@@ -46,6 +46,15 @@ def test_simple_web_goal_enters_lane_with_fast_model(anthropic_session):
 
 def test_chat_goal_enters_lane(anthropic_session):
     assert decide_fast_lane(_classification("chat", 0.95)).active
+
+
+@pytest.mark.parametrize('provider', ['anthropic', None])
+def test_explicit_model_is_never_downshifted(anthropic_session, monkeypatch, provider):
+    monkeypatch.setattr(anthropic_session.llm, 'active_provider', provider)
+    monkeypatch.setattr(anthropic_session.llm, 'active_model', 'claude-opus-5')
+    for kind in ('chat', 'web'):
+        decision = decide_fast_lane(_classification(kind, 0.99))
+        assert not decision.active and decision.reason == 'explicit_model'
 
 
 @pytest.mark.parametrize(
