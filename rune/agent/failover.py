@@ -27,6 +27,7 @@ FailoverReason = Literal[
     "context_overflow",
     "format",
     "invalid_request",
+    "bad_request",
     "unknown",
 ]
 
@@ -189,6 +190,15 @@ def classify_error(error: Exception | str) -> FailoverReason:
     if any(k in msg for k in ("format", "parse", "json", "invalid response", "schema")):
         return "format"
 
+    # A rejected request is deterministic: the identical call can only fail the
+    # same way, and retrying it three times is what burned the circuit breaker
+    # before a profile switch was ever tried. Kept below the branches that own
+    # 401/402/429 so it cannot shadow them.
+    if any(k in msg for k in ("400", "404", "422", "badrequest", "bad request")) and any(
+        k in msg for k in ("not supported", "unsupported", "does not exist", "invalid")
+    ):
+        return "bad_request"
+
     return "unknown"
 
 
@@ -234,6 +244,11 @@ def determine_strategy(
         case "format":
             if retries_left > 0:
                 return FailoverStrategy(action="retry", delay=0.5)
+            return _find_next_profile(current_profile, profiles)
+
+        case "bad_request":
+            # Nothing to wait for: another profile is the only thing that can
+            # answer differently.
             return _find_next_profile(current_profile, profiles)
 
         case "unknown":

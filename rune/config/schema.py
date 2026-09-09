@@ -13,17 +13,20 @@ from rune.llm.reasoning import ReasoningEffort, reasoning_model_key
 # LLM Configuration
 
 class ModelsByTier(BaseModel):
-    best: str = "gpt-5.4"
+    # Frontier defaults. Every id here answered a tool call end to end through
+    # the adapter, which is the bar that matters: an agent step always carries
+    # tools, and the newest OpenAI models refuse them on chat/completions.
+    best: str = "gpt-6-astra"
     coding: str = "gpt-5.3-codex"
-    fast: str = "gpt-5-mini"
+    fast: str = "gpt-5.4-mini"
 
 
 class ProviderModels(BaseModel):
     openai: ModelsByTier = Field(default_factory=lambda: ModelsByTier())
     anthropic: ModelsByTier = Field(
         default_factory=lambda: ModelsByTier(
-            best="claude-sonnet-4-5-20250929",
-            coding="claude-sonnet-4-5-20250929",
+            best="claude-opus-5",
+            coding="claude-sonnet-5",
             fast="claude-haiku-4-5-20251001",
         )
     )
@@ -36,9 +39,9 @@ class ProviderModels(BaseModel):
     )
     azure: ModelsByTier = Field(
         default_factory=lambda: ModelsByTier(
-            best="gpt-5.4",
+            best="gpt-6-astra",
             coding="gpt-5.3-codex",
-            fast="gpt-5-mini",
+            fast="gpt-5.4-mini",
         )
     )
     # A recommendation and a last resort, not the routing decision. At run
@@ -60,7 +63,7 @@ class LLMConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     default_provider: str = Field(default="openai", alias="defaultProvider")
-    default_model: str = Field(default="gpt-5.4", alias="defaultModel")
+    default_model: str = Field(default="gpt-6-astra", alias="defaultModel")
     active_provider: str | None = Field(default=None, alias="activeProvider")
     active_model: str | None = Field(default=None, alias="activeModel")
     # Read the old global setting once, attaching it to the previously selected model.

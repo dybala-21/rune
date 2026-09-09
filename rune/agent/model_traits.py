@@ -59,6 +59,15 @@ _STATIC: tuple[tuple[tuple[str, ...], ModelTraits], ...] = (
 # temperature while claude-opus-4-6 accepts it.
 _TEMPERATURE_REJECTED: set[str] = set()
 _COMPLETION_TOKENS_REQUIRED: set[str] = set()
+# Models that reason and take tools, but refuse both in one request. litellm's
+# capability DB answers "does it reason", which is true and not the question, so
+# this is learned from the provider's own 400 rather than declared up front.
+_REASONING_EFFORT_REJECTED: set[str] = set()
+# Models that will not take tools on chat/completions. Measured live:
+# gpt-6-astra and the gpt-5.6 family refuse them there whatever
+# reasoning_effort says, and gpt-5.3-codex is not served on that endpoint.
+# Learned from the provider's refusal, not pinned to a list of names.
+_RESPONSES_ONLY: set[str] = set()
 
 
 def traits(model: str) -> ModelTraits:
@@ -114,6 +123,65 @@ def note_temperature_rejected(model: str) -> None:
 
 def note_completion_tokens_required(model: str) -> None:
     _COMPLETION_TOKENS_REQUIRED.add(model)
+
+
+def note_reasoning_effort_rejected(model: str) -> None:
+    """Record that *model* refused reasoning_effort alongside tools."""
+    _REASONING_EFFORT_REJECTED.add(model)
+
+
+def reasoning_effort_rejected(model: str) -> bool:
+    """Whether *model* has refused reasoning_effort in this process.
+
+    Deliberately not cached, and deliberately not folded into
+    :func:`supports_reasoning_effort`: that one is ``lru_cache``d, so a True
+    answered before the first rejection would mask everything learned after it.
+    """
+    return model in _REASONING_EFFORT_REJECTED
+
+
+def note_responses_only(model: str) -> None:
+    """Record that *model* needs /v1/responses for a request carrying tools."""
+    _RESPONSES_ONLY.add(model)
+
+
+def needs_responses_api(model: str) -> bool:
+    """Whether *model* has refused tools on chat/completions in this process."""
+    return model in _RESPONSES_ONLY
+
+
+def is_responses_only_error(exc: Exception) -> bool:
+    """Whether a BadRequest is the endpoint pointing at /v1/responses.
+
+    Two distinct refusals mean the same thing: "function tools ... are not
+    supported ... use /v1/responses", and "this model is not supported in the
+    v1/chat/completions endpoint".
+    """
+    m = str(exc).lower()
+    if "v1/responses" in m or "/responses" in m:
+        return True
+    return "chat/completions" in m and (
+        "not supported" in m or "not a chat model" in m
+    )
+
+
+def is_max_tokens_rename_error(exc: Exception) -> bool:
+    """Whether the provider is asking for max_completion_tokens instead.
+
+    Newer OpenAI models refuse the older spelling outright, and that refusal
+    arrives before any complaint about tools — so without handling it the run
+    never gets far enough to learn the model needs /v1/responses.
+    """
+    m = str(exc).lower()
+    return "max_tokens" in m and "max_completion_tokens" in m
+
+
+def is_reasoning_effort_error(exc: Exception) -> bool:
+    """Whether a BadRequest is about reasoning_effort being unacceptable."""
+    m = str(exc).lower()
+    return "reasoning_effort" in m and (
+        "support" in m or "deprecat" in m or "invalid" in m
+    )
 
 
 def is_temperature_error(exc: Exception) -> bool:

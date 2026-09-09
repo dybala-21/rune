@@ -80,6 +80,12 @@ export interface TrustInfo {
     artifacts: Array<{ path: string; sha256: string }>;
     checks: Record<'native_content' | 'source_metrics' | 'visual_layout' | 'task_acceptance', string>;
   }>;
+  /** Where the run worked, when that was not only the workspace. Not a failure:
+      the snapshot simply cannot undo anything outside it. */
+  workspaceWarning?: string;
+  /** Figures the answer states that no retrieved page mentions. Not a verdict:
+      a number can be derived or rounded. */
+  unsourcedNumbers?: string[];
   evidenceGate?: {
     hasCheck: boolean;
     lastVerdict: string;

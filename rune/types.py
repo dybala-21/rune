@@ -255,6 +255,14 @@ class CompletionTrace:
     artifact_receipts: list[dict[str, Any]] = field(default_factory=list)
     table_acceptance: dict[str, Any] | None = None
     completion_check: dict[str, str] | None = None
+    # Commands ran outside the declared workspace. Not a failure — temp dirs
+    # and worktrees are routine — but the workspace snapshot cannot roll back
+    # anything outside it, so the run should say where it worked.
+    workspace_warning: str = ""
+    # Quantities the answer asserts that appear in nothing the run retrieved.
+    # Not a verdict: a figure can be derived or rounded. A number the sources
+    # never mention is the shape of a fabricated statistic.
+    unsourced_numbers: list[str] = field(default_factory=list)
 
 
 # LLM

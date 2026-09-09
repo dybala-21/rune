@@ -264,7 +264,13 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
       glyph: <span>{view.glyph}</span>,
       title: view.title,
       note: view.note,
-      details: trust.escalationHint ? [trust.escalationHint] : undefined,
+      details: [
+        ...(trust.escalationHint ? [trust.escalationHint] : []),
+        ...(trust.unsourcedNumbers?.length
+          ? [`Figures not found in retrieved sources: ${trust.unsourcedNumbers.slice(0, 5).join(', ')}. These may be calculated or rounded.`]
+          : []),
+        ...(trust.workspaceWarning?.trim() ? [trust.workspaceWarning.trim()] : []),
+      ],
       showEvidence: Boolean(evidence),
     };
   } else {

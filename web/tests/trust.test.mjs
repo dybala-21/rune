@@ -15,6 +15,9 @@ const gate = last_verdict => ({ has_check: true, last_verdict, verdict_counts: {
 const cases = [
   { name: 'table differences override passing command checks', trace: { mech_check: 'pass', table_acceptance: { required: true, status: 'fail', contracts: [], results: [], unverified: [] } }, title: 'Checks failed', tone: 'warning', ok: false, card: true },
   { name: 'web lookup completed without a checker', trace: {}, title: 'Completed', tone: 'neutral', ok: true, card: false },
+  { name: 'source and workspace warnings leave completion intact', trace: { unsourced_numbers: ['22', '15'], workspace_warning: 'Execution roots not under workspace: /tmp/review' }, title: 'Completed', tone: 'neutral', ok: true, card: false },
+  { name: 'source warnings preserve passing checks', trace: { evidence_gate: gate('pass'), unsourced_numbers: ['22'] }, title: 'Checks passed', tone: 'success', ok: true, card: true },
+  { name: 'workspace warning remains visible after failure', trace: { reason: 'error: timeout', workspace_warning: 'Execution roots not under workspace: /tmp/review' }, title: 'Run failed', tone: 'danger', ok: false, card: true },
   { name: 'ordinary chat', trace: { verification: { required: false, status: 'unverified' } }, title: 'Completed', tone: 'neutral', ok: true, card: false },
   { name: 'task check passed', trace: { evidence_gate: gate('pass') }, title: 'Checks passed', tone: 'success', ok: true, card: true },
   { name: 'passing check without historical counts', trace: { evidence_gate: { has_check: true, last_verdict: 'pass' } }, title: 'Checks passed', tone: 'success', ok: true, card: true },
@@ -151,6 +154,11 @@ cases.forEach((c, i) => test(c.name, () => {
   }));
   if (c.ok !== null) assert.ok(progress.includes(c.title), progress);
   assert.ok(!progress.includes('Not verified'));
+  if (trust.workspaceWarning) assert.ok(progress.includes(trust.workspaceWarning), progress);
+  if (trust.unsourcedNumbers?.length) {
+    assert.ok(progress.includes('Figures not found in retrieved sources'), progress);
+    assert.ok(progress.includes(trust.unsourcedNumbers.join(', ')), progress);
+  }
   if (trust.completionCheck?.detail) {
     assert.ok(card.includes('show evidence'), card);
     assert.ok(progress.includes('show evidence'), progress);

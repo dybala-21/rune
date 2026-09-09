@@ -79,6 +79,8 @@ def build_trust_payload(trace: Any) -> dict[str, Any]:
         if reason in ("completed_gate_warnings", "max_gate_blocked") else None,
         "artifactReceipts": getattr(trace, "artifact_receipts", []),
         "tableAcceptance": getattr(trace, "table_acceptance", None),
+        "workspaceWarning": getattr(trace, "workspace_warning", "") or "",
+        "unsourcedNumbers": list(getattr(trace, "unsourced_numbers", None) or []),
         "canEscalate": can_escalate(reason),
         "honestNote": honest_failure_note(reason, run_was_verifiable(trace)) or "",
         "escalationHint": "",

@@ -170,45 +170,6 @@ class TestDeepResearchPipeline:
         result2 = evaluate_completion_gate(inp)
         assert "R14_GROUNDING" not in result2.missing_requirement_ids
 
-    def test_module_coverage_gate(self) -> None:
-        """Research that requires module coverage should validate it."""
-        inp = CompletionGateInput(
-            intent_resolved=True,
-            tool_requirement="read",
-            output_expectation="text",
-            evidence=ExecutionEvidenceSnapshot(
-                reads=10, unique_file_reads=3, file_reads=10,
-            ),
-            module_count=12,
-            min_module_coverage=8,
-            answer_length=500,
-        )
-        result = evaluate_completion_gate(inp)
-        assert "R16_MODULE_COVERAGE" in result.missing_requirement_ids
-
-        inp.evidence.unique_file_reads = 10
-        result2 = evaluate_completion_gate(inp)
-        assert "R16_MODULE_COVERAGE" not in result2.missing_requirement_ids
-
-    def test_deep_analysis_tools_gate(self) -> None:
-        """Deep research requiring code graph / impact analysis tools."""
-        inp = CompletionGateInput(
-            intent_resolved=True,
-            tool_requirement="read",
-            output_expectation="text",
-            evidence=ExecutionEvidenceSnapshot(reads=5, unique_file_reads=5),
-            deep_analysis_tools=1,
-            min_deep_analysis_tools=3,
-            answer_length=500,
-        )
-        result = evaluate_completion_gate(inp)
-        assert "R17_DEEP_ANALYSIS" in result.missing_requirement_ids
-
-        inp.deep_analysis_tools = 5
-        result2 = evaluate_completion_gate(inp)
-        assert "R17_DEEP_ANALYSIS" not in result2.missing_requirement_ids
-
-
 # =========================================================================
 # 2. Code Refactoring Pipeline
 # =========================================================================
@@ -1463,8 +1424,14 @@ class TestComplexMultiSignalScenarios:
             assert key in _MAX_OUTPUT_TOKENS_BY_INTENT, \
                 f"Missing max_output for intent: {key}"
 
-    def test_all_19_requirements_evaluated(self) -> None:
-        """The gate should evaluate all 19 requirements even when some are skipped."""
+    def test_all_requirements_evaluated(self) -> None:
+        """Every requirement appears in the trace, evaluated or skipped.
+
+        Note what this does *not* prove: it hands the gate every input by hand.
+        Production (loop.py) passes a subset, so requirements gated on the rest
+        report "done" without checking anything. R16/R17 were removed for that;
+        R09-R12 remain in that state.
+        """
         gate_input = CompletionGateInput(
             intent_resolved=True,
             tool_requirement="write",
@@ -1473,9 +1440,6 @@ class TestComplexMultiSignalScenarios:
             requires_code_write_artifact=True,
             grounding_requirement=True,
             analysis_depth_min_reads=3,
-            module_count=5,
-            min_module_coverage=3,
-            min_deep_analysis_tools=2,
             min_web_searches=1,
             min_web_fetches=1,
             evidence=ExecutionEvidenceSnapshot(
@@ -1485,7 +1449,6 @@ class TestComplexMultiSignalScenarios:
             ),
             changed_files_count=5,
             structured_write_count=5,
-            deep_analysis_tools=3,
             service_task=ServiceTaskEvidenceSnapshot(starts=1, runtime_probes=1, cleanups=1),
             workspace=WorkspaceAlignmentSnapshot(
                 workspace_root="/project",
@@ -1494,7 +1457,7 @@ class TestComplexMultiSignalScenarios:
             answer_length=500,
         )
         result = evaluate_completion_gate(gate_input)
-        # All 19 requirements should be evaluated (R01 through R19).
-        assert len(result.requirements) == 19
+        # Every requirement in the set appears in the trace.
+        assert len(result.requirements) == 17
         assert result.outcome == "verified"
         assert result.success

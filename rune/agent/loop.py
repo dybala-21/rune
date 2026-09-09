@@ -52,6 +52,8 @@ from rune.agent.cognitive_cache import SessionToolCache
 from rune.agent.completion_gate import (
     CompletionGateInput,
     ExecutionEvidenceSnapshot,
+    ServiceTaskEvidenceSnapshot,
+    WorkspaceAlignmentSnapshot,
     evaluate_completion_gate,
 )
 from rune.agent.failover import FailoverManager, classify_error
@@ -62,6 +64,7 @@ from rune.agent.output_integrity import (
     build_nudge,
     fabricated_citations,
     output_integrity_enabled,
+    unsourced_numbers,
 )
 from rune.agent.prompts import build_system_prompt
 from rune.agent.requirement_gate import RequirementGate, requirement_gate_enabled
@@ -582,6 +585,72 @@ def _structured_by_extension(ext: str) -> bool | None:
     return None
 
 
+@dataclass(slots=True)
+class ExecutionRoots:
+    """Directories the run explicitly executed commands in.
+
+    Only an explicit ``cwd`` is recorded. A command without one runs in the
+    workspace by definition, so it cannot be misaligned and would only dilute
+    the signal.
+    """
+
+    roots: list[str] = field(default_factory=list)
+
+    def observe(self, params: Any) -> None:
+        if not isinstance(params, dict):
+            return
+        cwd = params.get("cwd")
+        if not cwd:
+            return
+        cwd = str(cwd)
+        if cwd not in self.roots:
+            self.roots.append(cwd)
+
+
+@dataclass(slots=True)
+class ServiceEvidence:
+    """Counts the managed-service lifecycle phases a run actually completed.
+
+    ``_execute_managed_service`` reports each phase in the tool result's
+    metadata; nothing read it, so the completion gate's three service
+    requirements judged a lifecycle no one had observed. Only a run that used
+    managed_service mode registers here — ordinary shell calls leave
+    ``observed`` False so the gate does not treat them as service tasks.
+    """
+
+    observed: bool = False
+    starts: int = 0
+    runtime_probes: int = 0
+    cleanups: int = 0
+
+    def observe(self, metadata: Any) -> None:
+        """Record one tool result, ignoring anything that is not a service."""
+        if not isinstance(metadata, dict):
+            return
+        if metadata.get("mode") != "managed_service":
+            return
+
+        self.observed = True
+        self.starts += 1
+        # Readiness and smoke are both probes against the running service.
+        # Readiness must pass for the call to succeed at all, so a healthy run
+        # always has at least one; a service that never came up has none.
+        for phase in ("readiness", "smoke"):
+            stage = metadata.get(phase)
+            if isinstance(stage, dict) and stage.get("success"):
+                self.runtime_probes += 1
+        teardown = metadata.get("teardown")
+        if isinstance(teardown, dict) and teardown.get("success"):
+            self.cleanups += 1
+
+    def as_snapshot_kwargs(self) -> dict[str, int]:
+        return {
+            "starts": self.starts,
+            "runtime_probes": self.runtime_probes,
+            "cleanups": self.cleanups,
+        }
+
+
 class NativeAgentLoop(EventEmitter):
     """Core agent execution loop using PydanticAI.
 
@@ -636,6 +705,8 @@ class NativeAgentLoop(EventEmitter):
         self._artifact_receipts: list[dict[str, Any]] = []
         self._table_acceptance = None
         self._structured_writes: int = 0
+        self._service_evidence = ServiceEvidence()
+        self._execution_roots = ExecutionRoots()
         self._budget_upgraded_for_code: bool = False
         self._unverified_completion_blocks: int = 0
         # Activity phase for adaptive observation windows
@@ -667,6 +738,7 @@ class NativeAgentLoop(EventEmitter):
         self._gate_blocked_count: int = 0
         self._completion_check: dict[str, str] | None = None
         self._output_integrity_fired: int = 0
+        self._unsourced_numbers: list[str] = []
         self._citation_support_fired: int = 0
         self._evidence_gate: Any = None
 
@@ -712,6 +784,8 @@ class NativeAgentLoop(EventEmitter):
         self._artifact_receipts = []
         self._table_acceptance = None
         self._structured_writes = 0
+        self._service_evidence = ServiceEvidence()
+        self._execution_roots = ExecutionRoots()
         self._budget_upgraded_for_code = False
         self._unverified_completion_blocks = 0
         self._activity_phase = "exploration"
@@ -729,6 +803,7 @@ class NativeAgentLoop(EventEmitter):
         self._gate_blocked_count = 0
         self._completion_check = None
         self._output_integrity_fired = 0
+        self._unsourced_numbers = []
         self._citation_support_fired = 0
         # Evidence Gate (benchmark output-correctness verification; opt-in)
         self._evidence_gate = None
@@ -880,19 +955,34 @@ class NativeAgentLoop(EventEmitter):
     def _output_integrity_gate(
         self, messages: list[Any], blocked_count: int
     ) -> tuple[bool, list[Any], int]:
-        """Deterministic citation-integrity check (opt-in, model-free). Flags URLs
-        cited in the output that were never retrieved. Skips when disabled or when
-        retrieval cannot be determined."""
+        """Deterministic citation-integrity check (model-free, on by default).
+
+        Two passes over what the run retrieved: URLs the answer cites but never
+        fetched, and quantities the answer asserts that appear in nothing it
+        found. The second is why a run can report "SanDisk +22%" from articles
+        saying 8% — the grounding requirement asks whether a search happened,
+        not whether the answer follows from it.
+
+        Numbers are recorded, never blocked: a figure can be legitimately
+        derived or rounded, and refusing a good answer costs more here than a
+        number carrying a caveat.
+        """
         if not output_integrity_enabled():
             return True, messages, blocked_count
-        # Bounded: after a couple of blocks the model is not fixing the citation
-        # (it may be a true hallucination it cannot ground, or a borderline case).
-        # Pass through with a warning rather than consuming the whole gate-block
-        # budget and failing the run while a usable artifact already exists.
+        answer_text = self._gather_citation_text()
+        unsourced = unsourced_numbers(answer_text, messages)
+        self._unsourced_numbers = unsourced
+        if unsourced:
+            log.warning(
+                "unsourced_numbers_in_answer",
+                step=self._step,
+                values=unsourced[:6],
+            )
+        # Stop nudging after two attempts, but keep warnings current.
         if self._output_integrity_fired >= 2:
             log.warning("output_integrity_budget_spent", step=self._step)
             return True, messages, blocked_count
-        bad = fabricated_citations(self._gather_citation_text(), messages)
+        bad = fabricated_citations(answer_text, messages)
         if bad:
             self._output_integrity_fired += 1
             log.info("output_integrity_block", step=self._step, n=len(bad))
@@ -1274,6 +1364,7 @@ class NativeAgentLoop(EventEmitter):
                     self._record_completion_block("Table requirements", blocker)
                     trace.reason = self._max_gate_reason()
             trace.artifact_receipts = list(self._artifact_receipts)
+            trace.unsourced_numbers = list(self._unsourced_numbers)
             trace.tests_passed_after_edit = self._verification.tests_passed_after_edit
             if trace.reason in ("completed_gate_warnings", "max_gate_blocked"):
                 trace.completion_check = self._completion_check
@@ -1747,6 +1838,10 @@ class NativeAgentLoop(EventEmitter):
                         self._verification.changed()
             elif cap_name == "bash_execute":
                 evidence.executions += 1
+                # managed_service mode reports its lifecycle here and nowhere
+                # else; ordinary commands are ignored by observe().
+                self._service_evidence.observe(result.metadata)
+                self._execution_roots.observe(_last_tool_params)
                 self._consecutive_reads_without_write = 0  # (#27) reset
                 if self._verification.observe_command(
                     _last_tool_params.get("command", ""), result.success, result.output or "",
@@ -2572,8 +2667,16 @@ class NativeAgentLoop(EventEmitter):
                         gate_input_snapshot = None
                     if gate_input_snapshot is not None:
                         rollover_gate_result = evaluate_completion_gate(gate_input_snapshot)
+                        # Only what the gate calls missing. "not done" also
+                        # catches the statuses it deliberately does not block
+                        # on (an unobserved cleanup, a command run in a temp
+                        # dir), and telling the agent to go finish those sends
+                        # it after work that was never required.
+                        _blocking = set(
+                            rollover_gate_result.missing_requirement_ids
+                        )
                         for req in rollover_gate_result.requirements:
-                            if req.required and req.status != "done":
+                            if req.id in _blocking:
                                 detail = req.failure_reason or req.description
                                 incomplete_reqs.append(f"{req.id}: {detail}")
 
@@ -2959,8 +3062,28 @@ class NativeAgentLoop(EventEmitter):
                     verification_passed=self._verification.passed,
                     # Hard failures tracked (deduplicated) (#16)
                     hard_failures=list(self._hard_failures),
+                    # Explicit command roots are reported as workspace warnings.
+                    workspace=(
+                        WorkspaceAlignmentSnapshot(
+                            workspace_root=workspace_root,
+                            execution_roots=list(self._execution_roots.roots),
+                        )
+                        if workspace_root
+                        else None
+                    ),
+                    service_task=(
+                        ServiceTaskEvidenceSnapshot(
+                            **self._service_evidence.as_snapshot_kwargs()
+                        )
+                        if self._service_evidence.observed
+                        else None
+                    ),
                 )
                 gate_result = evaluate_completion_gate(gate_input)
+                if gate_result.workspace_warning:
+                    trace.workspace_warning = gate_result.workspace_warning
+                if self._unsourced_numbers:
+                    trace.unsourced_numbers = list(self._unsourced_numbers)
 
                 # Same check here — the fast path isn't the only way to finish, so
                 # the full gate must not wave through unverified code either.
@@ -3095,10 +3218,11 @@ class NativeAgentLoop(EventEmitter):
                     )
                     # Inject missing requirements so the agent knows
                     # exactly what to do next instead of retrying blindly.
+                    _blocking_ids = set(gate_result.missing_requirement_ids)
                     _missing = [
                         f"{r.id}: {r.failure_reason or r.description}"
                         for r in gate_result.requirements
-                        if r.required and r.status != "done"
+                        if r.id in _blocking_ids
                     ]
                     if _missing:
                         if _ev_state != "fail":
