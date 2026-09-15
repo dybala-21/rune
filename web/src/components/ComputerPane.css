@@ -1,0 +1,44 @@
+.computer-pane { flex: 1; min-height: 0; overflow: auto; padding: 16px; display: flex; flex-direction: column; gap: 16px; color: var(--text-primary); font-size: 12px; }
+.desktop-task-notice { margin: 14px 0; padding: 16px; border: 1px solid var(--warning); border-radius: 10px; background: var(--bg-secondary); color: var(--text-primary); font-size: 13px; }
+.desktop-task-notice p { margin: 7px 0 12px; color: var(--text-secondary); line-height: 1.6; }
+.desktop-task-notice > .computer-actions button { padding: 8px 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--code-bg); color: var(--text-primary); font: inherit; cursor: pointer; }
+.desktop-task-notice > .computer-actions button:first-child { background: var(--text-primary); color: var(--bg-primary); }
+.desktop-task-notice > .computer-pane { padding: 16px 0 0; overflow: visible; }
+.computer-surface { display: flex; flex-shrink: 0; gap: 4px; padding: 10px 16px 0; }
+.computer-surface button { padding: 7px 12px; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--text-muted); font: inherit; font-size: 12px; cursor: pointer; }
+.computer-surface button[aria-selected="true"] { color: var(--text-primary); border-color: var(--border); background: var(--code-bg); }
+.desktop-app-list { max-height: 230px; overflow: auto; display: flex; flex-direction: column; gap: 10px; }
+.desktop-app-list label, .desktop-consent { display: flex; gap: 9px; align-items: flex-start; line-height: 1.5; }
+.computer-card .desktop-app-list input, .computer-card .desktop-consent input { width: auto; margin-top: 3px; }
+.desktop-app-list small { display: block; font-size: 10px; color: var(--text-muted); overflow-wrap: anywhere; }
+.desktop-action-detail { margin: 0; display: flex; flex-direction: column; gap: 6px; }
+.desktop-action-detail div { display: grid; grid-template-columns: 70px minmax(0, 1fr); gap: 8px; }
+.desktop-action-detail dt { color: var(--text-muted); }
+.desktop-action-detail dd { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.computer-toolbar, .computer-card-title, .computer-caption { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.computer-status { display: flex; align-items: center; gap: 7px; color: var(--text-secondary); }
+.computer-status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted); }
+.computer-status.held .computer-status-dot { background: var(--warning); }
+.computer-actions { display: flex; gap: 7px; flex-wrap: wrap; }
+.computer-pane button { border: 1px solid var(--border); background: var(--code-bg); border-radius: 7px; padding: 7px 10px; color: var(--text-primary); font: inherit; cursor: pointer; }
+.computer-pane button:hover:not(:disabled) { border-color: var(--text-muted); }
+.computer-pane button:disabled { opacity: .45; cursor: default; }
+.computer-browser { border: 1px solid var(--border); border-radius: 10px; overflow: hidden; background: var(--code-bg); }
+.computer-address { padding: 10px 12px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11px; border-bottom: 1px solid var(--border); }
+.computer-address span { margin-right: 8px; }
+.computer-browser img { display: block; width: 100%; height: auto; background: white; }
+.computer-caption { padding: 9px 12px; color: var(--text-muted); font-size: 10px; }
+.computer-empty { padding: 45px 20px; margin: auto 0; text-align: center; color: var(--text-muted); }
+.computer-empty-icon { font-size: 35px; margin-bottom: 16px; }
+.computer-empty strong { display: block; font-size: 14px; color: var(--text-secondary); font-weight: 500; }
+.computer-empty p { max-width: 260px; margin: 10px auto; line-height: 1.7; }
+.computer-card { display: flex; flex-direction: column; gap: 10px; border: 1px solid var(--border); border-radius: 10px; padding: 13px; }
+.computer-card strong { font-weight: 500; }
+.computer-card input, .computer-card select, .computer-card textarea { box-sizing: border-box; width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 9px; background: var(--code-bg); color: var(--text-primary); font: inherit; }
+.computer-card textarea { resize: vertical; line-height: 1.6; }
+.computer-pane .computer-resume { background: var(--text-primary); color: var(--bg-primary); border-color: transparent; font-weight: 500; }
+.computer-note { margin: 0; font-size: 11px; color: var(--text-muted); line-height: 1.5; }
+.computer-error, .computer-warning { padding: 11px; border: 1px solid var(--border); border-radius: 7px; line-height: 1.6; }
+.computer-error { color: var(--danger, #e57c7c); }
+.computer-warning { color: var(--warning); }
+.computer-warning label { display: flex; align-items: start; gap: 7px; margin-top: 9px; }

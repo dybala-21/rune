@@ -100,6 +100,7 @@ async def browser_observe(params: BrowserObserveParams) -> CapabilityResult:
         title = await page.title()
 
         elements = await extract_interactive_elements(page)
+        current_session().needs_observation = False
 
         snapshot = await _accessibility_snapshot(page, params.selector)
 
@@ -193,6 +194,9 @@ async def browser_act(params: BrowserActParams) -> CapabilityResult:
 
     session = current_session()
     owned_target = None
+    if session.needs_observation:
+        return CapabilityResult(success=False, error="Read the current page with browser_observe after user control changed.",
+                                metadata={"action_status": "not_executed"})
     if session.uncertain_action:
         return CapabilityResult(success=False, error=(
             "A previous browser action has an unknown outcome. Inspect the page or ask the user "
@@ -240,8 +244,10 @@ async def browser_act(params: BrowserActParams) -> CapabilityResult:
                     return CapabilityResult(success=False, error="Scroll value must be up or down",
                                             metadata={"action_status": "not_executed"})
                 await page.evaluate("dy => window.scrollBy(0, dy)", -500 if params.value == "up" else 500)
-        except Exception as exc:
+        except BaseException as exc:
             session.uncertain_action = True
+            if not isinstance(exc, Exception):
+                raise
             return CapabilityResult(success=False, error=(
                 f"Action outcome is unknown: {exc}. The command was attempted once and was not retried. "
                 "Inspect the current state before deciding what to do next."

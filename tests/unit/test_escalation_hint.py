@@ -98,9 +98,8 @@ def test_honest_note_for_max_gate_blocked():
     from rune.agent.escalation import honest_failure_note
 
     note = honest_failure_note("max_gate_blocked")
-    assert note and "test" in note.lower()
-    # The honest stance: do not claim an unverified result.
-    assert "verif" in note.lower() or "claim" in note.lower()
+    assert note and "completion checks" in note.lower()
+    assert "fails its tests" not in note.lower()
 
 
 def test_honest_note_is_config_independent(monkeypatch):

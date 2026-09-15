@@ -53,6 +53,13 @@ export function describeTrust(trust: TrustInfo): TrustPresentation {
     return { ...base, title: 'Checks failed', note: trust.honestNote || 'A recorded check failed. Review the evidence before using this result.', tone: 'warning', glyph: '⚠', ok: false };
   }
   if (completion === 'incomplete') {
+    if (trust.reason === 'desktop_blocked') {
+      return {
+        ...base, title: 'Desktop task stopped', tone: 'warning', glyph: '⚠', ok: false,
+        canEscalate: false,
+        note: trust.completionCheck?.detail || trust.honestNote || 'The desktop result could not be confirmed.',
+      };
+    }
     if (trust.reason === 'completed_gate_warnings' && !trust.budgetExhausted) {
       return {
         ...base, title: 'Review needed', tone: 'warning', glyph: '⚠', ok: false,
@@ -102,7 +109,7 @@ export function describeTrust(trust: TrustInfo): TrustPresentation {
 }
 
 export function checkEvidence(trust: TrustInfo): string {
-  if ((trust.reason === 'completed_gate_warnings' || trust.reason === 'max_gate_blocked')
+  if (['completed_gate_warnings', 'max_gate_blocked', 'desktop_blocked'].includes(trust.reason)
     && trust.completionCheck?.detail) {
     return `${trust.completionCheck.name}\n${trust.completionCheck.detail}`;
   }

@@ -22,11 +22,7 @@ LOAD_TEST_COMMAND_HEADS: frozenset[str] = frozenset({
 
 _SHELL_SEPARATORS = frozenset({";", "|", "&", "\n"})
 
-# "Run this binary inside the project environment" wrappers. They say nothing
-# about what the command does, so classification has to look past them —
-# `uv run pytest` is a test run exactly like `pytest` is. Without this, the
-# completion guard sees no passing test on any uv/poetry project and refuses
-# to finish work whose tests are green.
+# Unwrap environment runners so commands such as `uv run pytest` count as checks.
 _RUNNER_PREFIXES: frozenset[tuple[str, ...]] = frozenset({
     ("uv", "run"),
     ("uvx",),
@@ -56,7 +52,22 @@ def strip_runner_prefix(tokens: tuple[str, ...]) -> tuple[str, ...]:
         changed = False
         for size in range(_MAX_RUNNER_PREFIX_LEN, 0, -1):
             if len(tokens) > size and tokens[:size] in _RUNNER_PREFIXES:
+                prefix = tokens[:size]
                 tokens = tokens[size:]
+                if prefix == ("uv", "run"):
+                    while tokens:
+                        flag = tokens[0]
+                        if flag == "--":
+                            tokens = tokens[1:]
+                            break
+                        if flag in {"--with", "--python"} and len(tokens) > 1:
+                            tokens = tokens[2:]
+                        elif flag.startswith(("--with=", "--python=")) or flag in {
+                            "--no-project", "--isolated", "--offline", "--no-sync", "--locked", "--frozen", "--active",
+                        }:
+                            tokens = tokens[1:]
+                        else:
+                            break
                 changed = True
                 break
     return tokens

@@ -1,22 +1,7 @@
-"""Track which files a run actually opened, so it cannot invent one.
+"""Track requested files against the run's read and write records.
 
-Asked to fix the bug described in a file that does not exist, an agent
-wrote that file itself, invented a bug, edited unrelated code and reported
-the task done. Its own output said the file was missing.
-
-Reading the final answer does not catch this: a wrong answer is phrased
-just as confidently as a right one. The read record does. A file the
-request treats as already existing, that no read ever found, cannot be the
-file the run then writes from scratch.
-
-Two questions, both answered from the tool-call record — no model in the
-loop, nothing phrased in any particular language:
-
-  - is this write inventing a file the request treated as existing?
-  - did the run finish with such a file still unaccounted for?
-
-File names are matched with a regex because they are a structured format;
-nothing here tries to parse the sentence around them.
+The ledger detects attempts to replace a missing input with a generated
+file and reports inputs that remain unresolved at completion.
 """
 
 from __future__ import annotations
@@ -42,11 +27,13 @@ _PATH_RE = re.compile(
 )
 _WEB_LINK_RE = re.compile(r"\[[^\]\n]*\]\(\s*https?://[^)\n]*\)", re.IGNORECASE)
 _URL_RE = re.compile(r"https?://[^\s<>`\"']+", re.IGNORECASE)
+_FRAGMENT_RE = re.compile(r"(?<![\w/\\])#[^\s<>`\"')\]]+")
 
 
 def _local_path_tokens(text: str) -> Iterator[str]:
     # A page or download URL is not evidence that a local file should exist.
     text = _URL_RE.sub(" ", _WEB_LINK_RE.sub(" ", text or ""))
+    text = _FRAGMENT_RE.sub(" ", text)
     return (match.group(0) for match in _PATH_RE.finditer(text))
 
 # Extensions that name a document/artifact rather than an inline example.

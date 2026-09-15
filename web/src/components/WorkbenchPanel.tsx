@@ -11,11 +11,13 @@ import { langFromPath } from '../utils/highlight';
 const TerminalPane = lazy(() => import('./TerminalPane').then(m => ({ default: m.TerminalPane })));
 import { ProgressPane } from './ProgressPane';
 import { DiffText, FileChangesPane } from './FileChangesPane';
-import { hasFileEdits, preferredWorkbenchTab } from '../utils/workbench';
+import { desktopAttention, hasFileEdits, preferredWorkbenchTab } from '../utils/workbench';
+import { ComputerPane } from './ComputerPane';
 
 /** Saved code changes, execution progress, and live workspace tools. */
 
 interface WorkbenchPanelProps {
+  sessionId: string;
   toolCalls: ToolCall[];
   fileChanges?: FileChange[];
   isRunning: boolean;
@@ -190,10 +192,11 @@ function Elapsed({ startedAt }: { startedAt: number }) {
   );
 }
 
-type BenchTab = 'progress' | 'activity' | 'diff' | 'file' | 'terminal';
+type BenchTab = 'progress' | 'activity' | 'diff' | 'file' | 'terminal' | 'computer';
 
 const TABS: Array<[BenchTab, string]> = [
   ['progress', 'Progress'],
+  ['computer', 'Computer'],
   ['activity', 'Activity'],
   ['diff', 'Diff'],
   ['file', 'File'],
@@ -202,11 +205,15 @@ const TABS: Array<[BenchTab, string]> = [
 
 const NO_CHANGES: FileChange[] = [];
 
-export function WorkbenchPanel({ toolCalls, fileChanges = NO_CHANGES, isRunning, activitySummary, trust, currentStep = null, orchestration = null, awaiting = null, connected = true, historical = false, onClose }: WorkbenchPanelProps) {
-  // Same run-verdict rule as the status pip and chat card (shared helper), so
-  // the surfaces never disagree. null → no verdict to show yet.
+export function WorkbenchPanel({ sessionId, toolCalls, fileChanges = NO_CHANGES, isRunning, activitySummary, trust, currentStep = null, orchestration = null, awaiting = null, connected = true, historical = false, onClose }: WorkbenchPanelProps) {
+  // Share the verdict with chat and status indicators; null means no verdict yet.
   const verdictOk = computeRunVerdict(trust, activitySummary);
   const phase = useMemo(() => inferWorkPhase(toolCalls), [toolCalls]);
+  const desktopWait = desktopAttention(toolCalls, isRunning && !historical);
+  const waitingLabel = awaiting === 'approval' ? 'Waiting for approval'
+    : awaiting === 'question' ? 'Waiting for your answer'
+    : desktopWait === 'connection' ? 'Waiting for app access'
+    : desktopWait === 'action' ? 'Review app action' : null;
   const mode = useMemo(() => inferActivityMode(toolCalls), [toolCalls]);
   const coding = useMemo(
     () => toolCalls.filter(tc => isCodingToolName(normalizeToolName(tc.toolName))),
@@ -272,15 +279,16 @@ export function WorkbenchPanel({ toolCalls, fileChanges = NO_CHANGES, isRunning,
   const startedAt = toolCalls.length > 0 ? toolCalls[0].timestamp : null;
 
   let petState: MarkState = 'idle';
-  if (isRunning) petState = phase === 'verifying' ? 'thinking' : 'working';
+  if (waitingLabel) petState = 'warning';
+  else if (isRunning) petState = phase === 'verifying' ? 'thinking' : 'working';
   else if (verdictOk !== null) petState = verdictOk ? 'passed' : 'failed';
 
   const trustView = trust ? describeTrust(trust) : null;
   const verdictTitle = trustView?.title ?? (verdictOk ? 'Completed' : 'Failed');
   const verdictColors = trustColors(trustView?.tone ?? (verdictOk ? 'neutral' : 'danger'));
-  // One cascade for the footer so text and color can never disagree.
-  const foot = awaiting
-    ? { text: 'waiting for you', color: 'var(--warning)' }
+  // Choose the footer label and color from the same state.
+  const foot = awaiting || waitingLabel
+    ? { text: waitingLabel || 'waiting for you', color: 'var(--warning)' }
     : isRunning
       ? { text: `${PHASE_LABEL[phase]}…`, color: 'var(--warning)' }
       : verdictOk === null
@@ -317,7 +325,7 @@ export function WorkbenchPanel({ toolCalls, fileChanges = NO_CHANGES, isRunning,
           textTransform: 'uppercase',
           color: 'var(--text-muted)',
         }}>
-          {isRunning ? PHASE_LABEL[phase] : trust?.completionStatus === 'cancelled' ? 'stopped' : toolCalls.length || trust ? 'finished' : 'ready'}
+          {waitingLabel || (isRunning ? PHASE_LABEL[phase] : trust?.completionStatus === 'cancelled' ? 'stopped' : toolCalls.length || trust ? 'finished' : 'ready')}
         </span>
         {isRunning && startedAt !== null && <Elapsed startedAt={startedAt} />}
         <button
@@ -426,6 +434,7 @@ export function WorkbenchPanel({ toolCalls, fileChanges = NO_CHANGES, isRunning,
       )}
 
       {/* Diff view */}
+      {!historical && tab === 'computer' && <ComputerPane key={sessionId} sessionId={sessionId} />}
       {tab === 'diff' && !workspaceDiff && <FileChangesPane changes={fileChanges} toolCalls={toolCalls} historical={historical} />}
       {tab === 'diff' && workspaceDiff && !historical && (
         <div style={{

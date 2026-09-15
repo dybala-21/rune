@@ -9,6 +9,7 @@ from __future__ import annotations
 from fnmatch import fnmatch
 from typing import Any
 
+from rune.agent.timing import timed
 from rune.capabilities.types import TOOL_GROUPS, CapabilityDefinition
 from rune.types import CapabilityResult, RiskLevel
 from rune.utils.logger import get_logger
@@ -63,8 +64,13 @@ class CapabilityRegistry:
     def set_approval_patterns(self, patterns: list[str]) -> None:
         self._require_approval_patterns = patterns
 
+    @timed("tool", name_arg=1)
     async def execute(self, name: str, params: dict[str, Any]) -> CapabilityResult:
         """Execute a capability by name."""
+        from rune.computer.session import TOOLS, current_desktop
+        if current_desktop() is not None and name not in TOOLS:
+            return CapabilityResult(success=False, error="This desktop task can only use native desktop tools, think and ask_user.",
+                                    metadata={"action_status": "not_executed"})
         cap = self._capabilities.get(name)
         if cap is None:
             return CapabilityResult(
@@ -89,10 +95,12 @@ class CapabilityRegistry:
             else:
                 validated, normalized = params, params
             from rune.agent.execution_journal import active_journal
+            from rune.agent.run_control import dispatch_scope
             journal = active_journal()
-            if journal is not None:
-                return await journal.execute(name, normalized, lambda: cap.execute(validated))
-            return await cap.execute(validated)
+            async with dispatch_scope():
+                if journal is not None:
+                    return await journal.execute(name, normalized, lambda: cap.execute(validated))
+                return await cap.execute(validated)
         except Exception as exc:
             return CapabilityResult(
                 success=False, error=f"Capability '{name}' failed: {exc}"
@@ -160,6 +168,7 @@ def _register_all_capabilities(registry: CapabilityRegistry) -> None:
     from rune.capabilities.task_ops import register_task_ops_capabilities
     from rune.capabilities.think import register_think_capabilities
     from rune.capabilities.web import register_web_capabilities
+    from rune.computer.capabilities import register_desktop_capabilities
 
     register_file_capabilities(registry)
     register_document_capability(registry)
@@ -177,6 +186,7 @@ def _register_all_capabilities(registry: CapabilityRegistry) -> None:
     register_credential_capabilities(registry)
     register_skill_ops_capabilities(registry)
     register_browser_capabilities(registry)
+    register_desktop_capabilities(registry)
     register_ask_user_capability(registry)
     register_service_capabilities(registry)
     register_safety_capabilities(registry)

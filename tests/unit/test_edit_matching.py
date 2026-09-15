@@ -80,7 +80,7 @@ def _allow_guardian(monkeypatch):
         file_cap, "get_guardian",
         lambda: SimpleNamespace(
             validate_file_path=lambda p: SimpleNamespace(
-                allowed=True, reason=""
+                allowed=True, reason="", requires_approval=False
             )
         ),
     )

@@ -1,13 +1,8 @@
-"""Post-edit auto-verification.
+"""Detect and run project verification after code edits.
 
-After the agent edits code, run the project's fast verifier (lint/typecheck)
-so it can self-correct broken edits instead of finalizing them. A full test
-suite is intentionally NOT auto-run here (slow, side effects); lint/typecheck
-are fast and read-only. Opt-in via the RUNE_AUTO_VERIFY env flag (wired in the
-agent loop).
-
-The command runs as a trusted internal subprocess (same trust model as the
-Evidence Gate's check), not through the bash capability / Guardian.
+The agent loop enables automatic checks through ``RUNE_AUTO_VERIFY``.
+Commands run as internal subprocesses, outside the bash capability's
+Guardian validation.
 """
 
 from __future__ import annotations
@@ -32,16 +27,11 @@ _EVIDENCE_TAIL_CHARS = 400
 
 
 def detect_test_command(cwd: str) -> list[str] | None:
-    """Pick a CORRECTNESS test command for *cwd*, or None.
+    """Choose a test command for *cwd*, or None if no runner is detected.
 
-    Unlike :func:`detect_verify_command` (fast lint/typecheck — structure, not
-    correctness), this runs the project's tests, so it can serve as a best-of-K
-    *selection* verifier (execution beats LLM-judge for code; arXiv 2502.14382).
-
-    Precedence: an explicit ``RUNE_AUTO_VERIFY_CMD`` override (the project's own
-    test command) wins; otherwise structured marker detection — never NL. Returns
-    None when no test runner is evident, so the caller can fall back to the
-    Evidence Gate rather than mistake a lint pass for correctness.
+    ``RUNE_AUTO_VERIFY_CMD`` takes precedence over detected pytest or npm
+    tests. Best-of-K selection uses this instead of the lint/typecheck
+    command returned by :func:`detect_verify_command`.
     """
     override = os.environ.get("RUNE_AUTO_VERIFY_CMD", "").strip()
     if override:
@@ -58,10 +48,7 @@ def detect_test_command(cwd: str) -> list[str] | None:
         for e in entries
     )
     if has_pytests:
-        # Use the running interpreter, not a bare "python": many machines only
-        # have "python3", so "python" fails to spawn and run_verify returns
-        # "skip", falling back to the Evidence Gate. sys.executable is the venv
-        # interpreter, which has pytest.
+        # Use the current environment's interpreter; "python" may not be on PATH.
         return [sys.executable, "-m", "pytest", "-q"]
 
     # Node: a non-placeholder "test" script in package.json -> npm test.
@@ -79,11 +66,10 @@ def detect_test_command(cwd: str) -> list[str] | None:
 
 
 def detect_verify_command(cwd: str) -> list[str] | None:
-    """Pick a verify command, or None if unknown.
+    """Choose a verification command from the override or project markers.
 
-    An explicit ``RUNE_AUTO_VERIFY_CMD`` env override wins (lets a project use
-    its own test/typecheck command). Otherwise fall back to structured
-    file-marker detection (not NL matching), so it is safe and deterministic.
+    ``RUNE_AUTO_VERIFY_CMD`` takes precedence. Return None when neither
+    an override nor a supported project marker is present.
     """
     override = os.environ.get("RUNE_AUTO_VERIFY_CMD", "").strip()
     if override:
@@ -129,8 +115,7 @@ async def run_verify(
 
     text = (out or b"").decode("utf-8", "replace")
     if proc.returncode == 0:
-        # Keep the summary line ("3 passed in 0.01s") so callers can report the
-        # test count: verification is only as strong as the suite.
+        # Keep the summary line so callers can report how many tests passed.
         lines = [ln for ln in text.strip().splitlines() if ln.strip()]
         return "pass", (lines[-1].strip() if lines else "")
     return "fail", text[-_EVIDENCE_TAIL_CHARS:].strip()
@@ -195,4 +180,6 @@ def tests_failed(summary: str) -> bool:
         r"^FAILED\s*\((?:failures|errors)=[1-9]\d*",
         r"^(?:FAIL\s|test result: FAILED|not ok\s+\d+)",
         r"^(?:#|ℹ)\s*fail\s+[1-9]\d*\b",
+        r"(?:^|: )No module named (?:pytest|unittest|tox)\b",
+        r"^(?:ModuleNotFoundError|ImportError|pytest: error):",
     ))

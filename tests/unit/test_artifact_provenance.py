@@ -1,11 +1,4 @@
-"""An artifact the request treated as existing cannot be invented.
-
-The failure: told to fix the bug described in BUGREPORT.md when no such
-file exists, the agent wrote BUGREPORT.md itself, invented a bug, edited
-unrelated source and reported success. The decision here is made from the
-record of which reads succeeded — no model judgement, no phrase matching,
-so it behaves the same for every provider and every language.
-"""
+"""Missing input files must not be replaced with newly generated files."""
 
 from __future__ import annotations
 
@@ -42,6 +35,22 @@ class TestReferencedPaths:
         assert ledger.referenced == {"sales.csv", "summary.csv"}
         assert ledger.requested_paths["sales.csv"] == {"local/sales.csv"}
         assert referenced_paths('`HTTPS://example.com/report.pdf?download=raw.csv#section.html`') == set()
+
+
+@pytest.mark.parametrize("goal", [
+    "https://docs.python.org/3/library/decimal.html 을 확인하고 절 링크(#decimal.Decimal)를 달아줘.",
+    "Link to [section](#api.Response) in https://example.org/docs.html",
+    "Use `#reference/api.Response` from the documentation.",
+])
+def test_document_fragments_are_not_missing_local_inputs(goal):
+    assert referenced_paths(goal) == set()
+    ledger = ArtifactLedger.for_request(goal)
+    ledger.record_lookup(goal)
+    assert ledger.unresolved() == []
+
+
+def test_fragment_exclusion_preserves_real_local_references():
+    assert referenced_paths("# BUGREPORT.md\nRead BUGREPORT.md and cite [docs](#api.Response).") == {"BUGREPORT.md"}
 
 
 class TestLedger:
@@ -171,6 +180,27 @@ def _result(tmp_path, reads, writes):
         request_tokens_limit=200000, response_tokens_limit=4096,
         max_tool_rounds=8,
     )
+
+
+@pytest.mark.parametrize("name,params", [
+    ("desktop_open", {"app": "com.apple.TextEdit"}),
+    ("desktop_observe", {"app": "com.apple.calculator"}),
+    ("desktop_wait", {"app": "com.apple.TextEdit", "condition": {"kind": "title", "text": "BUGREPORT.md"}}),
+    ("desktop_act", {"action": "type", "text": "BUGREPORT.md"}),
+])
+def test_native_app_operations_do_not_report_missing_workspace_files(monkeypatch, tmp_path, name, params):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("RUNE_ARTIFACT_PROVENANCE", raising=False)
+    result = StreamResult(
+        model="gpt-6-astra", messages=[{"role": "user", "content":
+            "Use com.apple.TextEdit and com.apple.calculator. Show BUGREPORT.md in the app."}],
+        tool_schemas=[], tool_lookup={}, max_tokens=4096, temperature=0,
+        request_tokens_limit=200000, response_tokens_limit=4096,
+    )
+    result._record_provenance(name, params, "Observed the app")
+    assert result._unresolved_artifacts() == []
+    result._record_provenance("file_read", {"path": "BUGREPORT.md"}, "File not found")
+    assert result._unresolved_artifacts() == ["BUGREPORT.md"]
 
 
 _READ_TURN = [

@@ -1,14 +1,7 @@
-"""What each model family accepts on the wire, declared in one table.
+"""Model request settings that supplement LiteLLM's catalog.
 
-Scattered per-model checks are how the fast-mode 400 happened: `speed`
-went to a model that rejects the whole request over it, every round
-failed instantly, and the shorter wall-clock read as a speed-up. With
-the rules in one place, a new model generation is a row edit, not a
-hunt for call sites.
-
-The table only holds what litellm's own model database gets wrong or
-doesn't know; facts it carries reliably (output caps, context windows)
-are read from it directly.
+Static overrides cover model families; provider errors add corrections
+for individual models during the process lifetime.
 """
 
 from __future__ import annotations
@@ -24,16 +17,13 @@ class ModelTraits:
     # Anthropic request shaping applies: cache_control breakpoints and
     # the no-assistant-tail rule.
     anthropic_wire: bool = False
-    # Accepts speed="fast". Not advisory — an unsupported model rejects
-    # the whole request (measured on haiku: every round failed, and the
-    # run "finished" in a third of the time having done nothing).
+    # Send speed="fast" only to models that accept it.
     speed_param: bool = False
-    # Accepts a temperature parameter. litellm's drop_params strips it
-    # for the models its DB knows about; a False here covers a family
-    # the DB has wrong (gpt-5.5 rejects it while listed as supported).
+    # Omit temperature for families whose support is misreported by LiteLLM.
     temperature: bool = True
     max_completion_tokens: bool = False
     responses_api: bool = False
+    vision: bool | None = None
 
 
 _DEFAULT = ModelTraits()
@@ -42,31 +32,24 @@ _DEFAULT = ModelTraits()
 # appear in the lowercased model id wins, so specific families must
 # stay above general ones.
 _STATIC: tuple[tuple[tuple[str, ...], ModelTraits], ...] = (
+    (("claude-opus-5",), ModelTraits(anthropic_wire=True, speed_param=True, vision=True)),
     (("claude", "opus"), ModelTraits(anthropic_wire=True, speed_param=True)),
     (("anthropic", "opus"), ModelTraits(anthropic_wire=True, speed_param=True)),
     (("claude",), ModelTraits(anthropic_wire=True)),
     (("anthropic",), ModelTraits(anthropic_wire=True)),
     (("gpt-6-astra",), ModelTraits(
-        temperature=False, max_completion_tokens=True, responses_api=True,
+        temperature=False, max_completion_tokens=True, responses_api=True, vision=True,
     )),
     (("gpt-5.6",), ModelTraits(temperature=False, max_completion_tokens=True, responses_api=True)),
     (("gpt-5",), ModelTraits(temperature=False)),
 )
 
-# Models whose temperature rejection we only learn from the API's own
-# error (exact resolved id, kept for the process). The static table
-# can't enumerate these ahead of time — claude-opus-4-8 rejects
-# temperature while claude-opus-4-6 accepts it.
+# Cache provider rejections by resolved model ID for this process.
 _TEMPERATURE_REJECTED: set[str] = set()
 _COMPLETION_TOKENS_REQUIRED: set[str] = set()
-# Models that reason and take tools, but refuse both in one request. litellm's
-# capability DB answers "does it reason", which is true and not the question, so
-# this is learned from the provider's own 400 rather than declared up front.
+# Reasoning support alone does not guarantee support alongside tools.
 _REASONING_EFFORT_REJECTED: set[str] = set()
-# Models that will not take tools on chat/completions. Measured live:
-# gpt-6-astra and the gpt-5.6 family refuse them there whatever
-# reasoning_effort says, and gpt-5.3-codex is not served on that endpoint.
-# Learned from the provider's refusal, not pinned to a list of names.
+# Route models to Responses after the provider rejects Chat Completions.
 _RESPONSES_ONLY: set[str] = set()
 
 
@@ -103,12 +86,10 @@ def effective_reasoning_effort(model: str, configured: str | None) -> str | None
 
 @lru_cache(maxsize=256)
 def supports_vision(model: str) -> bool:
-    """Whether *model* accepts image content in a user message.
-
-    Same reasoning as supports_reasoning_effort: litellm's capability DB beats
-    a hand-kept list. Unknown or lookup failure → False, so an image is
-    described in text rather than sent as content the model would reject.
-    """
+    """Use confirmed model traits when the SDK's catalog has not caught up."""
+    declared = traits(model).vision
+    if declared is not None:
+        return declared
     try:
         import litellm
         return bool(litellm.supports_vision(model=model))

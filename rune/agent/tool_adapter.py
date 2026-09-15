@@ -387,8 +387,15 @@ def build_tool_set(
             stall = _FallbackStall()
 
     tools: dict[str, Any] = {}
+    from rune.computer.session import TOOLS as DESKTOP_TOOLS
+    from rune.computer.session import current_desktop
+    desktop_mode = current_desktop() is not None
 
     for cap in reg.list_all():
+        if desktop_mode and cap.name not in DESKTOP_TOOLS:
+            continue
+        if not desktop_mode and cap.name.startswith("desktop_"):
+            continue
         if opts.allowed_tools is not None and cap.name not in opts.allowed_tools:
             continue
         if not reg.is_allowed(cap.name):
@@ -434,17 +441,15 @@ def _build_typed_tool(
     _approved_network: set[str] = set()
 
     async def _execute(params: dict[str, Any]) -> str | Any:
+        from rune.computer.session import TOOLS as DESKTOP_TOOLS
+        from rune.computer.session import current_desktop
+        if current_desktop() is not None and cap_name not in DESKTOP_TOOLS:
+            return "[BLOCKED] This desktop task cannot execute scripts or use other tool transports."
         current_step = opts.step_counter() if opts.step_counter else 0
 
-        if opts.on_tool_start is not None:
-            await opts.on_tool_start(cap_name, params)
-
-        # -- Feature 4: Smart file expansion ---------------------
         effective_params = dict(params)
 
-        # Anchor relative paths to the run's workspace. Capabilities resolve
-        # paths against the process cwd, which is the daemon's start dir when
-        # serving the app — a bare "app.py" must mean the pinned project.
+        # Resolve relative paths in the selected workspace, not the server's cwd.
         if opts.workspace_root:
             if (cap_name.startswith(("file_", "document_", "code_", "table_"))
                     or cap_name == "browser_screenshot"
@@ -466,8 +471,11 @@ def _build_typed_tool(
                     if isinstance(source, str) and source and not os.path.isabs(os.path.expanduser(source)):
                         changes["source_path"] = os.path.join(opts.workspace_root, source)
                     effective_params["changes"] = changes
-            elif cap_name == _BASH_CAPABILITY and not effective_params.get("cwd"):
-                effective_params["cwd"] = opts.workspace_root
+            elif cap_name == _BASH_CAPABILITY:
+                directory = os.path.expanduser(effective_params.get("cwd") or ".")
+                effective_params["cwd"] = os.path.join(opts.workspace_root, directory)
+        if opts.on_tool_start is not None:
+            await opts.on_tool_start(cap_name, effective_params)
         if (
             cap_name == "file_read"
             and (effective_params.get("offset") or effective_params.get("limit"))
@@ -538,6 +546,10 @@ def _build_typed_tool(
                 hit = cache.get(cache_key, cap_name, effective_params)
                 if hit is not None:
                     log.debug("cache_hit", capability=cap_name, key=cache_key)
+                    if opts.on_tool_end is not None:
+                        await opts.on_tool_end(cap_name, CapabilityResult(
+                            success=True, output=hit.output, metadata={"cached": True},
+                        ))
                     return hit.output
 
         # 2. Guardian validation
@@ -545,7 +557,8 @@ def _build_typed_tool(
         if opts.enable_guardian:
             guard_result = _validate_with_guardian(cap_name, effective_params)
             if guard_result.blocked:
-                err = CapabilityResult(success=False, error=guard_result.reason)
+                err = CapabilityResult(success=False, error=guard_result.reason,
+                                       metadata={"action_status": "not_executed"})
                 if opts.on_tool_end is not None:
                     await opts.on_tool_end(cap_name, err)
                 return f"[BLOCKED] {guard_result.reason}"
@@ -574,7 +587,8 @@ def _build_typed_tool(
                                 "  2. Use ask_user to explain why you need this operation\n"
                                 "  3. If this is a prerequisite for the task, report the blocker to the user"
                             )
-                        err = CapabilityResult(success=False, error=guard_result.reason)
+                        err = CapabilityResult(success=False, error=guard_result.reason,
+                                               metadata={"action_status": "not_executed"})
                         if opts.on_tool_end is not None:
                             await opts.on_tool_end(cap_name, err)
                         return f"{DENIED_PREFIX} {guard_result.reason}{deny_hint}"
@@ -582,7 +596,8 @@ def _build_typed_tool(
                     _consecutive_denials[0] = 0
                     approval_cleared = True
                 else:
-                    err = CapabilityResult(success=False, error=guard_result.reason)
+                    err = CapabilityResult(success=False, error=guard_result.reason,
+                                           metadata={"action_status": "not_executed"})
                     if opts.on_tool_end is not None:
                         await opts.on_tool_end(cap_name, err)
                     return f"{BLOCKED_PREFIX} Guardian requires approval: {guard_result.reason}"
@@ -723,7 +738,8 @@ def _build_typed_tool(
                     )
             elif opts.approval_callback is not None:
                 _consecutive_denials[0] += 1
-                result = CapabilityResult(success=False, error=f"Denied: {reason}")
+                result = CapabilityResult(success=False, error=f"Denied: {reason}",
+                                          metadata={"action_status": "not_executed"})
 
         elapsed_ms = (time.monotonic() - start_time) * 1000
         if (result.metadata or {}).get("replayed"):
@@ -1455,7 +1471,7 @@ def _validate_with_guardian(cap_name: str, params: dict[str, Any]) -> _GuardianR
 
         if cap_name == "bash_execute":
             command = params.get("command", "")
-            result = guardian.validate(command)
+            result = guardian.validate(command, cwd=params.get("cwd"))
             if not result.allowed:
                 return _GuardianResult(blocked=True, reason=f"Guardian blocked bash: {result.reason}")
             if result.requires_approval:
@@ -1466,10 +1482,14 @@ def _validate_with_guardian(cap_name: str, params: dict[str, Any]) -> _GuardianR
             result = guardian.validate_file_path(file_path)
             if not result.allowed:
                 return _GuardianResult(blocked=True, reason=f"Guardian blocked file write: {result.reason}")
+            write_approval = result.requires_approval
+            write_reason = result.reason
             if cap_name == "document_bundle":
                 result = guardian.validate_file_read_path(params.get("source_path", ""))
                 if not result.allowed:
                     return _GuardianResult(blocked=True, reason=f"Guardian blocked source read: {result.reason}")
+            if write_approval:
+                return _GuardianResult(requires_approval=True, reason=write_reason)
 
         elif cap_name in ("file_read", "document_read", "document_bundle_inspect"):
             file_path = params.get("file_path") or params.get("path") or params.get("directory", "")

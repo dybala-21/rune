@@ -8,6 +8,8 @@ local provider does not have calls go to the default cloud provider.
 
 from __future__ import annotations
 
+import pytest
+
 from rune.config.loader import get_config
 from rune.llm.client import LLMClient
 from rune.types import ModelTier, Provider
@@ -144,4 +146,55 @@ def test_local_provider_needs_no_api_key(monkeypatch):
     assert _ensure_llm_key() is True  # local default too
 
     monkeypatch.setattr(cfg.llm, "default_provider", "openai")
-    assert _ensure_llm_key() is False  # cloud with no key still blocked
+    assert _ensure_llm_key() is False  # Cloud requests still require a key.
+
+
+async def test_completion_preserves_the_supported_response_contract(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from rune.agent.litellm_adapter import litellm
+    from rune.llm.structured import _format_type
+
+    requested = {"type": "json_schema", "json_schema": {"name": "check", "strict": True,
+                 "schema": {"type": "object", "properties": {}, "additionalProperties": False}}}
+    completion = AsyncMock(return_value={"choices": []})
+    monkeypatch.setattr(litellm, "acompletion", completion)
+    monkeypatch.setattr(litellm, "supports_response_schema", lambda **_: True)
+    _format_type.cache_clear()
+    try:
+        await LLMClient().completion(messages=[{"role": "user", "content": "Classify this"}],
+                                     model="claude-haiku-4-5-20251001", provider=Provider.ANTHROPIC,
+                                     response_format=requested)
+        assert completion.call_args.kwargs["response_format"] == requested
+    finally:
+        _format_type.cache_clear()
+
+
+@pytest.mark.parametrize("format_type", ["json_schema", "json_object", None])
+async def test_schema_is_sent_once_and_fallback_keeps_the_contract(monkeypatch, format_type):
+    import json
+    from unittest.mock import AsyncMock
+
+    from rune.agent.classification_response import RESPONSE_FORMAT
+    from rune.agent.litellm_adapter import litellm
+
+    monkeypatch.setattr("rune.llm.structured._format_type", lambda _: format_type)
+    completion = AsyncMock(return_value={"choices": []})
+    monkeypatch.setattr(litellm, "acompletion", completion)
+    messages = [{"role": "system", "content": "Route the request."}, {"role": "user", "content": "Write a file."}]
+    await LLMClient().completion(messages=messages, model="claude-opus-5", provider=Provider.ANTHROPIC,
+                                 response_format=RESPONSE_FORMAT, cache_system=True)
+    sent = completion.call_args.kwargs
+    assert sent["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    schema_in_messages = "table_output" in json.dumps(sent["messages"])
+    assert schema_in_messages == (format_type != "json_schema")
+    assert messages[0]["content"] == "Route the request."
+    if format_type == "json_schema":
+        assert sent["response_format"] == RESPONSE_FORMAT
+    elif format_type:
+        assert sent["response_format"] == {"type": format_type}
+    else:
+        assert "response_format" not in sent
+
+    await LLMClient().completion(messages=messages, model="claude-opus-5", provider=Provider.ANTHROPIC)
+    assert completion.call_args.kwargs["messages"] == messages

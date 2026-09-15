@@ -84,10 +84,68 @@ def test_stop_endpoint_preserves_checks_and_final_snapshot(client, monkeypatch, 
     assert _wait_for(lambda: not client.post("/api/v1/rpc", json={"method": "runs.active", "params": {}})
                      .json()["data"]["runIds"])
     snapshots = [e["data"] for e in events if e["event"] == "agent_aborted"]
-    assert snapshots[0]["trust"]["artifactReceipts"] == [RECEIPT]
     assert snapshots[-1]["trust"]["artifactReceipts"] == ([RECEIPT, later] if late_receipt else [RECEIPT])
-    assert len(snapshots) == (2 if late_receipt else 1)
+    assert len(snapshots) == 1
     assert not any(e["event"] in {"agent_complete", "agent_error"} for e in events)
+
+
+def test_stop_keeps_the_journal_writable_until_the_dispatched_action_settles(client, monkeypatch, events):
+    from rune.agent.execution_journal import active_journal
+
+    started, attempts = [], []
+
+    async def run(self, *args, **kwargs):
+        journal = active_journal()
+
+        async def write():
+            started.append(True)
+            await asyncio.Event().wait()
+
+        try:
+            await journal.execute("browser_act", {"action": "click", "selector": "save"}, write)
+        finally:
+            attempts.extend(journal.store.attempts(journal.run_id))
+
+    monkeypatch.setattr(FakeLoop, "run", run)
+    response = client.post("/api/message", json={"text": "save once"})
+    assert _wait_for(lambda: bool(started))
+    assert client.post("/api/abort", json={"runId": response.json()["runId"]}).json()["ok"]
+    assert len(attempts) == 1 and attempts[0]["state"] == "unknown"
+    assert any(event["event"] == "agent_aborted" for event in events)
+    assert not any(event["event"] == "agent_error" for event in events)
+
+
+def test_shutdown_records_unknown_effects_before_marking_the_run_interrupted(isolated_wiring, monkeypatch, tmp_path):
+    import sqlite3
+
+    from starlette.testclient import TestClient
+
+    from rune.agent.execution_journal import active_journal
+    from rune.api.server import create_app
+
+    started, attempts = [], []
+
+    async def run(self, *args, **kwargs):
+        journal = active_journal()
+
+        async def write():
+            started.append(True)
+            await asyncio.Event().wait()
+
+        try:
+            await journal.execute("browser_act", {"action": "click", "selector": "save"}, write)
+        finally:
+            attempts.extend(journal.store.attempts(journal.run_id))
+
+    monkeypatch.setattr(FakeLoop, "run", run)
+    monkeypatch.setattr("rune.agent.loop.NativeAgentLoop", FakeLoop)
+    with TestClient(create_app(), client=("127.0.0.1", 50000)) as client:
+        response = client.post("/api/message", json={"text": "save once", "sessionId": "shutdown"})
+        assert _wait_for(lambda: bool(started))
+        run_id = response.json()["runId"]
+    assert len(attempts) == 1 and attempts[0]["state"] == "unknown"
+    with sqlite3.connect(tmp_path / "conversations.db") as db:
+        assert db.execute("SELECT status FROM web_runs WHERE run_id = ?", (run_id,)).fetchone()[0] == "interrupted"
 
 
 @pytest.mark.parametrize("late_receipt", [False, True])

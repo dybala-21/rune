@@ -91,6 +91,64 @@ def test_wrong_tables_fail_even_when_totals_look_plausible(content):
     assert compare_table(plan(), expected, headers, actual)["status"] == "fail"
 
 
+@pytest.mark.parametrize("operation,total", [("sum", "17.01"), ("mean", "5.67"), ("count", "3.00")])
+def test_grand_total_uses_selected_source_rows_before_group_rounding(operation, total):
+    contract = plan(grand_total=["전체 합계"], aggregates=[{
+        "name": "amount", "operation": operation, "column": "amount", "decimals": 2}])
+    headers, source = read_tabular(SOURCE.encode(), ".csv")
+    expected, stats = expected_table(contract, headers, source)
+    assert expected[-1] == ("전체 합계", total)
+    assert stats["selected_rows"] == 3 and stats["output_rows"] == 3
+    columns = ["team", "amount"]
+    output = [dict(zip(columns, row, strict=True)) for row in expected]
+    assert compare_table(contract, expected, columns, output)["status"] == "pass"
+    for wrong in (output[:-1], output + [output[-1]], output[:-1] + [{"team": "전체 합계", "amount": "999"}]):
+        assert compare_table(contract, expected, columns, wrong)["status"] == "fail"
+
+
+def test_grand_total_labels_cannot_hide_a_source_group():
+    headers, rows = read_tabular(SOURCE.encode(), ".csv")
+    with pytest.raises(ValueError, match="collides"):
+        expected_table(plan(grand_total=["A"]), headers, rows)
+    with pytest.raises(ValueError, match="grouping column"):
+        plan(grand_total=["Total", ""])
+    with pytest.raises(ValueError):
+        plan(applicable=False, unverified=["unsupported"], filters=[], deduplicate_by=[],
+             group_by=[], aggregates=[], grand_total=["Total"])
+
+
+def test_unspecified_display_labels_do_not_become_data_requirements():
+    contract = plan(grand_total=["Total"], exact_headers=False, exact_total_label=False)
+    headers, source = read_tabular(SOURCE.encode(), ".csv")
+    expected, _ = expected_table(contract, headers, source)
+    columns, rows = read_tabular(b"Department,Total amount\nA,12.01\nB,5.01\nGrand total,17.01\n", ".csv")
+    assert compare_table(contract, expected, columns, rows)["status"] == "pass"
+    assert compare_table(contract.model_copy(update={"exact_headers": True}), expected, columns, rows)["status"] == "fail"
+    assert compare_table(contract.model_copy(update={"exact_total_label": True}), expected, columns, rows)["status"] == "fail"
+    for wrong in (rows[:-1], rows + [rows[-1]], rows[1:], rows[:-1] + [{"Department": "Grand total", "Total amount": "17.02"}]):
+        assert compare_table(contract, expected, columns, wrong)["status"] == "fail"
+
+
+@pytest.mark.parametrize("bom", [True, False])
+async def test_requested_csv_bom_is_verified_from_file_bytes(office, monkeypatch, bom):
+    source, output, _ = office
+
+    async def extract(*args):
+        return plan(csv_bom=bom)
+
+    monkeypatch.setattr("rune.agent.table_acceptance.extract_plan", extract)
+    state = TableAcceptance(REQUEST, required=True)
+    contract = (await state.requirements(str(source), None)).metadata["tableContract"]
+    content = "team,amount\nA,12.01\nB,5.01\n"
+    output.write_text(content, encoding="utf-8" if bom else "utf-8-sig")
+    bad = await state.verify(contract["id"], str(output), None, 1)
+    assert not bad.success and '"check": "csv_bom"' in bad.output
+    output.write_text(content, encoding="utf-8-sig" if bom else "utf-8")
+    good = await state.verify(contract["id"], str(output), None, 1)
+    assert good.success and "csv_bom" in good.metadata["tableVerification"]["checks"]
+    assert await state.blocker() is None
+
+
 def test_conflicting_duplicate_keys_are_not_silently_dropped():
     headers, rows = read_tabular(b"id,team,status,amount\n1,A,confirmed,5\n1,B,confirmed,9\n", ".csv")
     with pytest.raises(ValueError, match="Conflicting rows"):
@@ -105,6 +163,24 @@ def test_empty_selection_and_nonfinite_numbers():
     assert compare_table(plan(), expected, headers, output)["status"] == "pass"
     with pytest.raises(ValueError, match="non-finite"):
         compare_table(plan(), [("A", "1")], headers, [{"team": "A", "amount": "NaN"}])
+
+
+def test_grouped_amounts_are_verified_without_changing_source_values():
+    data = b'id,team,status,amount\n1,A,confirmed,"12,500.50"\n2,A,confirmed,"-1,000.25"\n3,B,confirmed,0\n'
+    headers, rows = read_tabular(data, ".csv")
+    expected, _ = expected_table(plan(grand_total=["Total"]), headers, rows)
+    assert expected == [("A", "11500.25"), ("B", "0.00"), ("Total", "11500.25")]
+    assert rows[0]["amount"] == "12,500.50"
+    columns, output = read_tabular(b'team,amount\nA,"11,500.25"\nB,0\nTotal,"11,500.25"\n', ".csv")
+    assert compare_table(plan(grand_total=["Total"]), expected, columns, output)["status"] == "pass"
+
+
+@pytest.mark.parametrize("value", ["12,34", "1,234,56", "1.234,56", "1,,234", "1,234_000", "", None, True, "NaN", "Infinity"])
+def test_invalid_amounts_never_become_valid_totals(value):
+    from rune.capabilities.table_acceptance import number
+
+    with pytest.raises(ValueError):
+        number(value)
 
 
 @pytest.mark.asyncio

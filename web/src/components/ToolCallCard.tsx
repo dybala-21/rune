@@ -82,6 +82,7 @@ export const ToolCallCard = memo(function ToolCallCard({ toolCall, isLatest = fa
 
   const hasResult = toolCall.result !== undefined;
   const isPending = !hasResult;
+  const connecting = normalizeToolName(toolCall.toolName) === 'desktop.connect';
   const expanded = manualExpanded ?? false;
   const toolColor = getToolColor(toolCall.toolName);
 
@@ -91,7 +92,7 @@ export const ToolCallCard = memo(function ToolCallCard({ toolCall, isLatest = fa
 
   const summary = getToolSummary(toolCall);
 
-  const failed = toolCall.success === false;
+  const failed = toolCall.success === false || toolCall.checkStatus === 'fail';
 
   return (
     <div className="fade-in" style={{
@@ -130,7 +131,7 @@ export const ToolCallCard = memo(function ToolCallCard({ toolCall, isLatest = fa
           color: 'var(--text-secondary)',
           fontWeight: 500,
         }}>
-          {toolCall.toolName}
+          {connecting ? 'App connection' : toolCall.toolName}
         </span>
         {summary && (
           <span style={{
@@ -146,9 +147,15 @@ export const ToolCallCard = memo(function ToolCallCard({ toolCall, isLatest = fa
           </span>
         )}
         {!summary && <span style={{ flex: 1 }} />}
+        {toolCall.checkStatus && (
+          <span style={{ fontSize: 11, color: toolCall.checkStatus === 'fail' ? 'var(--danger)' : 'var(--text-muted)' }}>
+            {toolCall.checkStatus === 'pass' ? 'Checks passed' : toolCall.checkStatus === 'fail' ? 'Checks failed' : 'Checks unconfirmed'}
+          </span>
+        )}
 
         {isPending ? (
-          <span className="spinner" style={{ width: 12, height: 12, borderWidth: 1.5 }} />
+          connecting ? <span style={{ fontSize: 11, color: 'var(--warning)' }}>Waiting for you</span>
+            : <span className="spinner" style={{ width: 12, height: 12, borderWidth: 1.5 }} />
         ) : (
           <>
             {toolCall.durationMs != null && (

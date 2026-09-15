@@ -89,3 +89,57 @@ async def test_truncated_tool_call_recovers_instead_of_executing(monkeypatch):
         m.get("role") == "user" and "cut off by the output limit" in m.get("content", "")
         for m in result.all_messages()
     )
+
+
+@pytest.mark.asyncio
+async def test_pending_verification_requires_tools_then_releases_final_answer(monkeypatch):
+    from rune.agent.verification_state import VerificationState
+
+    state = VerificationState()
+    state.changed()
+    requests = []
+    command = "python3 -m unittest -v"
+
+    async def verify(**_):
+        output = "test_ok (example.Cases) ... ok\nRan 1 test in 0.001s\nOK"
+        state.observe_command(command, True, output, "/fixture")
+        return output
+
+    streams = iter([
+        [_delta_chunk(tool_calls=[{"index": 0, "name": "bash_execute", "arguments": "{}"}]),
+         _delta_chunk(finish_reason="tool_calls")],
+        [_delta_chunk(content="The check passed."), _delta_chunk(finish_reason="stop")],
+    ])
+
+    async def fake_completion(**kwargs):
+        requests.append(kwargs)
+        return _astream(next(streams))
+
+    monkeypatch.setattr(la.litellm, "acompletion", fake_completion)
+    result = StreamResult(
+        model="claude-sonnet-4-5", messages=[{"role": "user", "content": "Verify the change"}],
+        tool_schemas=[{"function": {"name": "bash_execute"}}], tool_lookup={"bash_execute": verify},
+        max_tokens=1024, temperature=0.0, request_tokens_limit=200000, response_tokens_limit=8192,
+        verification_state=lambda: state,
+    )
+    assert "The check passed." in "".join([part async for part in result.stream_text()])
+    assert len(requests) == 2
+    assert requests[0]["tool_choice"] == "required"
+    assert requests[1].get("tool_choice") != "required"
+    ledger = [m for m in result.all_messages() if m.get("content", "").startswith("[Recorded verification evidence]")]
+    assert len(ledger) == 2 and '"pending": false' in ledger[-1]["content"]
+    assert all(message["role"] == "user" for message in ledger)
+    assert requests[1]["messages"][-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+
+    from copy import deepcopy
+
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        LiteLLMResponsesTransformationHandler,
+    )
+    from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+
+    # Actual provider conversion must leave changing evidence out of the system prefix.
+    converter = LiteLLMResponsesTransformationHandler()
+    instructions = [converter.convert_chat_completion_messages_to_responses_api(deepcopy(r["messages"]))[1] for r in requests]
+    assert instructions[0] == instructions[1]
+    assert AnthropicConfig().translate_system_message(deepcopy(requests[1]["messages"])) == []

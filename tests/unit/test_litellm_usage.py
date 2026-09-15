@@ -66,10 +66,55 @@ def test_stream_usage_extracts_anthropic_cache_write_tokens():
 
     usage = result.usage()
 
-    assert usage.input_tokens == 800
+    assert usage.input_tokens == 1150
     assert usage.output_tokens == 120
     assert usage.cached_input_tokens == 300
     assert usage.cache_write_tokens == 50
+
+
+@pytest.mark.parametrize("written", [0, 300])
+@pytest.mark.parametrize("as_object", [False, True])
+def test_responses_cache_writes_survive_litellm_conversion(written, as_object):
+    from litellm.responses.utils import ResponseAPILoggingUtils
+    from openai.types.responses import ResponseUsage
+
+    from rune.llm.usage import preserve_responses_cache_usage, token_counts
+
+    native = {"input_tokens": 1000, "output_tokens": 20, "total_tokens": 1020,
+              "input_tokens_details": {"cached_tokens": 600, "cache_write_tokens": written},
+              "output_tokens_details": {"reasoning_tokens": 10}}
+    preserve_responses_cache_usage()
+    original = ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage
+    preserve_responses_cache_usage()
+    assert original is ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage
+    normalized = original(ResponseUsage(**native) if as_object else native)
+    counts = token_counts(normalized)
+    assert counts["cache_write_tokens"] == written and counts["cache_write_reported"]
+    assert counts["total_tokens"] == 1020 and counts["reasoning_tokens"] == 10
+    result = _stream_result()
+    result._update_usage(normalized)
+    assert result.usage().cache_write_tokens == written
+
+
+def test_usage_distinguishes_native_anthropic_input_and_missing_cache_fields():
+    from rune.llm.usage import token_counts
+
+    counts = token_counts({"input_tokens": 100, "output_tokens": 20,
+                           "cache_read_input_tokens": 600, "cache_creation_input_tokens": 300})
+    assert counts["input_tokens"] == 1000 and counts["total_tokens"] == 1020
+    counts = token_counts({"prompt_tokens": 100, "completion_tokens": 20})
+    assert not counts["cache_write_reported"]
+
+
+def test_stream_usage_deduplicates_snapshots_but_counts_separate_rounds():
+    result = _stream_result()
+    result._update_usage({"prompt_tokens": 1000, "completion_tokens": 0})
+    result._update_usage({"prompt_tokens": 0, "completion_tokens": 50})
+    result._update_usage({"prompt_tokens": 1000, "completion_tokens": 50})
+    assert result.usage().input_tokens == 1000 and result.usage().output_tokens == 50
+    result._round_usage = None
+    result._update_usage({"prompt_tokens": 1000, "completion_tokens": 50})
+    assert result.usage().input_tokens == 2000 and result.usage().output_tokens == 100
 
 
 @pytest.mark.asyncio

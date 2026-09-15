@@ -1,4 +1,4 @@
-"""Browser resources and observations belong to one agent run."""
+"""Browser resources can outlive a run when a conversation owns them."""
 
 from __future__ import annotations
 
@@ -35,6 +35,8 @@ class BrowserSession:
     _owner: asyncio.Task | None = None
     closed: bool = False
     uncertain_action: bool = False
+    needs_observation: bool = False
+    bound_task: asyncio.Task | None = None
 
     def __post_init__(self) -> None:
         _sessions.add(self)
@@ -86,14 +88,16 @@ def current_session() -> BrowserSession:
 
 
 @asynccontextmanager
-async def browser_session() -> AsyncIterator[BrowserSession]:
-    session = BrowserSession()
+async def browser_session(session: BrowserSession | None = None) -> AsyncIterator[BrowserSession]:
+    owned = session is None
+    session = session or BrowserSession()
     token = _current.set(session)
     try:
         yield session
     finally:
         try:
-            await session.close()
+            if owned:
+                await session.close()
         finally:
             _current.reset(token)
 
@@ -101,6 +105,9 @@ async def browser_session() -> AsyncIterator[BrowserSession]:
 def with_browser_session(function: Callable) -> Callable:
     @wraps(function)
     async def wrapped(*args: Any, **kwargs: Any) -> Any:
+        session = _current.get()
+        if session is not None and session.bound_task is asyncio.current_task():
+            return await function(*args, **kwargs)
         async with browser_session():
             return await function(*args, **kwargs)
     return wrapped
@@ -110,6 +117,10 @@ def browser_operation(function: Callable) -> Callable:
     @wraps(function)
     async def wrapped(*args: Any, **kwargs: Any) -> Any:
         async with current_session().operation():
+            from rune.agent.run_control import current_control
+            control = current_control()
+            if control is not None:
+                control.check()
             return await function(*args, **kwargs)
     return wrapped
 

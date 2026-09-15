@@ -168,3 +168,24 @@ def test_need_inferer():
     needs = inferer.infer(context, actions)
     assert len(needs) >= 1
     assert any(n.need_type == "documentation" for n in needs)
+
+
+def test_testing_need_uses_completed_code_changes_and_fresh_checks():
+    inferer = NeedInferer()
+    edit = {"tool": "file_edit", "success": True, "code_changed": True, "session_id": "a", "workspace": "/project"}
+    check = {"tool": "bash_execute", "success": True, "tests_passed": True, "session_id": "a", "workspace": "/project"}
+    assert inferer._check_testing_need([edit] * 4) is not None
+    assert inferer._check_testing_need([edit] * 4 + [check]) is None
+    assert inferer._check_testing_need([check] + [edit] * 4) is not None
+    assert inferer._check_testing_need([{**edit, "success": False}] * 4) is None
+    assert inferer._check_testing_need([{**edit, "code_changed": False}] * 4) is None
+    assert inferer._check_testing_need([{"tool": "bash_execute", "success": True}] * 4) is None
+    assert inferer._check_testing_need([edit] * 4 + [{**check, "tests_passed": False}]) is not None
+
+
+def test_testing_need_does_not_mix_sessions_or_workspaces():
+    inferer = NeedInferer()
+    edit = {"tool": "file_edit", "success": True, "code_changed": True, "session_id": "a", "workspace": "/project"}
+    other = {**edit, "session_id": "b"}
+    assert inferer._check_testing_need([edit] * 3 + [other]) is None
+    assert inferer._check_testing_need([edit] * 3 + [{**edit, "workspace": "/other"}]) is None

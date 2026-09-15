@@ -16,6 +16,7 @@ from rune.agent.model_traits import (
     reasoning_effort_rejected,
     traits,
 )
+from rune.agent.timing import timed_completion
 from rune.llm.reasoning import apply_reasoning_control
 from rune.utils.logger import get_logger
 
@@ -65,7 +66,7 @@ async def compatible_completion(
     retries_left = 4
     while True:
         try:
-            return await completion(**params)
+            return await timed_completion(completion, params)
         except bad_request as exc:
             if retries_left == 0:
                 raise

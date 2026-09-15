@@ -38,4 +38,5 @@ async def test_bash_execute_blocks_benchmark_vcs_history_before_execution(monkey
     result = await bash_execute(BashParams(command="git log --oneline -20"))
 
     assert result.success is False
-    assert result.metadata == {"benchmark_policy_block": "vcs_history", "command": "git log"}
+    assert result.metadata == {"benchmark_policy_block": "vcs_history", "command": "git log",
+                               "action_status": "not_executed"}

@@ -33,6 +33,7 @@ if boundary in {'written', 'completed'}:
     runs.record('tool_result', {'runId': 'r1', 'artifactReceipts': [{'revision': 'rev1', 'source_sha256': 'source1'}]})
 if boundary == 'completed':
     runs.record('agent_complete', {'runId': 'r1', 'answer': '완료', 'success': True,
+        'timings': {'totalMs': 100, 'spans': [{'kind': 'model', 'durationMs': 70}], 'deliveryMs': 2},
         'trust': {'completionStatus': 'completed', 'verified': True,
                   'artifactReceipts': [{'revision': 'rev1', 'source_sha256': 'source1'}]}})
 (root / 'expected.json').write_text(json.dumps(runs.latest('s1')))
@@ -49,6 +50,8 @@ os._exit(23)
         assert run["startedAt"] == before["startedAt"]
         assert run["textStartedAt"] == before["textStartedAt"]
         assert run["status"] == ("completed" if boundary == "completed" else "interrupted")
+        if boundary == "completed":
+            assert run["timings"] == before["timings"]
         assert run["seq"] == before["seq"] + (boundary != "completed")
         assert run["question"] is None and run["approval"] is None
         assert run["interactions"][0]["request"]["expiresAt"] == 9000000000000

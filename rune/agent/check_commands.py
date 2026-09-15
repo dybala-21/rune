@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import PurePosixPath
 
-from rune.agent.bash_parsing import is_test_command, is_verification_command
+from rune.agent.bash_parsing import is_test_command, is_verification_command, strip_runner_prefix
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,7 +21,28 @@ class CheckCommand:
 
     @property
     def key(self) -> tuple[str, str]:
-        return self.cwd, self.command
+        words = shlex.split(self.command)
+        if words and re.fullmatch(r"python(?:[23](?:\.\d+)?)?", PurePosixPath(words[0]).name):
+            # -B changes bytecode writes, not which tests run.
+            while words[1:2] == ["-B"]:
+                del words[1]
+        return self.cwd, shlex.join(words)
+
+
+def pytest_scope(command: str) -> tuple[str, ...] | None:
+    """Match pytest arguments across direct and Python-module invocations."""
+    try:
+        words = strip_runner_prefix(tuple(shlex.split(command)))
+    except ValueError:
+        return None
+    if not words:
+        return None
+    head = PurePosixPath(words[0]).name
+    if head in {"pytest", "py.test"}:
+        return words[1:]
+    if head in {"python", "python3", "python2"} and words[1:3] == ("-m", "pytest"):
+        return words[3:]
+    return None
 
 
 @lru_cache(maxsize=1)

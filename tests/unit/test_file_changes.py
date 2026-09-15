@@ -16,7 +16,8 @@ from rune.capabilities.file import (
 @pytest.fixture(autouse=True)
 def authorized_workspace(tmp_path, monkeypatch):
     def validate(path):
-        return SimpleNamespace(allowed=Path(path).resolve().is_relative_to(tmp_path.resolve()), reason="outside test workspace")
+        return SimpleNamespace(allowed=Path(path).resolve().is_relative_to(tmp_path.resolve()),
+                               requires_approval=False, reason="outside test workspace")
 
     monkeypatch.setattr("rune.capabilities.file.get_guardian", lambda: SimpleNamespace(validate_file_path=validate))
 

@@ -75,16 +75,25 @@ export interface TrustInfo {
   testsPassedAfterEdit?: boolean | null;
   artifactReceipts?: Array<{
     kind: 'document_bundle';
+    scope?: never;
     revision: string;
     source_sha256: string;
     artifacts: Array<{ path: string; sha256: string }>;
     checks: Record<'native_content' | 'source_metrics' | 'visual_layout' | 'task_acceptance', string>;
+  } | {
+    scope: 'download';
+    id: string;
+    sessionId: string;
+    runId: string;
+    path: string;
+    name: string;
+    sha256: string;
+    size: number;
+    verified: boolean;
   }>;
-  /** Where the run worked, when that was not only the workspace. Not a failure:
-      the snapshot simply cannot undo anything outside it. */
+  /** Actions outside the workspace that its snapshot cannot restore. */
   workspaceWarning?: string;
-  /** Figures the answer states that no retrieved page mentions. Not a verdict:
-      a number can be derived or rounded. */
+  /** Figures absent from retrieved sources; derived or rounded values may still be valid. */
   unsourcedNumbers?: string[];
   evidenceGate?: {
     hasCheck: boolean;
@@ -121,12 +130,15 @@ export interface AgentAbortedData { runId?: string; trust?: TrustInfo }
 export interface StepStartData { stepNumber: number; tokens: number }
 export interface ThinkingData { text: string }
 export interface ToolCallData {
+  runId?: string;
   toolName: string;
   args: Record<string, unknown>;
   /** Pairs this call with its result; tools run concurrently. */
   callId?: string;
 }
 export interface ToolResultData {
+  checkStatus?: 'pass' | 'fail' | 'inconclusive' | null;
+  outputTruncated?: boolean;
   fileChange?: FileChange | null;
   toolName: string;
   result: string;
@@ -267,7 +279,10 @@ export interface FileChange {
 }
 
 export interface ToolCall {
+  checkStatus?: 'pass' | 'fail' | 'inconclusive' | null;
+  outputTruncated?: boolean;
   id: string;
+  runId?: string;
   /** Server-side id of the call this row is waiting on. */
   callId?: string;
   toolName: string;

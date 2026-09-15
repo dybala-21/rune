@@ -32,16 +32,31 @@ Return ONLY JSON matching the supplied schema. Do not emit code.
   explicit data condition. The current request overrides earlier requests; preserve unchanged requirements.
 - Use exact source column names. Group columns appear first in output, then aggregates in listed order.
   Aggregate names are output headers: honor requested headers, otherwise choose concise natural labels.
+- Set exact_headers=true ONLY if the user specifies exact output column labels; otherwise false. Source
+  column names and phrases such as 'sum by team' do not prescribe output headers. Unspecified headers
+  are presentation choices; verification still checks column count, positional groups and aggregate values.
 - Filter values must match source types: CSV fields are strings. Deduplicate only when requested, using
   specified key columns or ALL source columns for exact duplicate rows. Never silently choose first/last
   for conflicting duplicate keys. count counts rows, not nonempty cells.
+- Numeric aggregates accept decimal points and comma-separated groups of three digits, including signs.
+  Blank, malformed, and non-finite amounts are errors, never implicit zeroes. Other numeric locales and
+  currency/unit conversions need explicit support; do not silently reinterpret them.
 - output_names lists explicitly requested CSV/XLSX output basenames only; never list the source.
   output_sheet is the exact requested output worksheet name, or null when unspecified/CSV.
+- csv_bom is true when the user requests UTF-8 BOM CSV, false when they explicitly forbid a BOM,
+  otherwise null. This byte-level encoding check is supported; do not list it as unverified/out_of_scope.
+- grand_total is [] unless the request asks for an overall aggregate row alongside groups. When requested,
+  supply one label per group_by column, honoring explicit labels or choosing a concise natural label and
+  blanks for remaining group columns. All aggregates are recomputed from the filtered, deduplicated source,
+  before group rounding; an overall mean is not an average of group means. Intermediate subtotals are unsupported.
+- Set exact_total_label=true ONLY if the user prescribes the total row's literal label; otherwise false.
+  Merely asking for a grand-total row does not prescribe its text. Never make your chosen display label
+  an extra user requirement. Actual groups, totals, missing rows and duplicate rows are still checked.
 - The verifier supports checking an EXISTING output, repairing it, and checking it again against the SAME
   source. An existing output is NOT a second source. It also checks source preservation by SHA256 since
   requirements were fixed. Do not list these supported operations as unverified.
 - Put unsupported or ambiguous DATA requirements in unverified (formulas, joins of multiple INPUT sources,
-  unit conversion, sorting, subtotal/grand-total rows alongside groups, unspecified duplicate policy).
+  unit conversion, sorting, intermediate subtotal rows, unspecified duplicate policy).
   Do not approximate these using supported operations.
 - Put non-data requirements (styling, prose, non-tabular deliverables) in out_of_scope. A request to give
   a file link or explain check results is ordinary delivery, not an unsupported data condition. The tool
@@ -182,9 +197,15 @@ class TableAcceptance:
             expected, stats = await asyncio.to_thread(expected_table, plan, headers, rows)
             columns, actual = await asyncio.to_thread(read_tabular, actual_data, output.suffix.lower(), sheet, header_row)
             report.update(await asyncio.to_thread(compare_table, plan, expected, columns, actual))
-            if output.suffix.lower() == ".xlsx" and columns == plan.group_by + [a.name for a in plan.aggregates]:
-                text_numbers = [a.name for a in plan.aggregates
-                                if any(isinstance(row[a.name], (str, bool)) for row in actual)]
+            if plan.csv_bom is not None:
+                report.setdefault("checks", []).append("csv_bom")
+                if output.suffix.lower() != ".csv" or actual_data.startswith(b"\xef\xbb\xbf") != plan.csv_bom:
+                    report.update(status="fail", issues=[*report.get("issues", []), {
+                        "check": "csv_bom", "expected": plan.csv_bom,
+                    }])
+            if output.suffix.lower() == ".xlsx" and len(columns) == len(plan.group_by) + len(plan.aggregates):
+                text_numbers = [column for column in columns[len(plan.group_by):]
+                                if any(isinstance(row[column], (str, bool)) for row in actual)]
                 if text_numbers:
                     report.update(status="fail", issues=[*report.get("issues", []), {
                         "check": "numeric_cells", "detail": "Store aggregates as numeric cells: " + ", ".join(text_numbers),

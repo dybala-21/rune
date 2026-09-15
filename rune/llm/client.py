@@ -288,6 +288,8 @@ class LLMClient:
         temperature: float = 0.0,
         max_tokens: int = 16_384,
         tools: list[dict] | None = None,
+        response_format: dict | None = None,
+        cache_system: bool = False,
         timeout: float = 600.0,
     ) -> dict:
         """Send a completion request via LiteLLM.
@@ -352,6 +354,22 @@ class LLMClient:
             kwargs["temperature"] = temperature
         if tools:
             kwargs["tools"] = tools
+        if response_format is not None:
+            from rune.llm.structured import supported_format
+            selected_format = supported_format(resolved_model, response_format)
+            if selected_format is not None:
+                kwargs["response_format"] = selected_format
+            if response_format.get("type") == "json_schema" and (selected_format or {}).get("type") != "json_schema":
+                import json
+
+                contract = "Return JSON matching this schema:\n" + json.dumps(
+                    response_format["json_schema"]["schema"], separators=(",", ":"))
+                kwargs["messages"] = [{"role": "system", "content": contract}, *messages]
+
+        if cache_system:
+            from rune.agent.litellm_adapter import _apply_anthropic_cache_control
+
+            kwargs["messages"] = _apply_anthropic_cache_control(resolved_model, kwargs["messages"])
 
         from rune.llm.request_params import compatible_completion
 

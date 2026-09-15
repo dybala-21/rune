@@ -1,40 +1,21 @@
-"""Freeze pre-existing test files across an agent run.
+"""Preserve existing tests while the agent edits the workspace.
 
-External verifiers (Evidence Gate, GoalLoop validation) judge the agent's work
-by running checks inside the very workspace the agent just edited. Observed
-live, and then measured (scripts/tamper_rate_bench.py): under the wording
-people actually use ("fix the failing test"), a 7B edits the tests in 15/15
-runs and gets a false "verified" in 4/15; a 32B still tampers in 3/15. A
-verifier whose inputs the agent can rewrite is not a verifier.
+Before verification, restore changed or deleted tests from the snapshot
+and quarantine new ``conftest.py`` files that could alter collection.
+Other new tests and changed runner configs are reported without reverting
+them. Directory, file-count and byte limits bound the snapshot work.
 
-Policy (``RUNE_PROTECT_TESTS``, default on):
-
-- snapshot conventional test files (and test-runner config files) when the
-  guard is created — the pre-run state;
-- immediately before a verification runs:
-  * restore any snapshotted test file whose content changed or was deleted,
-  * quarantine any NEWLY CREATED ``conftest.py`` (a fresh conftest can skip or
-    deselect the failing tests without touching them — the collection attack),
-  * detect (disclose only) newly created test files and modified runner
-    configs (``pytest.ini``/``pyproject.toml``/``setup.cfg``/``tox.ini``) —
-    configs are NOT restored because editing them is often legitimate work;
-- report everything so the verdict discloses what happened.
-
-When the user's task genuinely is to edit tests, disable with
-``RUNE_PROTECT_TESTS=0``.
-
-Perf envelope (measured on this 94K-LOC repo): snapshot ~54ms once per run,
-re-scan+restore ~16-60ms per verification; walk is capped at ``_MAX_DIRS``
-directories so a workspace pinned to a home directory cannot stall a run.
-
-The name globs below match file-naming conventions (structured formats), not
-natural language — pattern matching is the correct tool here.
+Protection is on by default. Set ``RUNE_PROTECT_TESTS=0`` for tasks that
+intentionally change existing tests.
 """
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import os
 from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -57,8 +38,7 @@ _SKIP_DIR_NAMES = frozenset({
     ".rune", "dist", "build", ".pytest_cache", ".mypy_cache", ".ruff_cache",
 })
 # Root-level files that steer test collection (addopts, testpaths, markers).
-# Changed configs are DISCLOSED, never restored: editing pyproject.toml is
-# routine legitimate work (deps), unlike rewriting an existing assertion.
+# Report config changes without restoring them; they may include dependency edits.
 _CONFIG_FILES = ("pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini")
 
 _MAX_FILE_BYTES = 256 * 1024
@@ -66,6 +46,45 @@ _MAX_FILES = 500
 _MAX_TOTAL_BYTES = 8 * 1024 * 1024
 _MAX_DIRS = 8_000  # a mis-pinned home-dir workspace must not stall the run
 _QUARANTINE_SUFFIX = ".rune-quarantined"
+_authored: ContextVar[dict[str, str] | None] = ContextVar("authored_tests", default=None)
+
+
+@contextmanager
+def new_tests_scope():
+    """Permit corrections to tests created by file tools in this run only."""
+    token = _authored.set({})
+    try:
+        yield
+    finally:
+        _authored.reset(token)
+
+
+def _test_digest(path: Path) -> str | None:
+    try:
+        if path.stat().st_size <= _MAX_FILE_BYTES:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as exc:
+        log.debug("authored_test_read_failed", path=str(path), error=str(exc))
+    return None
+
+
+def authored_test_unchanged(path: Path) -> bool:
+    authored = _authored.get()
+    expected = authored.get(str(path)) if authored is not None else None
+    return expected is not None and expected == _test_digest(path)
+
+
+def record_test_write(path: Path, *, existed: bool) -> None:
+    authored = _authored.get()
+    if authored is None or path.name == "conftest.py" or (existed and str(path) not in authored):
+        return
+    if not _is_test_file(path, any(part in _TEST_DIR_NAMES for part in path.parts)):
+        return
+    digest = _test_digest(path)
+    if digest is not None:
+        authored[str(path)] = digest
+    else:
+        authored.pop(str(path), None)
 
 
 def protect_tests_enabled() -> bool:
@@ -80,11 +99,18 @@ def _is_test_file(path: Path, under_test_dir: bool) -> bool:
     return any(fnmatch.fnmatch(path.name, g) for g in _TEST_FILE_GLOBS)
 
 
-def _walk_test_files(root: Path) -> Iterator[Path]:
-    """Yield test-convention files under *root*, bounded by ``_MAX_DIRS``."""
-    for dirs_seen, (dirpath, dirnames, filenames) in enumerate(os.walk(root), start=1):
+def _walk_test_files(root: Path, *, strict: bool = False) -> Iterator[Path]:
+    """Find test files under *root*, scanning at most ``_MAX_DIRS`` directories."""
+    def scan_error(error: OSError) -> None:
+        log.debug("test_walk_failed", root=str(root), error=str(error))
+        if strict:
+            raise error
+
+    for dirs_seen, (dirpath, dirnames, filenames) in enumerate(os.walk(root, onerror=scan_error), start=1):
         if dirs_seen > _MAX_DIRS:
             log.warning("test_walk_truncated", max_dirs=_MAX_DIRS, root=str(root))
+            if strict:
+                raise ValueError("Too many directories to check for protected tests; narrow the deletion target")
             return
         dirnames[:] = [d for d in dirnames if d not in _SKIP_DIR_NAMES]
         rel_dir = Path(dirpath).relative_to(root)

@@ -151,6 +151,9 @@ class RunSnapshots:
             run["_textSize"] += len(chunk)
             while run["_textSize"] > 1_000_000:
                 run["_textSize"] -= len(run["_textParts"].popleft())
+        elif event == "user_steering":
+            run.setdefault("steering", []).append({"instruction": data.get("instruction", ""),
+                                                    "acknowledgeUnknown": data.get("acknowledgeUnknown", False)})
         elif event == "step_start":
             run["stepNumber"] = data.get("stepNumber", 0)
         elif event == "tool_call":
@@ -170,6 +173,7 @@ class RunSnapshots:
                     or (not data.get("callId") and call["toolName"] == data.get("toolName")
                         and "result" not in call)):
                     call.update(result=data.get("result", ""), success=data.get("success"),
+                                checkStatus=data.get("checkStatus"), outputTruncated=data.get("outputTruncated", False),
                                 completedAt=now, durationMs=now - call["timestamp"])
                     break
         elif event in {"question", "approval_request"}:
@@ -183,7 +187,7 @@ class RunSnapshots:
                 run[field] = None
         elif event in {"agent_complete", "agent_error", "agent_aborted", "agent_interrupted"}:
             run["question"] = run["approval"] = None
-            for key in ("trust", "answer", "error", "durationMs", "success", "interruptionReason"):
+            for key in ("trust", "answer", "error", "durationMs", "timings", "success", "interruptionReason"):
                 if key in data:
                     run[key] = copy.deepcopy(data[key])
             if event == "agent_interrupted":

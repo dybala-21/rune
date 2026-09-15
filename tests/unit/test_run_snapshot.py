@@ -46,3 +46,14 @@ def test_an_agent_error_is_failed_even_when_delivered_in_the_final_event():
     runs.record("agent_complete", {"runId": "r1", "success": False,
                                   "trust": {"completionStatus": "failed", "reason": "error: invalid request"}})
     assert runs.latest("s1")["status"] == "failed"
+
+
+def test_snapshot_preserves_check_failure_separately_from_process_exit():
+    runs = RunSnapshots()
+    runs.start("r1", "s1", "verify")
+    runs.record("tool_call", {"runId": "r1", "callId": "a", "toolName": "bash_execute"})
+    runs.record("tool_result", {"runId": "r1", "callId": "a", "success": True,
+                               "result": "FAILED (failures=5)", "checkStatus": "fail", "outputTruncated": True})
+    call = runs.latest("s1")["toolCalls"][0]
+    assert call["success"] and call["checkStatus"] == "fail" and call["outputTruncated"]
+    assert call["completedAt"] >= call["timestamp"]

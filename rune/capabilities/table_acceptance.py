@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 import zipfile
 from collections import Counter
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
@@ -29,6 +30,10 @@ class TablePlan(BaseModel):
     filters: list[RowFilter] = Field(default_factory=list, max_length=20)
     deduplicate_by: list[str] = Field(default_factory=list, max_length=32)
     group_by: list[str] = Field(default_factory=list, max_length=4)
+    grand_total: list[str] = Field(default_factory=list, max_length=4)
+    exact_headers: bool = True
+    exact_total_label: bool = True
+    csv_bom: bool | None = None
     aggregates: list[Aggregate] = Field(default_factory=list, max_length=32)
     output_names: list[str] = Field(default_factory=list, max_length=12)
     output_sheet: str | None = Field(default=None, min_length=1, max_length=31)
@@ -39,11 +44,15 @@ class TablePlan(BaseModel):
     def valid_plan(self) -> TablePlan:
         if self.applicable and (not self.requirements or not self.aggregates):
             raise ValueError("An applicable plan needs quoted requirements and aggregates")
-        if not self.applicable and (self.filters or self.deduplicate_by or self.group_by or self.aggregates):
+        if not self.applicable and (self.filters or self.deduplicate_by or self.group_by or self.aggregates or self.grand_total):
             raise ValueError("An inapplicable plan cannot contain executable conditions")
         if not self.applicable and not self.unverified:
             raise ValueError("Explain why the request cannot be checked")
         names = self.group_by + [a.name for a in self.aggregates]
+        if self.grand_total and (len(self.grand_total) != len(self.group_by)
+                                 or not any(label.strip() for label in self.grand_total)
+                                 or any(len(label) > 128 for label in self.grand_total)):
+            raise ValueError("Grand-total labels must identify each grouping column")
         if len(set(names)) != len(names) or len(set(self.deduplicate_by)) != len(self.deduplicate_by):
             raise ValueError("Duplicate output columns or duplicate keys")
         for name in self.output_names:
@@ -121,8 +130,14 @@ def read_tabular(data: bytes, suffix: str, sheet: str | None = None,
 def number(value: Any) -> Decimal:
     if isinstance(value, bool) or value is None:
         raise ValueError(f"Expected a number, got {value!r}")
+    text = str(value).strip()
+    if "," in text:
+        # Validate grouping before removing separators; 12,34 must not become 1234.
+        if not re.fullmatch(r"[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?(?:[eE][+-]?\d+)?", text):
+            raise ValueError(f"Invalid numeric grouping: {value!r}; expected comma groups of three and a decimal point")
+        text = text.replace(",", "")
     try:
-        result = Decimal(str(value))
+        result = Decimal(text)
     except InvalidOperation as exc:
         raise ValueError(f"Expected a number, got {value!r}") from exc
     if not result.is_finite() or abs(result.adjusted()) > 100 or len(result.as_tuple().digits) > 100:
@@ -164,6 +179,12 @@ def expected_table(plan: TablePlan, headers: list[str], rows: list[dict[str, Any
         groups.setdefault(key, []).append(row)
         if len(groups) > 10_000:
             raise ValueError("Result exceeds 10000 groups")
+    if plan.grand_total:
+        key = tuple(plan.grand_total)
+        if key in groups:
+            raise ValueError("Grand-total label collides with a source group; choose an unambiguous label")
+        # Recompute from source rows, before group rounding or averaging.
+        groups[key] = selected
     expected = []
     with localcontext() as context:
         context.prec = 220
@@ -196,13 +217,18 @@ def expected_table(plan: TablePlan, headers: list[str], rows: list[dict[str, Any
 def compare_table(plan: TablePlan, expected: list[tuple[str, ...]],
                   headers: list[str], rows: list[dict[str, Any]]) -> dict[str, Any]:
     columns = plan.group_by + [a.name for a in plan.aggregates]
-    if headers != columns:
+    if len(headers) != len(columns) or plan.exact_headers and headers != columns:
         return {"status": "fail", "issues": [{"check": "columns", "expected": columns, "actual": headers}]}
 
     def canonical(row: tuple[str, ...]) -> tuple[str | Decimal, ...]:
         return tuple(row[:len(plan.group_by)]) + tuple(number(v) for v in row[len(plan.group_by):])
 
-    actual = [tuple("" if row[c] is None else str(row[c]) for c in columns) for row in rows]
+    actual = [tuple("" if row[c] is None else str(row[c]) for c in headers) for row in rows]
+    if plan.grand_total and not plan.exact_total_label:
+        width = len(plan.group_by)
+        group_keys = {row[:width] for row in expected[:-1]}
+        # An extra row may represent the requested total, but its values and multiplicity must still match.
+        actual = [tuple(plan.grand_total) + row[width:] if row[:width] not in group_keys else row for row in actual]
     wanted, found = Counter(map(canonical, expected)), Counter(map(canonical, actual))
     missing, extra = wanted - found, found - wanted
     issues = []

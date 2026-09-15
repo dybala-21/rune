@@ -446,7 +446,7 @@ export function useAgent() {
       runSeqRef.current = Math.max(runSeqRef.current, 1);
       setMessages(previous => restoreRunMessages(previous, run));
       const calls = run.toolCalls.map((call, index) => ({
-        ...call, id: call.callId || `${run.runId}:tool:${index}`, run: runSeqRef.current,
+        ...call, runId: run.runId, id: call.callId || `${run.runId}:tool:${index}`, run: runSeqRef.current,
       }));
       setToolCalls(calls);
       setLastTrust(run.trust);
@@ -665,6 +665,7 @@ export function useAgent() {
       setToolCalls(prev => appendWithLimit(prev, {
         id: nextId(),
         callId: data.callId,
+        runId: data.runId || api.getCurrentRunId(),
         toolName: data.toolName,
         args: data.args ?? {},
         timestamp: Date.now(),
@@ -697,6 +698,8 @@ export function useAgent() {
           ...original,
           result: data.result,
           success: data.success,
+          checkStatus: data.checkStatus,
+          outputTruncated: data.outputTruncated,
           completedAt: now,
           durationMs: Math.max(0, now - original.timestamp),
         };

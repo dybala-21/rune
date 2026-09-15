@@ -215,25 +215,11 @@ def _milder(a: ValidationResult, b: ValidationResult) -> bool:
 
 
 def _raised(base: ValidationResult, level: RiskLevel) -> ValidationResult:
-    """*base*, or a copy of it read as more dangerous — never less.
+    """Raise the risk level without relaxing the existing decision.
 
-    Two shapes can leave here and both are at least as strict as what came
-    in: base itself, or base with a higher level, blocked outright once that
-    level is critical. Nothing milder is constructible, and that is the whole
-    safety argument for consulting a parser at all — a tree that misreads a
-    command cannot open a hole it has no way to describe.
-
-    Everything but the level is copied, and that is not tidiness. Setting
-    requires_approval here once invented approval prompts nobody had asked
-    for: the tool adapter calls the approval callback on that flag alone, and
-    a run with no one at the keyboard blocks on input() until something kills
-    it — measured, on a cleanup task, hung for eight minutes at 0% CPU. This
-    raises the reading. It does not decide how the run is supervised.
-
-    The check at the end costs three comparisons and should never fire. It is
-    there because the property it guards is the one thing this design cannot
-    be wrong about, and because the last three defects on this path were all
-    found by widening what was compared.
+    Preserve the approval requirement; a critical risk also blocks execution.
+    Lower or equal levels leave the base result unchanged. The final check
+    guards these constraints if the result construction changes later.
     """
     if risk_to_number(level) <= risk_to_number(base.risk_level):
         return base
@@ -266,24 +252,42 @@ class Guardian:
     def _expand(self, p: str) -> str:
         return p.replace("~", self._home, 1) if p.startswith("~") else p
 
-    def validate(self, command: str, _context: str | None = None) -> ValidationResult:
-        """Validate a bash command, then let the parse raise the answer.
+    def validate(self, command: str, _context: str | None = None, *, cwd: str | None = None) -> ValidationResult:
+        """Check command risks and explicit writes against the file policy.
 
-        The pattern checks decide on their own and keep every allow they
-        would have given. The parse is consulted afterwards for one thing —
-        a deletion the patterns could not see, because it sat behind a `cd`,
-        a wrapper, or a second command on the same line — and it can only
-        move the verdict up. Every return path goes through `_raised`, which
-        is the only place an escalation is constructed and cannot produce a
-        milder answer than the one it was given.
+        Parsed deletions and write targets can strengthen an existing verdict;
+        they never override a block or an approval requirement.
         """
         base = self._validate_patterns(command, _context)
         from rune.safety.shell_ast import worst_deletion
 
         seen = worst_deletion(command)
-        if seen is None:
+        if seen is not None:
+            base = _raised(base, seen)
+        if not base.allowed:
             return base
-        return _raised(base, seen)
+        from rune.safety.shell_writes import shell_write_targets
+
+        targets = shell_write_targets(command, cwd or "", home=self._home)
+        for path in sorted(targets.paths):
+            check = self.validate_file_path(path)
+            if not check.allowed or check.requires_approval:
+                base = ValidationResult(
+                    allowed=base.allowed and check.allowed,
+                    risk_level=max((base.risk_level, check.risk_level), key=risk_to_number),
+                    reason=check.reason,
+                    requires_approval=base.requires_approval or check.requires_approval,
+                )
+            if not base.allowed:
+                return base
+        if targets.uncertain:
+            return ValidationResult(
+                allowed=True,
+                risk_level=max((base.risk_level, "high"), key=risk_to_number),
+                reason="Shell write targets cannot be resolved before execution; approval is required.",
+                requires_approval=True,
+            )
+        return base
 
     def _validate_patterns(self, command: str,
                            _context: str | None = None) -> ValidationResult:
@@ -584,6 +588,7 @@ class Guardian:
                     allowed=True,
                     risk_level="high",
                     reason=f"Config file modification requires approval: {cp}",
+                    requires_approval=True,
                 )
 
         return ValidationResult(allowed=True, risk_level="safe")
