@@ -202,7 +202,7 @@ async def set_workspace(conversation_id: str, path: str) -> str:
         ec = {}
     ec["cwd"] = str(resolved)
     conv.execution_context = json.dumps(ec)
-    await manager._store.save(conv)
+    await manager._store.save(conv, embed=False)
     return str(resolved)
 
 

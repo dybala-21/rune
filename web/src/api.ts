@@ -131,6 +131,40 @@ let _currentRunId = '';
 export function setCurrentRunId(id: string): void { _currentRunId = id; }
 export function getCurrentRunId(): string { return _currentRunId; }
 
+export interface ComputerState {
+  sessionId: string;
+  runId?: string | null;
+  state: 'unavailable' | 'idle' | 'running' | 'pausing' | 'paused' | 'manual' | 'stopped';
+  lease: number;
+  uncertainAction?: boolean;
+  frameId?: string;
+  title?: string;
+  url?: string;
+  capturedAt?: number;
+  controls?: Array<{ ref: string; role: string; name: string; disabled: boolean }>;
+}
+
+export async function fetchComputer(sessionId: string): Promise<ComputerState> {
+  await ensureWebAuth();
+  const response = await fetch(`/api/computer/state?sessionId=${encodeURIComponent(sessionId)}`, {
+    credentials: 'include', cache: 'no-store', signal: AbortSignal.timeout(8000),
+  });
+  if (!response.ok) throw new Error(`Could not read the browser (${response.status}).`);
+  return response.json();
+}
+
+export function controlComputer(state: ComputerState, action: 'pause' | 'takeover' | 'resume' | 'close', instruction = '', acknowledgeUnknown = false): Promise<ComputerState> {
+  return post('/api/computer/control', { sessionId: state.sessionId, lease: state.lease, action, instruction, acknowledgeUnknown });
+}
+
+export function actOnComputer(state: ComputerState, action: 'click' | 'type' | 'select' | 'check' | 'uncheck' | 'scroll', ref = '', value = ''): Promise<ComputerState> {
+  return post('/api/computer/action', { sessionId: state.sessionId, lease: state.lease, frameId: state.frameId, action, ref, value });
+}
+
+export function stopComputer(runId: string): Promise<{ ok: boolean }> {
+  return post('/api/abort', { runId });
+}
+
 export async function fetchRunSnapshot(sessionId: string): Promise<{ run: import('./utils/runSnapshot').RunSnapshot | null; available?: boolean }> {
   await ensureWebAuth();
   const response = await fetch(`/api/runs/snapshot?sessionId=${encodeURIComponent(sessionId)}`, {

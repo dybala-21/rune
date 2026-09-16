@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from rune.agent.timing import timed
 from rune.api.questions import PendingQuestion, question_payload
 from rune.api.trust import build_cancelled_trust
 from rune.api.trust import build_trust_payload as build_trust_payload
@@ -280,6 +281,9 @@ def create_app() -> Any:
 
     # Active tasks - declared early so the lifespan can reference them.
     _active_tasks: dict[str, asyncio.Task[Any]] = {}
+    _shutting_down = False
+    from rune.api.computer import Computers, computer_router
+    _computers = Computers(record=lambda event, data: _run_snapshots.record(event, data))
     # A final snapshot may add receipts after the initial stop notification.
     _aborted_runs: dict[str, dict[str, Any]] = {}
 
@@ -312,8 +316,10 @@ def create_app() -> Any:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[arg-type]
+        nonlocal _shutting_down
         _run_snapshots.open()
         _maintenance.start()
+        computer_maintenance = asyncio.create_task(_computers.maintain())
         log.info("api_server_started")
         _proactive_engine = None
         try:
@@ -325,16 +331,20 @@ def create_app() -> Any:
         try:
             yield
         finally:
+            _shutting_down = True
             if _proactive_engine is not None:
                 with contextlib.suppress(Exception):
                     _proactive_engine.off("suggestion", _on_proactive_suggestion)
             try:
-                _run_snapshots.interrupt_active("server_shutdown")
-            finally:
                 tasks = list(_active_tasks.values())
                 for task in tasks:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
+                _run_snapshots.interrupt_active("server_shutdown")
+            finally:
+                computer_maintenance.cancel()
+                await asyncio.gather(computer_maintenance, return_exceptions=True)
+                await _computers.close()
                 await _maintenance.close()
                 _run_snapshots.close()
                 log.info("api_server_stopped")
@@ -384,6 +394,9 @@ def create_app() -> Any:
 
     # Auth dependency
     auth = TokenAuthDependency()
+    app.include_router(computer_router(_computers, auth))
+    from rune.api.desktop import desktop_router
+    app.include_router(desktop_router(_computers, auth, stop_run=lambda rid: _stop_run(rid)))
 
     # REST API routers
     from rune.api.handlers.mcp import router as mcp_router
@@ -479,6 +492,8 @@ def create_app() -> Any:
         return build_trust_payload(trace)
 
     async def _broadcast_aborted(run_id: str, trace: Any = None) -> None:
+        if _shutting_down:
+            return
         loop = _active_loops.get(run_id)
         trust = build_cancelled_trust(trace, artifact_receipts=getattr(loop, "artifact_receipts", []))
         payload = {"runId": run_id, "trust": trust}
@@ -505,6 +520,7 @@ def create_app() -> Any:
         sticky reuses the default web conversation; headless callers leave it off.
         """
         trace = None
+        computer = None
         try:
             from rune.agent.agent_context import (
                 PrepareContextOptions,
@@ -523,6 +539,7 @@ def create_app() -> Any:
                 except Exception as exc:
                     log.debug("web_conv_resolve_failed", error=str(exc)[:100])
                     conv_manager = None
+            computer = await _computers.claim(conv_id or session_id or run_id, run_id)
             if conv_manager is not None and conv_id and resume_from is None:
                 conv_wiring.record_user_turn(conv_manager, conv_id, goal, attachments)
                 await conv_manager._store.save(conv_manager._active[conv_id], embed=False)
@@ -552,12 +569,15 @@ def create_app() -> Any:
                 conversation_manager=conv_manager,
             )
             _run_recovery.workspace_available(run_id, agent_ctx.workspace_root, resuming=resume_from is not None)
+            if conv_manager is not None and conv_id and not workspace:
+                await conv_wiring.set_workspace(conv_id, agent_ctx.workspace_root)
 
             loop = NativeAgentLoop(config=agent_config) if agent_config else NativeAgentLoop()
             _active_loops[run_id] = loop
 
             approval_lock = asyncio.Lock()
 
+            @timed("approval")
             async def _request_approval(command: str, reason: str) -> bool:
                 approval_id = f"approval:{run_id}:{uuid4().hex}"
                 approval_future: asyncio.Future[dict[str, Any]] = (
@@ -594,6 +614,7 @@ def create_app() -> Any:
 
             loop.set_approval_callback(_web_approval_callback)
 
+            @timed("question")
             async def _web_ask_user_callback(
                 params: AskUserParams,
             ) -> UserResponse:
@@ -621,6 +642,7 @@ def create_app() -> Any:
             journal = ExecutionJournal(_run_store, run_id, agent_ctx.workspace_root,
                                        previous=resume_records if resume_from is not None else None,
                                        approval=_web_approval_callback)
+            computer.journal = journal
             _run_snapshots.record("run_context", {
                 "runId": run_id, "workspace": agent_ctx.workspace_root, "recoveryVersion": 1,
                 "execution": {"attachments": attachments or []},
@@ -671,6 +693,8 @@ def create_app() -> Any:
                         "result": info.get("output_head", "")
                         or info.get("error_head", ""),
                         "success": info.get("success", True),
+                        "checkStatus": info.get("check_status"),
+                        "outputTruncated": info.get("output_truncated", False),
                         "callId": info.get("callId", ""),
                         "runId": run_id,
                         "artifactReceipts": getattr(loop, "artifact_receipts", []),
@@ -756,11 +780,12 @@ def create_app() -> Any:
                 continuation["extra_system_context"] = recovery_context(resume_from, resume_records or [])
                 run_context["recovery_written_files"] = recovery_written_files(resume_records or [])
             with journal_scope(journal):
-                trace = await loop.run(
-                    agent_ctx.goal, context=run_context,
-                    message_history=agent_ctx.messages if agent_ctx.messages else None,
-                    **continuation,
-                )
+                async with _computers.bind(computer):
+                    trace = await loop.run(
+                        agent_ctx.goal, context=run_context,
+                        message_history=agent_ctx.messages if agent_ctx.messages else None,
+                        **continuation,
+                    )
                 journal.check()
             loop_finished = time.monotonic()
             full_text, answer = split_answer(collected, _step_starts)
@@ -768,6 +793,8 @@ def create_app() -> Any:
             duration_ms = int((time.monotonic() - _run_start_time) * 1000)
 
             if conv_manager is not None and conv_id:
+                for instruction in computer.instructions:
+                    conv_wiring.record_user_turn(conv_manager, conv_id, instruction)
                 await conv_wiring.record_assistant_turn(
                     conv_manager, conv_id, loop, answer,
                     reason=trace.reason or "",
@@ -793,6 +820,8 @@ def create_app() -> Any:
                     "success": trace.reason == "completed",
                     "answer": answer,
                     "durationMs": duration_ms,
+                    "timings": {**getattr(trace, "timings", {}),
+                                "deliveryMs": round((time.monotonic() - loop_finished) * 1000, 1)},
                     "trust": _trust_payload(trace),
                 },
             )
@@ -810,6 +839,8 @@ def create_app() -> Any:
             )
             return f"error: {type(exc).__name__}"
         finally:
+            if computer is not None:
+                _computers.finish(computer, run_id)
             _active_loops.pop(run_id, None)
 
     async def _ndjson_execution(
@@ -1014,6 +1045,7 @@ def create_app() -> Any:
                     )
 
             trace = None if run_task.cancelled() else run_task.result()
+            loop_finished = time.monotonic()
             cancelled = (run_task.cancelled() or getattr(trace, "reason", "") == "cancelled"
                          or run_id in _aborted_runs)
             full_text, answer = split_answer(collected, _step_starts)
@@ -1034,7 +1066,7 @@ def create_app() -> Any:
                     classification_hint=getattr(loop, "_last_goal_type", "") or None,
                 )
             duration_ms = int((time.monotonic() - _run_start_time) * 1000)
-            if cancelled and run_id in _aborted_runs:
+            if cancelled:
                 await _broadcast_aborted(run_id, trace)
 
             yield (
@@ -1046,6 +1078,8 @@ def create_app() -> Any:
                             "success": not cancelled and getattr(trace, "reason", "") == "completed",
                             "answer": answer,
                             "durationMs": duration_ms,
+                            "timings": {**getattr(trace, "timings", {}),
+                                        "deliveryMs": round((time.monotonic() - loop_finished) * 1000, 1)},
                             "trust": build_cancelled_trust(trace, artifact_receipts=getattr(loop, "artifact_receipts", []))
                             if cancelled else _trust_payload(trace),
                         },
@@ -1379,9 +1413,7 @@ def create_app() -> Any:
 
                 elif msg_type == "abort":
                     run_id = msg.get("runId", "")
-                    agent_loop = _active_loops.get(run_id)
-                    if agent_loop:
-                        await agent_loop.cancel()
+                    await _stop_run(run_id)
 
                 elif msg_type == "approval":
                     try:
@@ -1570,6 +1602,21 @@ def create_app() -> Any:
             log.warning("voice_transcribe_failed", error=str(exc)[:150])
             return {"ok": False, "error": f"Transcription failed: {type(exc).__name__}"}
 
+    async def _stop_run(rid: str) -> None:
+        await _computers.stop(rid)
+        agent_loop = _active_loops.get(rid)
+        if agent_loop:
+            with contextlib.suppress(Exception):
+                await agent_loop.cancel()
+        task = _active_tasks.get(rid)
+        if task and not task.done():
+            task.cancel()
+            # Let tool receipts settle before the run becomes terminal in the store.
+            await asyncio.wait({task}, timeout=5)
+        snapshot = _run_snapshots.get(rid)
+        if (task is None or task.done()) and snapshot and snapshot["status"] not in {"completed", "failed", "cancelled"}:
+            await _broadcast_aborted(rid)
+
     @app.post("/api/abort", dependencies=[Depends(auth)])
     async def api_abort(
         request: Request,
@@ -1582,22 +1629,10 @@ def create_app() -> Any:
         except Exception:
             pass
 
-        async def _stop(rid: str) -> None:
-            # Notify clients first; cancelling the task can skip its final event.
-            # Cancel the task as well as the loop to interrupt an active LLM stream.
-            await _broadcast_aborted(rid)
-            agent_loop = _active_loops.get(rid)
-            if agent_loop:
-                with contextlib.suppress(Exception):
-                    await agent_loop.cancel()
-            task = _active_tasks.get(rid)
-            if task and not task.done():
-                task.cancel()
-
         if run_id:
             # Never fall back to another run when the requested run has already ended.
             if run_id in _active_loops or run_id in _active_tasks:
-                await _stop(run_id)
+                await _stop_run(run_id)
                 return {"ok": True}
             return {"ok": True, "stopped": False, "reason": "run is not active"}
 
@@ -1605,7 +1640,7 @@ def create_app() -> Any:
         rid = (list(_active_loops.keys())[-1] if _active_loops
                else list(_active_tasks.keys())[-1] if _active_tasks else "")
         if rid:
-            await _stop(rid)
+            await _stop_run(rid)
         return {"ok": True}
 
     @app.post("/api/approval", dependencies=[Depends(auth)])

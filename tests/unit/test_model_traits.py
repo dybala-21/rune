@@ -10,6 +10,7 @@ from rune.agent.model_traits import (
     _TEMPERATURE_REJECTED,
     ModelTraits,
     note_temperature_rejected,
+    supports_vision,
     traits,
 )
 
@@ -20,8 +21,19 @@ def test_unknown_models_get_bare_defaults():
     assert traits("") == ModelTraits()
 
 
+def test_current_browser_models_keep_vision_when_the_sdk_catalog_is_stale(monkeypatch):
+    monkeypatch.setattr("litellm.supports_vision", lambda **kwargs: False)
+    supports_vision.cache_clear()
+    try:
+        for model in ("gpt-6-astra", "openai/gpt-6-astra", "claude-opus-5", "anthropic/claude-opus-5"):
+            assert supports_vision(model)
+        assert not supports_vision("ollama/text-only-model")
+    finally:
+        supports_vision.cache_clear()
+
+
 def test_specific_family_wins_over_general():
-    # opus rows sit above the bare claude row; both must keep anthropic_wire.
+    # Specific families take precedence while retaining Anthropic request settings.
     opus = traits("anthropic/claude-opus-5")
     assert opus.speed_param and opus.anthropic_wire
     haiku = traits("claude-haiku-4-5")

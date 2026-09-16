@@ -13,6 +13,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from rune.capabilities.fetch_state import current_fetch_state
 from rune.capabilities.registry import CapabilityRegistry
 from rune.capabilities.search.duckduckgo import DuckDuckGoSearchProvider
 from rune.capabilities.search.provider import SearchOptions, SearchProvider, SearchResult
@@ -202,39 +203,23 @@ def _html_to_text(html: str) -> str:
 
 
 def _extract_by_selector(html: str, selector: str) -> str:
-    """Basic CSS selector extraction supporting tag, .class, and #id.
+    """Return text from the complete subtrees matched by a CSS selector."""
+    from cssselect import SelectorError
+    from lxml import etree
+    from lxml import html as document
 
-    Falls back to full text if no match is found.
-    """
-    selector = selector.strip()
-    pattern: str | None = None
-
-    if selector.startswith("#"):
-        # ID selector: #my-id
-        id_val = re.escape(selector[1:])
-        pattern = (
-            rf'<[^>]+id\s*=\s*["\']?{id_val}["\']?[^>]*>'
-            r"(.*?)</[^>]+>"
+    try:
+        tree = document.fromstring(
+            html.encode("utf-8"), parser=document.HTMLParser(encoding="utf-8", no_network=True),
         )
-    elif selector.startswith("."):
-        # Class selector: .my-class
-        cls_val = re.escape(selector[1:])
-        pattern = (
-            rf'<[^>]+class\s*=\s*["\'][^"\']*\b{cls_val}\b[^"\']*["\'][^>]*>'
-            r"(.*?)</[^>]+>"
-        )
-    else:
-        # Tag selector: div, p, article, etc.
-        tag = re.escape(selector)
-        pattern = rf"<{tag}[^>]*>(.*?)</{tag}>"
-
-    if pattern:
-        matches = re.findall(pattern, html, re.DOTALL | re.IGNORECASE)
-        if matches:
-            combined = "\n".join(matches)
-            return _html_to_text(combined)
-
-    return _html_to_text(html)
+        matches = tree.cssselect(selector.strip())
+    except (SelectorError, etree.ParserError) as exc:
+        raise ValueError(f"Cannot extract the CSS selector: {exc}") from exc
+    if not matches:
+        raise ValueError("No elements match the CSS selector.")
+    return _html_to_text("\n".join(
+        document.tostring(node, encoding="unicode", with_tail=False) for node in matches
+    ))
 
 
 # Capability implementations
@@ -273,19 +258,6 @@ async def web_search(params: WebSearchParams) -> CapabilityResult:
         output="\n".join(lines).strip(),
         metadata={"query": params.query, "count": len(results)},
     )
-
-
-# Session-level fetch failure tracking (reset per process)
-_fetch_failures: dict[str, int] = {}
-
-
-def _get_domain(url: str) -> str:
-    """Extract domain from URL for failure tracking."""
-    from urllib.parse import urlparse
-    try:
-        return urlparse(url).netloc.lower()
-    except Exception:
-        return ""
 
 
 def _is_path_wipe_redirect(original_url: str, final_url: str) -> bool:
@@ -360,26 +332,17 @@ def _prune_json_by_term(text: str, term: str) -> str | None:
 
 
 async def web_fetch(params: WebFetchParams) -> CapabilityResult:
-    """Fetch a URL and convert HTML to clean text.
-
-    Tracks per-domain failures within a session. If a domain has failed
-    2+ times, returns early with a guidance message to use search snippets.
-    """
+    """Fetch a URL; preserve short responses and isolate transient failures."""
     import httpx
 
-    domain = _get_domain(params.url)
-    log.debug("web_fetch", url=params.url, selector=params.selector)
-
-    # Check session failure history for this domain
-    if domain and _fetch_failures.get(domain, 0) >= 2:
+    state = current_fetch_state() if params.method.upper() == "GET" else None
+    if state is not None and (delay := state.retry_after(params.url)) > 0:
         return CapabilityResult(
             success=False,
-            error=(
-                f"Skipped: {domain} has failed {_fetch_failures[domain]} times this session "
-                f"(likely bot-blocked or paywalled). Use search snippets for this source."
-            ),
-            metadata={"status_code": 0, "skipped": True},
+            error=f"This URL recently failed twice. Retry in {delay:.0f} seconds or use another source.",
+            metadata={"status_code": 0, "skipped": True, "retry_after_seconds": round(delay, 1)},
         )
+    log.debug("web_fetch", url=params.url, selector=params.selector)
 
     try:
         headers = {
@@ -419,13 +382,8 @@ async def web_fetch(params: WebFetchParams) -> CapabilityResult:
         html = resp.text
         final_url = str(resp.url)
 
-        # Path-wipe redirect detection. Sites commonly serve an invalid
-        # deep path by redirecting to the homepage or a search page,
-        # which returns 200 OK with boilerplate nav content. That looks
-        # like success but is not the requested resource.
+        # A redirect to the homepage or search page can return 200 without the requested content.
         if _is_path_wipe_redirect(params.url, final_url):
-            if domain:
-                _fetch_failures[domain] = _fetch_failures.get(domain, 0) + 1
             return CapabilityResult(
                 success=False,
                 error=(
@@ -443,24 +401,24 @@ async def web_fetch(params: WebFetchParams) -> CapabilityResult:
 
         # Extract by selector if provided
         if params.selector:
-            text = _extract_by_selector(html, params.selector)
+            try:
+                text = _extract_by_selector(html, params.selector)
+                if not text.strip():
+                    raise ValueError("The selected elements have no readable text.")
+            except ValueError as exc:
+                return CapabilityResult(
+                    success=False,
+                    error=f"{exc} Adjust the selector or omit it to read the full page.",
+                    metadata={"status_code": resp.status_code, "selector_error": True},
+                )
         else:
             text = _html_to_text(html)
 
-        # JS-rendered site detection: HTTP 200 but minimal useful text.
-        # Sites like yanolja.com return valid HTML with JS bundles but
-        # no readable content after tag stripping.
-        if len(text.strip()) < 500:
-            if domain:
-                _fetch_failures[domain] = _fetch_failures.get(domain, 0) + 1
+        if not text.strip():
             return CapabilityResult(
                 success=False,
-                error=(
-                    f"Page returned minimal content ({len(text.strip())} chars) — "
-                    f"likely JavaScript-rendered or empty. "
-                    f"Use web_search snippets or browser_navigate instead."
-                ),
-                metadata={"status_code": resp.status_code, "js_rendered": True},
+                error="The response has no readable content. Check the URL or inspect the page in a browser if needed.",
+                metadata={"status_code": resp.status_code, "empty_content": True},
             )
 
         # Large JSON: blind truncation drops the relevant records (a schedule
@@ -486,9 +444,8 @@ async def web_fetch(params: WebFetchParams) -> CapabilityResult:
         if filter_note:
             text = filter_note + text
 
-        # Success: reset failure count for this domain
-        if domain:
-            _fetch_failures.pop(domain, None)
+        if state is not None:
+            state.succeeded(params.url)
 
         return CapabilityResult(
             success=True,
@@ -505,23 +462,21 @@ async def web_fetch(params: WebFetchParams) -> CapabilityResult:
         )
 
     except httpx.HTTPStatusError as exc:
-        if domain:
-            _fetch_failures[domain] = _fetch_failures.get(domain, 0) + 1
+        if state is not None and (exc.response.status_code == 429 or exc.response.status_code >= 500):
+            state.failed(params.url)
         return CapabilityResult(
             success=False,
             error=f"HTTP {exc.response.status_code}: {params.url}",
             metadata={"status_code": exc.response.status_code},
         )
     except httpx.TimeoutException:
-        if domain:
-            _fetch_failures[domain] = _fetch_failures.get(domain, 0) + 1
+        if state is not None:
+            state.failed(params.url)
         return CapabilityResult(
             success=False,
             error=f"Timeout fetching {params.url}",
         )
     except Exception as exc:
-        if domain:
-            _fetch_failures[domain] = _fetch_failures.get(domain, 0) + 1
         return CapabilityResult(
             success=False,
             error=f"Fetch failed: {exc}",

@@ -20,7 +20,7 @@ import { WorkspaceChip } from './components/WorkspaceChip';
 import { InlineWorkspacePicker } from './components/InlineWorkspacePicker';
 import { Toaster } from './components/Toaster';
 import { normalizeToolName, isCodingToolName, computeRunVerdict } from './utils/tooling';
-import { shouldOpenWorkbench } from './utils/workbench';
+import { desktopAttention, shouldOpenWorkbench } from './utils/workbench';
 import { fetchConfig, fetchSessions, getLiveSessionId, type ConfigInfo, type SessionInfo } from './api';
 
 type SidebarTab = 'chats' | 'settings';
@@ -52,6 +52,8 @@ export function App() {
   const [paletteSessions, setPaletteSessions] = useState<SessionInfo[]>([]);
 
   const isViewingHistory = history.viewingSessionId !== null;
+  const desktopWait = desktopAttention(agent.toolCalls, !isViewingHistory && agent.state === 'running');
+  const attentionLabel = desktopWait === 'connection' ? 'Waiting for app access' : desktopWait === 'action' ? 'Review app action' : undefined;
 
   const touchedWorkspace = useMemo(
     () => agent.toolCalls.some(tc => isWorkspaceTool(normalizeToolName(tc.toolName))),
@@ -268,6 +270,7 @@ export function App() {
         tokenUsage={!isViewingHistory ? agent.tokenUsage : undefined}
         currentStepInfo={!isViewingHistory ? agent.currentStepInfo : undefined}
         currentActivity={currentActivity}
+        attentionLabel={attentionLabel}
         activeModel={configInfo?.activeModel ?? null}
         reasoningSupported={configInfo?.reasoningSupported}
         reasoningEffort={configInfo?.reasoningEffort ?? null}
@@ -650,6 +653,7 @@ export function App() {
                 onSend={isViewingHistory ? handleSendFromHistory : agent.sendMessage}
                 onAbort={agent.abort}
                 isRunning={!isViewingHistory && agent.state !== 'idle'}
+                attentionLabel={attentionLabel}
                 disabled={!agent.connected}
               />
             </div>
@@ -659,6 +663,7 @@ export function App() {
             <div style={{ minWidth: 0, overflow: 'hidden' }}>
               {workbenchOpen && (
                 <WorkbenchPanel
+                  sessionId={history.viewingSessionId ?? getLiveSessionId()}
                   key={history.viewingSessionId ?? getLiveSessionId()}
                   historical={isViewingHistory}
                   toolCalls={displayToolCalls}

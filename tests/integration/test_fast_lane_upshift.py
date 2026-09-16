@@ -231,13 +231,9 @@ async def _fake_execute(cap_name: str, params: dict[str, Any]) -> Any:
 async def test_search_only_answer_passes_gate_only_on_the_lane(
     anthropic_lane, monkeypatch, lane_on
 ) -> None:
-    """The lane's grounding relaxation, exercised behaviorally: one search,
-    zero fetches, short answer. Lane on -> gate passes; lane off -> the
-    web-evidence gate demands a fetch and blocks."""
+    """Allow search-only answers in the fast lane; require fetched evidence otherwise."""
     cfg = get_config()
     monkeypatch.setattr(cfg.llm, "route_simple_queries", lane_on)
-    # Short answer (< 50 chars) so the full completion gate evaluates
-    # instead of the text-plus-evidence fast path.
     factory = _SearchingAgentFactory(step_texts=["45.20달러입니다."])
     loop = _loop()
 

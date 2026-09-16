@@ -38,6 +38,7 @@ def _allow_guardian(monkeypatch):
     class _OK:
         allowed = True
         reason = ""
+        requires_approval = False
 
     monkeypatch.setattr(g.Guardian, "validate_file_path", lambda self, p: _OK())
 
@@ -192,3 +193,47 @@ class TestPostconditions:
     def test_verification_can_be_disabled(self, tmp_path, monkeypatch):
         monkeypatch.setenv("RUNE_VERIFY_MUTATIONS", "0")
         assert verify_written(tmp_path / "missing.txt", 5).ok
+
+
+@pytest.mark.asyncio
+async def test_new_test_corrections_are_scoped_and_external_edits_remain_protected(tmp_path):
+    from rune.agent.validation_guard import new_tests_scope
+
+    path = tmp_path / 'test_new.py'
+    old = tmp_path / 'test_original.py'
+    old.write_text('assert 2 + 2 == 4\n')
+    with new_tests_scope():
+        assert (await file_write(FileWriteParams(path=str(path), content='assert 2 + 2 == 5\n'))).success
+        assert (await file_edit(FileEditParams(path=str(path), search='== 5', replace='== 4'))).success
+        assert (await file_write(FileWriteParams(path=str(path), content='assert 3 + 3 == 6\n'))).success
+        blocked = await file_edit(FileEditParams(path=str(old), search='== 4', replace='== 5'))
+        assert not blocked.success and old.read_text() == 'assert 2 + 2 == 4\n'
+        path.write_text('assert 3 + 3 == 7\n')
+        blocked = await file_edit(FileEditParams(path=str(path), search='== 7', replace='== 6'))
+        assert not blocked.success and '== 7' in path.read_text()
+    with new_tests_scope():
+        blocked = await file_edit(FileEditParams(path=str(path), search='== 7', replace='== 6'))
+        assert not blocked.success
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('directory', [False, True])
+async def test_deletion_cannot_bypass_protected_tests(tmp_path, directory):
+    root = tmp_path / 'package'
+    root.mkdir()
+    path = root / 'test_contract.py'
+    path.write_text('assert 2 + 2 == 4\n')
+    result = await file_delete(FileDeleteParams(path=str(root if directory else path), recursive=directory))
+    assert not result.success and result.metadata['action_status'] == 'not_executed'
+    assert path.read_text() == 'assert 2 + 2 == 4\n'
+
+
+@pytest.mark.asyncio
+async def test_oversized_test_scan_blocks_deletion(tmp_path, monkeypatch):
+    monkeypatch.setattr('rune.agent.validation_guard._MAX_DIRS', 1)
+    root = tmp_path / 'package'
+    (root / 'nested').mkdir(parents=True)
+    path = root / 'nested/test_contract.py'
+    path.write_text('assert True\n')
+    result = await file_delete(FileDeleteParams(path=str(root), recursive=True))
+    assert not result.success and path.exists()

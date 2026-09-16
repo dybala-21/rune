@@ -178,21 +178,12 @@ def test_missing_metadata_is_handled():
 
 @pytest.fixture
 def work_dir():
-    """A scratch dir under $HOME.
-
-    pytest's tmp_path lives under /private/var, which Guardian refuses as a
-    sensitive path before the allowlist gate is ever reached.
-    """
-    import shutil
-    import uuid
+    """Use writable scratch space outside macOS's protected /var tree."""
+    import tempfile
     from pathlib import Path
 
-    d = Path.home() / f".rune-test-{uuid.uuid4().hex[:8]}"
-    d.mkdir()
-    try:
-        yield d
-    finally:
-        shutil.rmtree(d, ignore_errors=True)
+    with tempfile.TemporaryDirectory(prefix="rune-policy-test-", dir="/tmp") as directory:
+        yield Path(directory)
 
 
 @pytest.fixture

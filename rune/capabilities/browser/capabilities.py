@@ -1,11 +1,12 @@
 """Browser capabilities for RUNE (Playwright-based).
 
 Observe, act, find, extract, screenshot capabilities plus registration.
-Singleton management and navigation live in ``browser_core``.
-Batch/workflow/profile live in ``browser_extended``.
+Navigation and run-owned resources live in ``core`` and ``session``.
 """
 
 from __future__ import annotations
+
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -21,6 +22,7 @@ from rune.capabilities.browser.discover import (
     BrowserDiscoverApisParams,
     browser_discover_apis,
 )
+from rune.capabilities.browser.session import browser_operation, current_session
 from rune.capabilities.registry import CapabilityRegistry
 from rune.capabilities.types import CapabilityDefinition
 from rune.types import CapabilityResult, Domain, RiskLevel
@@ -29,42 +31,9 @@ from rune.utils.logger import get_logger
 log = get_logger(__name__)
 
 
-# Browser agent intelligence — loop detection + history compression
-_action_history: list[tuple[str, str]] = []  # (action, selector) per session
-_observe_history: list[str] = []  # ["Title (N elements)"] per session
-_LOOP_THRESHOLD = 2  # same action+selector N times -> loop warning
-
-
-def _reset_action_history_on_navigation(before_url: str, after_url: str) -> None:
-    """Clear action history when the page URL changes (refs are reassigned)."""
-    if before_url != after_url:
-        _action_history.clear()
-
-
-def _detect_action_loop(action: str, selector: str) -> str:
-    """Check if the same action+selector has been repeated recently."""
-    current = (action, selector)
-    recent = _action_history[-4:]  # check last 4 actions
-    repeats = sum(1 for h in recent if h == current)
-    _action_history.append(current)
-    # Keep history bounded
-    if len(_action_history) > 50:
-        _action_history[:] = _action_history[-30:]
-    if repeats >= _LOOP_THRESHOLD:
-        return (
-            f"\n\u26a0\ufe0f LOOP DETECTED: '{action} {selector}' repeated {repeats + 1} times with no effect.\n"
-            "Try a DIFFERENT approach:\n"
-            "  1. browser_observe to find alternative elements\n"
-            "  2. Scroll down/up to reveal hidden elements\n"
-            "  3. Construct the target URL directly (browser_navigate)\n"
-            "  4. Use browser_find to locate by text\n"
-            "Do NOT repeat the same action."
-        )
-    return ""
-
-
 def _compress_observe_history(current_title: str, current_count: int) -> str:
     """Compress older observe results into a 1-line summary prefix."""
+    _observe_history = current_session().observe_history
     _observe_history.append(f"{current_title} ({current_count} elements)")
     if len(_observe_history) > 20:
         _observe_history[:] = _observe_history[-15:]
@@ -88,13 +57,13 @@ class BrowserObserveParams(BaseModel):
 
 
 class BrowserActParams(BaseModel):
-    action: str = Field(description="Action: click, type, scroll, select")
-    selector: str = Field(description="CSS selector for target element")
+    action: Literal["click", "type", "scroll", "select", "check", "uncheck"] = Field(description="Click, fill, scroll, select, or set a checkbox state")
+    selector: str = Field(description="Element ref from the current observation, or a CSS selector matching exactly one element")
     value: str = Field(default="", description="Value for type/select actions")
 
 
 class BrowserScreenshotParams(BaseModel):
-    path: str = Field(default="screenshot.png", description="Output file path")
+    path: str = Field(default="", description="Optional output file path; otherwise saved as a unique session screenshot")
     full_page: bool = Field(default=False, alias="fullPage")
 
 
@@ -111,6 +80,7 @@ class BrowserFindParams(BaseModel):
 
 
 # Capability implementations
+@browser_operation
 async def browser_observe(params: BrowserObserveParams) -> CapabilityResult:
     """Observe the current page via accessibility tree snapshot."""
     from rune.capabilities.browser.helpers import (
@@ -130,6 +100,7 @@ async def browser_observe(params: BrowserObserveParams) -> CapabilityResult:
         title = await page.title()
 
         elements = await extract_interactive_elements(page)
+        current_session().needs_observation = False
 
         snapshot = await _accessibility_snapshot(page, params.selector)
 
@@ -167,9 +138,9 @@ async def browser_observe(params: BrowserObserveParams) -> CapabilityResult:
                 return null;
             }""")
             if has_overlay:
-                overlay_warning = f"\n\u26a0\ufe0f BLOCKING {has_overlay.upper()} DETECTED \u2014 close it before interacting with the page."
-        except Exception:
-            pass
+                overlay_warning = f"\nA {has_overlay} may block the page. Inspect its purpose before interacting."
+        except Exception as exc:
+            log.debug("browser_overlay_observation_failed", error=str(exc))
 
         header = f"URL: {url}\nTitle: {title}"
         if overlay_warning:
@@ -210,263 +181,150 @@ async def browser_observe(params: BrowserObserveParams) -> CapabilityResult:
         )
 
 
+@browser_operation
 async def browser_act(params: BrowserActParams) -> CapabilityResult:
-    """Perform an action on a page element."""
+    """Dispatch once against the observed node and report the resulting state."""
     from rune.capabilities.browser.helpers import (
-        MAX_RETRIES,
-        RETRY_DELAY_MS,
-        dismiss_blocking_overlays,
         extract_interactive_elements,
-        get_element_store,
-        self_healing_find,
+        find_element_locator,
+        format_interactive_elements,
+        is_element_ref,
         wait_for_dom_settle,
     )
 
-    log.debug("browser_act", action=params.action, selector=params.selector)
-
+    session = current_session()
+    owned_target = None
+    if session.needs_observation:
+        return CapabilityResult(success=False, error="Read the current page with browser_observe after user control changed.",
+                                metadata={"action_status": "not_executed"})
+    if session.uncertain_action:
+        return CapabilityResult(success=False, error=(
+            "A previous browser action has an unknown outcome. Inspect the page or ask the user "
+            "to confirm its effects; further changes are paused for this run."
+        ), metadata={"action_status": "not_executed"})
     try:
         _, page = await _get_browser()
-
-        action = params.action.lower()
-
-        # Scroll doesn't need an element.
-        if action == "scroll":
-            direction = params.value.lower() if params.value else "down"
-            delta = 500 if direction == "down" else -500
-            await page.evaluate(f"window.scrollBy(0, {delta})")
-            await wait_for_dom_settle(page)
-            return CapabilityResult(
-                success=True,
-                output=f"Scrolled {direction}",
-                metadata={"action": "scroll", "url": page.url},
-            )
-
-        # Before snapshot
-        before_url = page.url
-        before_title = await page.title()
-        before_element_count = len(get_element_store().all)
-
-        # Resolve element - try ref-based self-healing first, fall back to CSS.
-        locator = None
-        if params.selector.startswith("e") and params.selector[1:].isdigit():
-            locator = await self_healing_find(page, params.selector)
-
-        if locator is None:
-            element = await page.query_selector(params.selector)
-            if element is None:
-                return CapabilityResult(
-                    success=False,
-                    error=f"Element not found: {params.selector}",
-                )
-            locator = element
-
-        # Execute action with reactive overlay recovery.
-        last_error: Exception | None = None
-        for attempt in range(MAX_RETRIES + 1):
-            try:
-                if action == "click":
-                    await locator.click(timeout=10_000)
-                    output = f"Clicked: {params.selector}"
-                elif action == "type":
-                    await locator.fill(params.value)
-                    output = f"Typed into {params.selector}: {params.value[:50]}"
-                elif action == "select":
-                    await locator.select_option(params.value)
-                    output = f"Selected '{params.value}' in {params.selector}"
-                else:
-                    return CapabilityResult(
-                        success=False,
-                        error=f"Unknown action: {params.action}. "
-                              f"Supported: click, type, scroll, select",
-                    )
-                last_error = None
-                break
-            except Exception as exc:
-                last_error = exc
-                if attempt < MAX_RETRIES:
-                    log.debug("browser_act_retry", attempt=attempt + 1, error=str(exc))
-                    dismissed = await dismiss_blocking_overlays(page)
-                    if dismissed:
-                        log.debug("browser_act_overlay_dismissed_on_retry", dismissed=dismissed)
-                    await page.wait_for_timeout(RETRY_DELAY_MS)
-                    if params.selector.startswith("e") and params.selector[1:].isdigit():
-                        new_locator = await self_healing_find(page, params.selector)
-                        if new_locator is not None:
-                            locator = new_locator
-                    else:
-                        new_el = await page.query_selector(params.selector)
-                        if new_el is not None:
-                            locator = new_el
-
-        if last_error is not None:
-            return CapabilityResult(
-                success=False,
-                error=f"Action failed after {MAX_RETRIES + 1} attempts: {last_error}",
-            )
-
-        # Phantom click detection
-        if action == "click":
-            await wait_for_dom_settle(page)
-            phantom_url = page.url
-            phantom_title = await page.title()
-            no_change = (phantom_url == before_url and phantom_title == before_title)
-
-            if no_change:
-                log.debug("phantom_click_detected", selector=params.selector)
-                click_recovered = False
-
-                # Fallback 1: JS element.click()
-                try:
-                    el_handle = await page.query_selector(
-                        f'[data-rune-ref="{params.selector}"]'
-                    ) or await page.query_selector(params.selector)
-                    if el_handle:
-                        await page.evaluate("""(el) => {
-                            el.scrollIntoView({block: 'center'});
-                            el.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true}));
-                            el.dispatchEvent(new MouseEvent('mousedown', {bubbles: true}));
-                            el.dispatchEvent(new MouseEvent('mouseup', {bubbles: true}));
-                            el.dispatchEvent(new PointerEvent('pointerup', {bubbles: true}));
-                            el.click();
-                        }""", el_handle)
-                        await wait_for_dom_settle(page)
-                        if page.url != before_url or await page.title() != before_title:
-                            click_recovered = True
-                            output += " (JS click fallback)"
-                            log.debug("phantom_click_recovered_js")
-                except Exception as exc:
-                    log.debug("js_click_fallback_failed", error=str(exc))
-
-                # Fallback 2: CDP Input.dispatchMouseEvent
-                if not click_recovered:
-                    try:
-                        el_handle = await page.query_selector(
-                            f'[data-rune-ref="{params.selector}"]'
-                        ) or await page.query_selector(params.selector)
-                        if el_handle:
-                            box = await el_handle.bounding_box()
-                            if box:
-                                x = box["x"] + box["width"] / 2
-                                y = box["y"] + box["height"] / 2
-                                cdp = await page.context.new_cdp_session(page)
-                                for event_type in ("mousePressed", "mouseReleased"):
-                                    await cdp.send("Input.dispatchMouseEvent", {
-                                        "type": event_type,
-                                        "x": x, "y": y,
-                                        "button": "left",
-                                        "clickCount": 1,
-                                    })
-                                await cdp.detach()
-                                await wait_for_dom_settle(page)
-                                if page.url != before_url or await page.title() != before_title:
-                                    output += " (CDP click fallback)"
-                                    log.debug("phantom_click_recovered_cdp")
-                    except Exception as exc:
-                        log.debug("cdp_click_fallback_failed", error=str(exc))
-
-        # After snapshot + change detection
-        await wait_for_dom_settle(page)
-        new_elements = await extract_interactive_elements(page)
-
-        after_url = page.url
-        after_title = await page.title()
-        after_element_count = len(new_elements)
-
-        changes: list[str] = []
-        page_changed = False
-        if after_url != before_url:
-            changes.append(f"Navigated: {before_url} \u2192 {after_url}")
-            page_changed = True
-        if after_title != before_title:
-            changes.append(f"Title changed: {before_title} \u2192 {after_title}")
-            page_changed = True
-        element_diff = after_element_count - before_element_count
-        if abs(element_diff) > 2:
-            changes.append(f"Elements: {before_element_count} \u2192 {after_element_count} ({'+' if element_diff > 0 else ''}{element_diff})")
-        has_dialog = await page.evaluate(
-            "() => !!document.querySelector('[role=\"dialog\"]:not([aria-hidden=\"true\"]), [role=\"alertdialog\"]')"
-        )
-        if has_dialog:
-            changes.append("Dialog/overlay opened")
-
-        parts = [f"Action: {action} on {params.selector}"]
-        parts.append(f"URL: {after_url}")
-        parts.append(f"Title: {after_title}")
-        if changes:
-            parts.append("Changes: " + "; ".join(changes))
-        if page_changed:
-            parts.append("Page changed \u2014 element refs may be stale, re-observe if needed.")
-
-        _reset_action_history_on_navigation(before_url, after_url)
-
-        if not changes and action == "click":
-            parts.append(
-                "\n\u26a0\ufe0f NO CHANGES DETECTED \u2014 this click likely had no effect.\n"
-                "Evaluate: Did you achieve your intended goal? If not, try:\n"
-                "  - A different element (re-observe the page)\n"
-                "  - Scrolling to reveal the target\n"
-                "  - Constructing the URL directly"
-            )
-
-        loop_warning = _detect_action_loop(action, params.selector)
-        if loop_warning:
-            parts.append(loop_warning)
-
-        # Data-loading XHRs (the schedule/booking class) fire on interaction —
-        # exactly after clicks like this one. Surface the catch so the model
-        # can switch to the API path instead of more clicking.
-        from rune.capabilities.browser.network import get_network_monitor, hybrid_api_enabled
-        _monitor = get_network_monitor()
-        if hybrid_api_enabled():
-            # Hand over the data the click actually loaded. Pointing at another
-            # tool measured badly: it reads as one more branch to explore, and
-            # runs burned their budget choosing between paths (0/3 vs 2/3).
-            _bodies = _monitor.unreported_json_bodies()
-            if _bodies:
-                _api = _bodies[-1]
-                _body = _api.response_body[:6000]
-                _cut = (
-                    "\n[response truncated — browser_discover_apis(readBody=…, "
-                    "jsonFilter='<keyword>') returns the matching records]"
-                    if len(_api.response_body) > len(_body) else ""
-                )
-                parts.append(
-                    f"\nThis interaction loaded {_api.method} {_api.url[:120]} — "
-                    f"its JSON response follows, so the answer may already be "
-                    f"here:\n{_body}{_cut}"
-                )
-                _monitor.mark_reported()
+        action = params.action
+        target = None
+        if action != "scroll":
+            if is_element_ref(params.selector):
+                target = await find_element_locator(page, params.selector)
+                if target is None:
+                    return CapabilityResult(success=False, error=(
+                        f"Reference {params.selector} is stale or ambiguous. Read the page again "
+                        "and choose an unambiguous target. No action was dispatched."
+                    ), metadata={"action_status": "not_executed"})
             else:
-                _new_apis = _monitor.unreported_interesting_count()
-                if _new_apis > 0:
-                    parts.append(
-                        f"\U0001f4e1 {_new_apis} new data API call(s) captured "
-                        "by this interaction — browser_discover_apis lists them."
+                locator = page.locator(params.selector)
+                count = await locator.count()
+                if count != 1:
+                    return CapabilityResult(success=False, error=(
+                        f"Selector matched {count} elements; exactly one is required. "
+                        "No action was dispatched."
+                    ), metadata={"action_status": "not_executed"})
+                target = await locator.element_handle(timeout=1000)
+                owned_target = target
+                if target is None:
+                    raise RuntimeError("The target disappeared before the action")
+
+        before_url = page.url
+        before_snapshot = await _accessibility_snapshot(page)
+        before_state = await _control_state(target) if target is not None else {}
+        try:
+            if action == "click":
+                await target.click(timeout=10_000)
+            elif action == "type":
+                await target.fill(params.value, timeout=10_000)
+            elif action == "select":
+                await target.select_option(params.value, timeout=10_000)
+            elif action in {"check", "uncheck"}:
+                await target.set_checked(action == "check", timeout=10_000)
+            else:
+                if params.value not in {"", "up", "down"}:
+                    return CapabilityResult(success=False, error="Scroll value must be up or down",
+                                            metadata={"action_status": "not_executed"})
+                await page.evaluate("dy => window.scrollBy(0, dy)", -500 if params.value == "up" else 500)
+        except BaseException as exc:
+            session.uncertain_action = True
+            if not isinstance(exc, Exception):
+                raise
+            return CapabilityResult(success=False, error=(
+                f"Action outcome is unknown: {exc}. The command was attempted once and was not retried. "
+                "Inspect the current state before deciding what to do next."
+            ), metadata={"action_status": "unknown", "action": action, "selector": params.selector})
+
+        try:
+            await wait_for_dom_settle(page)
+            after_state = await _control_state(target) if target is not None else {}
+            after_snapshot = await _accessibility_snapshot(page)
+            elements = await extract_interactive_elements(page)
+            changed = page.url != before_url or after_snapshot != before_snapshot or before_state != after_state
+            summary = "Observed a state change." if changed else (
+                "No visible state change was observed. Verify the intended result before another action."
+            )
+            api_sections: list[str] = []
+            from rune.capabilities.browser.network import get_network_monitor, hybrid_api_enabled
+            _monitor = get_network_monitor()
+            if hybrid_api_enabled():
+                _bodies = _monitor.unreported_json_bodies()
+                if _bodies:
+                    _api = _bodies[-1]
+                    _body = _api.response_body[:6000]
+                    _cut = (
+                        "\n[response truncated — browser_discover_apis(readBody=…, "
+                        "jsonFilter='<keyword>') returns the matching records]"
+                        if len(_api.response_body) > len(_body) else ""
                     )
-
-        return CapabilityResult(
-            success=True,
-            output="\n".join(parts),
-            metadata={
-                "action": params.action,
-                "selector": params.selector,
-                "url": after_url,
-                "page_changed": page_changed,
-                "changes": changes,
-                "elements_refreshed": after_element_count,
-                "no_effect": not changes and action == "click",
-            },
-        )
-
-    except RuntimeError as exc:
-        return CapabilityResult(success=False, error=str(exc))
+                    api_sections.append(
+                        f"\nThis interaction loaded {_api.method} {_api.url[:120]} — "
+                        f"its JSON response follows, so the answer may already be "
+                        f"here:\n{_body}{_cut}"
+                    )
+                    _monitor.mark_reported()
+                else:
+                    _new_apis = _monitor.unreported_interesting_count()
+                    if _new_apis > 0:
+                        api_sections.append(
+                            f"\U0001f4e1 {_new_apis} new data API call(s) captured "
+                            "by this interaction — browser_discover_apis lists them."
+                        )
+            api_text = "\n".join(api_sections)
+            return CapabilityResult(success=True, output=(
+                f"Action dispatched: {action} on {params.selector}\nURL: {page.url}\n{summary}"
+                f"\n{after_snapshot}{format_interactive_elements(elements)}{api_text}"
+            ), metadata={"action_status": "dispatched", "action": action, "selector": params.selector,
+                         "url": page.url, "page_changed": changed, "control_state": after_state,
+                         "elements_refreshed": len(elements)})
+        except Exception as exc:
+            log.debug("browser_post_action_observation_failed", error=str(exc))
+            return CapabilityResult(success=True, output=(
+                f"Action dispatched: {action}. Reading the resulting page failed: {exc}. "
+                "Observe the page again; do not repeat the action to obtain its result."
+            ), metadata={"action_status": "dispatched", "observation_failed": True})
     except Exception as exc:
-        return CapabilityResult(
-            success=False,
-            error=f"Action failed: {exc}",
-        )
+        return CapabilityResult(success=False, error=f"Action was not dispatched: {exc}",
+                                metadata={"action_status": "not_executed"})
+    finally:
+        if owned_target is not None:
+            try:
+                await owned_target.dispose()
+            except Exception as exc:
+                log.debug("browser_target_release_failed", error=str(exc))
 
 
+async def _control_state(target: Any) -> dict[str, Any]:
+    try:
+        return await target.evaluate("""el => ({
+            connected: el.isConnected, checked: el.checked, value: el.value,
+            selected: el.selectedIndex, expanded: el.getAttribute('aria-expanded'),
+            pressed: el.getAttribute('aria-pressed'), disabled: el.disabled
+        })""")
+    except Exception as exc:
+        log.debug("browser_control_state_unavailable", error=str(exc))
+        return {}
+
+
+@browser_operation
 async def browser_screenshot(params: BrowserScreenshotParams) -> CapabilityResult:
     """Take a screenshot of the current page."""
     log.debug("browser_screenshot", path=params.path, full_page=params.full_page)
@@ -474,14 +332,25 @@ async def browser_screenshot(params: BrowserScreenshotParams) -> CapabilityResul
     try:
         _, page = await _get_browser()
         from pathlib import Path
+        from uuid import uuid4
 
-        output_path = Path(params.path).resolve()
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        from rune.safety.guardian import get_guardian
+        from rune.utils.paths import rune_data
 
-        await page.screenshot(
-            path=str(output_path),
-            full_page=params.full_page,
-        )
+        if params.path:
+            from rune.agent.isolation import enforce
+            if denied := enforce(params.path):
+                return CapabilityResult(success=False, error=denied)
+            validation = get_guardian().validate_file_path(params.path)
+            if not validation.allowed:
+                return CapabilityResult(success=False, error=validation.reason)
+            output_path = Path(params.path).expanduser().resolve()
+        else:
+            output_path = rune_data() / "screenshots" / current_session().id / f"{uuid4().hex}.png"
+        output_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        await page.screenshot(path=str(output_path), full_page=params.full_page)
+        if not params.path:
+            output_path.chmod(0o600)
 
         return CapabilityResult(
             success=True,
@@ -502,6 +371,7 @@ async def browser_screenshot(params: BrowserScreenshotParams) -> CapabilityResul
         )
 
 
+@browser_operation
 async def browser_extract(params: BrowserExtractParams) -> CapabilityResult:
     """Extract text or attributes from elements matching a CSS selector."""
     log.debug("browser_extract", selector=params.selector, attribute=params.attribute)
@@ -547,6 +417,7 @@ async def browser_extract(params: BrowserExtractParams) -> CapabilityResult:
         )
 
 
+@browser_operation
 async def browser_find(params: BrowserFindParams) -> CapabilityResult:
     """Find elements on the page containing the specified text."""
     log.debug("browser_find", text=params.text)
@@ -646,8 +517,8 @@ def register_browser_capabilities(registry: CapabilityRegistry) -> None:
             "Open a URL in a VISIBLE browser the user can see. "
             "Use when the user wants to watch the browser, interact with a site, "
             "log in, make a purchase, or says things like 'open', 'show me', "
-            "'launch', 'pull up'. Tries the user's Chrome first, falls back to "
-            "a visible Playwright browser."
+            "'launch', 'pull up'. Opens a Rune-managed browser with "
+            "its own profile; existing Chrome tabs are not attached."
         ),
         domain=Domain.BROWSER,
         risk_level=RiskLevel.MEDIUM,

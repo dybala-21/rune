@@ -60,7 +60,7 @@ def looks_like_failure_output(formatted: str) -> bool:
         ERROR_PREFIX in head
         or ELEMENT_NOT_FOUND_MARKER in head
         or NO_CHANGES_MARKER in formatted
-        or formatted.startswith("Error")
+        or formatted.startswith(("Error", "ERROR:"))
         or formatted.startswith(BLOCKED_PREFIX)
         or formatted.startswith(DENIED_PREFIX)
     )

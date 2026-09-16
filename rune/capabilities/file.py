@@ -14,6 +14,7 @@ from rune.agent.isolation import enforce as _enforce_isolation
 from rune.capabilities.registry import CapabilityRegistry
 from rune.capabilities.types import CapabilityDefinition
 from rune.config.defaults import DEFAULT_MAX_FILE_SIZE, DEFAULT_MAX_LINE_COUNT
+from rune.safety.approval_context import was_approved
 from rune.safety.guardian import get_guardian
 from rune.types import CapabilityResult, Domain, RiskLevel
 
@@ -68,6 +69,19 @@ class FileSearchParams(BaseModel):
 
 
 # Implementations
+
+def _authorize_mutation(path: str) -> CapabilityResult | None:
+    check = get_guardian().validate_file_path(path)
+    if not check.allowed or (check.requires_approval and not was_approved()):
+        return CapabilityResult(
+            success=False, error=check.reason,
+            metadata={"action_status": "not_executed",
+                      "requires_approval": check.allowed and check.requires_approval},
+        )
+    if error := _enforce_isolation(path):
+        return CapabilityResult(success=False, error=error,
+                                metadata={"action_status": "not_executed"})
+    return None
 
 async def file_read(params: FileReadParams) -> CapabilityResult:
     """Read a file with optional line offset/limit."""
@@ -132,17 +146,17 @@ async def file_read(params: FileReadParams) -> CapabilityResult:
 
 
 def _reject_test_overwrite(file_path: Path) -> str | None:
-    """Refuse to rewrite a test that already exists.
+    """Protect existing tests from being rewritten to accept a broken change.
 
-    The verifier-side guard restores tampered tests before a check runs,
-    but that only covers runs that reach a verifier. On the plain path an
-    agent asked to "make the failing test pass" will simply edit the
-    assertion, and nothing notices. A pre-existing test is the user's
-    specification: changing it to agree with the code under test destroys
-    the only independent signal there is. Writing NEW tests stays free.
-    RUNE_PROTECT_TESTS=0 turns this off for genuine test-editing work.
+    Tests created in this run can be corrected while their contents still
+    match the recorded revision. Set RUNE_PROTECT_TESTS=0 for tasks that
+    intentionally change existing tests.
     """
-    from rune.agent.validation_guard import _is_test_file, protect_tests_enabled
+    from rune.agent.validation_guard import (
+        _is_test_file,
+        authored_test_unchanged,
+        protect_tests_enabled,
+    )
 
     if not protect_tests_enabled() or not file_path.is_file():
         return None
@@ -150,6 +164,8 @@ def _reject_test_overwrite(file_path: Path) -> str | None:
         part in {"tests", "test", "__tests__", "spec"} for part in file_path.parts
     )
     if not _is_test_file(file_path, under_test_dir):
+        return None
+    if authored_test_unchanged(file_path):
         return None
     return (
         f"BLOCKED: {file_path.name} is an existing test. Editing a test so it "
@@ -167,15 +183,8 @@ async def file_write(params: FileWriteParams) -> CapabilityResult:
     if not params.path or not params.path.strip():
         return CapabilityResult(success=False, error="Empty file path")
 
-    guardian = get_guardian()
-    validation = guardian.validate_file_path(params.path)
-    if not validation.allowed:
-        return CapabilityResult(success=False, error=validation.reason)
-
-    # deny writes outside an isolated worker's worktree (no-op otherwise)
-    _iso_err = _enforce_isolation(params.path)
-    if _iso_err:
-        return CapabilityResult(success=False, error=_iso_err)
+    if blocked := _authorize_mutation(params.path):
+        return blocked
 
     file_path = Path(params.path).expanduser().resolve()
 
@@ -198,9 +207,6 @@ async def file_write(params: FileWriteParams) -> CapabilityResult:
                 metadata={"changed": False},
             )
 
-    if params.create_dirs:
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-
     # Syntax guard: validate before writing to disk
     from rune.agent.syntax_guard import validate as _syntax_validate
     _syn_err = _syntax_validate(str(file_path), params.content)
@@ -208,11 +214,16 @@ async def file_write(params: FileWriteParams) -> CapabilityResult:
         return CapabilityResult(
             success=False,
             output=f"Syntax error in {file_path.name}: {_syn_err}. Fix the content and retry.",
+            metadata={"action_status": "not_executed"},
         )
 
     _tamper = _reject_test_overwrite(file_path)
     if _tamper:
-        return CapabilityResult(success=False, error=_tamper)
+        return CapabilityResult(success=False, error=_tamper,
+                                metadata={"action_status": "not_executed"})
+
+    if params.create_dirs:
+        file_path.parent.mkdir(parents=True, exist_ok=True)
 
     from rune.capabilities.file_changes import file_change, read_before
     existed = file_path.exists()
@@ -223,6 +234,9 @@ async def file_write(params: FileWriteParams) -> CapabilityResult:
     check = verify_written(file_path, len(params.content))
     if not check.ok:
         return CapabilityResult(success=False, error=f"Write failed: {check.detail}")
+
+    from rune.agent.validation_guard import record_test_write
+    record_test_write(file_path, existed=existed)
 
     return CapabilityResult(
         success=True,
@@ -238,15 +252,8 @@ async def file_edit(params: FileEditParams) -> CapabilityResult:
     if not params.path or not params.path.strip():
         return CapabilityResult(success=False, error="Empty file path")
 
-    guardian = get_guardian()
-    validation = guardian.validate_file_path(params.path)
-    if not validation.allowed:
-        return CapabilityResult(success=False, error=f"Guardian blocked: {validation.reason}")
-
-    # deny writes outside an isolated worker's worktree (no-op otherwise)
-    _iso_err = _enforce_isolation(params.path)
-    if _iso_err:
-        return CapabilityResult(success=False, error=_iso_err)
+    if blocked := _authorize_mutation(params.path):
+        return blocked
 
     file_path = Path(params.path).expanduser().resolve()
 
@@ -267,6 +274,7 @@ async def file_edit(params: FileEditParams) -> CapabilityResult:
                 f"the path: use the full path from project_map or file_list "
                 f"(e.g., rune/agent/loop.py, not loop.py)."
             ),
+            metadata={"action_status": "not_executed"},
         )
 
     content = file_path.read_text()
@@ -304,6 +312,7 @@ async def file_edit(params: FileEditParams) -> CapabilityResult:
                     + (f"\n{hint}" if hint else "")
                     + escalation_hint(params.path, failures)
                 ),
+                metadata={"action_status": "not_executed"},
             )
         new_content = apply_block(content, block, params.replace)
         matched_via = block.strategy
@@ -311,7 +320,7 @@ async def file_edit(params: FileEditParams) -> CapabilityResult:
 
     if new_content == content:
         record_edit_success(str(file_path))
-        return CapabilityResult(success=True, output="No changes made")
+        return CapabilityResult(success=True, output="No changes made", metadata={"changed": False})
 
     # Syntax guard: validate replacement before writing to disk
     from rune.agent.syntax_guard import validate as _syntax_validate
@@ -325,11 +334,13 @@ async def file_edit(params: FileEditParams) -> CapabilityResult:
                 f"{_syn_err}. Fix and retry."
                 + escalation_hint(params.path, failures)
             ),
+            metadata={"action_status": "not_executed"},
         )
 
     _tamper = _reject_test_overwrite(file_path)
     if _tamper:
-        return CapabilityResult(success=False, error=_tamper)
+        return CapabilityResult(success=False, error=_tamper,
+                                metadata={"action_status": "not_executed"})
 
     file_path.write_text(new_content)
     record_edit_success(str(file_path))
@@ -338,6 +349,9 @@ async def file_edit(params: FileEditParams) -> CapabilityResult:
     _check = verify_written(file_path, len(new_content))
     if not _check.ok:
         return CapabilityResult(success=False, error=f"Edit failed: {_check.detail}")
+
+    from rune.agent.validation_guard import record_test_write
+    record_test_write(file_path, existed=True)
 
     note = "" if matched_via == "exact" else (
         f" (matched via {matched_via} fuzzy match — verify the edit landed "
@@ -358,15 +372,8 @@ async def file_delete(params: FileDeleteParams) -> CapabilityResult:
     if not params.path or not params.path.strip():
         return CapabilityResult(success=False, error="Empty file path")
 
-    guardian = get_guardian()
-    validation = guardian.validate_file_path(params.path)
-    if not validation.allowed:
-        return CapabilityResult(success=False, error=validation.reason)
-
-    # deny writes outside an isolated worker's worktree (no-op otherwise)
-    _iso_err = _enforce_isolation(params.path)
-    if _iso_err:
-        return CapabilityResult(success=False, error=_iso_err)
+    if blocked := _authorize_mutation(params.path):
+        return blocked
 
     file_path = Path(params.path).expanduser().resolve()
 
@@ -385,17 +392,28 @@ async def file_delete(params: FileDeleteParams) -> CapabilityResult:
         )
 
     if not file_path.exists():
-        return CapabilityResult(success=False, error=f"Path not found: {params.path}")
+        return CapabilityResult(success=False, error=f"Path not found: {params.path}",
+                                metadata={"action_status": "not_executed"})
 
     if file_path.is_dir() and not params.recursive:
         return CapabilityResult(
             success=False,
             error=f"'{params.path}' is a directory. Use recursive=true to delete.",
+            metadata={"action_status": "not_executed"},
         )
 
-    # Build output and OS cruft can be rebuilt, so they go for real.
-    # Anything else the user might not be able to recreate, so it goes to
-    # the workspace trash and stays recoverable.
+    from rune.agent.validation_guard import _walk_test_files, protect_tests_enabled
+    if protect_tests_enabled():
+        candidates = _walk_test_files(file_path, strict=True) if file_path.is_dir() else (file_path,)
+        try:
+            for candidate in candidates:
+                if reason := _reject_test_overwrite(candidate):
+                    return CapabilityResult(success=False, error=reason, metadata={"action_status": "not_executed"})
+        except (OSError, ValueError) as exc:
+            return CapabilityResult(success=False, error=f"Cannot check protected tests before deletion: {exc}",
+                                    metadata={"action_status": "not_executed"})
+
+    # Delete regenerable output directly; keep other files in the workspace trash.
     from rune.capabilities.file_changes import file_change, read_before
     from rune.safety.recoverable import (
         is_regenerable,

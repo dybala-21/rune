@@ -230,14 +230,18 @@ class ServiceStopParams(BaseModel):
     service_id: str = Field(description="Service ID to stop")
 
 
-# Oneshot execution (unchanged logic, extracted for clarity)
+# Oneshot execution
 
 
 async def _execute_oneshot(params: BashParams) -> CapabilityResult:
     """Run a single command and wait for completion."""
+    from rune.capabilities.command_output import capture_output, stop_capture
+
     cwd = params.cwd or os.getcwd()
     env = {**os.environ, **(params.env or {})}
     timeout_sec = params.timeout / 1000.0
+    proc = None
+    capture = None
 
     try:
         proc = await asyncio.create_subprocess_shell(
@@ -249,50 +253,43 @@ async def _execute_oneshot(params: BashParams) -> CapabilityResult:
             preexec_fn=os.setsid if hasattr(os, "setsid") else None,
         )
 
+        capture = asyncio.create_task(capture_output(proc, DEFAULT_OUTPUT_BUFFER_LIMIT))
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_sec
-            )
-        except TimeoutError:
-            if proc.pid and hasattr(os, "killpg"):
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    proc.kill()
-            else:
-                proc.kill()
-            await proc.wait()
+            stdout, stderr = await asyncio.wait_for(asyncio.shield(capture), timeout=timeout_sec)
+        except (TimeoutError, asyncio.CancelledError) as exc:
+            await stop_capture(proc, capture)
+
+            if isinstance(exc, asyncio.CancelledError):
+                raise
 
             return CapabilityResult(
                 success=False,
                 error=f"Command timed out after {params.timeout}ms",
-                metadata={"timeout": True},
+                metadata={"timeout": True, "action_status": "unknown"},
             )
-
-        stdout = stdout_bytes.decode(errors="replace")
-        stderr = stderr_bytes.decode(errors="replace")
-
-        if len(stdout) > DEFAULT_OUTPUT_BUFFER_LIMIT:
-            stdout = stdout[:DEFAULT_OUTPUT_BUFFER_LIMIT] + "\n... (truncated)"
-        if len(stderr) > DEFAULT_OUTPUT_BUFFER_LIMIT:
-            stderr = stderr[:DEFAULT_OUTPUT_BUFFER_LIMIT] + "\n... (truncated)"
 
         success = proc.returncode == 0
         output = stdout
-        if stderr and not success:
+        if stderr:
             output += f"\nSTDERR:\n{stderr}"
 
         return CapabilityResult(
             success=success,
             output=output,
             error=stderr if not success else None,
-            metadata={"exit_code": proc.returncode, "cwd": cwd},
+            metadata={"exit_code": proc.returncode, "cwd": cwd,
+                      "action_status": "completed" if success else "unknown"},
         )
 
     except FileNotFoundError:
-        return CapabilityResult(success=False, error="Shell not found")
+        return CapabilityResult(success=False, error="Shell or working directory not found",
+                                metadata={"action_status": "unknown" if proc else "not_executed"})
     except Exception as exc:
-        return CapabilityResult(success=False, error=f"Execution failed: {exc}")
+        return CapabilityResult(success=False, error=f"Execution failed: {exc}",
+                                metadata={"action_status": "unknown" if proc else "not_executed"})
+    finally:
+        if proc is not None and capture is not None and (proc.returncode is None or not capture.done()):
+            await stop_capture(proc, capture)
 
 
 # Managed-service lifecycle
@@ -717,17 +714,15 @@ async def bash_execute(params: BashParams) -> CapabilityResult:
                 "and public task resources unless this benchmark task explicitly "
                 "allows repository history."
             ),
-            metadata={"benchmark_policy_block": "vcs_history", "command": blocked},
+            metadata={"benchmark_policy_block": "vcs_history", "command": blocked,
+                      "action_status": "not_executed"},
         )
 
     guardian = get_guardian()
 
-    # Validate command through Guardian
-    validation = guardian.validate(params.command)
+    validation = guardian.validate(params.command, cwd=params.cwd)
 
-    # sandbox_enabled is False because this executor does not sandbox —
-    # nothing on the agent path calls execute_sandboxed. Claiming otherwise
-    # made the policy demand a sandbox, find none, and deny the command.
+    # This executor runs commands without OS isolation; report that to the policy.
     deny_enabled, allowed_executables = _configured_deny_by_default()
     policy_config = ExecutionPolicyConfig(
         rollout_mode=_configured_rollout_mode(),
@@ -745,6 +740,7 @@ async def bash_execute(params: BashParams) -> CapabilityResult:
         return CapabilityResult(
             success=False,
             error=f"Command blocked: {decision.reason}",
+            metadata={"action_status": "not_executed"},
         )
 
     if decision.decision == "ask" and not was_approved():
@@ -753,7 +749,8 @@ async def bash_execute(params: BashParams) -> CapabilityResult:
         return CapabilityResult(
             success=False,
             error=f"Command requires approval: {decision.reason}",
-            metadata={"requires_approval": True, "reason": decision.reason},
+            metadata={"requires_approval": True, "reason": decision.reason,
+                      "action_status": "not_executed"},
         )
 
     if params.mode == "managed_service":

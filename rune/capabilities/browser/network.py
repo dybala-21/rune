@@ -248,11 +248,10 @@ class NetworkMonitor:
 
 
 # Module-level singleton
-_monitor: NetworkMonitor | None = None
-
-
 def get_network_monitor() -> NetworkMonitor:
-    global _monitor
-    if _monitor is None:
-        _monitor = NetworkMonitor()
-    return _monitor
+    from rune.capabilities.browser.session import current_session
+
+    session = current_session()
+    if session.monitor is None:
+        session.monitor = NetworkMonitor()
+    return session.monitor

@@ -94,7 +94,7 @@ class ToolCallPolicy:
             return False
         block_at = self.max_consecutive_same_tool + _BLOCK_GRACE
         recent = self._tool_history[-block_at:]
-        return len(recent) == block_at and len(set(recent)) == 1
+        return len(recent) == block_at and all(previous == name for previous in recent)
 
     def get_extra_params(self) -> dict[str, Any]:
         """Extra parameters to pass to litellm.acompletion()."""

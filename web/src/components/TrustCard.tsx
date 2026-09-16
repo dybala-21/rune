@@ -171,7 +171,14 @@ export function TrustCard({ trust, onEscalate }: TrustCardProps) {
       </div>
 
       <TableChecks data={trust.tableAcceptance} />
-      {trust.artifactReceipts?.map(receipt => (
+      {trust.artifactReceipts?.map(receipt => receipt.scope === 'download' ? (
+        <div key={receipt.id} style={{ marginTop: 8, fontSize: 12, lineHeight: 1.6 }}>
+          <div style={{ fontWeight: 600 }}>Saved document</div>
+          <a href={`/api/v1/files/download?sessionId=${encodeURIComponent(receipt.sessionId)}&path=${encodeURIComponent(receipt.path)}`} download>{receipt.name}</a>
+          <div>Download copy: {receipt.verified ? 'content hash checked' : 'not confirmed'}</div>
+          <div>Document quality and layout require separate checks.</div>
+        </div>
+      ) : (
         <div key={receipt.revision} style={{ marginTop: 8, fontSize: 12, lineHeight: 1.6 }}>
           <div style={{ fontWeight: 600 }}>Document checks</div>
           <div>{receipt.artifacts.map(a => a.path.split(/[\\/]/).pop()).join(', ')}</div>

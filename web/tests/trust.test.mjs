@@ -13,6 +13,7 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const home = mkdtempSync(resolve(tmpdir(), 'rune-trust-contract-'));
 const gate = last_verdict => ({ has_check: true, last_verdict, verdict_counts: { pass: 1 }, last_evidence: 'check output' });
 const cases = [
+  { name: 'native connection loss preserves its cause without model escalation', trace: { reason: 'desktop_blocked', completion_check: { name: 'Desktop outcome', detail: 'Rune Computer disconnected. Reconnect the selected apps before continuing.' } }, title: 'Desktop task stopped', tone: 'warning', ok: false, card: true },
   { name: 'table differences override passing command checks', trace: { mech_check: 'pass', table_acceptance: { required: true, status: 'fail', contracts: [], results: [], unverified: [] } }, title: 'Checks failed', tone: 'warning', ok: false, card: true },
   { name: 'web lookup completed without a checker', trace: {}, title: 'Completed', tone: 'neutral', ok: true, card: false },
   { name: 'source and workspace warnings leave completion intact', trace: { unsourced_numbers: ['22', '15'], workspace_warning: 'Execution roots not under workspace: /tmp/review' }, title: 'Completed', tone: 'neutral', ok: true, card: false },
@@ -41,6 +42,10 @@ const cases = [
   { name: 'document checks do not attest the entire task', trace: { artifact_receipts: [{
     kind: 'document_bundle', revision: 'r1', source_sha256: 'abc', artifacts: [{ path: '/report.xlsx', sha256: 'def' }],
     checks: { native_content: 'pass', source_metrics: 'pass', visual_layout: 'not_performed', task_acceptance: 'not_performed' },
+  }] }, title: 'Completed', tone: 'neutral', ok: true, card: true },
+  { name: 'native download receipt does not attest document quality', trace: { artifact_receipts: [{
+    scope: 'download', id: 'd1', sessionId: 'native-one', runId: 'r1', path: '/Desktop/출시 계획.rtf',
+    name: '출시 계획.rtf', sha256: 'abc', size: 128, verified: true,
   }] }, title: 'Completed', tone: 'neutral', ok: true, card: true },
   { name: 'cancelled run retains published document checks', trace: { reason: 'cancelled', artifact_receipts: [{
     kind: 'document_bundle', revision: 'r2', source_sha256: 'abc', artifacts: [{ path: '/published.xlsx', sha256: 'def' }],
@@ -94,6 +99,62 @@ test('past executions expose saved evidence without live workspace controls', ()
   assert.match(live, /Requested changes/);
 });
 
+for (const [awaiting, label] of [['approval', 'Waiting for approval'], ['question', 'Waiting for your answer']]) {
+  test(`workbench keeps ${awaiting} visible after tools have run`, () => {
+    const html = renderToStaticMarkup(createElement(WorkbenchPanel, {
+      toolCalls: [{ id: 'read', toolName: 'file_read', args: {}, timestamp: 1, result: 'source', success: true }],
+      isRunning: false, awaiting, activitySummary: null, onClose() {},
+    }));
+    assert.match(html, new RegExp(label));
+    assert.doesNotMatch(html, />finished</);
+  });
+}
+
+test('native access waits remain actionable in chat without the work panel', async () => {
+  const { ChatPanel } = await server.ssrLoadModule('/src/components/ChatPanel.tsx');
+  const { InputArea } = await server.ssrLoadModule('/src/components/InputArea.tsx');
+  const { desktopAttention } = await server.ssrLoadModule('/src/utils/workbench.ts');
+  const call = { id: 'connect', runId: 'native-run', toolName: 'desktop_connect', args: {}, timestamp: 1 };
+  const props = {
+    conversationKey: 'native-session', messages: [], toolCalls: [call], thinkingBlocks: [],
+    isRunning: true, activitySummary: null, delegateEvents: [], compactionEvents: [],
+    currentStepInfo: null, pendingQuestion: null, pendingApproval: null,
+    onRespondQuestion: async () => {}, onRespondApproval: async () => {},
+  };
+  const html = renderToStaticMarkup(createElement(ChatPanel, props));
+  assert.match(html, /Waiting for app access/);
+  assert.match(html, /Connect an app/);
+  assert.match(html, /Cancel task/);
+  assert.match(html, /up to 10 minutes/);
+  assert.doesNotMatch(html, /Thinking\.\.\./);
+  assert.equal(desktopAttention([call], false), null);
+  assert.equal(desktopAttention([{ ...call, result: 'connected' }], true), null);
+  assert.equal(desktopAttention([call, { ...call, id: 'new', runId: 'new-run', toolName: 'file_read' }], true), null);
+  const stopped = renderToStaticMarkup(createElement(ChatPanel, { ...props, isRunning: false }));
+  assert.doesNotMatch(stopped, /Connect an app|Cancel task/);
+  const review = renderToStaticMarkup(createElement(ChatPanel, { ...props, toolCalls: [{ ...call, toolName: 'desktop_act' }] }));
+  assert.match(review, /Review the app action/);
+  assert.doesNotMatch(review, /Thinking\.\.\./);
+  const panel = renderToStaticMarkup(createElement(WorkbenchPanel, { sessionId: 'native-session', toolCalls: [call], isRunning: true, activitySummary: null, onClose() {} }));
+  assert.match(panel, /Waiting for app access/);
+  assert.doesNotMatch(panel, />analyzing</);
+  const input = renderToStaticMarkup(createElement(InputArea, {
+    isRunning: true, disabled: false, attentionLabel: 'Waiting for app access', onSend() {}, onAbort() {},
+  }));
+  assert.match(input, /placeholder="Waiting for app access/);
+  const failed = { ...props, isRunning: false, onRegenerate() {}, toolCalls: [{ ...call, result: 'Permission required', success: false }] };
+  const recovery = renderToStaticMarkup(createElement(ChatPanel, failed));
+  assert.match(recovery, /App access required/);
+  assert.match(recovery, /then retry the request/);
+  assert.doesNotMatch(recovery, /up to 10 minutes|Cancel task/);
+  const cancelled = renderToStaticMarkup(createElement(ChatPanel, { ...failed, messages: [
+    { id: 'stopped', role: 'assistant', content: '', timestamp: 2, trust: { completionStatus: 'cancelled' } },
+  ] }));
+  assert.doesNotMatch(cancelled, /App access required/);
+  const history = renderToStaticMarkup(createElement(ChatPanel, { ...failed, onRegenerate: undefined }));
+  assert.doesNotMatch(history, /App access required/);
+});
+
 test('table evidence shows fixed requirements, data differences and unverified scope', () => {
   const html = renderToStaticMarkup(createElement(TrustCard, { trust: {
     reason: 'completed', verified: false, completionStatus: 'completed',
@@ -114,6 +175,16 @@ test('table evidence shows fixed requirements, data differences and unverified s
   }
 });
 
+test('native download renders a working link with a limited verification claim', () => {
+  const trust = payloads[cases.findIndex(c => c.name === 'native download receipt does not attest document quality')];
+  const html = renderToStaticMarkup(createElement(TrustCard, { trust }));
+  assert.match(html, /content hash checked/);
+  assert.match(html, /quality and layout require separate checks/);
+  assert.match(html, /sessionId=native-one/);
+  assert.ok(html.includes(encodeURIComponent('/Desktop/출시 계획.rtf')));
+  assert.doesNotMatch(html, /Checks passed|Layout: checked|Source totals: passed/);
+});
+
 test('code diffs stay available after research and in resumed history', async () => {
   const { shouldOpenWorkbench, preferredWorkbenchTab } = await server.ssrLoadModule('/src/utils/workbench.ts');
   const calls = ['web_search', 'web_fetch', 'web_search', 'file_edit'].map((toolName, index) => ({
@@ -130,6 +201,20 @@ test('code diffs stay available after research and in resumed history', async ()
   assert.match(html, /-return 1/);
   assert.match(html, /\+return 2/);
   assert.doesNotMatch(html, /Workspace diff|>Terminal<|>File</);
+});
+
+test('browser work opens Computer while code changes keep their Diff priority', async () => {
+  const { shouldOpenWorkbench, preferredWorkbenchTab } = await server.ssrLoadModule('/src/utils/workbench.ts');
+  const calls = [{ id: 'b1', toolName: 'browser_navigate', args: {}, timestamp: 0 }];
+  assert.equal(shouldOpenWorkbench(calls, []), true);
+  assert.equal(preferredWorkbenchTab(calls, []), 'computer');
+  assert.equal(preferredWorkbenchTab(calls, [{ id: 'edit', path: '/workspace/app.py' }]), 'diff');
+  for (const name of ['desktop_open', 'desktop.observe']) {
+    const native = [{ ...calls[0], toolName: name }];
+    assert.equal(shouldOpenWorkbench(native, []), true);
+    assert.equal(preferredWorkbenchTab(native, []), 'computer');
+    assert.equal(preferredWorkbenchTab(native, [{ id: 'edit', path: '/workspace/app.py' }]), 'diff');
+  }
 });
 
 cases.forEach((c, i) => test(c.name, () => {

@@ -37,11 +37,11 @@ def _litellm() -> Any:
         # Suppress cost-calculation warnings for models not in LiteLLM's
         # price DB (e.g., local ollama models routed via openai/ prefix).
         _ll.suppress_debug_info = True
-        # Drop params a model doesn't accept rather than raising. Lets
-        # litellm decide per model instead of us hardcoding which ones reject
-        # temperature != 1 (gpt-5, o-series, ...). Without it, temperature=0
-        # on those raises and failover treats it as a dead model.
+        # Let LiteLLM omit unsupported parameters so parameter errors do not trigger failover.
         _ll.drop_params = True
+        from rune.llm.usage import preserve_responses_cache_usage
+
+        preserve_responses_cache_usage()
         _litellm_mod = _ll
     return _litellm_mod
 
@@ -64,7 +64,9 @@ from rune.agent.model_traits import (
     traits,
 )
 from rune.agent.obs_cap import mask_stale_tool_messages
-from rune.capabilities.output_prefixes import looks_like_failure_output
+from rune.agent.run_control import controlled_tool, current_control
+from rune.agent.tool_output import ToolOutput, tool_content
+from rune.capabilities.output_prefixes import BLOCKED_PREFIX, looks_like_failure_output
 from rune.utils.env import env_flag as _env_flag
 from rune.utils.env import env_int as _env_int
 from rune.utils.logger import get_logger
@@ -267,8 +269,8 @@ async def _run_stop_check(
     return " ".join(cmd), out[-_VOS_OUTPUT_CAP:], proc.returncode or 0
 
 
-def _looks_like_tool_failure(result: str) -> bool:
-    return looks_like_failure_output(result)
+def _looks_like_tool_failure(result: str | ToolOutput) -> bool:
+    return looks_like_failure_output(str(result))
 
 
 def _redirect_edit_to_write(fn: str, args: dict[str, Any]) -> str:
@@ -289,7 +291,7 @@ def _redirect_edit_to_write(fn: str, args: dict[str, Any]) -> str:
 
 def _skipped_after_batch_failure_message(tool_name: str) -> str:
     return (
-        "[BLOCKED] Skipped this tool because an earlier write/execute tool in the same "
+        "[BLOCKED] Skipped this tool because an earlier action or observation in the same "
         "assistant turn failed. Read the failed tool result first, then issue a new "
         f"{tool_name} call only after choosing the next fix."
     )
@@ -603,43 +605,6 @@ def _build_tool_lookup(tools: list[Any]) -> dict[str, Any]:
                 lookup[api_name] = fn
     return lookup
 
-
-def _usage_value(value: Any, name: str) -> Any:
-    if isinstance(value, dict):
-        return value.get(name)
-    return getattr(value, name, None)
-
-
-def _coerce_usage_int(value: Any) -> int:
-    try:
-        return int(value or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _nested_usage_int(usage: Any, path: tuple[str, ...]) -> int:
-    value = usage
-    for name in path:
-        value = _usage_value(value, name)
-        if value is None:
-            return 0
-    return _coerce_usage_int(value)
-
-
-def _usage_int(
-    usage: Any,
-    *names: str,
-    nested: tuple[tuple[str, ...], ...] = (),
-) -> int:
-    for name in names:
-        value = _coerce_usage_int(_usage_value(usage, name))
-        if value:
-            return value
-    for path in nested:
-        value = _nested_usage_int(usage, path)
-        if value:
-            return value
-    return 0
 
 
 # Provider prefix resolution
@@ -961,11 +926,16 @@ class StreamResult:
         workspace_root: str = "",
         request: str | None = None,
         verification_callback: Callable[[str, bool, str], Any] | None = None,
+        verification_state: Callable[[], Any] | None = None,
+        require_verification: bool = True,
     ) -> None:
         self._model = model
         from rune.llm.reasoning import configured_reasoning_effort
         self._reasoning_effort = configured_reasoning_effort(model)
         self._verification_callback = verification_callback
+        self._verification_state = verification_state
+        self._require_verification = require_verification
+        self._verification_sequence = 0
         self._workspace_root = os.path.abspath(os.path.expanduser(workspace_root or os.getcwd()))
         self._request = request if request is not None else next(
             (content_text(m.get("content", "")) for m in reversed(messages)
@@ -1042,8 +1012,8 @@ class StreamResult:
             })
         self._collected_text = ""
         self._usage = StreamUsage()
+        self._round_usage = None
         self._stream: Any = None
-        self._tool_result_cache: dict[str, str] = {}
         self._tool_fail_streak: dict[str, int] = {}
         self._blocked_groups: set[str] = set()
         self._native_advisor_events: list[dict[str, Any]] = []
@@ -1117,10 +1087,26 @@ class StreamResult:
         self._start_artifact_role_classification()
 
         while True:
-            # Early stop: already have a substantial answer after 2+ tool
-            # rounds. Don't make another LLM call that would regenerate
-            # the same content and waste tokens.
-            if (_tool_round >= 2
+            control = current_control()
+            if control is not None and await control.checkpoint(self._messages):
+                self._collected_text = ""
+            from rune.computer.session import current_desktop
+            desktop = current_desktop()
+            if desktop is not None:
+                desktop.check()
+            plan_revision = control.revision if control is not None else 0
+            verification = self._verification_state() if self._verification_state else None
+            verification_pending = bool(verification and verification.pending and self._require_verification)
+            if verification is not None:
+                context = verification.model_context(since_sequence=self._verification_sequence)
+                self._verification_sequence = verification.sequence
+                if context:
+                    # Append evidence without changing the cached system prefix.
+                    self._messages.append({"role": "user", "content": context})
+            if verification_pending:
+                self._collected_text = ""
+            # Avoid regenerating a substantial answer once required verification is clear.
+            if (_tool_round >= 2 and not verification_pending
                     and self._collected_text
                     and len(self._collected_text.strip()) > 300):
                 log.info(
@@ -1151,6 +1137,8 @@ class StreamResult:
                 _force_edit_tool = False
 
             _tools = self._tool_schemas or None
+            if verification_pending and _tools and "bash_execute" in self._tool_lookup:
+                extra["tool_choice"] = "required"
 
             _effective_max = _clamp_max_tokens(
                 self._model,
@@ -1204,12 +1192,11 @@ class StreamResult:
             if self._guided:
                 _acompletion_kwargs.pop("tools", None)
                 _acompletion_kwargs.pop("tool_choice", None)
-                # Forbid {final} until a real artifact exists (capped), so a weak
-                # model can't bail to a prose answer after a rejected write — it
-                # must retry the tool call instead.
+                # Require a successful action or the retry cap before allowing a final answer.
+                # Pending verification still blocks completion after the cap.
                 _allow_final = (
-                    self._action_ok
-                    or self._forced_action_turns >= _GUIDED_FORCE_ACTION_CAP
+                    (self._action_ok or self._forced_action_turns >= _GUIDED_FORCE_ACTION_CAP)
+                    and not verification_pending
                 )
                 if not _allow_final:
                     self._forced_action_turns += 1
@@ -1228,6 +1215,7 @@ class StreamResult:
             _ll = _litellm()
             from rune.llm.request_params import compatible_completion
 
+            self._round_usage = None
             self._stream = await compatible_completion(_ll.acompletion, _ll.BadRequestError, _acompletion_kwargs)
 
             text_this_turn = ""
@@ -1292,6 +1280,11 @@ class StreamResult:
                 # Usage from final chunk
                 if hasattr(chunk, "usage") and chunk.usage:
                     self._update_usage(chunk.usage)
+
+            if control is not None and plan_revision != control.revision:
+                # No tool calls from this response have entered the history yet.
+                self._collected_text = self._collected_text[:_collected_len_before]
+                continue
 
             log.info(
                 "round_usage",
@@ -1798,7 +1791,7 @@ class StreamResult:
         write_exec_count = 0
 
         for is_concurrent, batch in batches:
-            if batch_failure_seen:
+            if batch_failure_seen or getattr(self, "_task_blocked", ""):
                 for tc_data in batch:
                     fn = tc_data["function"]["name"]
                     tc_id = tc_data["id"]
@@ -1811,7 +1804,7 @@ class StreamResult:
 
             if is_concurrent and len(batch) > 1:
                 # Run read-only tools concurrently
-                async def _run_one(tc_data: dict[str, Any]) -> tuple[str, str, str]:
+                async def _run_one(tc_data: dict[str, Any]) -> tuple[str, str, str | ToolOutput]:
                     fn = tc_data["function"]["name"]
                     args_str = tc_data["function"]["arguments"]
                     tc_id = tc_data["id"]
@@ -1820,21 +1813,21 @@ class StreamResult:
                     except (json.JSONDecodeError, TypeError):
                         args = {}
                     if self._policy.should_block_tool(fn):
-                        res = f"ERROR: {fn} blocked — called too many times consecutively."
+                        res = f"{BLOCKED_PREFIX} {fn} called too many times consecutively."
                     else:
                         res = await self._execute_tool(fn, args)
                     return tc_id, fn, res
 
                 _sem = _aio.Semaphore(self._MAX_CONCURRENT_TOOLS)
 
-                async def _limited(tc_data: dict[str, Any], sem: _aio.Semaphore = _sem) -> tuple[str, str, str]:
+                async def _limited(tc_data: dict[str, Any], sem: _aio.Semaphore = _sem) -> tuple[str, str, str | ToolOutput]:
                     async with sem:
                         return await _run_one(tc_data)
 
                 results = await _aio.gather(*[_limited(tc) for tc in batch])
                 for tc_id, fn, res in results:
                     self._messages.append({
-                        "role": "tool", "tool_call_id": tc_id, "content": res,
+                        "role": "tool", "tool_call_id": tc_id, "content": tool_content(res),
                     })
                     nudge = self._policy.record_tool_call(fn)
                     if nudge:
@@ -1845,7 +1838,7 @@ class StreamResult:
                     fn = tc_data["function"]["name"]
                     args_str = tc_data["function"]["arguments"]
                     tc_id = tc_data["id"]
-                    if batch_failure_seen:
+                    if batch_failure_seen or getattr(self, "_task_blocked", ""):
                         self._messages.append({
                             "role": "tool",
                             "tool_call_id": tc_id,
@@ -1877,12 +1870,12 @@ class StreamResult:
                             fn = _redirected
                             log.info("guided_edit_to_write_redirect")
                     if self._policy.should_block_tool(fn):
-                        res = f"ERROR: {fn} blocked — called too many times consecutively."
+                        res = f"{BLOCKED_PREFIX} {fn} called too many times consecutively."
                         log.warning("policy_tool_blocked", tool=fn)
                     else:
                         res = await self._execute_tool(fn, args)
                     self._messages.append({
-                        "role": "tool", "tool_call_id": tc_id, "content": res,
+                        "role": "tool", "tool_call_id": tc_id, "content": tool_content(res),
                     })
                     # The check verdict is recorded whichever way it went —
                     # the failing case is the one the end-of-run gate exists
@@ -1950,8 +1943,7 @@ class StreamResult:
                     if nudge:
                         deferred_nudges.append(nudge)
                     if (
-                        stop_after_failure
-                        and fn in _STOP_BATCH_FAILURE_TOOLS
+                        (fn.startswith(("browser_", "desktop_")) or stop_after_failure and fn in _STOP_BATCH_FAILURE_TOOLS)
                         and _looks_like_tool_failure(res)
                     ):
                         batch_failure_seen = True
@@ -2136,7 +2128,10 @@ class StreamResult:
     def _record_provenance(
         self, name: str, params: dict[str, Any], result: str
     ) -> None:
-        """Note what this call proved about the workspace."""
+        """Record file existence and tool results in the artifact ledger."""
+        # App identifiers and UI input are not workspace file lookups.
+        if name.startswith("desktop_"):
+            return
         from rune.agent.provenance import (
             _READ_TOOLS,
             _WRITE_TOOLS,
@@ -2162,34 +2157,14 @@ class StreamResult:
         if name in _WRITE_TOOLS and target:
             ledger.record_write(str(target), path_exists(str(target), self._workspace_root))
 
-    async def _execute_tool(self, name: str, params: dict[str, Any]) -> str:
-        """Execute a tool by name and return string result.
-
-        Identical (name, params) calls within the same stream_text()
-        session return a cached result to prevent wasteful repetition
-        (e.g. same URL fetched 26 times).
-        """
+    @controlled_tool
+    async def _execute_tool(self, name: str, params: dict[str, Any]) -> str | ToolOutput:
+        """Dispatch through the tool's guards and state-aware read cache."""
         # TAFC: strip 'think' reasoning parameter before execution
         params.pop("think", None)
 
-        # Dedup: return cached result for identical calls
-        import hashlib as _hl
-        _cache_key = _hl.md5(
-            f"{name}:{json.dumps(params, sort_keys=True)}".encode(),
-            usedforsecurity=False,
-        ).hexdigest()[:16]
-        if _cache_key in self._tool_result_cache:
-            return (
-                "[CACHED — identical call already executed. "
-                "Use the result above or try a different approach.]\n"
-                + self._tool_result_cache[_cache_key][:500]
-            )
-
-        # Block tool after 3 consecutive failures.  When a tool like
-        # browser_act fails 3 times, block the ENTIRE tool group
-        # (all browser_* tools) since navigate+observe without
-        # working act is just burning tokens.
-        _group = self._TOOL_GROUPS.get(name, "")
+        # A failed browser action must leave observation tools available.
+        _group = "" if name.startswith("browser_") else self._TOOL_GROUPS.get(name, "")
 
         _MAX_FAILS = 3
 
@@ -2235,6 +2210,9 @@ class StreamResult:
             return _phantom
 
         try:
+            control = current_control()
+            if control is not None:
+                control.check()
             result = await func(**params)
             result_str = str(result) if result is not None else ""
             if name == "task_blocked":
@@ -2246,29 +2224,26 @@ class StreamResult:
             _reverted = self._revert_circumvented_writes()
             if _reverted:
                 result_str += "\n" + _reverted
-            self._tool_result_cache[_cache_key] = result_str
             self._record_provenance(name, params, result_str)
-            # Reset fail streak on success.
-            # Also treat "NO CHANGES DETECTED" as failure — the action
-            # technically executed but had no effect (phantom click).
             is_failure = _looks_like_tool_failure(result_str)
             if is_failure:
                 streak = self._tool_fail_streak.get(name, 0) + 1
                 self._tool_fail_streak[name] = streak
-                # At 2 failures: hint to try URL construction before
-                # the group gets blocked at 3.
                 if streak == 2 and name == "browser_act":
                     result_str += (
-                        "\n\n[HINT] browser_act failed twice. Before trying again, "
-                        "construct the target URL directly with browser_navigate. "
-                        "Example: browser_navigate(url='https://site.com/search?q=keyword&sort=review')"
+                        "\n\nRead the current page before another action. "
+                        "An old reference must not be replaced by a guessed target."
                     )
                 # Block entire group immediately when threshold reached
                 if streak >= _MAX_FAILS and _group:
                     self._blocked_groups.add(_group)
             else:
                 self._tool_fail_streak[name] = 0
-            return result_str
+                if name in {"browser_observe", "browser_navigate", "browser_open"}:
+                    self._tool_fail_streak.pop("browser_act", None)
+                if name in {"desktop_observe", "desktop_open"}:
+                    self._tool_fail_streak.pop("desktop_act", None)
+            return result.with_text(result_str) if isinstance(result, ToolOutput) else result_str
         except Exception as exc:
             streak = self._tool_fail_streak.get(name, 0) + 1
             self._tool_fail_streak[name] = streak
@@ -2278,42 +2253,17 @@ class StreamResult:
 
     def _update_usage(self, usage: Any) -> None:
         """Extract token counts; parse native advisor events when beta is active."""
-        self._usage.input_tokens += _usage_int(usage, "prompt_tokens", "input_tokens")
-        self._usage.output_tokens += _usage_int(usage, "completion_tokens", "output_tokens")
+        from rune.llm.usage import merge_usage, token_counts
+
+        counts = token_counts(usage)
+        if counts is not None:
+            previous = self._round_usage
+            self._round_usage = merge_usage(previous, counts)
+            for key in ("input_tokens", "output_tokens", "cached_input_tokens", "cache_write_tokens", "reasoning_tokens"):
+                delta = self._round_usage[key] - (previous[key] if previous else 0)
+                setattr(self._usage, key, getattr(self._usage, key) + delta)
         self._usage.prompt_tokens = self._usage.input_tokens
         self._usage.completion_tokens = self._usage.output_tokens
-        self._usage.cached_input_tokens += _usage_int(
-            usage,
-            "cached_tokens",
-            "cache_read_input_tokens",
-            "cache_read_tokens",
-            nested=(
-                ("prompt_tokens_details", "cached_tokens"),
-                ("prompt_tokens_details", "cache_read_input_tokens"),
-                ("input_token_details", "cache_read"),
-                ("input_token_details", "cached_tokens"),
-            ),
-        )
-        self._usage.cache_write_tokens += _usage_int(
-            usage,
-            "cache_creation_input_tokens",
-            "cache_write_input_tokens",
-            "cache_write_tokens",
-            nested=(
-                ("prompt_tokens_details", "cache_creation_tokens"),
-                ("prompt_tokens_details", "cache_write_tokens"),
-                ("input_token_details", "cache_creation"),
-                ("input_token_details", "cache_write"),
-            ),
-        )
-        self._usage.reasoning_tokens += _usage_int(
-            usage,
-            "reasoning_tokens",
-            nested=(
-                ("completion_tokens_details", "reasoning_tokens"),
-                ("output_token_details", "reasoning_tokens"),
-            ),
-        )
         if self._extra_headers.get("anthropic-beta"):
             from rune.agent.advisor.native_tool import (
                 extract_synthetic_events_from_usage,
@@ -2400,6 +2350,8 @@ class LiteLLMAgent:
         usage_limits: Any = None,
         workspace_root: str = "",
         verification_callback: Callable[[str, bool, str], Any] | None = None,
+        verification_state: Callable[[], Any] | None = None,
+        require_verification: bool = True,
     ) -> AsyncIterator[StreamResult]:
         """Start a streaming run. Mirrors ``Agent.run_stream()``."""
         # Build messages list
@@ -2467,6 +2419,8 @@ class LiteLLMAgent:
             workspace_root=workspace_root,
             request=goal,
             verification_callback=verification_callback,
+            verification_state=verification_state,
+            require_verification=require_verification,
         )
         self._last_stream_result = stream_result
 

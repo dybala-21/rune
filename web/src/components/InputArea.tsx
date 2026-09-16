@@ -19,10 +19,11 @@ interface InputAreaProps {
   onAbort: () => void;
   isRunning: boolean;
   disabled: boolean;
+  attentionLabel?: string;
 }
 
 export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function InputArea(
-  { onSend, onAbort, isRunning, disabled }: InputAreaProps,
+  { onSend, onAbort, isRunning, disabled, attentionLabel }: InputAreaProps,
   ref,
 ) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -478,7 +479,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 : disabled
                   ? 'Connecting...'
                   : isRunning
-                    ? 'Running — press Stop to send a message'
+                    ? `${attentionLabel || 'Running'} — press Stop to send a message`
                     : 'Message RUNE...'
             }
             disabled={disabled}

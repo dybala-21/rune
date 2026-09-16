@@ -1,12 +1,4 @@
-"""Refusing is a way to finish, and it finishes as a failure.
-
-Two measured shapes motivate this: a test that contradicts the spec it
-guards (blocking the test edit only pushed the agent into bending the
-source instead), and a request whose premise is wrong (obeying it broke a
-documented contract). In both, the correct outcome was to stop and say
-what conflicts — and there was no way to express that, so the run always
-ended shaped like success.
-"""
+"""Explicit task blockers stop execution without marking the task complete."""
 
 from __future__ import annotations
 
@@ -90,9 +82,9 @@ def _fake(streams):
 
 
 @pytest.mark.asyncio
-async def test_abstaining_ends_the_run_immediately(monkeypatch, tmp_path):
-    """Nothing follows a refusal — no further tool rounds, and the refusal
-    itself is what the run returns."""
+@pytest.mark.parametrize("same_turn", [False, True])
+async def test_abstaining_ends_the_run_immediately(monkeypatch, tmp_path, same_turn):
+    """Return the refusal immediately without another tool round."""
     monkeypatch.chdir(tmp_path)
     consume_block()
     later = []
@@ -122,6 +114,9 @@ async def test_abstaining_ends_the_run_immediately(monkeypatch, tmp_path):
                                          'docs/fees.md"}'}]),
         _delta(finish_reason="tool_calls"),
     ]
+    if same_turn:
+        block_turn.insert(1, _delta(tool_calls=[{"index": 1, "name": "file_edit",
+                                                "arguments": '{"path":"a.py","search":"x","replace":"y"}'}]))
     edit_turn = [
         _delta(tool_calls=[{"index": 0, "name": "file_edit",
                             "arguments": '{"path": "a.py", "search": "x", '
@@ -137,3 +132,57 @@ async def test_abstaining_ends_the_run_immediately(monkeypatch, tmp_path):
     assert later == [], "the run kept editing after refusing"
     assert BLOCKED_MARKER in await res.get_output()
     assert consume_block()
+
+
+async def test_outer_loop_does_not_retry_a_blocked_task_for_unmet_table_checks(monkeypatch, tmp_path):
+    from contextlib import asynccontextmanager
+    from unittest.mock import AsyncMock
+
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.agent.loop import NativeAgentLoop
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("RUNE_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("RUNE_IN_BEST_OF", "1")
+    consume_block()
+    requests = []
+
+    class Stream:
+        tool_budget_exhausted = False
+
+        async def stream_text(self, **kwargs):
+            await task_blocked(TaskBlockedParams(reason="Required source is missing"))
+            yield "Required source is missing"
+
+        async def get_output(self):
+            return "Required source is missing"
+
+        def all_messages(self):
+            return []
+
+        def get_failure_state(self):
+            return {}, set()
+
+        def usage(self):
+            return SimpleNamespace(input_tokens=100, output_tokens=20)
+
+    class Agent:
+        def __init__(self, **kwargs):
+            pass
+
+        @asynccontextmanager
+        async def run_stream(self, *args, **kwargs):
+            requests.append(True)
+            yield Stream()
+
+    monkeypatch.setattr("rune.agent.loop.LiteLLMAgent", Agent)
+    monkeypatch.setattr("rune.agent.loop.build_tool_set", lambda opts: {})
+    loop = NativeAgentLoop()
+    loop._auto_skill = False
+    loop._token_budget.total = 100000
+    monkeypatch.setattr(loop, "_finalize_gates", AsyncMock(side_effect=AssertionError("Do not retry completion checks after task_blocked")))
+    trace = await loop._execute_loop("Aggregate the missing CSV", "test", ["task_blocked"], 2,
+        ClassificationResult(goal_type="full", confidence=1, tier=2, intent_categories=frozenset({"table"})),
+        context={"workspace_root": str(tmp_path)})
+    assert trace.reason == "task_blocked" and trace.final_step == 1
+    assert requests == [True]

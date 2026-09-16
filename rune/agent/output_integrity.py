@@ -1,12 +1,8 @@
-"""Output-integrity checks: deterministic, model-free verification of the output.
+"""Check cited URLs against tool results and search or fetch arguments.
 
-Citation integrity: every URL cited in the produced output must appear in a tool
-result (search result or fetched page) or a web_fetch call argument. A cited URL
-that was never retrieved is ungrounded. Agent-generated content (assistant text,
-file_write arguments) is not counted as retrieval. Conservative: when no
-retrieved URLs can be determined, the check skips (never blocks).
-
-Enabled via RUNE_OUTPUT_INTEGRITY (off by default).
+Assistant text and file-write arguments do not count as sources. Skip the
+check when no retrieved URLs are available. Set RUNE_OUTPUT_INTEGRITY=0
+to disable it.
 """
 
 from __future__ import annotations
@@ -25,21 +21,14 @@ _URL_RE = re.compile(r"""https?://[^\s)\]}>"'`]+""")
 
 
 def output_integrity_enabled() -> bool:
-    """On unless explicitly disabled: no model call, and it nudges not blocks.
-
-    A floor, not a guarantee — it catches a citation the run never fetched.
-    Link validity runs above 94% while the facts hung off those links are
-    right only 39-77% of the time (arXiv 2605.06635).
-    """
+    """Check citation retrieval unless explicitly disabled."""
     return os.environ.get(_OUTPUT_INTEGRITY_ENV, "1").strip().lower() not in _OFF
 
 
 def _norm(url: str) -> str:
-    """Normalize a URL for comparison. Percent-decode so a citation written in
-    decoded form (e.g. non-ASCII path) matches the same URL retrieved in
-    percent-encoded form; without this, a legitimately retrieved non-ASCII URL is
-    falsely flagged as ungrounded."""
-    return unquote(url).rstrip(".,;:!?")
+    """Normalize a URL without its fragment or trailing citation punctuation."""
+    # Split before decoding: %23 belongs to the path, not the fragment.
+    return unquote(url.partition("#")[0]).rstrip(".,;:!?")
 
 
 def _urls(text: str) -> set[str]:
@@ -47,8 +36,7 @@ def _urls(text: str) -> set[str]:
 
 
 def retrieved_urls(messages: list) -> set[str]:
-    """URLs the system actually surfaced: tool-result contents and web_fetch call
-    arguments. Excludes agent-generated content (assistant text, file_write)."""
+    """Collect URLs from tool output and search or fetch arguments."""
     seen: set[str] = set()
     for m in messages or []:
         if not isinstance(m, dict):
@@ -64,8 +52,7 @@ def retrieved_urls(messages: list) -> set[str]:
 
 
 def fabricated_citations(output: str, messages: list) -> list[str]:
-    """Cited URLs that were never retrieved. Empty when nothing is cited or when
-    no retrieval can be determined (conservative: do not block)."""
+    """Return unseen citation URLs, or an empty list when retrieval is unavailable."""
     cited = _urls(output)
     seen = retrieved_urls(messages)
     log.info("output_integrity_check", cited=len(cited), retrieved=len(seen))

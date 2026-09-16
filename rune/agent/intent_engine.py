@@ -1,12 +1,4 @@
-"""Intent engine - hybrid regex + LLM intent classification.
-
-Ported from src/agent/intent-engine.ts (270 lines) - unified intent
-classification facade with contract-based completion verification.
-
-classifyIntent(): Tier-1 regex, then optional Tier-2 LLM fallback.
-resolveIntentContract(): Maps GoalClassification to a completion contract.
-isExplicitRecallIntent(): Detects recall/status follow-ups that bypass evidence gate.
-"""
+"""Resolve model-classified goals into tool and completion requirements."""
 
 from __future__ import annotations
 
@@ -232,6 +224,16 @@ def resolve_intent_contract(
         )
 
     if category == "full":
+        requires_code = getattr(classification, "requires_code", False)
+        if requires_code or output_expectation == "file":
+            return IntentContract(
+                kind="mixed",
+                tool_requirement="write",
+                grounding_requirement="recommended",
+                output_expectation=output_expectation,
+                requires_code_verification=requires_code,
+                requires_code_write_artifact=requires_code,
+            )
         action_type = getattr(classification, "action_type", "unspecified")
         complexity = getattr(classification, "complexity", "simple")
         is_analyze = action_type in ("analyze", "unspecified")

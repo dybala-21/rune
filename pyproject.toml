@@ -36,8 +36,9 @@ dependencies = [
     "websockets>=16.0",
     # Database
     "apsw>=3.51.2",
-    # HTTP
+    # HTTP and HTML
     "httpx>=0.28.1",
+    "lxml[cssselect]>=6.1.1",
     # Config
     "ruamel.yaml>=0.19.1",
     # Code Intelligence

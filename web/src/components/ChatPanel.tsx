@@ -18,6 +18,8 @@ import { ToolCallCard, getToolColor } from './ToolCallCard';
 import { ThinkingBlockView } from './ThinkingBlock';
 import { normalizeToolName, inferWorkPhase } from '../utils/tooling';
 import { WelcomePanel } from './WelcomePanel';
+import { DesktopTaskNotice } from './DesktopTaskNotice';
+import { desktopAttention } from '../utils/workbench';
 import {
   APPROVAL_COPY,
   QUESTION_COPY,
@@ -135,6 +137,11 @@ export function ChatPanel({
   }, [isRunning, toolCalls]);
 
   const isEmpty = timeline.length === 0;
+  const desktopWait = desktopAttention(toolCalls, isRunning);
+  const lastTool = toolCalls[toolCalls.length - 1];
+  const desktopSetup = !isRunning && !!onRegenerate && lastTool?.success === false
+    && normalizeToolName(lastTool.toolName) === 'desktop.connect'
+    && messages[messages.length - 1]?.trust?.completionStatus !== 'cancelled';
 
   useEffect(() => {
     if (!atBottomRef.current || isEmpty) return;
@@ -300,7 +307,19 @@ export function ChatPanel({
           />
         )}
 
-        {isRunning && !pendingApproval && !pendingQuestion && (
+        {desktopWait && <DesktopTaskNotice
+          key={`${conversationKey}:${toolCalls[toolCalls.length - 1]?.runId}:${desktopWait}`}
+          sessionId={conversationKey === 'live' ? getLiveSessionId() : conversationKey}
+          runId={toolCalls[toolCalls.length - 1]?.runId}
+          kind={desktopWait}
+        />}
+        {desktopSetup && <DesktopTaskNotice
+          key={`${conversationKey}:${lastTool.runId}:setup`}
+          sessionId={conversationKey === 'live' ? getLiveSessionId() : conversationKey}
+          kind="setup"
+        />}
+
+        {isRunning && !pendingApproval && !pendingQuestion && !desktopWait && (
           <RunningIndicator toolCalls={toolCalls} currentStepInfo={currentStepInfo} />
         )}
 

@@ -8,9 +8,17 @@ from rune.agent.intent_engine import (
     resolve_intent_contract,
 )
 
-# ---------------------------------------------------------------------------
-# Helpers — fake ClassificationResult-like objects
-# ---------------------------------------------------------------------------
+
+def test_full_task_contract_distinguishes_analysis_from_deliverables():
+    from dataclasses import replace
+
+    from rune.agent.goal_classifier import ClassificationResult
+
+    analysis = ClassificationResult(goal_type="full", confidence=.99, tier=2, output_expectation="text")
+    assert resolve_intent_contract(analysis, .99).tool_requirement == "read"
+    for task in (replace(analysis, output_expectation="file"), replace(analysis, requires_code=True),
+                 replace(analysis, requires_execution=True)):
+        assert resolve_intent_contract(task, .99).tool_requirement == "write"
 
 class FakeClassification:
     """Minimal duck-typed ClassificationResult for resolve_intent_contract."""

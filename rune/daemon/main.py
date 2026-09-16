@@ -587,16 +587,9 @@ class RuneDaemon:
     # -- browser subsystem init/shutdown ------------------------------------
 
     async def _init_browser_subsystems(self) -> None:
-        """Start the CDP relay server and browser page pool."""
-        # Relay server (for Chrome Extension integration)
-        try:
-            from rune.browser.relay_server import RelayServer
-            self._relay_server = RelayServer()
-            await self._relay_server.start()
-            log.info("subsystem_initialised", name="relay_server", port=self._relay_server.port)
-        except Exception as exc:
-            log.warning("relay_server_init_failed", error=str(exc))
-
+        """Start the browser search pool; agent runs own their browser sessions."""
+        # The legacy relay has no authenticated pairing or tab selection.
+        # Do not expose it as a side effect of starting the daemon.
         # Browser page pool (for browser-based search fallback)
         try:
             from rune.capabilities.search.browser_page_pool import BrowserPagePool

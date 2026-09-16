@@ -18,6 +18,7 @@ interface StatusBarProps {
   tokenUsage?: TokenUsageType | null;
   currentStepInfo?: StepInfo | null;
   currentActivity?: string | null;
+  attentionLabel?: string;
   approvalMode?: string;
   activeModel?: { provider: string; model: string; source: 'active' | 'default' } | null;
   reasoningSupported?: boolean;
@@ -40,7 +41,7 @@ function formatTokensCompact(n: number): string {
 
 export function StatusBar({
   trailing, connected, state, sidebarOpen, onToggleSidebar, tokenUsage,
-  currentStepInfo, currentActivity, activeModel, reasoningSupported, reasoningEffort,
+  currentStepInfo, currentActivity, attentionLabel, activeModel, reasoningSupported, reasoningEffort,
   reasoningOptions, reasoningBudgets, approvalMode, lastRunSuccess = null, onOpenPalette, onToggleWorkbench, workbenchOpen,
 }: StatusBarProps) {
   const [showTokens, setShowTokens] = useState(false);
@@ -54,7 +55,7 @@ export function StatusBar({
     return () => document.removeEventListener('mousedown', dismiss);
   }, [showTokens]);
 
-  const markState = !connected ? 'warning' : state === 'running' ? 'working' : state !== 'idle' ? 'thinking'
+  const markState = !connected ? 'warning' : attentionLabel ? 'warning' : state === 'running' ? 'working' : state !== 'idle' ? 'thinking'
     : lastRunSuccess === true ? 'passed' : lastRunSuccess === false ? 'failed' : 'idle';
 
   return <header className="app-toolbar">
@@ -65,7 +66,7 @@ export function StatusBar({
           <rect x="2" y="3" width="14" height="12" rx="2" /><path d="M7 3v12" />
         </svg>
       </button>}
-      <RuneMark state={markState} size={24} title={connected ? `RUNE (${STATE_LABELS[state]})` : 'RUNE — engine unreachable'} />
+      <RuneMark state={markState} size={24} title={connected ? `RUNE (${attentionLabel || STATE_LABELS[state]})` : 'RUNE — engine unreachable'} />
       <span className="toolbar-wordmark">RUNE</span>
     </div>
 
@@ -96,13 +97,13 @@ export function StatusBar({
     </div>
 
     {(state !== 'idle' || approvalMode === 'bypass' || tokenUsage) && <div className="toolbar-status">
-      {state !== 'idle' && <div className="toolbar-activity" data-attention={state !== 'running'}>
-        <span className="status-dot status-dot--pulse" />
-        <span>{STATE_LABELS[state]}</span>
-        {state === 'running' && currentStepInfo && <span className="toolbar-step">
+      {state !== 'idle' && <div className="toolbar-activity" data-attention={!!attentionLabel || state !== 'running'}>
+        <span className={`status-dot ${attentionLabel ? 'status-dot--warning' : 'status-dot--pulse'}`} />
+        <span>{attentionLabel || STATE_LABELS[state]}</span>
+        {state === 'running' && !attentionLabel && currentStepInfo && <span className="toolbar-step">
           Step {currentStepInfo.stepNumber}{currentStepInfo.tokens > 0 && ` · ${formatTokensCompact(currentStepInfo.tokens)}`}
         </span>}
-        {state === 'running' && currentActivity && <span className="toolbar-current">{currentActivity}</span>}
+        {state === 'running' && !attentionLabel && currentActivity && <span className="toolbar-current">{currentActivity}</span>}
       </div>}
       {approvalMode === 'bypass' && <span className="approval-mode-badge"
         title="RUNE will not ask before risky commands, MCP writes, or network writes">Approvals off</span>}

@@ -17,7 +17,6 @@ log = get_logger(__name__)
 # Tool patterns that hint at specific needs
 # Use actual capability names (underscore-separated, not dot-separated)
 _DOC_TOOLS = {"file_read", "web_search", "web_fetch"}
-_TEST_TOOLS = {"bash_execute", "file_edit", "file_write"}
 _REFACTOR_TOOLS = {"file_edit", "file_write", "file_search"}
 
 # Thresholds
@@ -114,21 +113,24 @@ class NeedInferer:
         self,
         actions: list[dict[str, Any]],
     ) -> InferredNeed | None:
-        """Detect if the user likely needs to write or run tests.
-
-        Heuristic: many edits followed by executions without test-related
-        keywords suggest the code is untested.
-        """
+        """Suggest tests after repeated code changes without a fresh pass."""
         if len(actions) < _TEST_EDIT_THRESHOLD:
             return None
 
-        recent = actions[-12:]
-        edit_count = sum(1 for a in recent if a.get("tool") in _TEST_TOOLS)
-        has_test_mention = any(
-            "test" in str(a.get("args", "")).lower() for a in recent
-        )
+        latest = actions[-1]
+        scope = latest.get("session_id"), latest.get("workspace")
+        edit_count = 0
+        for action in actions[-12:]:
+            if (action.get("session_id"), action.get("workspace")) != scope:
+                continue
+            if action.get("success") is not True:
+                continue
+            if action.get("tests_passed") is True:
+                edit_count = 0
+            elif action.get("code_changed") is True:
+                edit_count += 1
 
-        if edit_count >= _TEST_EDIT_THRESHOLD and not has_test_mention:
+        if edit_count >= _TEST_EDIT_THRESHOLD:
             confidence = min(0.8, 0.3 + (edit_count - _TEST_EDIT_THRESHOLD) * 0.1)
             return InferredNeed(
                 need_type="testing",

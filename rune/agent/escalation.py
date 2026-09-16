@@ -1,26 +1,14 @@
-"""Escalation hinting for verified-unfixable failures.
+"""Stop messages and optional suggestions to retry with another model.
 
-Two terminal outcomes mean the local model could not finish and a stronger model
-is the next step:
-
-- ``max_gate_blocked``: the agent verified its output against the project's tests,
-  the tests failed, and repeated self-fix attempts did not converge.
-- ``advisor_abort``: the in-loop advisor (a stronger reviewer) inspected the run
-  and recommended stopping.
-
-We only suggest the next step; data leaves the machine on an explicit
-``/escalate``, never automatically. The message adapts to the advisor's state so
-the two rungs of the ladder (in-loop advisor, then full /escalate handoff) stay
-coherent.
+An unresolved completion check or advisor abort can suggest ``/escalate``
+when a retry profile is configured. This module does not start the retry.
 """
 
 from __future__ import annotations
 
 _HINT_REASONS = ("max_gate_blocked", "advisor_abort")
 
-# /goal outer-loop terminal causes where the model tried and could not pass
-# validation. "cancelled" (user stopped) and "error" (crash) are not capability
-# failures, and "verified" is success, so none of those suggest escalation.
+# Goal-loop limits that qualify for escalation; cancellation and crashes do not.
 _GOAL_STUCK_CAUSES = ("stagnation", "max_iterations", "budget")
 
 
@@ -30,11 +18,7 @@ def can_escalate(reason: str) -> bool:
 
 
 def escalation_hint(reason: str) -> str | None:
-    """Return a one-line escalation suggestion, or None.
-
-    Shown only on a terminal local failure AND when an escalation profile is
-    configured, so the suggestion is always actionable.
-    """
+    """Suggest a retry when the stop reason and configured profile support it."""
     if not can_escalate(reason):
         return None
     from rune.config import get_config
@@ -51,20 +35,21 @@ def escalation_hint(reason: str) -> str | None:
             f"/escalate to hand the whole task to {target}."
         )
 
-    # max_gate_blocked: the solution still fails the project's tests.
+    # This may be an answer-evidence check, even when the tests passed.
     base = (
-        "The solution still fails the project's tests after repeated self-fix "
-        f"attempts. Run /escalate to retry once on {target}"
+        "Required completion checks remain unresolved after correction attempts. "
+        f"Run /escalate to retry once on {target}"
     )
     return _with_advisor_suffix(base)
 
 
-# Why the run stopped, in plain words. Shown whether or not an escalation model
-# is set — RUNE says what it couldn't verify rather than claiming it's done.
+# Stop messages are shown even when no escalation profile is configured.
 _HONEST_STOP_NOTES = {
+    "desktop_blocked": (
+        "The desktop task stopped before its result could be confirmed. Review the app or connection error before retrying."
+    ),
     "max_gate_blocked": (
-        "Not marking this done: the solution still fails its tests after repeated "
-        "self-fix attempts, so I won't claim a result I can't verify."
+        "Required completion checks remain unresolved. Review the specific check before treating this result as complete."
     ),
     "advisor_abort": (
         "Stopping here: a stronger reviewer inspected this run and advised against "

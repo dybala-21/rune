@@ -76,7 +76,7 @@ def build_trust_payload(trace: Any) -> dict[str, Any]:
         "testsPassedAfterEdit": getattr(trace, "tests_passed_after_edit", None),
         "verification": verification,
         "completionCheck": getattr(trace, "completion_check", None)
-        if reason in ("completed_gate_warnings", "max_gate_blocked") else None,
+        if reason in ("completed_gate_warnings", "max_gate_blocked", "desktop_blocked") else None,
         "artifactReceipts": getattr(trace, "artifact_receipts", []),
         "tableAcceptance": getattr(trace, "table_acceptance", None),
         "workspaceWarning": getattr(trace, "workspace_warning", "") or "",

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from rune.agent import output_integrity as oi
 
 
@@ -31,6 +33,26 @@ def test_all_grounded_passes():
     messages = [{"role": "tool", "content": "https://a.com https://b.com"}]
     output = "Sources: https://a.com https://b.com"
     assert oi.fabricated_citations(output, messages) == []
+
+
+@pytest.mark.parametrize("fetched,cited", [
+    ("https://docs.python.org/3/library/decimal.html", "https://docs.python.org/3/library/decimal.html#decimal.Decimal"),
+    ("https://docs.python.org/3/library/decimal.html#quick-start-tutorial", "https://docs.python.org/3/library/decimal.html"),
+])
+def test_section_links_use_the_retrieved_document(fetched, cited):
+    messages = [{"role": "tool", "content": f"Fetched {fetched}"}]
+    assert oi.fabricated_citations(f"[Documentation]({cited})", messages) == []
+
+
+@pytest.mark.parametrize("cited", [
+    "https://docs.python.org/3/library/fractions.html#decimal.Decimal",
+    "https://docs.python.org/3/library/decimal.html?version=other#decimal.Decimal",
+    "https://docs.python.org/3/library/decimal.html%23decimal.Decimal",
+    "https://other.example/3/library/decimal.html#decimal.Decimal",
+])
+def test_section_matching_keeps_distinct_resources_separate(cited):
+    messages = [{"role": "tool", "content": "https://docs.python.org/3/library/decimal.html"}]
+    assert oi.fabricated_citations(f"[Documentation]({cited})", messages)
 
 
 def test_no_citations_passes():

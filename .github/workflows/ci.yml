@@ -31,7 +31,7 @@ jobs:
         run: uv run ruff check .
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
@@ -47,8 +47,51 @@ jobs:
         run: cd web && npm ci && npm run build
       - name: Install dependencies
         run: uv sync --extra dev
+      - name: Install test browser
+        run: |
+          export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/rune-playwright"
+          printf 'PLAYWRIGHT_BROWSERS_PATH=%s\n' "$PLAYWRIGHT_BROWSERS_PATH" >> "$GITHUB_ENV"
+          uv run playwright install --with-deps chromium
+      - name: Allow test Chromium to create its sandbox
+        shell: bash
+        run: |
+          # Ubuntu requires a user-namespace grant for these downloaded executables.
+          browser_profile="$RUNNER_TEMP/rune-playwright.apparmor"
+          printf 'abi <abi/4.0>,\ninclude <tunables/global>\n' > "$browser_profile"
+          browser_count=0
+          while IFS= read -r -d '' executable; do
+            test -x "$executable"
+            browser_count=$((browser_count + 1))
+            printf 'profile rune-playwright-%s "%s" flags=(unconfined) {\n  userns,\n}\n' \
+              "$browser_count" "$executable" >> "$browser_profile"
+          done < <(find "$PLAYWRIGHT_BROWSERS_PATH" -type f \( -name chrome -o -name chrome-headless-shell \) -print0)
+          test "$browser_count" -gt 0
+          sudo install -m 0644 "$browser_profile" /etc/apparmor.d/rune-playwright
+          sudo apparmor_parser -r /etc/apparmor.d/rune-playwright
+      - name: Check sandboxed browser startup
+        timeout-minutes: 1
+        run: |
+          uv run python - <<'PY'
+          import asyncio
+
+          from rune.capabilities.browser.core import _get_browser
+          from rune.capabilities.browser.session import browser_session
+
+          async def check():
+              async with browser_session():
+                  _, page = await _get_browser("managed")
+                  await page.set_content("<title>Rune browser check</title>")
+                  assert await page.title() == "Rune browser check"
+
+          asyncio.run(check())
+          PY
       - name: Run tests
+        # Browser action regressions use Chromium, including its actionability checks.
         run: uv run pytest tests/ -q --tb=short
+      - name: Run web regression tests
+        env:
+          RUNE_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
+        run: cd web && npm test
 
   # Fresh install with no dev extras, then import. lint and test both run
   # on `uv sync --extra dev`, so a runtime dependency missing from the base

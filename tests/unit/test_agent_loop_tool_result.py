@@ -282,3 +282,16 @@ def test_failed_tool_nudge_clears_after_successful_bash() -> None:
         "file_write",
         CapabilityResult(success=True, output="wrote file"),
     )
+
+
+def test_long_successful_process_keeps_failed_check_summary_in_preview():
+    output = "test_first ... FAIL\n" + "x" * 3000 + "\nRan 6 tests in 0.001s\nFAILED (failures=5)"
+    payload = _tool_result_event_payload("bash_execute", CapabilityResult(
+        success=True, output=output, metadata={"check_status": "fail"},
+    ))
+    assert payload["success"] is True
+    assert payload["check_status"] == "fail"
+    assert payload["output_truncated"] is True
+    assert "test_first ... FAIL" in payload["output_head"]
+    assert "FAILED (failures=5)" in payload["output_head"]
+    assert len(payload["output_head"]) <= 2000

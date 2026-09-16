@@ -54,6 +54,7 @@ def mask_stale_tool_messages(
     """
     if keep_last < 0 or trunc <= 0:
         return messages
+    messages = _mask_old_images(messages, keep_last=keep_last)
     total = sum(_content_len(m) for m in messages)
     if total <= activate_over:
         return messages
@@ -82,3 +83,19 @@ def mask_stale_tool_messages(
         else:
             out.append(m)
     return out
+
+
+def _mask_old_images(messages: list[dict[str, Any]], *, keep_last: int) -> list[dict[str, Any]]:
+    """Keep recent screenshots on the wire without changing stored history."""
+    positions = [i for i, message in enumerate(messages)
+                 if message.get("role") == "tool" and isinstance(message.get("content"), list)
+                 and any(part.get("type") == "image_url" for part in message["content"])]
+    stale = positions[:-keep_last] if keep_last else positions
+    if not stale:
+        return messages
+    result = list(messages)
+    for i in stale:
+        content = [part for part in messages[i]["content"] if part.get("type") != "image_url"]
+        content.append({"type": "text", "text": "[Older screenshot omitted; capture the current page if needed.]"})
+        result[i] = {**messages[i], "content": content}
+    return result

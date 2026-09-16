@@ -773,13 +773,15 @@ def test_build_trust_payload_honest_failure():
     from types import SimpleNamespace
 
     from rune.api.server import build_trust_payload
-    # max_gate_blocked = the verify-or-fail case: solution failed its tests, so
-    # RUNE refuses to claim done. The honest note must say exactly that.
+    # An unresolved completion check is not evidence that tests failed.
     trace = SimpleNamespace(reason="max_gate_blocked", evidence_gate=None)
     p = build_trust_payload(trace)
     assert p["verified"] is False
     assert p["reason"] == "max_gate_blocked"
-    assert "won't claim a result I can't verify" in p["honestNote"]
+    assert p["completionStatus"] == "incomplete"
+    assert p["verificationStatus"] == "not_checked"
+    assert "completion checks remain unresolved" in p["honestNote"]
+    assert "fails its tests" not in p["honestNote"]
 
 
 def test_build_trust_payload_budget_exhausted():

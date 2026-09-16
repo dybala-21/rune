@@ -92,6 +92,95 @@ async def test_unknown_external_effect_blocks_resumption(recovery, tmp_path):
     assert (tmp_path / "external-effect").read_text() == "sent"
 
 
+async def test_failed_shell_that_already_wrote_cannot_repeat_without_review(recovery, tmp_path):
+    from rune.capabilities.bash import BashParams, _execute_oneshot
+
+    store, _, _ = recovery
+    journal = ExecutionJournal(store, "first", str(tmp_path))
+    params = BashParams(command="printf saved >> result.txt; exit 1", cwd=str(tmp_path))
+    first = await journal.execute("bash_execute", params.model_dump(), lambda: _execute_oneshot(params))
+    assert not first.success and first.metadata["exit_code"] == 1
+    assert store.attempts("first")[0]["state"] == "unknown"
+    denied = await journal.execute("bash_execute", params.model_dump(), lambda: _execute_oneshot(params))
+    assert denied.metadata["action_status"] == "not_executed"
+    assert (tmp_path / "result.txt").read_text() == "saved"
+
+    async def read():
+        return CapabilityResult(success=True, output=(tmp_path / "result.txt").read_text())
+
+    assert (await journal.execute("file_read", {"path": str(tmp_path / "result.txt")}, read)).output == "saved"
+    approvals = []
+
+    async def approve(name, reason):
+        approvals.append((name, reason))
+        return len(approvals) > 1
+
+    journal.approval = approve
+    replacement = BashParams(command="printf repaired > result.txt", cwd=str(tmp_path))
+    for expected in (False, True):
+        result = await journal.execute("bash_execute", replacement.model_dump(), lambda: _execute_oneshot(replacement))
+        assert result.success is expected
+    assert "exit 1" in approvals[0][1] and "repaired" in approvals[0][1]
+    assert (tmp_path / "result.txt").read_text() == "repaired"
+    prior = store.attempts("first")[0]
+    assert prior["state"] == "unknown" and prior["review"]["next_tool"] == "bash_execute"
+
+
+async def test_shell_failure_before_dispatch_does_not_block_followup(recovery, tmp_path):
+    from rune.capabilities.bash import BashParams, _execute_oneshot
+
+    store, _, _ = recovery
+    journal = ExecutionJournal(store, "first", str(tmp_path))
+    params = BashParams(command="true", cwd=str(tmp_path / "missing"))
+    result = await journal.execute("bash_execute", params.model_dump(), lambda: _execute_oneshot(params))
+    assert result.metadata["action_status"] == "not_executed"
+    valid = BashParams(command="printf ok", cwd=str(tmp_path))
+    result = await journal.execute("bash_execute", valid.model_dump(), lambda: _execute_oneshot(valid))
+    assert result.success and result.output == "ok"
+
+
+async def test_cancelled_shell_stops_its_child_and_keeps_the_effect_unknown(recovery, tmp_path):
+    import os
+    import shlex
+
+    from rune.capabilities.bash import BashParams, _execute_oneshot
+
+    store, _, _ = recovery
+    journal = ExecutionJournal(store, "first", str(tmp_path))
+    script = "import os,time; from pathlib import Path; Path('started').write_text(str(os.getpid())); time.sleep(30)"
+    params = BashParams(command=shlex.join([sys.executable, "-c", script]), cwd=str(tmp_path))
+    task = asyncio.create_task(journal.execute("bash_execute", params.model_dump(), lambda: _execute_oneshot(params)))
+    try:
+        async with asyncio.timeout(3):
+            while not (tmp_path / "started").exists():
+                await asyncio.sleep(0.005)
+    finally:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 3)
+    pid = int((tmp_path / "started").read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    assert store.attempts("first")[0]["state"] == "unknown"
+    denied = await journal.execute("bash_execute", params.model_dump(), lambda: _execute_oneshot(params))
+    assert denied.metadata["action_status"] == "not_executed"
+
+
+@pytest.mark.parametrize("state", ["unknown", "dispatched"])
+async def test_browser_effect_cannot_be_replayed_in_a_new_session(recovery, tmp_path, state):
+    from unittest.mock import AsyncMock
+
+    store, runs, service = recovery
+    invoke = AsyncMock(return_value=CapabilityResult(success=state == "dispatched",
+                                                   metadata={"action_status": state}))
+    await ExecutionJournal(store, "first", str(tmp_path)).execute("browser_act", {"selector": "e1"}, invoke)
+    assert store.attempts("first")[0]["state"] == ("done" if state == "dispatched" else "unknown")
+    runs.interrupt_active("server_shutdown")
+    with pytest.raises(RecoveryBlocked):
+        service.begin("first")
+    invoke.assert_awaited_once()
+
+
 def test_resume_excludes_overlapping_workspaces(recovery, tmp_path):
     store, runs, service = recovery
     runs.interrupt_active("server_shutdown")

@@ -7,7 +7,6 @@ cognitive caching integration, and Guardian validation wrappers.
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import math
 import os
@@ -16,10 +15,10 @@ import time
 from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
-from pathlib import Path
 from typing import Any, NamedTuple, Protocol, runtime_checkable
 
 from rune.agent.cognitive_cache import WEB_FETCH_DEFAULT_MAX_LENGTH, SessionToolCache
+from rune.agent.tool_output import ToolOutput, output_for_model
 from rune.capabilities.output_prefixes import (
     BASH_CMD_PREFIX,
     BASH_EXIT_PREFIX,
@@ -47,7 +46,7 @@ class ToolWrapper:
     name: str
     description: str
     json_schema: dict[str, Any] = field(default_factory=lambda: {"type": "object", "properties": {}})
-    function: Any = None  # async callable(**kwargs) -> str
+    function: Any = None  # async callable(**kwargs) -> str | ToolOutput
 
 
 # Stall limits - frozen constant thresholds for stall detection
@@ -96,85 +95,6 @@ STALL_LIMITS: dict[str, Any] = {
 
 # Multiplier applied when "extended" stall mode is active
 EXTENDED_MULTIPLIER: float = 1.5
-
-# Multimodal output - image/media MIME mapping and size limits
-
-# Supported image extensions to MIME types for multimodal tool output
-_IMAGE_EXTENSIONS: dict[str, str] = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-    ".svg": "image/svg+xml",
-}
-
-# Max image file size we'll inline as base64 (~10 MB)
-_MAX_IMAGE_INLINE_BYTES: int = 10 * 1024 * 1024
-
-# Regex to detect image file paths in tool output text
-_IMAGE_PATH_RE = re.compile(
-    r"""(?:^|[\s"'=])(/[^\s"']+\.(?:png|jpe?g|gif|webp|svg))""",
-    re.IGNORECASE,
-)
-
-
-def _mime_for_image(path: str) -> str | None:
-    """Return MIME type if *path* is a supported image extension, else None."""
-    ext = Path(path).suffix.lower()
-    return _IMAGE_EXTENSIONS.get(ext)
-
-
-def _build_multimodal_output(
-    text: str,
-    image_base64: str | None = None,
-    image_mime_type: str = "image/jpeg",
-) -> str:
-    """Embed image data inline when present, otherwise return plain text.
-
-    For SVG, appends the SVG source as text.
-    For raster images, appends a base64 data-URI reference so the LLM
-    can receive the image via the OpenAI content_parts format if the
-    caller decides to post-process it.
-    """
-    if not image_base64:
-        return text
-
-    try:
-        image_bytes = base64.b64decode(image_base64)
-    except Exception:
-        log.warning("multimodal_decode_failed", mime=image_mime_type)
-        return text
-
-    if image_mime_type == "image/svg+xml":
-        svg_text = image_bytes.decode("utf-8", errors="replace")
-        return f"{text}\n\n[SVG image]\n{svg_text}"
-
-    return f"{text}\n\n[image: data:{image_mime_type};base64,{image_base64[:80]}... ({len(image_bytes)} bytes)]"
-
-
-def _extract_image_from_file(file_path: str) -> tuple[str, str] | None:
-    """Read an image file and return ``(base64_data, mime_type)`` or None.
-
-    Only reads files that exist, are within size limits, and have a
-    supported image extension.
-    """
-    mime = _mime_for_image(file_path)
-    if mime is None:
-        return None
-    try:
-        size = os.path.getsize(file_path)
-    except OSError:
-        return None
-    if size > _MAX_IMAGE_INLINE_BYTES or size == 0:
-        return None
-    try:
-        with open(file_path, "rb") as f:
-            data = f.read()
-        return base64.b64encode(data).decode("ascii"), mime
-    except OSError:
-        return None
-
 
 # StallState - unified type lives in loop.py (#15)
 # To avoid circular imports (loop.py imports from tool_adapter.py), we use
@@ -467,8 +387,15 @@ def build_tool_set(
             stall = _FallbackStall()
 
     tools: dict[str, Any] = {}
+    from rune.computer.session import TOOLS as DESKTOP_TOOLS
+    from rune.computer.session import current_desktop
+    desktop_mode = current_desktop() is not None
 
     for cap in reg.list_all():
+        if desktop_mode and cap.name not in DESKTOP_TOOLS:
+            continue
+        if not desktop_mode and cap.name.startswith("desktop_"):
+            continue
         if opts.allowed_tools is not None and cap.name not in opts.allowed_tools:
             continue
         if not reg.is_allowed(cap.name):
@@ -514,19 +441,18 @@ def _build_typed_tool(
     _approved_network: set[str] = set()
 
     async def _execute(params: dict[str, Any]) -> str | Any:
+        from rune.computer.session import TOOLS as DESKTOP_TOOLS
+        from rune.computer.session import current_desktop
+        if current_desktop() is not None and cap_name not in DESKTOP_TOOLS:
+            return "[BLOCKED] This desktop task cannot execute scripts or use other tool transports."
         current_step = opts.step_counter() if opts.step_counter else 0
 
-        if opts.on_tool_start is not None:
-            await opts.on_tool_start(cap_name, params)
-
-        # -- Feature 4: Smart file expansion ---------------------
         effective_params = dict(params)
 
-        # Anchor relative paths to the run's workspace. Capabilities resolve
-        # paths against the process cwd, which is the daemon's start dir when
-        # serving the app — a bare "app.py" must mean the pinned project.
+        # Resolve relative paths in the selected workspace, not the server's cwd.
         if opts.workspace_root:
             if (cap_name.startswith(("file_", "document_", "code_", "table_"))
+                    or cap_name == "browser_screenshot"
                     or cap_name == "project_map"):
                 if cap_name == "project_map" and not effective_params.get("path"):
                     effective_params["path"] = "."
@@ -545,8 +471,11 @@ def _build_typed_tool(
                     if isinstance(source, str) and source and not os.path.isabs(os.path.expanduser(source)):
                         changes["source_path"] = os.path.join(opts.workspace_root, source)
                     effective_params["changes"] = changes
-            elif cap_name == _BASH_CAPABILITY and not effective_params.get("cwd"):
-                effective_params["cwd"] = opts.workspace_root
+            elif cap_name == _BASH_CAPABILITY:
+                directory = os.path.expanduser(effective_params.get("cwd") or ".")
+                effective_params["cwd"] = os.path.join(opts.workspace_root, directory)
+        if opts.on_tool_start is not None:
+            await opts.on_tool_start(cap_name, effective_params)
         if (
             cap_name == "file_read"
             and (effective_params.get("offset") or effective_params.get("limit"))
@@ -617,6 +546,10 @@ def _build_typed_tool(
                 hit = cache.get(cache_key, cap_name, effective_params)
                 if hit is not None:
                     log.debug("cache_hit", capability=cap_name, key=cache_key)
+                    if opts.on_tool_end is not None:
+                        await opts.on_tool_end(cap_name, CapabilityResult(
+                            success=True, output=hit.output, metadata={"cached": True},
+                        ))
                     return hit.output
 
         # 2. Guardian validation
@@ -624,7 +557,8 @@ def _build_typed_tool(
         if opts.enable_guardian:
             guard_result = _validate_with_guardian(cap_name, effective_params)
             if guard_result.blocked:
-                err = CapabilityResult(success=False, error=guard_result.reason)
+                err = CapabilityResult(success=False, error=guard_result.reason,
+                                       metadata={"action_status": "not_executed"})
                 if opts.on_tool_end is not None:
                     await opts.on_tool_end(cap_name, err)
                 return f"[BLOCKED] {guard_result.reason}"
@@ -653,7 +587,8 @@ def _build_typed_tool(
                                 "  2. Use ask_user to explain why you need this operation\n"
                                 "  3. If this is a prerequisite for the task, report the blocker to the user"
                             )
-                        err = CapabilityResult(success=False, error=guard_result.reason)
+                        err = CapabilityResult(success=False, error=guard_result.reason,
+                                               metadata={"action_status": "not_executed"})
                         if opts.on_tool_end is not None:
                             await opts.on_tool_end(cap_name, err)
                         return f"{DENIED_PREFIX} {guard_result.reason}{deny_hint}"
@@ -661,7 +596,8 @@ def _build_typed_tool(
                     _consecutive_denials[0] = 0
                     approval_cleared = True
                 else:
-                    err = CapabilityResult(success=False, error=guard_result.reason)
+                    err = CapabilityResult(success=False, error=guard_result.reason,
+                                           metadata={"action_status": "not_executed"})
                     if opts.on_tool_end is not None:
                         await opts.on_tool_end(cap_name, err)
                     return f"{BLOCKED_PREFIX} Guardian requires approval: {guard_result.reason}"
@@ -802,7 +738,8 @@ def _build_typed_tool(
                     )
             elif opts.approval_callback is not None:
                 _consecutive_denials[0] += 1
-                result = CapabilityResult(success=False, error=f"Denied: {reason}")
+                result = CapabilityResult(success=False, error=f"Denied: {reason}",
+                                          metadata={"action_status": "not_executed"})
 
         elapsed_ms = (time.monotonic() - start_time) * 1000
         if (result.metadata or {}).get("replayed"):
@@ -816,8 +753,15 @@ def _build_typed_tool(
         if cap_name == _BASH_CAPABILITY and result.success:
             _consecutive_denials[0] = 0
 
+        try:
+            output = output_for_model(_format_tool_output(cap_name, effective_params, result), cap_name, result)
+        except (ValueError, OSError) as exc:
+            log.warning("tool_image_delivery_failed", capability=cap_name, error=str(exc))
+            result = CapabilityResult(success=False, error=f"Image delivery failed: {exc}", metadata=result.metadata)
+            output = _format_tool_output(cap_name, effective_params, result)
+
         # 4. Cache store
-        if cache is not None and result.success:
+        if cache is not None and result.success and not isinstance(output, ToolOutput):
             cache_key = cache.generate_key(cap_name, effective_params)
             if cache_key is not None:
                 cache.set(cache_key, cap_name, effective_params, result, current_step)
@@ -839,35 +783,7 @@ def _build_typed_tool(
         if opts.on_tool_end is not None:
             await opts.on_tool_end(cap_name, result)
 
-        # -- Feature 5: Wire output prefixes --------------------
-        output = _format_tool_output(cap_name, effective_params, result)
-
-        # -- Feature 6: Multimodal output (images/media) --------
-        # Mirrors TS toModelOutput: when result.metadata contains
-        # image_base64/image_mime_type (e.g. from browser screenshots),
-        # return a ToolReturn with BinaryContent so the LLM sees the image.
-        image_b64: str | None = None
-        image_mime: str = "image/jpeg"
-
-        if result.metadata and isinstance(result.metadata, dict):
-            # Source 1: capability explicitly provides base64 image data
-            image_b64 = result.metadata.get("image_base64") or result.metadata.get("imageBase64")
-            image_mime = (
-                result.metadata.get("image_mime_type")
-                or result.metadata.get("imageMimeType")
-                or "image/jpeg"
-            )
-
-        # Source 2: detect image file paths in the output text and inline them
-        if not image_b64 and result.success:
-            matches = _IMAGE_PATH_RE.findall(output)
-            for match_path in matches:
-                extracted = _extract_image_from_file(match_path)
-                if extracted is not None:
-                    image_b64, image_mime = extracted
-                    break  # Only inline the first detected image
-
-        return _build_multimodal_output(output, image_b64, image_mime)
+        return output
 
     # --- Wrapper that receives **kwargs from LiteLLMAgent's tool executor ---
     async def _wrapper(**kwargs: Any) -> str | Any:
@@ -1555,7 +1471,7 @@ def _validate_with_guardian(cap_name: str, params: dict[str, Any]) -> _GuardianR
 
         if cap_name == "bash_execute":
             command = params.get("command", "")
-            result = guardian.validate(command)
+            result = guardian.validate(command, cwd=params.get("cwd"))
             if not result.allowed:
                 return _GuardianResult(blocked=True, reason=f"Guardian blocked bash: {result.reason}")
             if result.requires_approval:
@@ -1566,10 +1482,14 @@ def _validate_with_guardian(cap_name: str, params: dict[str, Any]) -> _GuardianR
             result = guardian.validate_file_path(file_path)
             if not result.allowed:
                 return _GuardianResult(blocked=True, reason=f"Guardian blocked file write: {result.reason}")
+            write_approval = result.requires_approval
+            write_reason = result.reason
             if cap_name == "document_bundle":
                 result = guardian.validate_file_read_path(params.get("source_path", ""))
                 if not result.allowed:
                     return _GuardianResult(blocked=True, reason=f"Guardian blocked source read: {result.reason}")
+            if write_approval:
+                return _GuardianResult(requires_approval=True, reason=write_reason)
 
         elif cap_name in ("file_read", "document_read", "document_bundle_inspect"):
             file_path = params.get("file_path") or params.get("path") or params.get("directory", "")
