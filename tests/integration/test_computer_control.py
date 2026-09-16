@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -79,7 +80,8 @@ async def test_a_preview_in_progress_does_not_reject_the_next_turn(computer):
     assert entry.control.run_id == "run2"
 
 
-async def test_conversation_survives_runs_but_shutdown_and_expiry_release_resources(computer):
+@pytest.mark.parametrize("now", [60.0, 3600.0])
+async def test_conversation_survives_runs_but_expiry_releases_resources(computer, monkeypatch, now):
     computers, entry, page, _, _ = computer
     original = entry.browser.browser
     computers.finish(entry, "run1")
@@ -95,7 +97,12 @@ async def test_conversation_survives_runs_but_shutdown_and_expiry_release_resour
         await run()
     assert original.is_connected()
     computers.finish(entry, "run2")
-    entry.touched = 0
+    monkeypatch.setattr("rune.api.computer.time", SimpleNamespace(monotonic=lambda: now))
+    entry.touched = now
+    await computers.reap()
+    assert original.is_connected() and computers.entries["expenses"] is entry
+
+    entry.touched = now - computers.idle_seconds - 1
     await computers.reap()
     assert not original.is_connected() and not computers.entries
 
