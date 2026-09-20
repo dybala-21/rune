@@ -32,13 +32,17 @@ def token_counts(usage: Any) -> dict[str, Any] | None:
                      "input_tokens_details.cache_write_tokens", "input_token_details.cache_creation", "input_token_details.cache_write",
                      "cache_creation_input_tokens", "cache_write_tokens", "cache_write_input_tokens")
     # Native Anthropic input_tokens excludes cache reads and writes; LiteLLM prompt_tokens includes them.
-    if _get(usage, "prompt_tokens") is None and _get(usage, "cache_read_input_tokens") is not None:
+    if _get(usage, "prompt_tokens") is None and (
+        _get(usage, "cache_read_input_tokens") is not None or _get(usage, "cache_creation_input_tokens") is not None
+    ):
         input_tokens += (cached or 0) + (written or 0)
     return {
         "input_tokens": input_tokens, "output_tokens": output_tokens,
         "total_tokens": input_tokens + output_tokens,
         "cached_input_tokens": cached or 0, "cache_write_tokens": written or 0,
         "cache_write_reported": written is not None,
+        "cache_write_1h_tokens": _count(usage, "prompt_tokens_details.cache_creation_token_details.ephemeral_1h_input_tokens",
+                                       "cache_creation.ephemeral_1h_input_tokens") or 0,
         "reasoning_tokens": _count(usage, "completion_tokens_details.reasoning_tokens",
                                    "output_tokens_details.reasoning_tokens", "output_token_details.reasoning_tokens", "reasoning_tokens") or 0,
     }
@@ -48,7 +52,7 @@ def merge_usage(previous: dict | None, counts: dict) -> dict:
     """Merge cumulative snapshots from one request, including partial final events."""
     if previous is None:
         return counts
-    merged = {key: max(value, previous[key]) for key, value in counts.items()}
+    merged = {key: max(value, previous.get(key, 0)) for key, value in counts.items()}
     merged["total_tokens"] = merged["input_tokens"] + merged["output_tokens"]
     return merged
 

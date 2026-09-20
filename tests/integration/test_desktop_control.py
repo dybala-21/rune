@@ -225,8 +225,9 @@ async def test_unavailable_routing_cannot_fall_back_to_generic_execution(monkeyp
     execute = AsyncMock()
     monkeypatch.setattr(loop, "_execute_loop", execute)
     result = await loop.run("TextEdit에서 저장해", classification=ClassificationResult(
-        goal_type="full", confidence=0.5, tier=2, available=False))
-    assert result.reason.startswith("error: Task routing could not be checked")
+        goal_type="full", confidence=0.5, tier=2, available=False,
+        reason="Classification unavailable: read_timeout"))
+    assert result.reason.startswith("error:") and "read_timeout" in result.reason
     execute.assert_not_awaited()
 
 

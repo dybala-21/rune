@@ -126,6 +126,7 @@ class TableAcceptance:
         self.results: dict[str, dict[str, Any]] = {}
         self.outputs: set[str] = set()
         self._pending = required
+        self._recovering = False
         self._lock = asyncio.Lock()
         for record in previous or []:
             if record["tool"] != "table_requirements" or record["state"] != "done":
@@ -159,6 +160,7 @@ class TableAcceptance:
                         "source_sha256": digest, "sheet": sheet, "plan": plan.model_dump()}
                 contract = {"id": hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest(), **body}
                 self.contracts[contract["id"]] = contract
+            self._recovering = False
             return CapabilityResult(success=True, output=json.dumps({
                 "contract": contract, "next": "Create the requested table, then call table_verify with this contract ID. "
                 "Keep the fixed columns and conditions. Unsupported conditions are not verified.",
@@ -166,6 +168,7 @@ class TableAcceptance:
 
     async def verify(self, contract_id: str, output_path: str, sheet: str | None,
                      header_row: int) -> CapabilityResult:
+        self._recovering = False
         contract = self.contracts.get(contract_id)
         if contract is None:
             raise ValueError("Unknown contract; call table_requirements with the original source first")
@@ -236,7 +239,14 @@ class TableAcceptance:
     async def blocker(self) -> str | None:
         message = await self._blocker()
         self._pending = bool(message)
+        self._recovering = bool(message)
         return message
+
+    def recovery_tools(self) -> set[str] | None:
+        if not self._recovering:
+            return None
+        check = "table_verify" if self.contracts else "table_requirements"
+        return {check, "file_read", "file_list", "file_search", "ask_user"}
 
     async def _blocker(self) -> str | None:
         if not self.required:

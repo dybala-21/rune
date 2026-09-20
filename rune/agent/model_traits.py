@@ -32,7 +32,7 @@ _DEFAULT = ModelTraits()
 # appear in the lowercased model id wins, so specific families must
 # stay above general ones.
 _STATIC: tuple[tuple[tuple[str, ...], ModelTraits], ...] = (
-    (("claude-opus-5",), ModelTraits(anthropic_wire=True, speed_param=True, vision=True)),
+    (("claude-opus-5",), ModelTraits(anthropic_wire=True, speed_param=True, temperature=False, vision=True)),
     (("claude", "opus"), ModelTraits(anthropic_wire=True, speed_param=True)),
     (("anthropic", "opus"), ModelTraits(anthropic_wire=True, speed_param=True)),
     (("claude",), ModelTraits(anthropic_wire=True)),
@@ -61,6 +61,9 @@ def traits(model: str) -> ModelTraits:
         if all(n in m for n in needles):
             found = entry
             break
+    from rune.llm.xai import model_name as xai_model_name
+    if xai_model_name(model) is not None:
+        found = replace(found, vision=True)
     if found.temperature and model in _TEMPERATURE_REJECTED:
         found = replace(found, temperature=False)
     if model in _COMPLETION_TOKENS_REQUIRED:

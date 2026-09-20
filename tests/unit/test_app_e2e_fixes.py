@@ -279,3 +279,23 @@ async def test_concurrent_tool_results_keep_their_own_paths(tmp_path, monkeypatc
 
     await asyncio.gather(first(), second())
     assert loop._files_read == {"first.md", "second.md"}
+
+
+async def test_file_role_classification_uses_bounded_grok_reasoning(monkeypatch):
+    from types import SimpleNamespace
+
+    from rune.agent.litellm_adapter import litellm
+    from rune.agent.provenance import classify_roles
+
+    requests = []
+
+    async def complete(**kwargs):
+        requests.append(kwargs)
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            content='{"source.csv":"input","summary.csv":"output"}'))])
+
+    monkeypatch.setattr(litellm, "acompletion", complete)
+    roles = await classify_roles("Summarize source.csv into summary.csv", ["source.csv", "summary.csv"], "grok-4.6", "xai")
+    assert roles == {"source.csv": "input", "summary.csv": "output"}
+    assert requests[0]["extra_body"]["reasoning_effort"] == "low"
+    assert requests[0]["timeout"] == 20

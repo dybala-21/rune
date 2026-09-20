@@ -768,6 +768,7 @@ class NativeAgentLoop(EventEmitter):
         self._step_start_time = 0.0
         self._last_activity = 0.0
         self._last_answer_text = ""
+        self._last_goal_type = ""
         self._consecutive_reads_without_write = 0
         self._pending_verification_nudge = False
         self._files_written.clear()
@@ -1218,7 +1219,9 @@ class NativeAgentLoop(EventEmitter):
                     )
 
             if not getattr(classification, "available", True):
-                raise RuntimeError("Task routing could not be checked. Retry before allowing execution.")
+                from rune.agent.classification_response import RoutingUnavailable
+                raise RoutingUnavailable(f"Task routing failed: {classification.reason}. No task tools were run.")
+            self._last_goal_type = classification.goal_type
             log.info(
                 "goal_classified",
                 type=classification.goal_type,
@@ -2525,6 +2528,7 @@ class NativeAgentLoop(EventEmitter):
                     usage_limits=usage_limits,
                     workspace_root=self._workspace_root,
                     verification_state=lambda: self._verification,
+                    tool_recovery=(self._table_acceptance.recovery_tools if self._table_acceptance else None),
                     require_verification=verify_freshness_enabled or _require_test_pass,
                     verification_callback=lambda command, success, output: (
                         self._verification.observe_command(

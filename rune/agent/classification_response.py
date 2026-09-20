@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import random
 from typing import Any
 
 from rune.utils.logger import get_logger
@@ -13,15 +14,23 @@ log = get_logger(__name__)
 
 _PROPERTIES = {
     "goal_type": {"type": "string", "enum": ["chat", "web", "research", "code_modify", "execution", "browser", "full"]},
-    "confidence": {"type": "number"},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1,
+                   "description": "Confidence as a fraction from 0 to 1, never a percentage."},
     "reason": {"type": "string", "description": "One short phrase explaining the routing decision."},
-    "requires_execution": {"type": "boolean"},
+    "requires_execution": {
+        "type": "boolean",
+        "description": "True only for required code, script, shell or test execution. False for native app input, including calculations in Calculator, unless the user also requests code/tests to run.",
+    },
     "intent_categories": {"type": "array", "items": {"type": "string", "enum": ["email", "document", "table", "desktop"]}},
     "requires_desktop_input": {"type": "boolean"},
     "is_related_to_previous": {"type": "boolean"},
     "table_output": {
         "type": "string", "enum": ["none", "csv", "xlsx"],
         "description": "CSV/XLSX deliverable aggregating existing source data. Use none for Markdown tables, code/test summaries, software that processes data, or blank templates.",
+    },
+    "calculation_expression": {
+        "type": "string",
+        "description": "When asked to evaluate explicit numeric arithmetic, copy the complete expression verbatim from the current request. Never solve, rewrite or invent it. Otherwise use an empty string, including native app tasks, identifiers and code-writing requests.",
     },
 }
 RESPONSE_FORMAT = {"type": "json_schema", "json_schema": {
@@ -34,6 +43,13 @@ RESPONSE_FORMAT = {"type": "json_schema", "json_schema": {
 
 class InvalidClassification(ValueError):
     pass
+
+
+class RoutingUnavailable(RuntimeError):
+    """A routing request failed before any task tools were selected."""
+
+
+ROUTING_TIMEOUT = 35.0
 
 
 def decode_object(response: Any) -> dict[str, Any]:
@@ -86,20 +102,31 @@ def decode_response(response: Any) -> dict[str, Any]:
         raise InvalidClassification("invalid_intent_categories")
     if data["table_output"] not in ("none", "csv", "xlsx"):
         raise InvalidClassification("invalid_table_output")
+    if not isinstance(data["calculation_expression"], str):
+        raise InvalidClassification("invalid_calculation_expression")
     return data
 
 
 async def request_classification(client: Any, system: str, content: str) -> dict[str, Any]:
     from rune.llm.model_selection import get_effective_model_selection
+    from rune.llm.reasoning import reasoning_control
 
     selected = get_effective_model_selection()
+    control = reasoning_control(f"{selected.provider}/{selected.model}")
+    # Routing uses the smallest supported reasoning budget.
+    effort = next((level for level in ("none", "minimal", "low") if level in control.efforts), None)
     messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
-    async with asyncio.timeout(35):
+    from rune.llm.failures import request_failure
+
+    deadline = asyncio.get_running_loop().time() + ROUTING_TIMEOUT
+    async with asyncio.timeout(ROUTING_TIMEOUT):
         for attempt in range(2):
             try:
                 response = await client.completion(
                     messages=messages, model=selected.model, provider=selected.provider, max_tokens=1024 if attempt == 0 else 2048,
-                    timeout=15.0 if attempt == 0 else 20.0, response_format=RESPONSE_FORMAT, cache_system=True,
+                    timeout=max(0.01, deadline - asyncio.get_running_loop().time()),
+                    response_format=RESPONSE_FORMAT, cache_system=True, max_retries=0,
+                    **({"reasoning_effort": effort} if effort is not None else {}),
                 )
                 return decode_response(response)
             except InvalidClassification as exc:
@@ -110,4 +137,12 @@ async def request_classification(client: Any, system: str, content: str) -> dict
                     f"\nThe previous routing response was rejected: {exc}. Return only the schema object. "
                     "Do not perform the request, propose code, or write the user's final answer."
                 )}
+            except Exception as exc:
+                failure = request_failure(exc)
+                delay = failure.retry_after if failure.retry_after is not None else random.uniform(0.25, 0.75)
+                remaining = deadline - asyncio.get_running_loop().time()
+                if attempt or not failure.retryable or not math.isfinite(delay) or delay + 1 >= remaining:
+                    raise
+                log.info("classification_request_retry", **failure.to_dict(), delay_seconds=round(delay, 3))
+                await asyncio.sleep(delay)
     raise InvalidClassification("no_decision")

@@ -276,6 +276,7 @@ class Provider(StrEnum):
     OPENAI = "openai"
     ANTHROPIC = "anthropic"
     GEMINI = "gemini"
+    XAI = "xai"
     AZURE = "azure"
     OLLAMA = "ollama"
 

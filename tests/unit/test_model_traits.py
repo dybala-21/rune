@@ -36,6 +36,7 @@ def test_specific_family_wins_over_general():
     # Specific families take precedence while retaining Anthropic request settings.
     opus = traits("anthropic/claude-opus-5")
     assert opus.speed_param and opus.anthropic_wire
+    assert not opus.temperature
     haiku = traits("claude-haiku-4-5")
     assert haiku.anthropic_wire and not haiku.speed_param
 

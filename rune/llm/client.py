@@ -195,6 +195,9 @@ class LLMClient:
         elif provider == Provider.ANTHROPIC:
             healthy = await _check_dns("api.anthropic.com")
             reason = "OK" if healthy else "DNS lookup failed for api.anthropic.com"
+        elif provider == Provider.XAI:
+            healthy = await _check_dns("api.x.ai")
+            reason = "OK" if healthy else "DNS lookup failed for api.x.ai"
         elif provider == Provider.OLLAMA:
             healthy = await _check_ollama()
             reason = "OK" if healthy else "Ollama not reachable at localhost:11434"
@@ -207,7 +210,7 @@ class LLMClient:
 
     async def get_availability(self) -> LLMAvailabilityStatus:
         """Check all providers and return availability status."""
-        providers = [Provider.OPENAI, Provider.ANTHROPIC, Provider.OLLAMA]
+        providers = [Provider.OPENAI, Provider.ANTHROPIC, Provider.XAI, Provider.OLLAMA]
         results = await asyncio.gather(
             *(self.check_provider_health(p) for p in providers)
         )
@@ -291,6 +294,8 @@ class LLMClient:
         response_format: dict | None = None,
         cache_system: bool = False,
         timeout: float = 600.0,
+        reasoning_effort: str | None = None,
+        max_retries: int | None = None,
     ) -> dict:
         """Send a completion request via LiteLLM.
 
@@ -309,6 +314,7 @@ class LLMClient:
         _PREFIX_MAP = {
             Provider.ANTHROPIC: "anthropic/",
             Provider.GEMINI: "gemini/",
+            Provider.XAI: "xai/",
             Provider.AZURE: "azure/",
             Provider.OLLAMA: "ollama/",
         }
@@ -350,6 +356,17 @@ class LLMClient:
             "timeout": timeout,
             **provider_extra,
         }
+        if reasoning_effort is None and (response_format is not None or timeout <= 35):
+            from rune.llm.reasoning import reasoning_control
+
+            control = reasoning_control(resolved_model)
+            # Grok's high default can outlast short routing and verification calls.
+            if control.wire == "xai" and "low" in control.efforts:
+                reasoning_effort = "low"
+        if reasoning_effort is not None:
+            kwargs["reasoning_effort"] = reasoning_effort
+        if max_retries is not None:
+            kwargs["num_retries"] = kwargs["max_retries"] = max_retries
         if traits(resolved_model).temperature:
             kwargs["temperature"] = temperature
         if tools:

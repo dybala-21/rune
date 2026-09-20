@@ -1,6 +1,7 @@
 """Completion timing, conversation persistence, and deferred memory recovery."""
 
 import asyncio
+import json
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
@@ -204,6 +205,12 @@ async def test_restart_recovers_queued_work_without_repeating_learning(
     service.enqueue("r1", ctx, trace, "answer", 10, classification_hint="chat")
     ctx.goal = "second"
     service.enqueue("r2", ctx, trace, "answer", 10, classification_hint="chat")
+    # Jobs queued by older versions do not carry the accounting flag.
+    for run_id, raw in store.db.execute("SELECT run_id, payload FROM web_run_maintenance").fetchall():
+        payload = json.loads(raw)
+        payload.pop("wait_for_consolidation", None)
+        store.db.execute("UPDATE web_run_maintenance SET payload = ? WHERE run_id = ?",
+                         (json.dumps(payload), run_id))
     store.db.execute("UPDATE web_run_maintenance SET stage = ? WHERE run_id = 'r1'", (interrupted_stage,))
     store.db.commit()
     await service.close(grace_seconds=0)
@@ -212,6 +219,7 @@ async def test_restart_recovers_queued_work_without_repeating_learning(
     learned = []
 
     async def learn(inp):
+        assert inp.wait_for_consolidation
         learned.append(inp.context.goal)
 
     monkeypatch.setattr(agent_context, "post_process_agent_result", learn)
@@ -255,4 +263,71 @@ async def test_failed_learning_does_not_block_the_next_job(tmp_path, monkeypatch
         assert store.db.execute("SELECT COUNT(*) FROM web_run_maintenance").fetchone()[0] == 0
     finally:
         await service.close()
+        runs.close()
+
+
+@pytest.mark.parametrize('fail', [False, True])
+async def test_maintenance_usage_survives_completion_and_reload(tmp_path, monkeypatch, isolated_wiring, fail):
+    from rune.agent.timing import timed_completion
+
+    path = tmp_path / 'usage.db'
+    store = RunStore(path)
+    runs = RunSnapshots(store)
+    runs.start('r1', 's1', 'first')
+    base = {'total': 11, 'input': 10, 'output': 1,
+            'cost': {'usd': .001, 'knownUsd': .001, 'unpricedCalls': 0}}
+    runs.record('agent_complete', {'runId': 'r1', 'answer': 'done', 'usage': base})
+    completed_at = runs.get('r1')['updatedAt']
+    release = asyncio.Event()
+    entered = asyncio.Event()
+    updates = []
+
+    async def learn(inp):
+        assert inp.wait_for_consolidation
+        async def complete(**_):
+            return {'usage': {'prompt_tokens': 1000, 'completion_tokens': 100}}
+        await timed_completion(complete, {'model': 'xai/grok-4.6'})
+        entered.set()
+        await release.wait()
+        if fail:
+            async def unavailable(**_):
+                raise TimeoutError('secret detail')
+            await timed_completion(unavailable, {'model': 'xai/grok-4.6'})
+
+    async def publish(event, data):
+        updates.append(runs.record(event, data))
+
+    monkeypatch.setattr(agent_context, 'post_process_agent_result', learn)
+    service = RunMaintenance(store, publish)
+    service.start()
+    service.enqueue('r1', agent_context.AgentContext(goal='first'),
+                    SimpleNamespace(reason='completed'), 'answer', 10, classification_hint='web')
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        assert runs.get('r1')['status'] == 'completed'
+        assert runs.get('r1')['usage']['cost']['pending']
+        release.set()
+        await service._worker
+        run = runs.get('r1')
+        assert run['status'] == 'completed' and run['updatedAt'] == completed_at
+        assert run['usage']['total'] == 1111
+        assert run['usage']['cost']['knownUsd'] == pytest.approx(.0036)
+        assert run['usage']['cost']['usd'] == (None if fail else pytest.approx(.0036))
+        assert run['usage']['cost']['unpricedCalls'] == int(fail)
+        assert not run['usage']['cost'].get('pending')
+        assert updates[-1]['usage'] == run['usage']
+        # Re-delivery replaces the background subtotal instead of adding it twice.
+        runs.record('usage_update', {'runId': 'r1', 'maintenance': run['maintenance']})
+        assert runs.get('r1')['usage'] == run['usage']
+        await service.close()
+        runs.close()
+        restored = RunSnapshots(RunStore(path))
+        try:
+            assert restored.get('r1')['usage'] == run['usage']
+            assert restored.get('r1')['answer'] == 'done'
+        finally:
+            restored.close()
+    finally:
+        release.set()
+        await service.close(grace_seconds=0)
         runs.close()

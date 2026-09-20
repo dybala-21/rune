@@ -19,21 +19,33 @@ _TOKEN_FIELDS = ("input_tokens", "output_tokens", "total_tokens", "cached_input_
 
 def _usage_totals() -> dict:
     return {"calls": 0, "reported_calls": 0, "cache_write_unreported_calls": 0,
+            "cost_usd": 0.0, "unpriced_calls": 0,
             **dict.fromkeys(_TOKEN_FIELDS, 0)}
 
 
-def _record_usage(run: dict, row: dict, response: Any, *, streaming: bool) -> None:
+def current_usage() -> dict | None:
+    run = _current.get()
+    return copy.deepcopy(run["usage"]) if run is not None else None
+
+
+def _record_usage(run: dict, row: dict, response: Any, *, streaming: bool, request: dict) -> None:
     usage = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
     counts = token_counts(usage)
     if counts is None:
         return
     previous = row.get("usage")
     counts = merge_usage(previous, counts)
+    from rune.llm.pricing import estimate_request_cost
+    old_cost = row.get("costUsd")
+    cost = estimate_request_cost(row["model"], counts, request)
+    row["costUsd"] = cost
     row["usage"] = counts
     missing_before = previous is not None and not previous["cache_write_reported"]
     missing_after = not counts["cache_write_reported"]
     for totals in (run["usage"], run["usage"]["by_model"][row["model"]]):
         totals["reported_calls"] += int(previous is None)
+        totals["cost_usd"] += (cost or 0) - (old_cost or 0)
+        totals["unpriced_calls"] += int(cost is None) - int(previous is not None and old_cost is None)
         totals["cache_write_unreported_calls"] += int(missing_after) - int(missing_before)
         for key in _TOKEN_FIELDS:
             totals[key] += counts[key] - (previous[key] if previous else 0)
@@ -66,8 +78,11 @@ def span(kind: str, **fields: Any):
             run["droppedSpans"] += 1
     try:
         yield row
-    except BaseException:
+    except BaseException as exc:
         row["status"] = "interrupted"
+        if kind == "model":
+            from rune.llm.failures import request_failure
+            row["error"] = request_failure(exc).to_dict()
         raise
     else:
         row["status"] = "finished"
@@ -86,22 +101,30 @@ def timed(kind: str, *, name_arg: int | None = None):
     return decorate
 
 
+@contextmanager
+def capture_timing(owner=None):
+    run = {"started": time.monotonic(), "spans": [], "droppedSpans": 0,
+           "owner": owner, "usage": {**_usage_totals(), "by_model": {}}}
+    token = _current.set(run)
+    try:
+        yield run
+    finally:
+        _current.reset(token)
+
+
+def timing_snapshot(run: dict) -> dict:
+    return {"totalMs": round((time.monotonic() - run["started"]) * 1000, 1),
+            "spans": copy.deepcopy(run["spans"]), "droppedSpans": run["droppedSpans"],
+            "usage": copy.deepcopy(run["usage"])}
+
+
 def timed_run(fn):
     @wraps(fn)
     async def wrapper(*args, **kwargs):
-        run = {"started": time.monotonic(), "spans": [], "droppedSpans": 0,
-               "owner": args[0] if args else None, "usage": {**_usage_totals(), "by_model": {}}}
-        token = _current.set(run)
-        try:
+        with capture_timing(args[0] if args else None) as run:
             result = await fn(*args, **kwargs)
-            result.timings = {
-                "totalMs": round((time.monotonic() - run["started"]) * 1000, 1),
-                "spans": copy.deepcopy(run["spans"]), "droppedSpans": run["droppedSpans"],
-                "usage": copy.deepcopy(run["usage"]),
-            }
+            result.timings = timing_snapshot(run)
             return result
-        finally:
-            _current.reset(token)
     return wrapper
 
 
@@ -111,6 +134,7 @@ async def timed_completion(completion, params):
         return await completion(**params)
     measurement = span("model", model=params.get("model"),
                        reasoningEffort=params.get("reasoning_effort") or
+                       (params.get("extra_body") or {}).get("reasoning_effort") or
                        (params.get("extra_body") or {}).get("reasoning", {}).get("effort"))
     started = time.monotonic()
     row = measurement.__enter__()
@@ -122,14 +146,14 @@ async def timed_completion(completion, params):
         measurement.__exit__(type(exc), exc, exc.__traceback__)
         raise
     if not params.get("stream"):
-        _record_usage(run, row, response, streaming=False)
+        _record_usage(run, row, response, streaming=False, request=params)
         measurement.__exit__(None, None, None)
         return response
 
     async def stream():
         try:
             async for chunk in response:
-                _record_usage(run, row, chunk, streaming=True)
+                _record_usage(run, row, chunk, streaming=True, request=params)
                 row.setdefault("firstEventMs", round((time.monotonic() - started) * 1000, 1))
                 for choice in getattr(chunk, "choices", None) or []:
                     if getattr(getattr(choice, "delta", None), "content", None):

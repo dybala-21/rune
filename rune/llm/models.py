@@ -1,16 +1,4 @@
-"""Model registry for RUNE.
-
-Multi-provider model listing with dynamic OpenAI fetch, hardcoded
-fallbacks for all providers, and 5-minute caching.
-
-Supported providers:
-  OpenAI, Anthropic, Google Gemini, xAI Grok, Azure OpenAI,
-  Mistral, DeepSeek, Cohere
-
-All providers use API Key authentication. Azure additionally supports
-Entra ID (OAuth 2.0). OAuth is NOT supported for Anthropic or Google
-due to account suspension risk (OpenClaw ban wave, 2025-2026).
-"""
+"""Provider model catalogs with cached discovery and offline fallbacks."""
 
 from __future__ import annotations
 
@@ -21,6 +9,7 @@ from dataclasses import dataclass, field
 import httpx
 
 from rune.config import get_config
+from rune.llm.xai import MODELS as XAI_MODEL_IDS
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -164,11 +153,7 @@ GEMINI_MODELS: list[ModelInfo] = [
 # xAI Grok
 
 XAI_MODELS: list[ModelInfo] = [
-    ModelInfo(id="grok-3", provider="xai", label="Grok 3"),
-    ModelInfo(id="grok-3-fast", provider="xai", label="Grok 3 Fast"),
-    ModelInfo(id="grok-3-mini", provider="xai", label="Grok 3 Mini"),
-    ModelInfo(id="grok-3-mini-fast", provider="xai", label="Grok 3 Mini Fast"),
-    ModelInfo(id="grok-2", provider="xai", label="Grok 2"),
+    ModelInfo(id=name, provider="xai", label=name) for name in XAI_MODEL_IDS
 ]
 
 # Azure OpenAI (user deploys their own model names)
@@ -213,7 +198,6 @@ COHERE_MODELS: list[ModelInfo] = [
 _STATIC_PROVIDER_MODELS: dict[str, list[ModelInfo]] = {
     "anthropic": ANTHROPIC_MODELS,
     "gemini":    GEMINI_MODELS,
-    "xai":       XAI_MODELS,
     "azure":     AZURE_MODELS,
     "mistral":   MISTRAL_MODELS,
     "deepseek":  DEEPSEEK_MODELS,
@@ -338,6 +322,13 @@ async def get_available_models() -> list[ModelInfo]:
         if _has_provider_key(provider_id):
             models.extend(provider_models)
 
+    if _has_provider_key("xai"):
+        from rune.llm.xai import available_model_ids
+        fetched = await available_model_ids()
+        models.extend(XAI_MODELS if fetched is None else [
+            ModelInfo(id=name, provider="xai", label=name) for name in fetched
+        ])
+
     _cached_models = models
     _cache_timestamp = now
     return models
@@ -368,6 +359,20 @@ def invalidate_cache() -> None:
     global _cached_models, _cache_timestamp
     _cached_models = None
     _cache_timestamp = 0.0
+    from rune.llm.xai import invalidate_cache as invalidate_xai
+    invalidate_xai()
+
+
+async def selectable_models() -> list[tuple[str, str]]:
+    """Replace Grok fallbacks with the models available to the account."""
+    from rune.llm.xai import available_model_ids
+
+    result = known_models()
+    fetched = await available_model_ids()
+    if fetched is not None:
+        result = [(provider, name) for provider, name in result if provider != "xai"]
+        result.extend(("xai", name) for name in fetched)
+    return result
 
 
 def known_models() -> list[tuple[str, str]]:

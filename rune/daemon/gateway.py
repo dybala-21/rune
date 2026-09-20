@@ -1035,6 +1035,7 @@ class ChannelGateway:
             # 6. Post-process (memory persistence)
             try:
                 learned = await post_process_agent_result(PostProcessInput(
+                    classification_hint=getattr(loop, "_last_goal_type", "") or None,
                     verification=getattr(trace, "verification", None),
                     reason=getattr(trace, "reason", ""),
                     mech_check=getattr(trace, "mech_check", ""),

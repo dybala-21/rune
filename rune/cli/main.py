@@ -750,6 +750,7 @@ def _simple_repl(model: str | None = None, provider: str | None = None) -> None:
 
         with contextlib.suppress(Exception):
             await post_process_agent_result(PostProcessInput(
+                classification_hint=getattr(run_loop, "_last_goal_type", "") or None,
                 verification=getattr(trace, "verification", None),
                 context=ctx,
                 success=(trace.reason == "completed"),
@@ -1471,6 +1472,7 @@ def _ensure_llm_key() -> bool:
         or os.environ.get("OPENAI_API_KEY")
         or os.environ.get("ANTHROPIC_API_KEY")
         or os.environ.get("GEMINI_API_KEY")
+        or os.environ.get("XAI_API_KEY")
     )
 
 

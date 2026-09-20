@@ -110,3 +110,39 @@ async def test_claim_review_is_cached_and_does_not_run_without_historical_failur
     assert await gate.review(state, "Updated the implementation.") is None
     assert await gate.review(state, "Updated the implementation.") is None
     assert client.completion.await_count == 1
+
+
+def test_unique_short_test_name_matches_complete_record_but_not_wrong_status(state):
+    evidence = comparison_evidence(state)
+    claim = {"check_id": evidence[0]["check_id"], "phase": "before", "metric": "status",
+             "test_id": "test_passing", "value": "pass", "source_line": 1}
+    assert not check_claims("test_passing passed before", [claim], evidence)
+    claim["value"] = "fail"
+    assert check_claims("test_passing failed before", [claim], evidence)
+
+
+def test_short_test_name_cannot_choose_between_owners_or_incomplete_logs(state):
+    from copy import deepcopy
+
+    evidence = comparison_evidence(state)
+    claim = {"check_id": evidence[0]["check_id"], "phase": "before", "metric": "status",
+             "test_id": "test_passing", "value": "pass", "source_line": 1}
+    incomplete = deepcopy(evidence)
+    incomplete[0]["before"]["complete"] = False
+    assert check_claims("test_passing passed before", [claim], incomplete)
+    report = evidence[0]["before"]
+    duplicate = {"identity": "other.Cases.test_passing", "status": "fail", "subtest_failures": ()}
+    report["cases"] = (*report["cases"], duplicate)
+    assert check_claims("test_passing passed before", [claim], evidence)
+    claim["test_id"] = "test_example.Cases.test_passing"
+    assert not check_claims("test_example.Cases.test_passing passed before", [claim], evidence)
+
+
+@pytest.mark.parametrize('owner', ['test_example.Cases', 'test_example.Cases.test_values'])
+def test_unittest_versions_produce_the_same_identity(owner):
+    from rune.agent.test_evidence import parse_test_report
+
+    report = parse_test_report(f'test_values ({owner}) ... FAIL\n'
+        f'FAIL: test_values ({owner})\nRan 1 test in 0.001s\nFAILED (failures=1)\n')
+    assert report.complete and len(report.cases) == 1
+    assert report.cases[0].identity == 'test_example.Cases.test_values'

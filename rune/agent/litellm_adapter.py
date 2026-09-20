@@ -611,6 +611,7 @@ def _build_tool_lookup(tools: list[Any]) -> dict[str, Any]:
 
 _PROVIDER_PREFIX: dict[str, str] = {
     "anthropic": "anthropic/",
+    "xai": "xai/",
     "gemini": "gemini/",
     "azure": "azure/",
     # Ollama uses openai/ prefix to route through the OpenAI-compatible
@@ -927,6 +928,7 @@ class StreamResult:
         request: str | None = None,
         verification_callback: Callable[[str, bool, str], Any] | None = None,
         verification_state: Callable[[], Any] | None = None,
+        tool_recovery: Callable[[], set[str] | None] | None = None,
         require_verification: bool = True,
     ) -> None:
         self._model = model
@@ -934,6 +936,7 @@ class StreamResult:
         self._reasoning_effort = configured_reasoning_effort(model)
         self._verification_callback = verification_callback
         self._verification_state = verification_state
+        self._tool_recovery = tool_recovery
         self._require_verification = require_verification
         self._verification_sequence = 0
         self._workspace_root = os.path.abspath(os.path.expanduser(workspace_root or os.getcwd()))
@@ -1096,6 +1099,7 @@ class StreamResult:
                 desktop.check()
             plan_revision = control.revision if control is not None else 0
             verification = self._verification_state() if self._verification_state else None
+            recovery_tools = self._tool_recovery() if self._tool_recovery else None
             verification_pending = bool(verification and verification.pending and self._require_verification)
             if verification is not None:
                 context = verification.model_context(since_sequence=self._verification_sequence)
@@ -1106,7 +1110,7 @@ class StreamResult:
             if verification_pending:
                 self._collected_text = ""
             # Avoid regenerating a substantial answer once required verification is clear.
-            if (_tool_round >= 2 and not verification_pending
+            if (_tool_round >= 2 and not verification_pending and not recovery_tools
                     and self._collected_text
                     and len(self._collected_text.strip()) > 300):
                 log.info(
@@ -1137,8 +1141,23 @@ class StreamResult:
                 _force_edit_tool = False
 
             _tools = self._tool_schemas or None
+            narrowed_recovery = False
             if verification_pending and _tools and "bash_execute" in self._tool_lookup:
                 extra["tool_choice"] = "required"
+                if self._model.startswith(("gemini/", "vertex_ai/gemini-")):
+                    checks = {"bash_execute", "file_read", "file_list", "file_edit", "file_write", "ask_user"}
+                    _tools = [tool for tool in _tools if tool.get("function", {}).get("name") in checks]
+                    narrowed_recovery = True
+            if recovery_tools and _tools:
+                narrowed = [tool for tool in self._tool_schemas if tool.get("function", {}).get("name") in recovery_tools]
+                if narrowed:
+                    _tools = narrowed
+                    extra["tool_choice"] = "required"
+                    narrowed_recovery = True
+            if (self._model.startswith(("gemini/", "vertex_ai/gemini-"))
+                    and extra.get("tool_choice") == "required" and not narrowed_recovery):
+                # Gemini's ANY mode can exceed its schema limit with the full catalog.
+                extra["tool_choice"] = "auto"
 
             _effective_max = _clamp_max_tokens(
                 self._model,
@@ -2351,6 +2370,7 @@ class LiteLLMAgent:
         workspace_root: str = "",
         verification_callback: Callable[[str, bool, str], Any] | None = None,
         verification_state: Callable[[], Any] | None = None,
+        tool_recovery: Callable[[], set[str] | None] | None = None,
         require_verification: bool = True,
     ) -> AsyncIterator[StreamResult]:
         """Start a streaming run. Mirrors ``Agent.run_stream()``."""
@@ -2420,6 +2440,7 @@ class LiteLLMAgent:
             request=goal,
             verification_callback=verification_callback,
             verification_state=verification_state,
+            tool_recovery=tool_recovery,
             require_verification=require_verification,
         )
         self._last_stream_result = stream_result

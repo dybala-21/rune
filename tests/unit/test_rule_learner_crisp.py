@@ -227,6 +227,7 @@ async def test_evidence_gate_fail_drives_crisp_learning_through_save(
             },
         },
         memory_manager=_StubManager(),
+        classification_hint="code_modify",
     )
 
     assert captured.get("error_message") == "expected return 3 but got 5"
@@ -285,6 +286,7 @@ async def test_crisp_learning_on_by_default_through_save(isolated_home, monkeypa
             },
         },
         memory_manager=_StubManager(),
+        classification_hint="code_modify",
     )
     assert any(
         v.get("source") == "crisp_failure" for v in load_fact_meta().values()
@@ -309,6 +311,7 @@ async def test_crisp_learning_opt_out_through_save(isolated_home, monkeypatch):
             "evidence_gate": {"last_verdict": "fail", "last_evidence": "expected 3 got 5"},
         },
         memory_manager=_StubManager(),
+        classification_hint="code_modify",
     )
 
     assert not any(

@@ -6,7 +6,10 @@ import hashlib
 import json
 import unicodedata
 from collections import deque
+from io import BytesIO
 from typing import Any
+
+from PIL import Image, ImageChops
 
 from rune.computer.protocol import DesktopAction, DesktopCondition, DesktopError
 
@@ -79,18 +82,30 @@ class ObservationProgress:
         self.states: dict[str, str] = {}
         self.unchanged: dict[str, int] = {}
         self.noops: deque[tuple[str, str, str]] = deque(maxlen=16)
+        self._semantics: dict[str, str] = {}
+        self._frames: dict[str, Image.Image] = {}
 
     def observe(self, view: dict, frame: bytes) -> dict:
         app = view["app"]
-        state = digest({"app": app, "title": view.get("title"), "width": view.get("width"),
-                        "height": view.get("height"), "controls": [control_state(c) for c in view.get("controls", [])],
-                        "pixels": hashlib.sha256(frame).hexdigest()})
+        semantics = digest({"app": app, "title": view.get("title"), "width": view.get("width"),
+                            "height": view.get("height"), "controls": sorted(
+                                digest({k: v for k, v in control_state(c).items() if k != "bounds"})
+                                 for c in view.get("controls", []))})
+        with Image.open(BytesIO(frame)) as image:
+            image.thumbnail((384, 384), Image.Resampling.BOX)
+            sample = image.convert("RGB")
         previous = self.states.get(app)
-        change = "initial" if previous is None else "unchanged" if previous == state else "changed"
+        changed = (semantics != self._semantics.get(app)
+                   or _screen_changed(self._frames.get(app), sample))
+        change = "initial" if previous is None else "changed" if changed else "unchanged"
         self.unchanged[app] = self.unchanged.get(app, 0) + 1 if change == "unchanged" else 0
         if change == "changed":
             self.noops = deque((item for item in self.noops if item[0] != app), maxlen=16)
-        self.states[app] = state
+        if changed:
+            self.states[app] = digest((semantics, hashlib.sha256(sample.tobytes()).hexdigest()))
+            self._semantics[app] = semantics
+            # Keep this frame until changes accumulate past the threshold.
+            self._frames[app] = sample
         return {"change": change, "unchangedObservations": self.unchanged[app]}
 
     def action_key(self, action: DesktopAction, view: dict) -> tuple[str, str, str]:
@@ -110,3 +125,14 @@ class ObservationProgress:
         if not changed:
             self.noops.append(key)
         return {"change": "changed" if changed else "no_visible_change", "unchangedAttempts": self.noops.count(key)}
+
+
+def _screen_changed(before: Image.Image | None, after: Image.Image) -> bool:
+    if before is None or before.size != after.size:
+        return True
+    bands = ImageChops.difference(before, after).split()
+    difference = ImageChops.lighter(ImageChops.lighter(bands[0], bands[1]), bands[2])
+    # Filter cursor blinks and compression noise. Accessibility handles small
+    # text changes; the model still receives the original screenshot.
+    changed_pixels = sum(difference.histogram()[24:])
+    return changed_pixels >= max(16, after.width * after.height / 1000)

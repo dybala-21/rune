@@ -377,6 +377,7 @@ class DaemonServer:
             try:
                 answer = "".join(collected) if collected else (trace.reason or "")
                 await post_process_agent_result(PostProcessInput(
+                    classification_hint=getattr(loop, "_last_goal_type", "") or None,
                     verification=getattr(trace, "verification", None),
                     reason=getattr(trace, "reason", ""),
                     mech_check=getattr(trace, "mech_check", ""),
