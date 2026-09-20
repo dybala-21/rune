@@ -32,7 +32,7 @@ from rich.console import Console
 
 from rune.ui.clipboard import copy_to_clipboard
 from rune.ui.commands import _ALIAS_MAP, COMMANDS, parse_slash_command, suggest_command
-from rune.ui.cost import estimate_cost, format_cost
+from rune.ui.cost import format_cost
 from rune.ui.renderer import Renderer, format_idle_status, make_safe_console
 from rune.ui.utils.output_styles import OutputStyleName, cycle_style
 from rune.utils.logger import get_logger
@@ -278,6 +278,9 @@ class RuneApp:
         self._user_message_history: list[str] = []
         self._total_input_tokens: int = 0
         self._total_output_tokens: int = 0
+        self._total_cost: float = 0.0
+        self._cost_known = True
+        self._usage_recorded = False
         self._session_start: float = time.monotonic()
         self._output_style: OutputStyleName = "normal"
         self._undo_count: int = 0
@@ -1578,19 +1581,16 @@ class RuneApp:
         """Show estimated API cost."""
         from rich.panel import Panel
         from rich.table import Table
-        cost = estimate_cost(self._model, self._total_input_tokens, self._total_output_tokens)
+        cost = self._total_cost if self._usage_recorded and self._cost_known else None
         cost_str = format_cost(cost)
         from rune.ui.theme import format_tokens
         table = Table(show_header=False, show_edge=False, padding=(0, 1), expand=True)
         table.add_column("key", style="#888888", width=16)
         table.add_column("val", style="bold #E0E0E0")
-        table.add_row("Model", f"[#00CED1]{self._model}[/#00CED1]")
+        table.add_row("Current model", f"[#00CED1]{self._model}[/#00CED1]")
         table.add_row("Input tokens", format_tokens(self._total_input_tokens))
         table.add_row("Output tokens", format_tokens(self._total_output_tokens))
-        if self._provider != "ollama":
-            table.add_row("Estimated", f"[bold #D4A017]{cost_str}[/bold #D4A017]")
-        else:
-            table.add_row("Cost", "[dim]free (local)[/dim]")
+        table.add_row("Est. token cost", f"[bold #D4A017]{cost_str}[/bold #D4A017]")
         self.console.print(Panel(table, title="[bold #D4A017]💰 Cost[/bold #D4A017]", title_align="left", border_style="#333333", padding=(0, 1)))
 
     def _show_stats(self) -> None:
@@ -2059,6 +2059,18 @@ class RuneApp:
         """Accumulate token usage for cost estimation."""
         self._total_input_tokens += input_tokens
         self._total_output_tokens += output_tokens
+
+    def update_run_usage(self, usage: dict | None) -> None:
+        self._usage_recorded = True
+        if usage is None:
+            self._cost_known = False
+            return
+        self.update_token_usage(usage["input"], usage["output"])
+        cost = (usage.get("cost") or {}).get("usd")
+        if cost is None:
+            self._cost_known = False
+        else:
+            self._total_cost += cost
 
     def add_message(
         self,

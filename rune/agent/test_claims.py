@@ -76,6 +76,11 @@ def check_claims(answer: str, claims: Any, evidence: list[dict]) -> list[str]:
         metric, value = claim["metric"], claim["value"]
         actual = None
         case = next((c for c in report["cases"] if c["identity"] == claim["test_id"]), None)
+        if case is None and report["complete"] and report["runner"] == "unittest":
+    # A short name must identify exactly one test in the run.
+            matches = [c for c in report["cases"] if c["identity"].endswith("." + claim["test_id"])]
+            if len(matches) == 1:
+                case = matches[0]
         if metric in {"status", "all_tests_status"}:
             if value == "unknown":
                 continue

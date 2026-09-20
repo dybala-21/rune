@@ -577,13 +577,6 @@ class MemoryManager:
             from rune.memory.rule_learner import get_relevant_rules
 
             domain = getattr(classification, "goal_type", None) if classification else None
-            if domain is None and goal:
-                try:
-                    from rune.agent.goal_classifier import classify_goal
-
-                    domain = (await classify_goal(goal)).goal_type
-                except Exception:
-                    domain = None
             rules = await get_relevant_rules(goal, domain)
             if rules:
                 rule_lines = [f"- {r['key']}: {r['value']}" for r in rules]

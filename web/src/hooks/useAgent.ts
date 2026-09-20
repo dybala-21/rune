@@ -436,6 +436,7 @@ export function useAgent() {
         return;
       }
       if (run.sessionId !== api.getLiveSessionId()) return;
+      setTokenUsage(run.usage ?? null);
       setInterruptedRun(run.status === 'interrupted' ? run : null);
       beginLiveSession();
       api.setCurrentRunId(run.runId);
@@ -490,6 +491,7 @@ export function useAgent() {
       setCurrentStepInfo(null);
       setOrchestration(null);
       setToolCalls([]);
+      setTokenUsage(null);
       currentStepRef.current = 0;
       runSeqRef.current += 1;
     }));
@@ -523,6 +525,11 @@ export function useAgent() {
           },
         }, MAX_MESSAGES);
       });
+    }));
+
+    unsubs.push(onOwnRun('usage_update', (raw) => {
+      const data = raw as { runId: string; usage?: TokenUsage };
+      if (data.runId === api.getCurrentRunId() && data.usage) setTokenUsage(data.usage);
     }));
 
     unsubs.push(onOwnRun('agent_complete', (raw) => {
@@ -623,6 +630,7 @@ export function useAgent() {
       setPendingQuestion(null);
       setCurrentStepInfo(null);
       setLastTrust(data.trust ?? null);
+      if (data.usage) setTokenUsage(data.usage);
       setToolCalls(prev => {
         setActivitySummary(computeActivitySummary(prev, 0, false));
         return prev;

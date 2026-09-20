@@ -117,3 +117,77 @@ async def test_auxiliary_and_stream_usage_are_counted_once_and_missing_usage_is_
     assert usage["cache_write_tokens"] == 300 and usage["cache_write_unreported_calls"] == 1
     assert usage["by_model"]["router"]["total_tokens"] == 120
     assert usage["by_model"]["main"]["total_tokens"] == 1050
+
+
+async def test_cost_is_summed_per_request_without_repricing_or_stream_duplicates():
+    from rune.llm.pricing import usage_payload
+
+    @timed_run
+    async def run():
+        async def complete(**_):
+            async def stream():
+                for _ in range(2):
+                    yield {"usage": {"prompt_tokens": 150000, "completion_tokens": 100}}
+            return stream()
+
+        # Combined input exceeds Grok's long-context threshold, but each request does not.
+        for _ in range(2):
+            response = await timed_completion(complete, {"model": "xai/grok-4.6", "stream": True})
+            async for _ in response:
+                pass
+
+        async def auxiliary(**_):
+            return {"usage": {"prompt_tokens": 1000, "completion_tokens": 100}}
+        await timed_completion(auxiliary, {"model": "vertex_ai/gemini-2.5-flash"})
+        in_flight = usage_payload(SimpleNamespace(timings={}))
+        assert in_flight["cost"]["usd"] == pytest.approx(.60175)
+        return CompletionTrace(reason="completed")
+
+    trace = await run()
+    payload = usage_payload(trace)
+    assert payload["cost"]["usd"] == pytest.approx(.60175)
+    assert payload["total"] == 301300
+    assert trace.timings["usage"]["calls"] == 3
+
+
+async def test_partial_usage_reports_unknown_total_and_preserves_known_cost():
+    from rune.llm.pricing import usage_payload
+
+    @timed_run
+    async def run():
+        async def complete(**_):
+            return {"usage": {"prompt_tokens": 1000, "completion_tokens": 100}}
+        async def missing(**_):
+            return {}
+        for model in ("xai/grok-4.6", "unknown"):
+            await timed_completion(complete, {"model": model})
+        await timed_completion(missing, {"model": "xai/grok-4.6"})
+        return CompletionTrace(reason="completed")
+
+    payload = usage_payload(await run())
+    assert payload["cost"]["usd"] is None
+    assert payload["cost"]["knownUsd"] == pytest.approx(.0026)
+    assert payload["cost"]["unpricedCalls"] == 2
+
+
+async def test_request_failure_records_stage_and_status_without_provider_text():
+    import httpx
+
+    @timed_run
+    async def run():
+        async def fail(**_):
+            try:
+                raise httpx.ReadTimeout("private request content")
+            except httpx.ReadTimeout as cause:
+                raise RuntimeError("private provider response") from cause
+        with pytest.raises(RuntimeError):
+            await timed_completion(fail, {"model": "xai/grok-4.6"})
+        return CompletionTrace(reason="failed")
+
+    trace = await run()
+    row = trace.timings["spans"][0]
+    assert row["error"]["kind"] == "read_timeout"
+    assert row["error"]["retryable"] is False
+    assert "private" not in str(trace.timings)
+    assert trace.timings["usage"]["calls"] == 1
+    assert trace.timings["usage"]["reported_calls"] == 0

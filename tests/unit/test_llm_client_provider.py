@@ -137,6 +137,7 @@ def test_local_provider_needs_no_api_key(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
 
     monkeypatch.setattr(cfg.llm, "active_provider", "ollama")
     assert _ensure_llm_key() is True  # local needs no key
@@ -198,3 +199,40 @@ async def test_schema_is_sent_once_and_fallback_keeps_the_contract(monkeypatch, 
 
     await LLMClient().completion(messages=messages, model="claude-opus-5", provider=Provider.ANTHROPIC)
     assert completion.call_args.kwargs["messages"] == messages
+
+
+async def test_auxiliary_reasoning_override_reaches_provider_without_becoming_a_default(monkeypatch):
+    from rune.agent.litellm_adapter import litellm
+
+    seen = []
+
+    async def complete(**kwargs):
+        seen.append(kwargs)
+        return {"choices": []}
+
+    monkeypatch.setattr(litellm, "acompletion", complete)
+    client = LLMClient()
+    for effort in ("low", None):
+        await client.completion(messages=[{"role": "user", "content": "route"}],
+                                model="grok-4.6", provider=Provider.XAI, reasoning_effort=effort)
+    assert seen[0]["extra_body"]["reasoning_effort"] == "low"
+    assert "reasoning_effort" not in seen[1].get("extra_body", {})
+
+
+async def test_grok_structured_checks_use_low_effort_unless_explicitly_overridden(monkeypatch):
+    from rune.agent.classification_response import RESPONSE_FORMAT
+    from rune.agent.litellm_adapter import litellm
+
+    seen = []
+
+    async def complete(**kwargs):
+        seen.append(kwargs)
+        return {"choices": []}
+
+    monkeypatch.setattr(litellm, "acompletion", complete)
+    for effort in (None, "xhigh"):
+        await LLMClient().completion(messages=[{"role": "user", "content": "check evidence"}],
+            model="grok-4.6", provider=Provider.XAI, response_format=RESPONSE_FORMAT, reasoning_effort=effort)
+    await LLMClient().completion(messages=[{"role": "user", "content": "table requirements"}],
+        model="grok-4.6", provider=Provider.XAI, timeout=30)
+    assert [p["extra_body"]["reasoning_effort"] for p in seen] == ["low", "xhigh", "low"]

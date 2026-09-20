@@ -57,3 +57,32 @@ def test_snapshot_preserves_check_failure_separately_from_process_exit():
     call = runs.latest("s1")["toolCalls"][0]
     assert call["success"] and call["checkStatus"] == "fail" and call["outputTruncated"]
     assert call["completedAt"] >= call["timestamp"]
+
+
+def test_early_background_usage_is_combined_when_the_answer_arrives():
+    runs = RunSnapshots()
+    runs.start('r1', 's1', 'report')
+    part = {'total': 2, 'input': 1, 'output': 1,
+            'cost': {'usd': .01, 'knownUsd': .01, 'unpricedCalls': 0}}
+    runs.record('usage_update', {'runId': 'r1', 'maintenance': {'status': 'completed', 'usage': part}})
+    event = runs.record('agent_complete', {'runId': 'r1', 'usage': part, 'answer': 'done'})
+    assert event['usage']['total'] == 4
+    assert event['usage']['cost']['usd'] == .02
+    assert runs.get('r1')['status'] == 'completed'
+
+
+def test_interrupted_background_accounting_does_not_leave_a_finished_chat_updating():
+    runs = RunSnapshots()
+    runs.start('r1', 's1', 'report')
+    usage = {'total': 2, 'input': 1, 'output': 1,
+             'cost': {'usd': .01, 'knownUsd': .01, 'unpricedCalls': 0}}
+    runs.record('agent_complete', {'runId': 'r1', 'usage': usage})
+    runs.record('usage_update', {'runId': 'r1', 'maintenance': {'status': 'running'}})
+    assert runs.get('r1')['usage']['cost']['pending']
+    runs.record('usage_update', {'runId': 'r1', 'maintenance': {'status': 'interrupted'}})
+    run = runs.get('r1')
+    assert run['status'] == 'completed'
+    assert not run['usage']['cost'].get('pending')
+    assert run['usage']['cost']['incomplete']
+    assert run['usage']['cost']['usd'] is None
+    assert run['usage']['cost']['knownUsd'] == .01

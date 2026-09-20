@@ -657,6 +657,12 @@ class AgentLoopController:
 
         # Extract data from trace
         total_tokens = getattr(trace, "total_tokens_used", 0) or 0
+        from rune.llm.pricing import usage_payload
+
+        usage = usage_payload(trace)
+        if usage is not None:
+            total_tokens = usage["total"]
+            self._input_tokens, self._output_tokens = usage["input"], usage["output"]
         success = getattr(trace, "success", True)
         reason = getattr(trace, "reason", "")
         evidence_score = getattr(trace, "evidence_score", 0.0)
@@ -1000,6 +1006,9 @@ class AgentLoopController:
                 context=run_context,
                 message_history=message_history,
             )
+            from rune.llm.pricing import usage_payload
+
+            self._app.update_run_usage(usage_payload(trace))
 
             # If streaming was active but completed event didn't fire cleanly,
             # ensure we finish streaming
@@ -1039,6 +1048,7 @@ class AgentLoopController:
                         post_process_agent_result,
                     )
                     learned = await post_process_agent_result(PostProcessInput(
+                        classification_hint=getattr(self._loop, "_last_goal_type", "") or None,
                         verification=getattr(trace, "verification", None),
                         reason=getattr(trace, "reason", ""),
                         mech_check=getattr(trace, "mech_check", ""),
@@ -1088,35 +1098,6 @@ class AgentLoopController:
         hours = mins // 60
         remaining_m = mins % 60
         return f"{hours}h {remaining_m}m"
-
-    @staticmethod
-    def _fmt_cost(model: str, input_tokens: int, output_tokens: int) -> str:
-        """Estimate cost from token counts."""
-        prices: dict[str, tuple[float, float]] = {
-            "gpt-5.4-pro": (10.0, 40.0),
-            "gpt-5.4": (2.50, 10.0),
-            "gpt-5-mini": (0.30, 1.20),
-            "gpt-5-nano": (0.10, 0.40),
-            "gpt-5.3-codex": (2.50, 10.0),
-            "gpt-4o": (2.50, 10.0),
-            "gpt-4o-mini": (0.15, 0.60),
-            "gpt-4.1": (2.00, 8.00),
-            "o4-mini": (1.10, 4.40),
-            "o3-mini": (1.10, 4.40),
-            "claude-sonnet": (3.0, 15.0),
-            "claude-haiku": (0.25, 1.25),
-            "claude-opus": (15.0, 75.0),
-        }
-        in_price, out_price = 2.50, 10.0
-        model_lower = model.lower()
-        for key, (ip, op) in prices.items():
-            if key in model_lower:
-                in_price, out_price = ip, op
-                break
-        cost = (input_tokens / 1_000_000) * in_price + (output_tokens / 1_000_000) * out_price
-        if cost < 0.001:
-            return "<$0.001"
-        return f"~${cost:.2f}"
 
     def _build_completion_summary(
         self,
@@ -1180,18 +1161,12 @@ class AgentLoopController:
         elif input_tokens > 0 or output_tokens > 0:
             metrics.append(f"tokens {self._fmt_tokens(input_tokens + output_tokens)}")
 
-        model = self._app._model or "gpt-5.4"
-        # Skip cost display for local models (ollama) - no API cost
-        is_local = getattr(self._app, "_provider", "") == "ollama"
-        if not is_local:
-            if input_tokens > 0 or output_tokens > 0:
-                cost_str = self._fmt_cost(model, input_tokens, output_tokens)
-                metrics.append(f"cost {cost_str}")
-            elif total_tokens > 0:
-                est_in = int(total_tokens * 0.65)
-                est_out = total_tokens - est_in
-                cost_str = self._fmt_cost(model, est_in, est_out)
-                metrics.append(f"cost {cost_str}")
+        from rune.llm.pricing import usage_payload
+        from rune.ui.cost import format_cost
+
+        usage = usage_payload(trace)
+        cost = usage["cost"]["usd"] if usage is not None else None
+        metrics.append(f"est. token cost {format_cost(cost)}")
 
         metrics.append(f"time {self._fmt_elapsed(elapsed_ms)}")
 

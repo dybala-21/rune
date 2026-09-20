@@ -25,7 +25,7 @@ _VALID_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Category classification by key prefix
 _CATEGORY_PREFIXES: list[tuple[list[str], str]] = [
-    (["OPENAI_", "ANTHROPIC_", "OLLAMA_"], "llm"),
+    (["OPENAI_", "ANTHROPIC_", "OLLAMA_", "XAI_"], "llm"),
     (["RUNE_LOG", "RUNE_PRINT"], "logging"),
     (["BRAVE_"], "search"),
     (["TELEGRAM_"], "telegram"),

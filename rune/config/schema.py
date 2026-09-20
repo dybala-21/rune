@@ -23,6 +23,9 @@ class ModelsByTier(BaseModel):
 
 class ProviderModels(BaseModel):
     openai: ModelsByTier = Field(default_factory=lambda: ModelsByTier())
+    xai: ModelsByTier = Field(default_factory=lambda: ModelsByTier(
+        best="grok-4.6", coding="grok-4.6", fast="grok-4.3",
+    ))
     anthropic: ModelsByTier = Field(
         default_factory=lambda: ModelsByTier(
             best="claude-opus-5",

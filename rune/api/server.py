@@ -26,6 +26,7 @@ from rune.api.questions import PendingQuestion, question_payload
 from rune.api.trust import build_cancelled_trust
 from rune.api.trust import build_trust_payload as build_trust_payload
 from rune.capabilities.ask_user import AskUserParams, UserResponse, user_response
+from rune.llm.pricing import usage_payload
 from rune.utils.fast_serde import json_decode, json_encode
 from rune.utils.logger import get_logger
 
@@ -476,7 +477,6 @@ def create_app() -> Any:
     _run_store = RunStore()
     _run_snapshots = RunSnapshots(_run_store)
     _run_recovery = RunRecovery(_run_snapshots, _run_store)
-    _maintenance = RunMaintenance(_run_store)
 
     # Broadcast helper
 
@@ -488,6 +488,8 @@ def create_app() -> Any:
         _sse_manager.broadcast(event, data)
         await _ws_manager.broadcast(event, data)
 
+    _maintenance = RunMaintenance(_run_store, _broadcast)
+
     def _trust_payload(trace: Any) -> dict[str, Any]:
         return build_trust_payload(trace)
 
@@ -496,7 +498,7 @@ def create_app() -> Any:
             return
         loop = _active_loops.get(run_id)
         trust = build_cancelled_trust(trace, artifact_receipts=getattr(loop, "artifact_receipts", []))
-        payload = {"runId": run_id, "trust": trust}
+        payload = {"runId": run_id, "trust": trust, "usage": usage_payload(trace)}
         if _aborted_runs.get(run_id) != payload:
             _aborted_runs[run_id] = payload
             await _broadcast("agent_aborted", payload)
@@ -820,6 +822,7 @@ def create_app() -> Any:
                     "success": trace.reason == "completed",
                     "answer": answer,
                     "durationMs": duration_ms,
+                    "usage": usage_payload(trace),
                     "timings": {**getattr(trace, "timings", {}),
                                 "deliveryMs": round((time.monotonic() - loop_finished) * 1000, 1)},
                     "trust": _trust_payload(trace),
@@ -1078,6 +1081,7 @@ def create_app() -> Any:
                             "success": not cancelled and getattr(trace, "reason", "") == "completed",
                             "answer": answer,
                             "durationMs": duration_ms,
+                            "usage": usage_payload(trace),
                             "timings": {**getattr(trace, "timings", {}),
                                         "deliveryMs": round((time.monotonic() - loop_finished) * 1000, 1)},
                             "trust": build_cancelled_trust(trace, artifact_receipts=getattr(loop, "artifact_receipts", []))
@@ -2212,14 +2216,14 @@ def create_app() -> Any:
 
             elif method == "models.list":
                 from rune.llm.client import prime_ollama_installed
-                from rune.llm.models import known_models
+                from rune.llm.models import selectable_models
 
                 # Fill the local-model cache off the loop first; known_models
                 # only reads it, so probing here would stall every other
                 # request (SSE heartbeats, a run's text_delta) on localhost.
                 await prime_ollama_installed()
                 providers: dict[str, list[str]] = {}
-                for prov, model in known_models():
+                for prov, model in await selectable_models():
                     providers.setdefault(prov, []).append(model)
                 return _ok(providers)
 

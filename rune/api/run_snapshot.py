@@ -115,7 +115,7 @@ class RunSnapshots:
         if run is None:
             return data
         if run["status"] in TERMINAL and not (
-            event in {"question_closed", "approval_closed"}
+            event in {"question_closed", "approval_closed", "usage_update"}
             or event == "agent_aborted" and run["status"] == "cancelled"
         ):
             return None
@@ -129,13 +129,16 @@ class RunSnapshots:
             self._store.append(run, event, data, now, checkpoint=checkpoint, response=response,
                                status=_next_status(run, event, data))
         self._apply(run, event, data, now)
+        if event in {"agent_complete", "agent_aborted", "usage_update"} and "usage" in run:
+            data = {**data, "usage": copy.deepcopy(run["usage"])}
         return {**data, "seq": run["seq"], "sessionId": run["sessionId"]}
 
     @staticmethod
     def _apply(run: dict[str, Any], event: str, data: dict[str, Any], now: float) -> None:
         run["seq"] += 1
         run["status"] = _next_status(run, event, data)
-        run["updatedAt"] = now
+        if event != "usage_update":
+            run["updatedAt"] = now
         if event == "run_context":
             for key in ("sessionId", "workspace", "recoveryVersion", "execution"):
                 if key in data:
@@ -185,11 +188,17 @@ class RunSnapshots:
             field = "question" if event == "question_closed" else "approval"
             if run[field] and run[field]["id"] == data.get("id"):
                 run[field] = None
+        elif event == "usage_update":
+            if "executionUsage" not in run:
+                run["executionUsage"] = copy.deepcopy(run.get("usage"))
+            run["maintenance"] = {**run.get("maintenance", {}), **copy.deepcopy(data["maintenance"])}
         elif event in {"agent_complete", "agent_error", "agent_aborted", "agent_interrupted"}:
             run["question"] = run["approval"] = None
-            for key in ("trust", "answer", "error", "durationMs", "timings", "success", "interruptionReason"):
+            for key in ("trust", "answer", "error", "durationMs", "timings", "usage", "success", "interruptionReason"):
                 if key in data:
                     run[key] = copy.deepcopy(data[key])
+            if "usage" in data:
+                run["executionUsage"] = copy.deepcopy(data["usage"])
             if event == "agent_interrupted":
                 run["success"] = False
                 run["trust"] = {
@@ -197,6 +206,14 @@ class RunSnapshots:
                     "verified": False, "reason": run.get("interruptionReason", "server_restart"),
                     "artifactReceipts": run.get("artifactReceipts", []),
                 }
+        if event in {"agent_complete", "agent_error", "agent_aborted", "usage_update"} and "maintenance" in run:
+            from rune.llm.pricing import combine_usage_payloads
+            maintenance = run["maintenance"]
+            run["usage"] = combine_usage_payloads(
+                run.get("executionUsage"), maintenance.get("usage"),
+                pending=maintenance.get("status") in {"pending", "running"},
+                incomplete=maintenance.get("status") == "interrupted",
+            )
 
     def replay(self, interaction_id: str, response_id: str, payload: dict[str, Any]) -> bool:
         self.open()

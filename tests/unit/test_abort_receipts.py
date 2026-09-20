@@ -181,3 +181,30 @@ def test_stop_interrupts_ndjson_and_returns_final_receipts(client, monkeypatch, 
     assert not any(e["event"] in {"agent_complete", "agent_error"} for e in stream)
     assert [e for e in events if e["event"] == "agent_aborted"][-1]["data"]["trust"]["artifactReceipts"] == expected
     assert client.post("/api/abort", json={"runId": run_id}).json()["stopped"] is False
+
+
+@pytest.mark.parametrize("channel", ["web", "ndjson"])
+@pytest.mark.parametrize("reason", ["completed", "cancelled"])
+def test_usage_survives_terminal_delivery_and_web_reconnect(client, monkeypatch, events, channel, reason):
+    async def run(self, *args, **kwargs):
+        return SimpleNamespace(reason=reason, timings={"usage": {
+            "calls": 2, "reported_calls": 2, "input_tokens": 1000, "output_tokens": 200,
+            "total_tokens": 1200, "cached_input_tokens": 600, "cache_write_tokens": 100,
+            "cost_usd": .005, "unpriced_calls": 0,
+        }})
+
+    monkeypatch.setattr(FakeLoop, "run", run)
+    terminal = "agent_aborted" if reason == "cancelled" else "agent_complete"
+    if channel == "ndjson":
+        response = client.post("/api/v1/agent/execute", json={"goal": "check usage", "stream": True})
+        assert response.status_code == 200
+        events = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    else:
+        assert client.post("/api/message", json={"text": "check usage", "sessionId": "usage-test"}).status_code == 200
+        assert _wait_for(lambda: any(e["event"] == terminal for e in events))
+    usage = next(e["data"]["usage"] for e in events if e["event"] == terminal)
+    assert usage["total"] == 1200 and usage["cacheRead"] == 600 and usage["cacheCreation"] == 100
+    assert usage["cost"]["usd"] == .005
+    if channel == "web":
+        snapshot = client.get("/api/runs/snapshot", params={"sessionId": "usage-test"}).json()["run"]
+        assert snapshot["usage"] == usage

@@ -178,7 +178,7 @@ def _has_startup_markers(text: str) -> bool:
 
 
 class BashParams(BaseModel):
-    command: str = Field(description="Shell command to execute")
+    command: str = Field(description="Shell command, not raw Python or JavaScript. Invoke the interpreter explicitly; for multiline Python use python3 - <<'PY'\n<code>\nPY.")
     cwd: str | None = Field(default=None, description="Working directory")
     timeout: int = Field(default=DEFAULT_BASH_TIMEOUT_MS, description="Timeout in ms")
     env: dict[str, str] | None = Field(default=None, description="Extra env vars")
@@ -787,7 +787,7 @@ async def bash_execute(params: BashParams) -> CapabilityResult:
 def register_bash_capabilities(registry: CapabilityRegistry) -> None:
     registry.register(CapabilityDefinition(
         name="bash_execute",
-        description="Execute a shell command",
+        description="Execute a shell command. Script source needs an explicit interpreter invocation; never pass raw Python or JavaScript as the command.",
         domain=Domain.PROCESS,
         risk_level=RiskLevel.HIGH,
         group="runtime",

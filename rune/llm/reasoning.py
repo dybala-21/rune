@@ -19,7 +19,7 @@ _EXTENDED = (*_BASIC, "xhigh", "max")
 @dataclass(frozen=True)
 class ReasoningControl:
     efforts: tuple[str, ...] = ()
-    wire: Literal["litellm", "responses", "anthropic", "gemini"] = "litellm"
+    wire: Literal["litellm", "responses", "anthropic", "gemini", "xai"] = "litellm"
     adaptive: bool = False
     budgets: tuple[tuple[str, int], ...] = ()
 
@@ -63,7 +63,12 @@ def reasoning_model_key(model: str) -> str:
     provider, sep, name = model.strip().partition("/")
     if not sep:
         name = provider
-        provider = "anthropic" if name.startswith("claude-") else "openai"
+        if name.startswith("claude-"):
+            provider = "anthropic"
+        elif name.startswith("grok-"):
+            provider = "xai"
+        else:
+            provider = "openai"
     if provider in {"openai", "azure"}:
         name = name.removeprefix("responses/")
     # Rune's Gemini provider selects Vertex when service-account credentials exist.
@@ -75,6 +80,9 @@ def reasoning_model_key(model: str) -> str:
 @lru_cache(maxsize=256)
 def reasoning_control(model: str) -> ReasoningControl:
     provider, name = reasoning_model_key(model).split("/", 1)
+    if provider == "xai":
+        from rune.llm.xai import REASONING, model_name
+        return ReasoningControl(REASONING.get(model_name(model), ()), "xai")
     catalog = {"openai": _OPENAI, "anthropic": _ANTHROPIC, "gemini": _GEMINI}.get(provider, {})
     known = catalog.get(name)
     # Dated snapshots of a documented model keep that model's control surface.
@@ -146,3 +154,7 @@ def apply_reasoning_control(params: dict) -> None:
         params["thinkingConfig"] = (
             {"thinkingBudget": budget} if budget is not None else {"thinkingLevel": effort}
         )
+    elif control.wire == "xai":
+        # Older LiteLLM catalogs otherwise drop documented Grok effort levels.
+        params.pop("reasoning_effort")
+        params["extra_body"] = {**(params.get("extra_body") or {}), "reasoning_effort": effort}

@@ -661,6 +661,10 @@ def build_system_prompt(
     # appended after the instructional sections, keeping the leading prefix
     # byte-identical across turns for prompt caching. Only the position moves.
     dynamic_parts: list[str] = []
+    from rune.agent.calculation import calculation_context
+
+    if calculation := calculation_context(goal, classification):
+        dynamic_parts.append(calculation)
 
     # 9. Environment info (datetime changes every build -> dynamic tail)
     if environment:

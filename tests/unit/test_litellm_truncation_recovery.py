@@ -143,3 +143,62 @@ async def test_pending_verification_requires_tools_then_releases_final_answer(mo
     instructions = [converter.convert_chat_completion_messages_to_responses_api(deepcopy(r["messages"]))[1] for r in requests]
     assert instructions[0] == instructions[1]
     assert AnthropicConfig().translate_system_message(deepcopy(requests[1]["messages"])) == []
+
+
+async def test_gemini_verification_requires_a_small_schema_and_keeps_missing_checks_pending(monkeypatch):
+    from rune.agent.verification_state import VerificationState
+
+    state = VerificationState()
+    state.changed()
+    requests = []
+
+    async def fake_completion(**kwargs):
+        requests.append(kwargs)
+        return _astream([_delta_chunk(content="Done."), _delta_chunk(finish_reason="stop")])
+
+    monkeypatch.setattr(la.litellm, "acompletion", fake_completion)
+    result = StreamResult(model="vertex_ai/gemini-2.5-flash",
+        messages=[{"role": "user", "content": "Verify the change"}],
+        tool_schemas=[{"function": {"name": name}} for name in ("bash_execute", "document_create", "browser_navigate")],
+        tool_lookup={"bash_execute": lambda: None},
+        max_tokens=1024, temperature=0.0, request_tokens_limit=200000, response_tokens_limit=8192,
+        verification_state=lambda: state)
+    _ = [part async for part in result.stream_text()]
+    assert requests[0]["tool_choice"] == "required"
+    assert [t["function"]["name"] for t in requests[0]["tools"]] == ["bash_execute"]
+    assert state.pending and not state.tests_passed_after_edit
+    assert result._verification_state() is state
+
+
+@pytest.mark.parametrize("model", ["vertex_ai/gemini-2.5-flash", "xai/grok-4.6", "anthropic/claude-opus-5"])
+async def test_table_recovery_forces_a_small_tool_set_then_restores_tools(monkeypatch, model):
+    recovering = True
+    requests = []
+
+    async def verify(**_):
+        nonlocal recovering
+        recovering = False
+        return '{"status": "pass"}'
+
+    streams = iter([
+        [_delta_chunk(tool_calls=[{"index": 0, "name": "table_verify", "arguments": "{}"}]),
+         _delta_chunk(finish_reason="tool_calls")],
+        [_delta_chunk(content="The saved table passed."), _delta_chunk(finish_reason="stop")],
+    ])
+
+    async def completion(**kwargs):
+        requests.append(kwargs)
+        return _astream(next(streams))
+
+    monkeypatch.setattr(la.litellm, "acompletion", completion)
+    result = StreamResult(model=model, messages=[{"role": "user", "content": "Check the saved table"}],
+        tool_schemas=[{"type": "function", "function": {"name": name}} for name in ("table_verify", "file_read", "bash_execute")],
+        tool_lookup={"table_verify": verify}, max_tokens=1024, temperature=0,
+        request_tokens_limit=200000, response_tokens_limit=8192,
+        tool_recovery=lambda: {"table_verify", "file_read"} if recovering else None)
+    assert "passed" in "".join([part async for part in result.stream_text()])
+    assert len(requests) == 2
+    assert requests[0]["tool_choice"] == "required"
+    assert [t["function"]["name"] for t in requests[0]["tools"]] == ["table_verify", "file_read"]
+    assert len(requests[1]["tools"]) == 3
+    assert requests[1].get("tool_choice") != "required"

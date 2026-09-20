@@ -495,6 +495,7 @@ async def save_agent_result_to_memory(
     memory_manager: Any,
     conversation_id: str = "",
     classification_hint: str | None = None,
+    *, wait_for_consolidation: bool = False,
 ) -> list[str]:
     """Save an agent execution result to episodic memory.
 
@@ -587,6 +588,11 @@ async def save_agent_result_to_memory(
 
         await memory_manager.save_episode(episode)
 
+        # Keep the episode when routing failed, but skip domain-dependent learning.
+        if not classification_hint:
+            log.debug("memory_learning_skipped_unknown_domain")
+            return learned_keys
+
         # Save learned pattern (time-slot activity tracking)
         try:
             from datetime import UTC, datetime
@@ -616,18 +622,7 @@ async def save_agent_result_to_memory(
         except Exception:
             pass  # Pattern tracking must never block episode saving
 
-        # Use goal_type as the rule domain so learning matches injection
-        # (build_memory_context injects via get_rules_for_domain(goal_type)).
-        # The hint carries it when available; else classify here.
         domain = classification_hint
-        if not domain:
-            try:
-                from rune.agent.goal_classifier import classify_goal
-
-                domain = (await classify_goal(goal)).goal_type
-            except Exception:
-                domain = None
-        domain = domain or "code_modify"
         # Settle outcomes waiting on the user's verdict: this run's opening
         # message is the first reaction any earlier weak-evidence "success"
         # ever gets. Runs at save time, after the answer is out, so the
@@ -746,7 +741,10 @@ async def save_agent_result_to_memory(
 
                 from rune.memory.consolidation import consolidate_episode
 
-                asyncio.create_task(consolidate_episode(episode.id))
+                if wait_for_consolidation:
+                    await consolidate_episode(episode.id)
+                else:
+                    asyncio.create_task(consolidate_episode(episode.id))
             except Exception:
                 pass  # Consolidation failure must never block episode saving
 

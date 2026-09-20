@@ -5,10 +5,12 @@ import copy
 import json
 import time
 import unicodedata
+from io import BytesIO
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
+from PIL import Image
 from pydantic import ValidationError
 
 from rune.agent.litellm_adapter import StreamResult
@@ -266,18 +268,69 @@ async def test_short_refs_resolve_only_against_the_current_observation(desktop):
         assert [params for method, params in host.calls if method == "act"][0]["ref"] == "save"
 
 
+def screen(color="white", pixel=None):
+    image = Image.new("RGB", (384, 384), color)
+    if pixel is not None:
+        image.putpixel((0, 0), pixel)
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
 def test_state_identity_ignores_refs_but_keeps_values_and_pixels():
     progress = ObservationProgress()
     view = {"app": "test.editor", "title": "문서", "observation": "old", "capturedAt": 1,
             "controls": [{"ref": "old", "role": "AXTextArea", "value": "내용"}]}
-    assert progress.observe(view, b"pixels")["change"] == "initial"
+    assert progress.observe(view, screen())["change"] == "initial"
     view.update(observation="new", capturedAt=2)
     view["controls"][0]["ref"] = "new"
     view["title"] = unicodedata.normalize("NFD", view["title"])
-    assert progress.observe(view, b"pixels")["change"] == "unchanged"
+    assert progress.observe(view, screen())["change"] == "unchanged"
     view["controls"][0]["value"] = "다른 내용"
-    assert progress.observe(view, b"pixels")["change"] == "changed"
-    assert progress.observe(view, b"different pixels")["change"] == "changed"
+    assert progress.observe(view, screen())["change"] == "changed"
+    assert progress.observe(view, screen("black"))["change"] == "changed"
+
+
+async def test_pixel_noise_cannot_reopen_a_repeated_input(desktop):
+    import base64
+
+    computers, entry, host, client = desktop
+    original = host.request
+    sequence = 0
+
+    async def request(*args, **kwargs):
+        nonlocal sequence
+        data = await original(*args, **kwargs)
+        sequence += 1
+        data["image_base64"] = base64.b64encode(screen(pixel=(sequence % 255, 0, 0))).decode()
+        return data
+
+    host.request = request
+    async with computers.bind(entry):
+        await require_desktop()
+        await entry.desktop.observe("test.editor")
+        for _ in range(2):
+            await press_save(entry.desktop, client)
+            await entry.desktop.observe("test.editor")
+        with pytest.raises(DesktopError, match="same input"):
+            await entry.desktop.act(DesktopAction(observation=entry.desktop.view["observation"], action="press", ref="save"))
+    assert len([method for method, _ in host.calls if method == "act"]) == 2
+
+
+def test_canvas_progress_and_small_accessible_values_are_preserved():
+    progress = ObservationProgress()
+    view = {"app": "canvas", "controls": []}
+    progress.observe(view, screen())
+    action = DesktopAction(observation="view", action="scroll", deltaY=200)
+    for color in ("black", "red", "blue", "white"):
+        key = progress.action_key(action, view)
+        assert progress.blocker(key) is None
+        progress.observe(view, screen(color))
+        assert progress.acted(key)["change"] == "changed"
+    view["controls"] = [{"role": "AXTextField", "value": "1"}]
+    progress.observe(view, screen())
+    view["controls"][0]["value"] = "2"
+    assert progress.observe(view, screen())["change"] == "changed"
 
 
 def test_wait_conditions_require_one_matching_control_and_never_treat_missing_as_empty():

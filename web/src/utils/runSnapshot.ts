@@ -1,4 +1,4 @@
-import type { ChatMessage, FileChange, PendingApproval, PendingQuestion, ToolCall, TrustInfo } from '../types';
+import type { ChatMessage, FileChange, PendingApproval, PendingQuestion, TokenUsage, ToolCall, TrustInfo } from '../types';
 import { describeTrust } from './trust';
 import { abortedMessage } from './runEvents';
 
@@ -20,6 +20,7 @@ export interface RunSnapshot {
   error?: string;
   durationMs?: number;
   success?: boolean;
+  usage?: TokenUsage;
   stepNumber: number;
   toolCalls: Array<Omit<ToolCall, 'id'> & { callId?: string }>;
   question: (PendingQuestion & { expiresAt: number }) | null;

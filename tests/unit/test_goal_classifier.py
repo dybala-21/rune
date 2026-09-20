@@ -3,6 +3,7 @@
 import json
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
 from rune.agent.classification_response import RESPONSE_FORMAT
@@ -13,7 +14,7 @@ def verdict(**changes):
     return {"goal_type": "full", "confidence": 0.9, "reason": "requested work",
             "requires_execution": False, "intent_categories": [],
             "requires_desktop_input": False, "is_related_to_previous": False,
-            "table_output": "none", **changes}
+            "table_output": "none", "calculation_expression": "", **changes}
 
 
 def response(data, finish_reason="stop"):
@@ -35,6 +36,16 @@ async def test_valid_routing_needs_one_constrained_call(monkeypatch):
     assert result.available and result.requires_execution and result.is_complex_coding
     assert stub.completion.await_count == 1
     assert stub.completion.call_args.kwargs["response_format"] == RESPONSE_FORMAT
+    assert from_wire(to_wire(result)) == result
+
+
+async def test_calculation_extraction_reuses_the_routing_call(monkeypatch):
+    from rune.agent.calculation import calculation_context
+
+    stub = client(monkeypatch, response(verdict(goal_type="chat", calculation_expression="0.1 + 0.2")))
+    result = await classify_goal("Evaluate 0.1 + 0.2")
+    assert '"result": "0.3"' in calculation_context("Evaluate 0.1 + 0.2", result)
+    assert stub.completion.await_count == 1
     assert from_wire(to_wire(result)) == result
 
 
@@ -100,6 +111,61 @@ async def test_provider_error_fails_closed_without_unbounded_retry(monkeypatch):
     assert "RuntimeError" in result.reason
 
 
+@pytest.mark.parametrize("status,expected_calls", [(401, 1), (403, 1), (400, 1), (429, 2), (503, 2)])
+async def test_only_transient_rejections_retry_within_the_same_budget(monkeypatch, status, expected_calls):
+    import httpx
+
+    reply = httpx.Response(status, request=httpx.Request("POST", "https://example.invalid"),
+                           headers={"Retry-After": "0"})
+    error = httpx.HTTPStatusError("private provider details", request=reply.request, response=reply)
+    stub = client(monkeypatch, error, response(verdict(goal_type="web")))
+    result = await classify_goal("Find the source")
+    assert stub.completion.await_count == expected_calls
+    assert result.available == (expected_calls == 2)
+    requests = [call.kwargs for call in stub.completion.call_args_list]
+    assert all(call["max_retries"] == 0 for call in requests)
+    assert 30 < requests[0]["timeout"] <= 35
+    if expected_calls == 2:
+        assert requests[1]["timeout"] <= requests[0]["timeout"]
+
+
+async def test_provider_retry_after_cannot_extend_routing_deadline(monkeypatch):
+    import httpx
+
+    reply = httpx.Response(429, request=httpx.Request("POST", "https://example.invalid"),
+                           headers={"Retry-After": "120"})
+    stub = client(monkeypatch, httpx.HTTPStatusError("limited", request=reply.request, response=reply))
+    result = await classify_goal("Read the page")
+    assert not result.available and stub.completion.await_count == 1
+
+
+@pytest.mark.parametrize("failure", [TimeoutError, httpx.ReadTimeout])
+async def test_ambiguous_timeout_is_not_sent_again(monkeypatch, failure):
+    stub = client(monkeypatch, failure("secret response body"))
+    result = await classify_goal("Save the file")
+    assert not result.available and stub.completion.await_count == 1
+    assert "secret" not in result.reason and "timeout" in result.reason
+
+
+async def test_deadline_cancels_one_request_without_running_another(monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr("rune.agent.classification_response.ROUTING_TIMEOUT", 0.02)
+    cancelled = []
+
+    async def wait(**kwargs):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(True)
+
+    stub = client(monkeypatch)
+    stub.completion.side_effect = wait
+    result = await classify_goal("Open the app")
+    assert not result.available and cancelled == [True]
+    assert stub.completion.await_count == 1
+
+
 async def test_routing_uses_selected_model_without_a_weaker_intermediate(monkeypatch):
     from types import SimpleNamespace
 
@@ -111,3 +177,42 @@ async def test_routing_uses_selected_model_without_a_weaker_intermediate(monkeyp
     assert stub.completion.await_count == 1
     assert stub.completion.call_args.kwargs["model"] == "claude-opus-5"
     assert stub.completion.call_args.kwargs["provider"] == "anthropic"
+
+
+@pytest.mark.parametrize("provider,model,effort", [
+    ("xai", "grok-4.6", "low"), ("gemini", "gemini-2.5-flash", "none"),
+    ("anthropic", "claude-opus-5", "low"), ("openai", "gpt-6-astra", "low"),
+    ("xai", "grok-4.3", "none"), ("xai", "unknown-grok", None),
+])
+async def test_routing_uses_supported_small_effort_without_changing_preferences(monkeypatch, provider, model, effort):
+    from types import SimpleNamespace
+
+    from rune.config import get_config
+
+    cfg = get_config()
+    original = dict(cfg.llm.reasoning_efforts)
+    monkeypatch.setattr("rune.llm.model_selection.get_effective_model_selection", lambda: SimpleNamespace(
+        provider=provider, model=model))
+    stub = client(monkeypatch, response(verdict()))
+    assert (await classify_goal("Read the source file")).available
+    assert stub.completion.call_args.kwargs.get("reasoning_effort") == effort
+    assert cfg.llm.reasoning_efforts == original
+
+
+async def test_failed_routing_clears_prior_domain_and_never_selects_tools(monkeypatch, tmp_path):
+    from unittest.mock import Mock
+
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.agent.loop import NativeAgentLoop
+
+    monkeypatch.setenv('RUNE_HOME', str(tmp_path))
+    loop = NativeAgentLoop()
+    loop._last_goal_type = 'code_modify'
+    select = Mock()
+    monkeypatch.setattr(loop, '_select_tools', select)
+    bad = ClassificationResult(goal_type='full', confidence=.5, tier=2,
+                               available=False, reason='Classification unavailable: read_timeout')
+    trace = await loop.run('Open the app', classification=bad)
+    assert 'read_timeout' in trace.reason
+    assert loop._last_goal_type == ''
+    select.assert_not_called()

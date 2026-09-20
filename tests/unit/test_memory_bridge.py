@@ -128,6 +128,25 @@ async def _async_none(*args, **kwargs):
     return None
 
 
+async def test_unknown_task_domain_is_saved_without_reclassification_or_learning(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    classify = AsyncMock()
+    learn = AsyncMock()
+    consolidate = AsyncMock()
+    manager = type("Manager", (), {"save_episode": AsyncMock()})()
+    monkeypatch.setattr("rune.agent.goal_classifier.classify_goal", classify)
+    monkeypatch.setattr("rune.memory.rule_learner.learn_from_failures", learn)
+    monkeypatch.setattr("rune.memory.consolidation.consolidate_episode", consolidate)
+    await save_agent_result_to_memory("Look up the model", {
+        "success": False, "reason": "error: Task routing failed: timeout", "output": "",
+    }, manager, wait_for_consolidation=True)
+    assert manager.save_episode.await_count == 1
+    classify.assert_not_called()
+    learn.assert_not_called()
+    consolidate.assert_not_called()
+
+
 class TestSelectCrispSignal:
     """The crisp learning signal must be the actual mismatch, not agent prose."""
 

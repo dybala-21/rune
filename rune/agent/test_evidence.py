@@ -45,10 +45,11 @@ def parse_test_report(output: str) -> TestReport | None:
         for item in _UNIT_CASE.finditer(text):
             method, owner, result = item.groups()
             status = "pass" if result == "ok" else "fail" if result in {"FAIL", "ERROR", "unexpected success"} else "skip"
-            statuses[f"{owner}.{method}"] = status
+            identity = owner if owner.endswith(f".{method}") else f"{owner}.{method}"
+            statuses[identity] = status
         for item in _UNIT_FAILURE.finditer(text):
             _, method, owner, subtest = item.groups()
-            identity = f"{owner}.{method}"
+            identity = owner if owner.endswith(f".{method}") else f"{owner}.{method}"
             statuses[identity] = "fail"
             if subtest:
                 subtests.setdefault(identity, []).append(subtest[:300])

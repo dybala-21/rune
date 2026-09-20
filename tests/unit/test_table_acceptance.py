@@ -78,6 +78,25 @@ async def test_real_output_can_be_repaired_without_changing_contract(office):
     assert not trust["verified"] and trust["verificationStatus"] == "inconclusive"
 
 
+async def test_missing_table_checks_select_recovery_tools_and_release_repairs(office):
+    source, output, _ = office
+    state = TableAcceptance(REQUEST, required=True)
+    assert state.recovery_tools() is None
+    assert await state.blocker()
+    assert "table_requirements" in state.recovery_tools()
+    assert "bash_execute" not in state.recovery_tools()
+    contract = (await state.requirements(str(source), None)).metadata["tableContract"]
+    assert state.recovery_tools() is None
+    assert await state.blocker()
+    assert "table_verify" in state.recovery_tools()
+    output.write_text("team,amount\nA,999\n")
+    assert not (await state.verify(contract["id"], str(output), None, 1)).success
+    assert state.recovery_tools() is None
+    output.write_text("team,amount\nA,12.01\nB,5.01\n")
+    assert (await state.verify(contract["id"], str(output), None, 1)).success
+    assert await state.blocker() is None
+
+
 @pytest.mark.parametrize("content", [
     "team,amount\nA,12.01\nB,5.01\nB,5.01\n",  # extra duplicate
     "team,amount\nA,12.00\nB,5.01\n",  # wrong rounding

@@ -266,7 +266,16 @@ class Guardian:
             base = _raised(base, seen)
         if not base.allowed:
             return base
-        from rune.safety.shell_writes import shell_write_targets
+        from rune.safety.shell_writes import is_raw_python, shell_write_targets
+
+        if is_raw_python(command):
+            return ValidationResult(
+                allowed=False, risk_level=base.risk_level,
+                reason=("Python source was passed as a shell command; nothing was executed. "
+                        "For a one-off calculation or file transformation, pass the code directly "
+                        "through a quoted shell heredoc: python3 - <<'PY'\n<code>\nPY. "
+                        "Approval cannot correct this command format."),
+            )
 
         targets = shell_write_targets(command, cwd or "", home=self._home)
         for path in sorted(targets.paths):

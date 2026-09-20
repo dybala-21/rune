@@ -20,6 +20,34 @@ class WriteTargets:
     uncertain: bool = False
 
 
+def is_raw_python(command: str) -> bool:
+    """Recognize Python source only when it is not valid shell syntax."""
+    import ast
+
+    if len(command) > 128_000:
+        return False
+    try:
+        ast.parse(command)
+    except (SyntaxError, ValueError, RecursionError):
+        return False
+    parser = _parser()
+    if parser is None:
+        return False
+    root = parser.parse(command.encode()).root_node
+    raw_python = root.has_error
+    # The parser accepts f(value), but Bash requires an operator before a subshell.
+    pending = [root]
+    while pending:
+        node = pending.pop()
+        # An unfinished heredoc is still shell input, even if Python can parse it.
+        if node.type == "heredoc_start":
+            return False
+        if node.type == "command" and any(child.type == "subshell" for child in node.named_children):
+            raw_python = True
+        pending.extend(node.named_children)
+    return raw_python
+
+
 def shell_write_targets(command: str, cwd: str = "", *, home: str = "", depth: int = 0) -> WriteTargets:
     found = WriteTargets()
     parser = _parser()

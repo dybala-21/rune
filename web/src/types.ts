@@ -6,6 +6,14 @@ export interface TokenUsage {
   output: number;
   cacheRead?: number;
   cacheCreation?: number;
+  cost?: {
+    pending?: boolean;
+    incomplete?: boolean;
+    usd: number | null;
+    knownUsd: number;
+    unpricedCalls: number;
+    scope: 'model_tokens';
+  };
 }
 
 /** The one list of subscribable SSE events — useSSE iterates it, the type
@@ -16,6 +24,7 @@ export const SSE_EVENT_TYPES = [
   'resync_required',
   'agent_start',
   'agent_complete',
+  'usage_update',
   'agent_error',
   'agent_aborted',
   'step_start',
@@ -126,7 +135,7 @@ export interface TableAcceptanceInfo {
 }
 export interface AgentCompleteData { success: boolean; answer: string; durationMs: number; usage?: TokenUsage; trust?: TrustInfo }
 export interface AgentErrorData { error: string }
-export interface AgentAbortedData { runId?: string; trust?: TrustInfo }
+export interface AgentAbortedData { runId?: string; trust?: TrustInfo; usage?: TokenUsage }
 export interface StepStartData { stepNumber: number; tokens: number }
 export interface ThinkingData { text: string }
 export interface ToolCallData {

@@ -261,6 +261,26 @@ class TestSqliteLogRouting:
             _sqlite_log_handler(apsw.SQLITE_ERROR, "duplicate column name: importance")
         assert logs[0]["log_level"] == "debug"
 
+    def test_interpreter_shutdown_does_not_reenter_logging(self, monkeypatch):
+        from unittest.mock import Mock
+
+        import rune.memory.store as store
+
+        logger = Mock()
+        monkeypatch.setattr(store, "log", logger)
+        store._sqlite_log_handler(store.apsw.SQLITE_IOERR, "closing connection", _is_finalizing=lambda: True)
+        assert not logger.mock_calls
+
+    def test_logger_failure_cannot_escape_the_sqlite_callback(self, monkeypatch, capfd):
+        from unittest.mock import Mock
+
+        import rune.memory.store as store
+
+        monkeypatch.setattr(store, "log", Mock(warning=Mock(side_effect=ValueError("closed log"))))
+        store._sqlite_log_handler(store.apsw.SQLITE_IOERR, "closing connection")
+        assert "SQLite logging is unavailable" in capfd.readouterr().err
+        assert not store._sqlite_logging.active
+
     def test_health_codes_route_to_warning(self):
         import apsw
         from structlog.testing import capture_logs

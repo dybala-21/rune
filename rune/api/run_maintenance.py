@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections.abc import Awaitable, Callable
 from contextvars import Context
 from dataclasses import asdict
+from types import SimpleNamespace
 from typing import Any
 
 from rune.agent.agent_context import AgentContext, PostProcessInput
@@ -19,10 +21,12 @@ log = get_logger(__name__)
 class RunMaintenance:
     """Queue work on disk and serialize updates to shared memory state."""
 
-    def __init__(self, store: RunStore) -> None:
+    def __init__(self, store: RunStore, on_update: Callable[[str, dict], Awaitable[None]] | None = None) -> None:
         self._store = store
+        self._on_update = on_update
         self._worker: asyncio.Task[None] | None = None
         self._closing = False
+        self._interrupted: list[str] = []
 
     def start(self) -> None:
         db = self._store.db
@@ -36,6 +40,8 @@ class RunMaintenance:
             """)
             # Keep interrupted jobs for inspection: some rule updates may
             # already have been applied.
+            self._interrupted = [row[0] for row in db.execute(
+                "SELECT run_id FROM web_run_maintenance WHERE stage = 'learning'")]
             interrupted = db.execute(
                 "UPDATE web_run_maintenance SET stage = 'interrupted' WHERE stage = 'learning'"
             ).rowcount
@@ -59,6 +65,7 @@ class RunMaintenance:
             mech_check=getattr(trace, "mech_check", ""),
             evidence_gate=getattr(trace, "evidence_gate", None),
             classification_hint=classification_hint,
+            wait_for_consolidation=True,
         )
         with self._store.db:
             self._store.db.execute(
@@ -74,6 +81,9 @@ class RunMaintenance:
 
     async def _drain(self) -> None:
         try:
+            for run_id in self._interrupted:
+                await self._publish(run_id, {"status": "interrupted"})
+            self._interrupted.clear()
             while not self._closing:
                 row = self._store.db.execute(
                     "SELECT run_id, payload, stage FROM web_run_maintenance "
@@ -88,12 +98,28 @@ class RunMaintenance:
                     if stage == "pending":
                         self._set_stage(run_id, "learning")
                         from rune.agent.agent_context import post_process_agent_result
+                        from rune.agent.timing import capture_timing, timing_phase, timing_snapshot
+                        from rune.llm.pricing import usage_payload
 
                         inp = PostProcessInput(**{
                             **payload, "context": AgentContext(**payload["context"]),
+                            "wait_for_consolidation": True,
                         })
-                        async with asyncio.timeout(120):
-                            await post_process_agent_result(inp)
+                        status = "running"
+                        with capture_timing() as measured:
+                            try:
+                                await self._publish(run_id, {"status": status})
+                                with timing_phase("maintenance"):
+                                    async with asyncio.timeout(120):
+                                        await post_process_agent_result(inp)
+                                status = "completed"
+                            except BaseException:
+                                status = "interrupted" if self._closing else "failed"
+                                raise
+                            finally:
+                                timings = timing_snapshot(measured)
+                                await self._publish(run_id, {"status": status, "timings": timings,
+                                    "usage": usage_payload(SimpleNamespace(timings=timings))})
                         self._set_stage(run_id, "indexing")
 
                     from rune.api.conversation_wiring import get_conv_manager
@@ -124,6 +150,10 @@ class RunMaintenance:
             self._store.db.execute(
                 "UPDATE web_run_maintenance SET stage = ? WHERE run_id = ?", (stage, run_id),
             )
+
+    async def _publish(self, run_id: str, data: dict) -> None:
+        if self._on_update is not None:
+            await self._on_update("usage_update", {"runId": run_id, "maintenance": data})
 
     async def close(self, grace_seconds: float = 5.0) -> None:
         """Allow the current job to finish; leave queued work for the next start."""

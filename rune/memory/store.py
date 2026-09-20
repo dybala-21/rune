@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import sys
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -49,11 +52,26 @@ _SQLITE_HEALTH_CODES = frozenset(
         apsw.SQLITE_IOERR,
     }
 )
+_sqlite_logging = threading.local()
 
 
-def _sqlite_log_handler(errcode: int, message: str) -> None:
-    emit = log.warning if (errcode & 0xFF) in _SQLITE_HEALTH_CODES else log.debug
-    emit("sqlite_log", code=errcode, message=message)
+def _sqlite_log_handler(errcode: int, message: str, *, _is_finalizing=sys.is_finalizing) -> None:
+    # SQLite may close connections after Python's loggers are gone.
+    # APSW sends callback errors back here, so guard against re-entry too.
+    if _is_finalizing() or getattr(_sqlite_logging, "active", False):
+        return
+    _sqlite_logging.active = True
+    try:
+        emit = log.warning if (errcode & 0xFF) in _SQLITE_HEALTH_CODES else log.debug
+        emit("sqlite_log", code=errcode, message=message)
+    except Exception:
+        # Write directly to stderr if the logger is already closed.
+        try:
+            os.write(2, b"Rune: SQLite logging is unavailable.\n")
+        except OSError:
+            return
+    finally:
+        _sqlite_logging.active = False
 
 
 try:

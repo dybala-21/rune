@@ -87,6 +87,7 @@ class PostProcessInput:
     verification: dict[str, Any] | None = None
     # goal_type used as the rule domain, so learning matches injection.
     classification_hint: str | None = None
+    wait_for_consolidation: bool = False
 
 
 # Helpers
@@ -351,6 +352,7 @@ async def post_process_agent_result(inp: PostProcessInput) -> list[str]:
                 memory_manager=manager,
                 conversation_id=inp.context.conversation_id,
                 classification_hint=inp.classification_hint,
+                wait_for_consolidation=inp.wait_for_consolidation,
             )
             if attempt > 1:
                 log.warning(

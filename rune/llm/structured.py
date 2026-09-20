@@ -9,6 +9,10 @@ log = get_logger(__name__)
 
 @lru_cache(maxsize=128)
 def _format_type(model: str) -> str | None:
+    from rune.llm.xai import model_name as xai_model_name
+
+    if xai_model_name(model) is not None:
+        return "json_schema"
     from rune.agent.litellm_adapter import litellm
 
     try:
