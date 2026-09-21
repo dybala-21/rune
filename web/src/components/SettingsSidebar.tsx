@@ -13,6 +13,7 @@ import {
   type ChannelInfo,
 } from '../api';
 import { toast } from '../utils/toast';
+import { DecisionRoutingSettings } from './DecisionRoutingSettings';
 
 interface SettingsSidebarProps {
   onOpenSkillPanel: (selectedName?: string) => void;
@@ -29,7 +30,7 @@ const CHANNEL_STATUS_COLORS: Record<string, string> = {
   error: 'var(--danger)',
 };
 
-// Matches RolloutManager._VALID_MODES; 'auto' was offered here and rejected by the API.
+// Keep these choices in sync with RolloutManager._VALID_MODES.
 const MEMORY_POLICY_MODES = ['legacy', 'shadow', 'balanced', 'strict'] as const;
 const MEMORY_PRESET_VALUES = {
   speed: {
@@ -107,9 +108,8 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
   const [toggling, setToggling] = useState(false);
   const [restarting, setRestarting] = useState<string | null>(null);
   const [memoryDraft, setMemoryDraft] = useState<MemoryTuningDraft | null>(null);
-  // The 30s refresh must not overwrite fields the user is still filling in.
+  // Preserve unsaved memory edits across the 30-second refresh.
   const memoryDirtyRef = useRef(false);
-  // Wrap the setter so every field edit flags the draft; load() then leaves it alone.
   const editMemoryDraft: typeof setMemoryDraft = (v) => { memoryDirtyRef.current = true; setMemoryDraft(v); };
   const [savingMemory, setSavingMemory] = useState(false);
   const [memoryError, setMemoryError] = useState<string | null>(null);
@@ -134,7 +134,7 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
       if (ch.status === 'fulfilled') setChannels(ch.value.channels);
       if (cron.status === 'fulfilled') setCronCount(cron.value.jobs.length);
     } catch {
-      // keep empty
+      // Keep the last loaded values and retry on the next refresh.
     } finally {
       setLoading(false);
     }
@@ -248,7 +248,7 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
       const ch = await fetchChannels();
       setChannels(ch.channels);
     } catch {
-      // ignore
+      // The next refresh will fetch the channel's actual status.
     } finally {
       setRestarting(null);
     }
@@ -279,6 +279,10 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
       background: 'var(--bg-primary)',
     }}>
       <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
+        {config?.decisionRouting && (
+          <DecisionRoutingSettings routing={config.decisionRouting}
+            onSaved={load} />
+        )}
 
         {/* Proactive toggle */}
         {config && (

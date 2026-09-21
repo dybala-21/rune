@@ -1097,7 +1097,7 @@ class NativeAgentLoop(EventEmitter):
         )
         if not ok:
             return False, messages, blocked_count
-        claim_blocker = await self._test_claim_gate.review(self._verification, self._last_answer_text)
+        claim_blocker = await self._test_claim_gate.review(self._verification, self._last_answer_text, messages)
         if claim_blocker:
             self._record_completion_block("Test result claims", claim_blocker)
             messages = self._inject_system_message(messages, claim_blocker + "\n" + self._verification.model_context())
@@ -1744,6 +1744,7 @@ class NativeAgentLoop(EventEmitter):
 
         async def _on_tool_end(cap_name: str, result: CapabilityResult) -> None:
             _last_tool_params = _tool_params.get() or {}
+            self._test_claim_gate.observe(cap_name, _last_tool_params, result)
             previous_write = self._verification.last_write
             self._last_activity = time.monotonic()
             if any((result.metadata or {}).get(key) for key in ("replayed", "cached")):
@@ -2527,6 +2528,7 @@ class NativeAgentLoop(EventEmitter):
                     message_history=messages or None,
                     usage_limits=usage_limits,
                     workspace_root=self._workspace_root,
+                    artifact_roles=classification.artifact_roles if classification else None,
                     verification_state=lambda: self._verification,
                     tool_recovery=(self._table_acceptance.recovery_tools if self._table_acceptance else None),
                     require_verification=verify_freshness_enabled or _require_test_pass,

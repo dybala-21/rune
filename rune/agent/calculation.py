@@ -1,4 +1,4 @@
-"""Evaluate quoted arithmetic without running model-generated code."""
+"""Evaluate literal arithmetic without running model-generated code."""
 
 from __future__ import annotations
 
@@ -12,6 +12,23 @@ from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
 _OPERATORS = str.maketrans({"×": "*", "÷": "/", "−": "-"})
+
+
+def expression_candidates(text: str) -> list[str]:
+    """Find valid expressions; the classifier decides which one was requested."""
+    candidates = []
+    # Retain unsupported syntax so an invalid expression cannot yield a valid fragment.
+    for match in re.finditer(r"(?<![\w.,+*/%()×÷−^\-])[0-9.(+−\-][0-9eE.,_\s+*/%()×÷−^\-]*", text):
+        expression = match.group().strip().rstrip(".").rstrip()
+        try:
+            calculate(expression)
+        except (ValueError, SyntaxError, ArithmeticError, RecursionError):
+            continue
+        if expression not in candidates:
+            candidates.append(expression)
+        if len(candidates) > 8:
+            return []
+    return candidates
 
 
 def calculate(expression: str) -> str:

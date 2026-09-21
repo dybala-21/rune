@@ -550,7 +550,9 @@ def _build_typed_tool(
                         await opts.on_tool_end(cap_name, CapabilityResult(
                             success=True, output=hit.output, metadata={"cached": True},
                         ))
-                    return hit.output
+                    from rune.agent.tool_output import CachedToolResult
+
+                    return CachedToolResult(hit.output, cache_key)
 
         # 2. Guardian validation
         approval_cleared = False

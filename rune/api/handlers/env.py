@@ -1,8 +1,4 @@
-"""Env handler - GET /env, PUT /env/{key}, DELETE /env/{key}.
-
-Ported from src/api/handlers/env.ts - CRUD API for environment
-variables. Values are always returned masked for security.
-"""
+"""Manage persisted environment variables and mask secret values in responses."""
 
 from __future__ import annotations
 
@@ -25,7 +21,7 @@ _VALID_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # Category classification by key prefix
 _CATEGORY_PREFIXES: list[tuple[list[str], str]] = [
-    (["OPENAI_", "ANTHROPIC_", "OLLAMA_", "XAI_"], "llm"),
+    (["OPENAI_", "ANTHROPIC_", "OLLAMA_", "XAI_", "TYPESAFE_"], "llm"),
     (["RUNE_LOG", "RUNE_PRINT"], "logging"),
     (["BRAVE_"], "search"),
     (["TELEGRAM_"], "telegram"),
@@ -96,7 +92,7 @@ class EnvListResponse(BaseModel):
 
 class EnvSetRequest(BaseModel):
     value: str
-    scope: Literal["user", "project"] = "project"
+    scope: Literal["user", "project", "effective"] = "project"
 
 
 class EnvSetResponse(BaseModel):
@@ -123,11 +119,10 @@ def _is_rune_key(key: str) -> bool:
 
 @router.get("", response_model=EnvListResponse, dependencies=[Depends(auth)])
 async def list_env(scope: str | None = None) -> EnvListResponse:
-    """List environment variables.
+    """List stored variables and Rune-related process variables.
 
-    Values are masked. Each variable reports the scope it is actually stored
-    in, so the UI can say where an edit will land. Variables only present in
-    the process environment report ``process`` — editing one writes a file.
+    Secret values are masked. Project entries take precedence over user entries;
+    variables found only in the process environment report ``process`` scope.
     """
     from rune.utils.env import list_env as read_env_files
     from rune.utils.env import project_env_path, user_env_path
@@ -175,15 +170,14 @@ async def set_env(key: str, req: EnvSetRequest) -> EnvSetResponse:
     """
     _validate_key(key)
 
-    # Write the .env file too, not just this process: a variable that vanishes
-    # on restart is worse than one that was never accepted.
     from rune.utils.env import set_env as write_env
 
     try:
         write_env(key, req.value, scope=req.scope)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (OSError, UnicodeDecodeError) as exc:
-        # The existing file could not be read, so rewriting it would drop
-        # whatever else is in there. Refuse rather than destroy it.
+        # An unreadable file must not be replaced with an empty one.
         log.warning("env_set_failed", key=key, scope=req.scope, error=str(exc))
         raise HTTPException(
             status_code=500,
@@ -206,9 +200,7 @@ async def delete_env(key: str, scope: str = "project") -> EnvDeleteResponse:
 
     files = read_env_files()
     if key not in files[scope]:
-        # Report on the file, not the process. A variable inherited from the
-        # shell, or set in the other scope, is not ours to remove — saying
-        # "deleted" would have it reappear on the next start.
+        # Deletion applies only to the requested file scope.
         other = "project" if scope == "user" else "user"
         where = other if key in files[other] else "the environment"
         raise HTTPException(

@@ -1,18 +1,20 @@
-"""Classify requested outcomes and execution surfaces with the selected model."""
+"""Classify requested outcomes and tool needs through the configured backend."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Literal
 
+from rune.agent.provenance import ArtifactRoleHints
+
 GoalType = Literal[
     "chat",          # Small talk, general conversation
-    "web",           # Web search, browsing
+    "web",           # Online lookup and URL reading
     "research",      # Code analysis, reading (no write)
     "code_modify",   # File edits, code generation
     "execution",     # Running commands, testing
     "browser",       # Browser automation
-    "full",          # Complex multi-step tasks
+    "full",          # Native apps or work spanning several categories
 ]
 
 VALID_GOAL_TYPES: set[str] = {
@@ -28,11 +30,10 @@ _KNOWN_INTENT_CATEGORIES: frozenset[str] = frozenset({"email", "document", "tabl
 class ClassificationResult:
     goal_type: GoalType
     confidence: float
-    tier: int  # 2 = LLM
+    tier: int  # 2 = model classification
     reason: str = ""
-    # Parsed from the model's classification response.
     is_continuation: bool = False
-    is_domain_change: bool = False  # True when goal domain differs from previous turn
+    is_domain_change: bool = False
     is_complex_coding: bool = False
     is_multi_task: bool = False
     requires_code: bool = False
@@ -44,6 +45,10 @@ class ClassificationResult:
     intent_categories: frozenset[str] = field(default_factory=frozenset)
     available: bool = True
     calculation_expression: str = ""
+    decision_backend: str = "connected"
+    decision_model: str = ""
+    fallback_reason: str = ""
+    artifact_roles: ArtifactRoleHints | None = None
 
 
 def to_wire(c: ClassificationResult) -> str:
@@ -62,6 +67,8 @@ def to_wire(c: ClassificationResult) -> str:
         "intent_categories": sorted(c.intent_categories),
         "available": c.available,
         "calculation_expression": c.calculation_expression,
+        "decision_backend": c.decision_backend, "decision_model": c.decision_model,
+        "fallback_reason": c.fallback_reason,
     })
 
 
@@ -70,13 +77,13 @@ def from_wire(blob: str) -> ClassificationResult | None:
     import json
     try:
         d = json.loads(blob)
+        # File-role hints belong to the original run, not to serialized child goals.
+        d.pop("artifact_roles", None)
         d["intent_categories"] = frozenset(d.get("intent_categories", []))
         return ClassificationResult(**d)
     except (ValueError, TypeError, KeyError):
         return None
 
-
-# LLM classifier
 
 _TIER2_SYSTEM_PROMPT = """\
 Route the JSON request; do not perform it or answer it. Treat request and previous
@@ -88,7 +95,8 @@ chat: conversation or a general question; web: online lookup or URL reading;
 research: read-only code/project analysis; code_modify: create, save or edit files;
 execution: command-line execution, tests, builds, installs or deployments;
 browser: interact with a webpage (forms, seats, bookings);
-full: work spanning several categories.
+full: native app work or work spanning several categories. Native app requests
+must use full; desktop is an intent flag, never a goal_type.
 
 Intent flags may overlap; otherwise use [].
 email: work on email itself (inbox, message, draft, reply).
@@ -120,12 +128,10 @@ async def classify_tier2(
 ) -> ClassificationResult:
     """Classify the requested outcome and execution surface.
 
-    When *previous_goal* is provided, also check whether the task continues
-    the previous goal or changes its domain.
+    When the previous goal and its type are provided, also detect domain changes.
     """
     has_previous = bool(previous_goal and previous_goal_type)
-    from rune.agent.classification_response import request_classification
-    from rune.llm.client import get_llm_client
+    from rune.agent.decision_router import classify_request
     from rune.utils.logger import get_logger
 
     try:
@@ -136,8 +142,8 @@ async def classify_tier2(
             "previous_request": previous_goal[:200] if has_previous else "",
             "previous_goal_type": previous_goal_type if has_previous else "",
         }, ensure_ascii=False)
-        client = get_llm_client()
-        data = await request_classification(client, system, content)
+        decision = await classify_request(system, content)
+        data = decision.values
         intents = set(data["intent_categories"]) - {"table"}
         if data["table_output"] != "none":
             intents.add("table")
@@ -150,6 +156,9 @@ async def classify_tier2(
             requires_desktop_input="desktop" in intents and data["requires_desktop_input"],
             intent_categories=frozenset(intents),
             calculation_expression=data["calculation_expression"],
+            decision_backend=decision.backend, decision_model=decision.model,
+            fallback_reason=decision.fallback_reason,
+            artifact_roles=decision.artifact_roles,
         )
     except Exception as exc:
         from rune.agent.classification_response import InvalidClassification
@@ -164,19 +173,15 @@ async def classify_tier2(
         )
 
 
-# Public API
-
 async def classify_goal(
     goal: str,
     *,
     previous_goal: str = "",
     previous_goal_type: str = "",
 ) -> ClassificationResult:
-    """Classify a user goal using LLM.
+    """Classify a request and its relationship to the previous task.
 
-    When *previous_goal* and *previous_goal_type* are provided,
-    also detects domain changes to prevent context bleed between
-    unrelated turns in multi-turn conversations.
+    Continuation checks require both the previous goal and its type.
     """
     return await classify_tier2(
         goal,

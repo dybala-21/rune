@@ -1,9 +1,4 @@
-"""A .env is hand-edited, so writing one has to leave the rest of it alone.
-
-The settings UI can now write these files. The old serializer rebuilt the whole
-file from a parsed dict, which dropped every comment and re-quoted values that
-had picked up a trailing ``# comment`` as part of their text.
-"""
+"""Environment edits preserve unrelated entries, comments, and file permissions."""
 
 from __future__ import annotations
 
@@ -123,6 +118,43 @@ class TestWritesThroughTheFile:
         set_env("RUNE_PROBE", "1", scope="user")
         assert (env_home / ".env").stat().st_mode & 0o777 == 0o600
 
+    @pytest.mark.parametrize("scope", ["user", "project"])
+    def test_effective_key_replacement_survives_a_restart(self, env_home, monkeypatch, scope):
+        from rune.utils.env import effective_env_scope, list_env, load_env
+
+        key = "TYPESAFE_API_KEY"
+        monkeypatch.delenv(key, raising=False)
+        set_env(key, "dummy-user-value", scope="user")
+        if scope == "project":
+            set_env(key, "dummy-project-value", scope="project")
+        assert effective_env_scope(key) == scope
+        set_env(key, "dummy-replacement-value", scope="effective")
+        if scope == "project":
+            assert list_env()["user"][key] == "dummy-user-value"
+        monkeypatch.delenv(key)
+        load_env()
+        assert os.environ[key] == "dummy-replacement-value"
+        assert effective_env_scope(key) == scope
+
+    async def test_launch_environment_override_is_not_reported_as_a_saved_replacement(self, env_home, monkeypatch):
+        from fastapi import HTTPException
+
+        from rune.api.handlers.env import EnvSetRequest
+        from rune.api.handlers.env import set_env as save
+        from rune.utils.env import effective_env_scope
+
+        key = "TYPESAFE_API_KEY"
+        monkeypatch.delenv(key, raising=False)
+        set_env(key, "dummy-file-value", scope="user")
+        before = (env_home / ".env").read_bytes()
+        monkeypatch.setenv(key, "dummy-launch-value")
+        assert effective_env_scope(key) == "process"
+        with pytest.raises(HTTPException) as error:
+            await save(key, EnvSetRequest(value="dummy-replacement", scope="effective"))
+        assert error.value.status_code == 409
+        assert (env_home / ".env").read_bytes() == before
+        assert os.environ[key] == "dummy-launch-value"
+
     def test_an_updated_key_keeps_its_position(self, env_home):
         path = env_home / ".env"
         path.write_text(SAMPLE)
@@ -135,12 +167,7 @@ class TestWritesThroughTheFile:
 
 
 class TestOneParserForBothReaders:
-    """The config loader used to parse .env itself and disagree with this module.
-
-    Its version read an inline comment as part of the value, which silently
-    corrupted an API key, and turned ``export FOO=x`` into a variable named
-    ``export FOO`` so ``FOO`` was never set at all.
-    """
+    """The config loader and settings editor share the same parsing rules."""
 
     @pytest.mark.parametrize(
         ("line", "expected"),
@@ -177,7 +204,7 @@ class TestOneParserForBothReaders:
 
 
 class TestConcurrentEnvWrites:
-    """Unlocked read-modify-write lost 39 of 40 variables and wiped the file."""
+    """Concurrent edits preserve every key and the existing file contents."""
 
     def test_overlapping_writes_keep_every_variable(self, env_home):
         import threading

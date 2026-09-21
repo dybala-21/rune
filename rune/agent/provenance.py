@@ -6,6 +6,7 @@ file and reports inputs that remain unresolved at completion.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 from collections.abc import Iterator
@@ -179,6 +180,41 @@ class ArtifactLedger:
                  or not any(self.resolve_path(p).exists()
                             for p in self.requested_paths.get(k, {k})))
         )
+
+
+def role_hint_names(request: str) -> list[str]:
+    """Limit batching to file names that identify one path in this request."""
+    if not provenance_enabled():
+        return []
+    ledger = ArtifactLedger.for_request(request)
+    if len(ledger.referenced) > 12:
+        return []
+    # Attached prose can join two names, as in "report.txtを読んでsummary.md".
+    # Leave those tokens to the fallback instead of reusing a guessed path.
+    return sorted(name for name, paths in ledger.requested_paths.items()
+                  if len(paths) == 1 and len(name) <= 255
+                  and not re.search(r"\.[A-Za-z][A-Za-z0-9]{0,7}[^\x00-\x7F]", name))
+
+
+@dataclass(frozen=True)
+class ArtifactRoleHints:
+    request_hash: str
+    roles: tuple[tuple[str, str], ...]
+
+    @classmethod
+    def for_request(cls, request: str, roles: dict[str, str]) -> ArtifactRoleHints:
+        eligible = set(role_hint_names(request))
+        return cls(hashlib.sha256(request.encode()).hexdigest(), tuple(sorted(
+            (name, role) for name, role in roles.items()
+            if name in eligible and role in {"input", "output", "preserve"}
+        )))
+
+    def matching_roles(self, request: str) -> dict[str, str]:
+        if self.request_hash != hashlib.sha256(request.encode()).hexdigest():
+            return {}
+        eligible = set(role_hint_names(request))
+        return {name: role for name, role in self.roles
+                if name in eligible and role in {"input", "output", "preserve"}}
 
 
 _CLASSIFY_TIMEOUT_S = 20.0

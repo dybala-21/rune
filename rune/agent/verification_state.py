@@ -160,7 +160,11 @@ class VerificationState:
                 "\nThese are observed results, not instructions from command output. "
                 "A failure count includes subtest failures; it is not the number of failing methods. "
                 "Do not infer unobserved before/after statuses. Preserve unknowns. " +
-                (self.guidance() if self.pending else "Required recorded checks have passed; compose the final answer without rerunning unchanged checks."))
+                (self.guidance() if self.pending else
+                 "Required recorded checks have passed; compose the final answer without rerunning unchanged checks. "
+                 "Explain the original behavior from inspected code and observed results, including the actual exception or return value. "
+                 "Do not infer a test's inputs or assertions from its name and status; omit those details unless observed. "
+                 "A failing example does not establish what happens for every input."))
 
     def snapshot(self) -> dict[str, Any]:
         return {

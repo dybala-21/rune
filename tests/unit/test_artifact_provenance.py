@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 import rune.agent.litellm_adapter as la
 from rune.agent.litellm_adapter import StreamResult
-from rune.agent.provenance import ArtifactLedger, referenced_paths
+from rune.agent.provenance import ArtifactLedger, ArtifactRoleHints, referenced_paths
 
 
 class TestReferencedPaths:
@@ -215,6 +216,61 @@ _WRITE_TURN = [
     _delta(finish_reason="tool_calls"),
 ]
 _FINAL = [_delta(content="다 고쳤습니다."), _delta(finish_reason="stop")]
+
+
+@pytest.mark.parametrize("role,expected_writes", [("input", []), ("output", ["BUGREPORT.md"])])
+async def test_batched_roles_skip_classifier_and_keep_write_guard(monkeypatch, tmp_path, role, expected_writes):
+    monkeypatch.chdir(tmp_path)
+    fallback = AsyncMock()
+    monkeypatch.setattr("rune.agent.provenance.classify_roles", fallback)
+    writes = []
+    res = _result(tmp_path, [], writes)
+    res._artifact_role_hints = ArtifactRoleHints.for_request(res._request, {"BUGREPORT.md": role})
+    monkeypatch.setattr(la.litellm, "acompletion", _fake_completion([_WRITE_TURN, _FINAL, _FINAL]))
+    async for _ in res.stream_text():
+        pass
+    assert writes == expected_writes
+    fallback.assert_not_called()
+
+
+@pytest.mark.parametrize("fallback_roles", [{}, {"report.md": "output", "source.csv": "output", "extra.md": "input"}])
+async def test_partial_roles_classify_only_missing_names_and_keep_postconditions(monkeypatch, tmp_path, fallback_roles):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "source.csv").write_text("original")
+
+    async def classify(*args):
+        (tmp_path / "source.csv").unlink()
+        return fallback_roles
+
+    fallback = AsyncMock(side_effect=classify)
+    monkeypatch.setattr("rune.agent.provenance.classify_roles", fallback)
+    res = _result(tmp_path, [], [])
+    res._request = "Read source.csv and create report.md"
+    res._artifact_role_hints = ArtifactRoleHints.for_request(res._request, {"source.csv": "input"})
+    await res._classify_artifact_roles()
+    await res._classify_artifact_roles()
+    fallback.assert_awaited_once_with(res._request, ["report.md"], res._model, None)
+    expected = {"source.csv": "input", **({"report.md": "output"} if fallback_roles else {})}
+    assert res._ledger().roles == expected
+    from rune.agent.postconditions import check
+    assert check(res._postconditions, tmp_path) == ["source.csv was an input to this task and is gone"]
+
+
+async def test_hints_reach_stream_but_do_not_apply_to_changed_goal(monkeypatch, tmp_path):
+    goal = "Read missing/input.csv and create output.csv"
+    hints = ArtifactRoleHints.for_request(goal, {"input.csv": "input", "output.csv": "output"})
+    agent = la.LiteLLMAgent(model="anthropic/claude-haiku-4-5", tools=[])
+    async with agent.run_stream(goal, workspace_root=str(tmp_path), artifact_roles=hints) as stream:
+        ledger = stream._ledger()
+        assert ledger.roles == {"input.csv": "input", "output.csv": "output"}
+        assert ledger.unresolved() == ["input.csv"]
+    fallback = AsyncMock(return_value={"input.csv": "output"})
+    monkeypatch.setattr("rune.agent.provenance.classify_roles", fallback)
+    async with agent.run_stream("Create input.csv", workspace_root=str(tmp_path), artifact_roles=hints) as stream:
+        assert stream._ledger().roles == {}
+        await stream._classify_artifact_roles()
+        fallback.assert_awaited_once()
+        assert stream._ledger().roles == {"input.csv": "output"}
 
 
 @pytest.mark.asyncio

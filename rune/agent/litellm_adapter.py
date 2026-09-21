@@ -13,9 +13,12 @@ import os
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rune.agent.attachments import content_text
+
+if TYPE_CHECKING:
+    from rune.agent.provenance import ArtifactRoleHints
 
 _litellm_mod: Any = None
 
@@ -697,30 +700,10 @@ def _clamp_max_tokens(model: str, max_tokens: int) -> int:
 
 
 def _apply_anthropic_cache_control(model: str, messages: list[Any]) -> list[Any]:
-    """Add cache_control breakpoint(s) to the system message for Anthropic.
+    """Cache the stable instructions separately from the task-specific tail.
 
-    Anthropic prompt caching prices cached reads at 0.1x of input tokens.
-    A breakpoint at the end of the system prompt caches the tools (~9.3K) +
-    system (~7K) prefix across steps within a run (TTL 5 min), cutting the
-    ~16K fixed overhead to ~1.6K-equivalent from step 2 onward.
-
-    When the system prompt carries a SYSTEM_CACHE_BOUNDARY marker (built with
-    ``mark_cache_boundary=True``), the turn-stable instructional prefix is
-    split into its own cached block so it also survives ACROSS turns — the
-    per-turn dynamic tail (memory, goal, datetime) sits after this second
-    breakpoint and no longer invalidates the prefix cache.
-
-    The cache hierarchy is: tools → system → messages. Message content changes
-    do NOT invalidate the tools+system cache, so per-step history masking is
-    fine. Only tool-set changes (step 6 reduction, wind-down, stall) cause
-    cache rewrites — still net positive.
-
-    For non-Anthropic providers the marker is stripped so it never reaches the
-    model; those providers cache the (now stable) prefix automatically.
-
-    References:
-    - https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
-    - LiteLLM passes cache_control through to Anthropic when system is a block list.
+    Other providers receive the same text without the internal boundary marker.
+    Cache reuse still depends on the preceding tools and provider settings.
     """
     from rune.agent.prompts import SYSTEM_CACHE_BOUNDARY
 
@@ -801,18 +784,10 @@ def _apply_anthropic_cache_control(model: str, messages: list[Any]) -> list[Any]
 
 
 def _apply_anthropic_message_cache(model: str, messages: list[Any]) -> list[Any]:
-    """Add a moving cache_control breakpoint to the final message.
+    """Cache the transcript through its final message without editing history.
 
-    The system breakpoint only covers tools+system, so the growing message
-    history is re-prefilled at full price on every tool round. Marking the
-    last message caches the whole prefix: from round 2 the prior transcript
-    is a 0.1x cache read and only the new tail is written. Stale-observation
-    masking edits messages near the tail, which invalidates just the last few
-    messages — the bulk of the prefix stays cached.
-
-    Uses 1 of Anthropic's 4 breakpoints (system uses up to 2). litellm maps a
-    message-level ``cache_control`` on tool messages onto the converted
-    tool_result block; user/assistant messages need it inside a content block.
+    LiteLLM maps tool-message markers onto tool_result blocks. Other messages
+    need the marker on their final text block.
     """
     if os.environ.get(_MSG_CACHE_ENV, "1") == "0":
         return messages
@@ -846,6 +821,13 @@ def _apply_anthropic_message_cache(model: str, messages: list[Any]) -> list[Any]
     else:
         return messages
     return [*messages[:-1], marked]
+
+
+def _apply_anthropic_tool_cache(model: str, tools: list[dict] | None) -> list[dict] | None:
+    """Keep the tool catalog reusable when the task's system prompt changes."""
+    if not tools or not traits(model).anthropic_wire:
+        return tools
+    return [*tools[:-1], {**tools[-1], "cache_control": {"type": "ephemeral"}}]
 
 
 def _ensure_anthropic_user_tail(model: str, messages: list[Any]) -> list[Any]:
@@ -926,6 +908,7 @@ class StreamResult:
         explore_budget: int = 0,
         workspace_root: str = "",
         request: str | None = None,
+        artifact_roles: ArtifactRoleHints | None = None,
         verification_callback: Callable[[str, bool, str], Any] | None = None,
         verification_state: Callable[[], Any] | None = None,
         tool_recovery: Callable[[], set[str] | None] | None = None,
@@ -944,6 +927,7 @@ class StreamResult:
             (content_text(m.get("content", "")) for m in reversed(messages)
              if m.get("role") == "user"), "",
         )
+        self._artifact_role_hints = artifact_roles
         self._messages = list(messages)
         self._tool_schemas = tool_schemas
         self._tool_lookup = tool_lookup
@@ -1071,6 +1055,8 @@ class StreamResult:
         if _stale_roles is not None and not _stale_roles.done():
             _stale_roles.cancel()
         self._artifact_roles_task = None
+        self._cached_read_counts: dict[str, int] = {}
+        self._stalled_read_tools: set[str] = set()
         self._artifact_request = ""
         self._task_blocked = ""
         self._tamper_blocks = 0
@@ -1083,10 +1069,8 @@ class StreamResult:
         self._reobs_nudges = 0
         self._policy.reset()
 
-        # Input-versus-output classification rides along with the first
-        # round's network wait instead of blocking in front of the first
-        # tool. The tool path still waits for the result before any
-        # phantom-write decision — only the start moves, not the ordering.
+        # Classify unresolved files during the first response. Tools wait
+        # for the result before checking whether a write invents an input.
         self._start_artifact_role_classification()
 
         while True:
@@ -1154,6 +1138,11 @@ class StreamResult:
                     _tools = narrowed
                     extra["tool_choice"] = "required"
                     narrowed_recovery = True
+            if self._stalled_read_tools and _tools:
+                _tools = [tool for tool in _tools
+                          if tool.get("function", {}).get("name") not in self._stalled_read_tools] or None
+                if not _tools:
+                    extra.pop("tool_choice", None)
             if (self._model.startswith(("gemini/", "vertex_ai/gemini-"))
                     and extra.get("tool_choice") == "required" and not narrowed_recovery):
                 # Gemini's ANY mode can exceed its schema limit with the full catalog.
@@ -1167,8 +1156,7 @@ class StreamResult:
                 "model": self._model,
                 # Mask stale tool outputs for the wire only; self._messages
                 # stays full so history/rollover are unaffected.
-                # Apply Anthropic cache_control to system message for ~82% reduction
-                # in fixed overhead (tools+system cached at 0.1x from step 2).
+                # Cache the stable prefix and transcript where the provider supports it.
                 "messages": _apply_anthropic_message_cache(
                     self._model,
                     _ensure_anthropic_user_tail(
@@ -1181,7 +1169,7 @@ class StreamResult:
                         ),
                     ),
                 ),
-                "tools": _tools,
+                "tools": _apply_anthropic_tool_cache(self._model, _tools),
                 "stream": True,
                 "max_tokens": _effective_max,
                 "stream_options": {"include_usage": True},
@@ -1982,22 +1970,20 @@ class StreamResult:
                 self._request, root=self._workspace_root,
             )
             self._artifact_request = self._request
+            hints = getattr(self, "_artifact_role_hints", None)
+            if hints is not None:
+                roles = hints.matching_roles(self._request)
+                self._apply_artifact_roles(self._artifact_ledger, roles)
+                if roles:
+                    log.info("artifact_roles_reused", count=len(roles))
             log.info("artifact_ledger_init",
                      referenced=sorted(self._artifact_ledger.referenced)[:10])
         return self._artifact_ledger
 
     def _start_artifact_role_classification(self) -> None:
-        """Start settling input-versus-output alongside the first model round.
-
-        The classification is one model call that needs nothing but the
-        request text, yet it used to run as a blocking step in front of the
-        first tool — 1.6s measured, spent while the answer to the first
-        round was already known. Started here instead, it rides along with
-        the round's own network wait and is normally done before any tool
-        needs it.
-        """
+        """Classify remaining files alongside the first model response."""
         ledger = self._ledger()
-        if ledger is None or ledger.roles or not ledger.referenced:
+        if ledger is None or ledger.referenced <= ledger.roles.keys():
             return
         if getattr(self, "_artifact_roles_tried", False):
             return
@@ -2012,17 +1998,10 @@ class StreamResult:
             self._artifact_roles_task = None
 
     async def _classify_artifact_roles(self) -> None:
-        """Settle input-versus-output once, the first time it matters.
+        """Wait for file roles before a tool can write a missing input.
 
-        Skipped entirely when the request names no files, which is most of
-        them, so the extra call is not a per-run cost. If it fails the
-        ledger keeps its weaker fallback rule rather than blocking work.
-
-        A caller that arrives while an earlier start is still in flight
-        WAITS for it rather than skipping past it: the phantom-write guard
-        runs right after this returns, and letting it run unclassified
-        because the classification happened to still be on the wire would
-        reopen the exact hole the guard closes.
+        Each run gets one fallback call, for names not already classified.
+        On failure, existing roles and filesystem evidence still apply.
         """
         import asyncio as _aio
         pending = getattr(self, "_artifact_roles_task", None)
@@ -2033,7 +2012,7 @@ class StreamResult:
                 pass
             return
         ledger = self._ledger()
-        if ledger is None or ledger.roles or not ledger.referenced:
+        if ledger is None or ledger.referenced <= ledger.roles.keys():
             return
         if getattr(self, "_artifact_roles_tried", False):
             return
@@ -2041,8 +2020,14 @@ class StreamResult:
         from rune.agent.provenance import classify_roles
         roles = await classify_roles(
             getattr(self, "_artifact_request", ""),
-            sorted(ledger.referenced), self._model, None,
+            sorted(ledger.referenced - ledger.roles.keys()), self._model, None,
         )
+        self._apply_artifact_roles(ledger, roles)
+
+    def _apply_artifact_roles(self, ledger: Any, roles: dict[str, str]) -> None:
+        roles = {name: role for name, role in roles.items()
+                 if name in ledger.referenced and name not in ledger.roles
+                 and role in {"input", "output", "preserve"}}
         if roles:
             ledger.roles.update(roles)
             for name, paths in ledger.requested_paths.items():
@@ -2055,7 +2040,8 @@ class StreamResult:
             from pathlib import Path as _FsPath
 
             from rune.agent.postconditions import derive
-            self._postconditions = derive(roles, _FsPath(self._workspace_root))
+            self._postconditions = [*getattr(self, "_postconditions", []),
+                                    *derive(roles, _FsPath(self._workspace_root))]
 
     def _revert_circumvented_writes(self) -> str:
         """Undo a refused artifact that appeared anyway.
@@ -2194,6 +2180,10 @@ class StreamResult:
             )
 
         if self._tool_fail_streak.get(name, 0) >= _MAX_FAILS:
+            recovery = self._tool_recovery() if self._tool_recovery else None
+            if recovery and name in recovery and name == "table_requirements":
+                self._task_blocked = f"The required {name} check repeatedly failed. The result could not be verified."
+                return self._task_blocked
             if _group:
                 self._blocked_groups.add(_group)
                 return (
@@ -2233,6 +2223,24 @@ class StreamResult:
             if control is not None:
                 control.check()
             result = await func(**params)
+            from rune.agent.tool_output import CachedToolResult
+
+            if isinstance(result, CachedToolResult):
+                counts = getattr(self, "_cached_read_counts", {})
+                count = counts[result.cache_key] = counts.get(result.cache_key, 0) + 1
+                self._cached_read_counts = counts
+                if count >= 2:
+                    self._stalled_read_tools = getattr(self, "_stalled_read_tools", set()) | {name}
+                    result = str(result) + (
+                        "\nThis unchanged read is temporarily unavailable. Use the recorded result, "
+                        "perform the required verification, or explain what is missing."
+                    )
+                if count >= 4:
+                    self._task_blocked = "The model kept requesting unchanged cached results instead of progressing."
+            elif not _looks_like_tool_failure(str(result)):
+                # A fresh observation or successful action makes further reads useful again.
+                self._cached_read_counts = {}
+                self._stalled_read_tools = set()
             result_str = str(result) if result is not None else ""
             if name == "task_blocked":
                 from rune.capabilities.blocked import blocked_reason
@@ -2368,6 +2376,7 @@ class LiteLLMAgent:
         message_history: list[Any] | None = None,
         usage_limits: Any = None,
         workspace_root: str = "",
+        artifact_roles: ArtifactRoleHints | None = None,
         verification_callback: Callable[[str, bool, str], Any] | None = None,
         verification_state: Callable[[], Any] | None = None,
         tool_recovery: Callable[[], set[str] | None] | None = None,
@@ -2438,6 +2447,7 @@ class LiteLLMAgent:
             explore_budget=self._explore_budget,
             workspace_root=workspace_root,
             request=goal,
+            artifact_roles=artifact_roles,
             verification_callback=verification_callback,
             verification_state=verification_state,
             tool_recovery=tool_recovery,
