@@ -1,10 +1,7 @@
-"""Simple-query fast lane (docs/design/simple-query-fast-path.md).
+"""Use the fast tier for eligible chat/web tasks in automatic model mode.
 
-High-confidence chat/web goals run on the provider's fast tier with a
-tight tool-round cap, and a fresh web search counts as grounding. Other
-goal types never enter. Failover only reacts to exceptions and only
-walks down the fallback chain, so the loop itself upshifts back to the
-primary model when the completion gate blocks repeatedly.
+The loop limits tool rounds and returns to the primary model after repeated
+completion blocks. A fresh web search supplies grounding for web answers.
 """
 
 from __future__ import annotations
@@ -14,8 +11,7 @@ from typing import Any
 
 FAST_LANE_GOAL_TYPES: frozenset[str] = frozenset({"chat", "web"})
 
-# Per-step tool rounds while the lane is active: one search + answer,
-# small slack. Bypasses the 12-round floor in _compute_tool_rounds.
+# Overrides the usual 12-round minimum for simple tasks.
 FAST_LANE_TOOL_ROUNDS = 3
 
 # Completion-gate blocks tolerated before upshifting to the primary model.
@@ -31,11 +27,9 @@ class FastLaneDecision:
 
 
 def decide_fast_lane(classification: Any) -> FastLaneDecision:
-    """Decide whether this goal takes the fast lane and resolve its model.
+    """Select a fast-tier model when settings and classification permit it.
 
-    Entry is gated on goal_type and confidence only (is_multi_task is
-    never populated by the classifier). Never raises: any failure means
-    no lane and the run stays on the primary model.
+    Keep the primary model if selection fails.
     """
     try:
         return _decide_fast_lane(classification)
@@ -54,6 +48,8 @@ def _decide_fast_lane(classification: Any) -> FastLaneDecision:
         return FastLaneDecision(active=False, reason="disabled")
     if (getattr(llm, "active_model", None) or "").strip():
         return FastLaneDecision(active=False, reason="explicit_model")
+    if getattr(classification, "decision_backend", "connected") != "connected":
+        return FastLaneDecision(active=False, reason="backend_confidence_not_comparable")
 
     goal_type = getattr(classification, "goal_type", "")
     if goal_type not in FAST_LANE_GOAL_TYPES:

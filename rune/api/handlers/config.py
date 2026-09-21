@@ -1,10 +1,7 @@
-"""Config handler - GET /config, PATCH /config.
-
-Ported from src/api/handlers/config.ts - retrieve and update
-daemon/runtime configuration.
-"""
+"""Read and update the daemon's active configuration."""
 
 import asyncio
+import os
 import re
 from typing import Any
 
@@ -12,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from rune.api.auth import TokenAuthDependency
+from rune.config.schema import DecisionRoutingConfig
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -40,14 +38,14 @@ class ConfigGetResponse(BaseModel):
     memory_tuning: dict[str, Any] | None = Field(None, alias="memoryTuning")
     safety_tuning: dict[str, Any] | None = Field(None, alias="safetyTuning")
     advisor_enabled: bool = Field(False, alias="advisorEnabled")
-    # Surfaced so a session with its safety prompts switched off says so.
+    # Let the UI show when approvals are disabled.
     approval_mode: str = Field("standard", alias="approvalMode")
-    # Reasoning depth for the active model, and whether it accepts one at all
-    # (so the UI only shows the selector for reasoning-capable models).
+    # The active model's capabilities determine which reasoning controls are shown.
     reasoning_effort: str | None = Field(None, alias="reasoningEffort")
     reasoning_supported: bool = Field(False, alias="reasoningSupported")
     reasoning_options: list[str] = Field(default_factory=list, alias="reasoningOptions")
     reasoning_budgets: dict[str, int] = Field(default_factory=dict, alias="reasoningBudgets")
+    decision_routing: dict[str, Any] = Field(default_factory=dict, alias="decisionRouting")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -58,6 +56,7 @@ class ConfigPatchRequest(BaseModel):
     memory_tuning: dict[str, Any] | None = Field(None, alias="memoryTuning")
     safety_tuning: dict[str, Any] | None = Field(None, alias="safetyTuning")
     advisor_enabled: bool | None = Field(None, alias="advisorEnabled")
+    decision_routing: DecisionRoutingConfig | None = Field(None, alias="decisionRouting")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -75,9 +74,7 @@ def _get_rune_config():
     return get_config()
 
 
-# Memory knobs with a reader on the other end. The settings panel offers more;
-# the rest are schema-only leftovers, and reporting one as applied would be a
-# lie.
+# Only expose memory settings that the runtime reads.
 _MEMORY_ENV_KEYS = {
     "uncertainSemanticLimit": "RUNE_MEMORY_UNCERTAIN_SEMANTIC_LIMIT",
     "uncertainSemanticMinScore": "RUNE_MEMORY_UNCERTAIN_SEMANTIC_MIN_SCORE",
@@ -89,12 +86,7 @@ _MEMORY_ENV_KEYS = {
 
 
 def _plan_memory_tuning(tuning: dict[str, Any]) -> list[tuple[str, Any]]:
-    """Decide what a tuning request would change, rejecting bad values first.
-
-    Returns ``[(field, value)]`` for the fields that have a consumer. Nothing is
-    written here: a request that is partly invalid must not leave half of it
-    applied.
-    """
+    """Validate supported tuning fields and return edits without applying them."""
     plan: list[tuple[str, Any]] = []
 
     for field in _MEMORY_ENV_KEYS:
@@ -138,11 +130,7 @@ def _apply_memory_tuning(
 
 
 def _memory_tuning_state() -> dict[str, Any]:
-    """Report the tuning values actually in force, not the schema defaults.
-
-    Fixed literals here would send back whatever was hardcoded, making the
-    panel look like it had discarded the user's edit.
-    """
+    """Read the tuning values currently used by the memory pipeline."""
     from rune.memory.rollout_manager import get_rollout_manager
     from rune.memory.tuning import get_tuning_config
 
@@ -197,6 +185,10 @@ async def get_config_endpoint() -> ConfigGetResponse:
 
     cfg = _get_rune_config()
     effective = get_effective_model_selection()
+    from rune.agent.decision_router import accelerator_status
+    from rune.utils.env import effective_env_scope
+
+    decision_status = accelerator_status(effective) if cfg.llm.decision_routing.backend == "jev" else "disabled"
     model = loop_model_string(effective.provider.value, effective.model)
     control = await asyncio.to_thread(reasoning_control, model)
     options = control.efforts
@@ -208,9 +200,7 @@ async def get_config_endpoint() -> ConfigGetResponse:
         version=VERSION,
         advisorEnabled=is_advisor_enabled(),
         approvalMode=approval_mode(),
-        # Report what a run would actually use. Showing the configured default
-        # while active_* was set had the status bar name one model and the
-        # agent run another.
+        # The active selection takes precedence over provider defaults.
         activeModel={
             "provider": effective.provider.value,
             "model": effective.model,
@@ -220,6 +210,13 @@ async def get_config_endpoint() -> ConfigGetResponse:
         reasoningSupported=bool(options),
         reasoningOptions=list(options),
         reasoningBudgets=dict(control.budgets),
+        decisionRouting={
+            **cfg.llm.decision_routing.model_dump(by_alias=True),
+            "status": decision_status,
+            "effectiveBackend": "jev" if decision_status in {"ready", "unverified"} else "connected",
+            "hasKey": bool(os.environ.get("TYPESAFE_API_KEY", "").strip()),
+            "keyScope": effective_env_scope("TYPESAFE_API_KEY"),
+        },
         memoryTuning=_memory_tuning_state(),
         safetyTuning={
             "preset": None,
@@ -239,9 +236,7 @@ async def patch_config(req: ConfigPatchRequest) -> ConfigPatchResponse:
     """
     cfg = _get_rune_config()
 
-    # Validate the whole request before touching anything. Applying field by
-    # field left earlier fields live when a later one was rejected: the client
-    # saw an error while the agent had already switched models.
+    # Validate all fields before applying changes from this request.
     if req.safety_tuning is not None:
         log.info("config_patch_rejected", field="safetyTuning", value=req.safety_tuning)
         raise HTTPException(
@@ -278,27 +273,48 @@ async def patch_config(req: ConfigPatchRequest) -> ConfigPatchResponse:
                 detail="No memory tuning field in this request is connected to anything",
             )
 
-    # Everything validated — now apply.
-    updated = False
+    routing = None
+    routing_updates = req.decision_routing.model_dump(exclude_unset=True) if req.decision_routing is not None else {}
+    if routing_updates:
+        routing = cfg.llm.decision_routing.model_copy(update=routing_updates)
+        if routing_updates.get("backend") == "jev" and not os.environ.get("TYPESAFE_API_KEY", "").strip():
+            raise HTTPException(status_code=400, detail="Add a TypeSafe API key before enabling Jev.")
+
     to_persist: dict[str, Any] = {}
+    if routing is not None:
+        to_persist.update({f"llm.decisionRouting.{key}": value for key, value in
+                           req.decision_routing.model_dump(by_alias=True, exclude_unset=True).items()})
+    if req.proactive_enabled is not None:
+        to_persist["proactive.enabled"] = req.proactive_enabled
+    if provider:
+        to_persist.update({"llm.defaultProvider": provider, "llm.activeProvider": provider})
+    if model:
+        to_persist.update({"llm.defaultModel": model, "llm.activeModel": model})
+    if provider or model:
+        to_persist.update({"llm.reasoningEfforts": cfg.llm.reasoning_efforts,
+                           "llm.reasoningEffort": None, "llm.reasoning_effort": None})
+    if to_persist:
+        from rune.config import save_config_values
+
+        if save_config_values(to_persist) is None:
+            raise HTTPException(status_code=500, detail="Could not save settings. No configuration changes were applied.")
+
+    updated = routing is not None
+    if routing is not None:
+        cfg.llm.decision_routing = routing
 
     if req.proactive_enabled is not None:
         cfg.proactive.enabled = req.proactive_enabled
-        to_persist["proactive.enabled"] = req.proactive_enabled
         log.info("config_patch", field="proactiveEnabled", value=req.proactive_enabled)
         updated = True
 
     if provider:
         cfg.llm.default_provider = provider
         cfg.llm.active_provider = provider
-        to_persist["llm.defaultProvider"] = provider
-        to_persist["llm.activeProvider"] = provider
         updated = True
     if model:
         cfg.llm.default_model = model
         cfg.llm.active_model = model
-        to_persist["llm.defaultModel"] = model
-        to_persist["llm.activeModel"] = model
         updated = True
     if req.active_model is not None:
         log.info("config_patch", field="activeModel", provider=provider, model=model)
@@ -313,19 +329,5 @@ async def patch_config(req: ConfigPatchRequest) -> ConfigPatchResponse:
         set_advisor_enabled(req.advisor_enabled)
         log.info("config_patch", field="advisorEnabled", value=req.advisor_enabled)
         updated = True
-
-    if to_persist:
-        from rune.config import save_config_values
-
-        if provider or model:
-            to_persist.update({
-                "llm.reasoningEfforts": cfg.llm.reasoning_efforts,
-                "llm.reasoningEffort": None, "llm.reasoning_effort": None,
-            })
-        if save_config_values(to_persist) is None:
-            raise HTTPException(
-                status_code=500,
-                detail="Settings applied for this session but could not be saved to config.yaml",
-            )
 
     return ConfigPatchResponse(updated=updated)

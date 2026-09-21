@@ -11,10 +11,13 @@ from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from rune.capabilities.table_acceptance import (
     TablePlan,
     compare_table,
     expected_table,
+    number,
     read_tabular,
 )
 from rune.types import CapabilityResult
@@ -43,6 +46,10 @@ Return ONLY JSON matching the supplied schema. Do not emit code.
   currency/unit conversions need explicit support; do not silently reinterpret them.
 - output_names lists explicitly requested CSV/XLSX output basenames only; never list the source.
   output_sheet is the exact requested output worksheet name, or null when unspecified/CSV.
+- order_by lists requested output sort columns in priority order, with direction asc/desc. Aggregate
+  columns compare numerically. Set numeric=true for numeric group-column ordering; otherwise use text
+  ordering by Unicode code point. Ties are unconstrained. Sort checks cover group rows, excluding any
+  grand-total row. Locale-specific collation and explicit total-row placement remain unverified.
 - csv_bom is true when the user requests UTF-8 BOM CSV, false when they explicitly forbid a BOM,
   otherwise null. This byte-level encoding check is supported; do not list it as unverified/out_of_scope.
 - grand_total is [] unless the request asks for an overall aggregate row alongside groups. When requested,
@@ -56,7 +63,7 @@ Return ONLY JSON matching the supplied schema. Do not emit code.
   source. An existing output is NOT a second source. It also checks source preservation by SHA256 since
   requirements were fixed. Do not list these supported operations as unverified.
 - Put unsupported or ambiguous DATA requirements in unverified (formulas, joins of multiple INPUT sources,
-  unit conversion, sorting, intermediate subtotal rows, unspecified duplicate policy).
+  unit conversion, unsupported collation, intermediate subtotal rows, unspecified duplicate policy).
   Do not approximate these using supported operations.
 - Put non-data requirements (styling, prose, non-tabular deliverables) in out_of_scope. A request to give
   a file link or explain check results is ordinary delivery, not an unsupported data condition. The tool
@@ -106,14 +113,29 @@ async def extract_plan(request: str, prior: list[str], path: str,
     serialized = json.dumps(payload, ensure_ascii=False, default=str)
     if len(serialized) > 64_000:
         raise ValueError("Source schema and request exceed the extraction limit")
-    text = await _completion(_PROMPT, serialized, 3000)
-    if text is None:
-        raise ValueError("Requirement extraction is unavailable; no data verification was granted")
-    plan = TablePlan.model_validate_json(_strip_fences(text))
-    if any(not quote.strip() or not any(quote in message for message in [request, *prior])
-           for quote in plan.requirements):
-        raise ValueError("Extracted conditions are not quoted from the user's request")
-    return plan
+    for attempt in range(2):
+        text = await _completion(_PROMPT, serialized, 3000)
+        if text is None:
+            raise ValueError("Requirement extraction is unavailable; no data verification was granted")
+        try:
+            plan = TablePlan.model_validate_json(_strip_fences(text))
+            if any(not quote.strip() or not any(quote in message for message in [request, *prior])
+                   for quote in plan.requirements):
+                raise ValueError("Extracted conditions are not quoted from the user's request")
+            return plan
+        except (ValidationError, ValueError) as exc:
+            if attempt:
+                raise
+            errors = ([{"field": list(error["loc"]), "message": error["msg"]}
+                       for error in exc.errors(include_input=False, include_url=False)][:8]
+                      if isinstance(exc, ValidationError) else [{"message": str(exc)}])
+            repair = {**payload, "previous_extraction": text[:12000], "validation_errors": errors,
+                      "repair": "Correct the extraction against the original request and schema. "
+                      "Keep all requested conditions; do not weaken requirements to make validation pass."}
+            serialized = json.dumps(repair, ensure_ascii=False, default=str)
+            if len(serialized) > 64_000:
+                raise ValueError("Requirement repair exceeds the extraction limit") from exc
+    raise AssertionError("Unreachable requirement extraction state")
 
 
 class TableAcceptance:
@@ -127,6 +149,8 @@ class TableAcceptance:
         self.outputs: set[str] = set()
         self._pending = required
         self._recovering = False
+        self._source_observed = False
+        self._requirement_failures: dict[tuple[str, str | None, str], str] = {}
         self._lock = asyncio.Lock()
         for record in previous or []:
             if record["tool"] != "table_requirements" or record["state"] != "done":
@@ -142,19 +166,51 @@ class TableAcceptance:
         async with self._lock:
             locator = str(Path(source_path).expanduser().absolute())
             path, data, digest = await asyncio.to_thread(read_source, source_path)
+            key = (str(path), sheet, digest)
+            if key in self._requirement_failures:
+                raise ValueError(self._requirement_failures[key])
             saved = next((c for c in self.contracts.values()
                           if c.get("source_locator", c["source_path"]) == locator and c["sheet"] == sheet), None)
             if saved:
                 if saved["source_sha256"] != digest or saved["source_path"] != str(path):
                     raise ValueError("Source changed after requirements were fixed; start a new request with the updated source")
                 contract = saved
+                plan = TablePlan.model_validate(contract["plan"])
+                headers, rows = await asyncio.to_thread(read_tabular, data, path.suffix.lower(), sheet)
             else:
                 if len(self.request) + sum(map(len, self.prior)) > 48_000:
                     raise ValueError("Request history is too large to extract requirements without truncation")
                 headers, rows = await asyncio.to_thread(read_tabular, data, path.suffix.lower(), sheet)
-                plan = await extract_plan(self.request, self.prior, str(path), headers, rows)
-                if plan.applicable:
-                    await asyncio.to_thread(expected_table, plan, headers, rows)
+                try:
+                    plan = await extract_plan(self.request, self.prior, str(path), headers, rows)
+                except ValueError as exc:
+                    self._requirement_failures[key] = "Requirements could not be validated for this source: " + str(exc)[:1000]
+                    raise ValueError(self._requirement_failures[key]) from exc
+            preview = {}
+            if plan.applicable:
+                expected, stats = await asyncio.to_thread(expected_table, plan, headers, rows)
+                columns = plan.group_by + [aggregate.name for aggregate in plan.aggregates]
+                if len(expected) <= 10 and plan.order_by:
+                    total = expected[-1:] if plan.grand_total else []
+                    groups = expected[:-1] if total else expected[:]
+                    for rule in reversed(plan.order_by):
+                        index = columns.index(rule.column)
+                        numeric = rule.numeric or index >= len(plan.group_by)
+                        groups.sort(key=lambda row, i=index, n=numeric: number(row[i]) if n else row[i],
+                                    reverse=rule.direction == "desc")
+                    expected = groups + total
+                sample, size = [], 0
+                for row in expected[:10]:
+                    size += len(json.dumps(row, ensure_ascii=False))
+                    if size > 3000:
+                        break
+                    sample.append(row)
+                preview = {"computed_preview": {
+                    "columns": columns,
+                    "rows": sample, "total_rows": len(expected), "complete": len(sample) == len(expected),
+                    "stats": stats,
+                }}
+            if not saved:
                 body = {"request_sha256": self.request_hash, "source_path": str(path),
                         "source_locator": locator,
                         "source_sha256": digest, "sheet": sheet, "plan": plan.model_dump()}
@@ -162,8 +218,11 @@ class TableAcceptance:
                 self.contracts[contract["id"]] = contract
             self._recovering = False
             return CapabilityResult(success=True, output=json.dumps({
-                "contract": contract, "next": "Create the requested table, then call table_verify with this contract ID. "
-                "Keep the fixed columns and conditions. Unsupported conditions are not verified.",
+                "contract": contract, **preview,
+                "next": "Create the requested table, then call table_verify with this contract ID. "
+                "The preview contains aggregates computed from the source; complete previews follow the requested ordering. "
+                "If complete is false, compute every row from the source; never infer missing rows from the sample. "
+                "Apply the contract's columns, order and conditions. Unsupported conditions are not verified.",
             }, ensure_ascii=False), metadata={"tableContract": copy.deepcopy(contract)})
 
     async def verify(self, contract_id: str, output_path: str, sheet: str | None,
@@ -226,15 +285,22 @@ class TableAcceptance:
                                 metadata={"tableVerification": report})
 
     def observe(self, name: str, params: dict[str, Any], result: CapabilityResult) -> None:
-        if not result.success or name not in {"file_write", "file_edit", "document_create", "document_bundle", "document_bundle_update"}:
+        if not result.success:
             return
         metadata = result.metadata or {}
         paths = [metadata.get("path"), *metadata.get("paths", [])]
-        if name in {"file_write", "file_edit"}:
-            paths.append(params.get("path"))
+        paths.extend((params.get("path"), params.get("file_path")))
+        if name in {"file_read", "document_read"}:
+            if any(isinstance(path, str) and Path(path).suffix.lower() in {".csv", ".xlsx"} for path in paths):
+                self._source_observed = True
+            return
+        if name not in {"file_write", "file_edit", "document_create", "document_bundle", "document_bundle_update"}:
+            return
         for path in paths:
             if isinstance(path, str) and Path(path).suffix.lower() in {".csv", ".xlsx"}:
                 self.outputs.add(str(Path(path).expanduser().resolve()))
+                if any(c["plan"]["applicable"] for c in self.contracts.values()):
+                    self._recovering = True
 
     async def blocker(self) -> str | None:
         message = await self._blocker()
@@ -243,9 +309,11 @@ class TableAcceptance:
         return message
 
     def recovery_tools(self) -> set[str] | None:
-        if not self._recovering:
+        if not self._recovering and not (self.required and not self.contracts):
             return None
         check = "table_verify" if self.contracts else "table_requirements"
+        if self.contracts or self._source_observed:
+            return {check, "ask_user"}
         return {check, "file_read", "file_list", "file_search", "ask_user"}
 
     async def _blocker(self) -> str | None:

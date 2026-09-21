@@ -409,7 +409,7 @@ export async function fetchEnvVars(scope?: 'user' | 'project'): Promise<{ variab
   return rpc('env.list', scope ? { scope } : {});
 }
 
-export async function setEnvVar(key: string, value: string, scope: 'user' | 'project'): Promise<void> {
+export async function setEnvVar(key: string, value: string, scope: 'user' | 'project' | 'effective'): Promise<void> {
   return rpc('env.set', { key, value, scope });
 }
 
@@ -437,7 +437,15 @@ export interface ConfigInfo {
   reasoningSupported?: boolean;
   reasoningOptions?: ReasoningEffort[];
   reasoningBudgets?: Partial<Record<ReasoningEffort, number>>;
-  /** Only knobs the memory pipeline actually reads are listed here. */
+  decisionRouting?: {
+    backend: 'connected' | 'jev';
+    timeoutMs: number;
+    effectiveBackend: 'connected' | 'jev';
+    status: 'disabled' | 'ready' | 'unverified' | 'local' | 'automatic_model' | 'missing_key' | 'cooldown' | 'auth_error';
+    hasKey: boolean;
+    keyScope: 'user' | 'project' | 'process' | null;
+  };
+  /** Settings consumed by the memory pipeline. */
   memoryTuning: {
     preset: 'speed' | 'balanced' | 'accuracy' | null;
     policyMode: 'legacy' | 'shadow' | 'balanced' | 'strict';
@@ -467,6 +475,7 @@ export async function fetchConfig(): Promise<ConfigInfo> {
 export async function patchConfig(params: {
   proactiveEnabled?: boolean;
   advisorEnabled?: boolean;
+  decisionRouting?: { backend?: 'connected' | 'jev'; timeoutMs?: number };
   memoryTuning?: {
     scope?: 'user' | 'project';
     preset?: 'speed' | 'balanced' | 'accuracy';

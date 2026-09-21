@@ -84,7 +84,10 @@ def decode_object(response: Any) -> dict[str, Any]:
 
 
 def decode_response(response: Any) -> dict[str, Any]:
-    data = decode_object(response)
+    return validate_decision(decode_object(response))
+
+
+def validate_decision(data: dict[str, Any]) -> dict[str, Any]:
     if set(data) != set(_PROPERTIES):
         raise InvalidClassification("invalid_fields")
     if data["goal_type"] not in _PROPERTIES["goal_type"]["enum"]:
@@ -107,19 +110,21 @@ def decode_response(response: Any) -> dict[str, Any]:
     return data
 
 
-async def request_classification(client: Any, system: str, content: str) -> dict[str, Any]:
+async def request_classification(
+    client: Any, system: str, content: str, *, selected=None, deadline: float | None = None,
+) -> dict[str, Any]:
     from rune.llm.model_selection import get_effective_model_selection
     from rune.llm.reasoning import reasoning_control
 
-    selected = get_effective_model_selection()
-    control = reasoning_control(f"{selected.provider}/{selected.model}")
-    # Routing uses the smallest supported reasoning budget.
-    effort = next((level for level in ("none", "minimal", "low") if level in control.efforts), None)
+    selected = selected or get_effective_model_selection()
     messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
     from rune.llm.failures import request_failure
 
-    deadline = asyncio.get_running_loop().time() + ROUTING_TIMEOUT
-    async with asyncio.timeout(ROUTING_TIMEOUT):
+    deadline = deadline if deadline is not None else asyncio.get_running_loop().time() + ROUTING_TIMEOUT
+    async with asyncio.timeout_at(deadline):
+        control = await asyncio.to_thread(reasoning_control, f"{selected.provider}/{selected.model}")
+        # Routing uses the smallest supported reasoning budget.
+        effort = next((level for level in ("none", "minimal", "low") if level in control.efforts), None)
         for attempt in range(2):
             try:
                 response = await client.completion(

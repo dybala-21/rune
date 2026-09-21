@@ -81,7 +81,7 @@ async def test_real_output_can_be_repaired_without_changing_contract(office):
 async def test_missing_table_checks_select_recovery_tools_and_release_repairs(office):
     source, output, _ = office
     state = TableAcceptance(REQUEST, required=True)
-    assert state.recovery_tools() is None
+    assert "table_requirements" in state.recovery_tools()
     assert await state.blocker()
     assert "table_requirements" in state.recovery_tools()
     assert "bash_execute" not in state.recovery_tools()
@@ -97,6 +97,101 @@ async def test_missing_table_checks_select_recovery_tools_and_release_repairs(of
     assert await state.blocker() is None
 
 
+async def test_table_write_requests_verification_without_waiting_for_final_answer(office):
+    from rune.types import CapabilityResult
+
+    source, output, _ = office
+    state = TableAcceptance(REQUEST, required=True)
+    assert "file_list" in state.recovery_tools()
+    state.observe("file_read", {"path": str(source)}, CapabilityResult(success=True, output=SOURCE))
+    assert state.recovery_tools() == {"table_requirements", "ask_user"}
+    contract = (await state.requirements(str(source), None)).metadata["tableContract"]
+    state.observe("file_write", {"path": str(output)}, CapabilityResult(success=True, output="Written"))
+    assert state.recovery_tools() == {"table_verify", "ask_user"}
+    assert (await state.verify(contract["id"], str(output), None, 1)).success
+    assert state.recovery_tools() is None
+
+
+async def test_computed_preview_uses_source_values_and_discloses_truncation(office):
+    source, _, _ = office
+    state = TableAcceptance(REQUEST, required=True)
+    result = await state.requirements(str(source), None)
+    preview = json.loads(result.output)["computed_preview"]
+    assert preview["columns"] == ["team", "amount"]
+    assert preview["rows"] == [["A", "12.01"], ["B", "5.01"]]
+    assert preview["complete"] and preview["total_rows"] == 2
+    assert json.loads((await state.requirements(str(source), None)).output)["computed_preview"] == preview
+
+    source.write_text("id,team,status,amount\n" + "\n".join(f"{i},team{i},paid,1" for i in range(12)))
+    result = await TableAcceptance(REQUEST, required=True).requirements(str(source), None)
+    preview = json.loads(result.output)["computed_preview"]
+    assert len(preview["rows"]) == 10 and preview["total_rows"] == 12 and not preview["complete"]
+
+
+async def test_complete_preview_applies_numeric_order_and_retains_total(office, monkeypatch):
+    source, _, _ = office
+
+    async def ordered(*args):
+        return plan(grand_total=["Total"], order_by=[{"column": "amount", "direction": "asc"}])
+
+    monkeypatch.setattr("rune.agent.table_acceptance.extract_plan", ordered)
+    result = await TableAcceptance(REQUEST, required=True).requirements(str(source), None)
+    preview = json.loads(result.output)["computed_preview"]
+    assert preview["rows"] == [["B", "5.01"], ["A", "12.01"], ["Total", "17.01"]]
+    assert preview["complete"]
+
+
+async def test_nonapplicable_table_contract_does_not_force_impossible_verification(office, monkeypatch):
+    from rune.types import CapabilityResult
+
+    source, output, _ = office
+
+    async def outside_scope(*args):
+        return TablePlan(applicable=False, requirements=[REQUEST], unverified=["Unsupported operation"])
+
+    monkeypatch.setattr("rune.agent.table_acceptance.extract_plan", outside_scope)
+    state = TableAcceptance(REQUEST, required=True)
+    await state.requirements(str(source), None)
+    state.observe("file_write", {"path": str(output)}, CapabilityResult(success=True, output="Written"))
+    assert state.recovery_tools() is None
+
+
+async def test_invalid_output_name_is_repaired_with_validation_feedback(monkeypatch):
+    bad = plan().model_dump()
+    bad["output_names"] = ["summary.csv에 저장"]
+    calls = []
+
+    async def completion(system, user, max_tokens):
+        calls.append(json.loads(user))
+        return json.dumps(bad if len(calls) == 1 else plan().model_dump())
+
+    monkeypatch.setattr("rune.agent.requirement_gate._completion", completion)
+    result = await extract_plan(REQUEST, [], "sales.csv", ["id", "team", "status", "amount"], [])
+    assert result == plan() and len(calls) == 2
+    assert calls[1]["current_request"] == REQUEST
+    assert calls[1]["validation_errors"][0]["field"] == ["output_names", 0]
+    assert "pattern" in calls[0]["schema"]["properties"]["output_names"]["items"]
+
+
+async def test_failed_requirement_repair_is_not_billed_again_for_same_source(office, monkeypatch):
+    source, _, _ = office
+    bad = plan().model_dump()
+    bad["output_names"] = ["/unexpected/directory/summary.csv"]
+    calls = []
+
+    async def completion(*args):
+        calls.append(args)
+        return json.dumps(bad)
+
+    monkeypatch.setattr("rune.agent.table_acceptance.extract_plan", extract_plan)
+    monkeypatch.setattr("rune.agent.requirement_gate._completion", completion)
+    state = TableAcceptance(REQUEST, required=True)
+    for _ in range(3):
+        with pytest.raises(ValueError, match="could not be validated"):
+            await state.requirements(str(source), None)
+    assert len(calls) == 2 and not state.contracts
+
+
 @pytest.mark.parametrize("content", [
     "team,amount\nA,12.01\nB,5.01\nB,5.01\n",  # extra duplicate
     "team,amount\nA,12.00\nB,5.01\n",  # wrong rounding
@@ -108,6 +203,34 @@ def test_wrong_tables_fail_even_when_totals_look_plausible(content):
     expected, _ = expected_table(plan(), headers, source)
     headers, actual = read_tabular(content.encode(), ".csv")
     assert compare_table(plan(), expected, headers, actual)["status"] == "fail"
+
+
+def test_sort_order_is_verified_separately_from_correct_aggregate_values():
+    contract = plan(order_by=[{"column": "team", "direction": "asc"}])
+    headers, source = read_tabular(SOURCE.encode(), ".csv")
+    expected, _ = expected_table(contract, headers, source)
+    columns = ["team", "amount"]
+    rows = [{"team": "B", "amount": "5.01"}, {"team": "A", "amount": "12.01"}]
+    result = compare_table(contract, expected, columns, rows)
+    assert result["status"] == "fail" and result["issues"] == [{"check": "row_order", "column": "team", "direction": "asc"}]
+    assert compare_table(contract, expected, columns, rows[::-1])["status"] == "pass"
+    numeric = plan(order_by=[{"column": "amount", "direction": "desc"}])
+    assert compare_table(numeric, expected, columns, rows[::-1])["status"] == "pass"
+    assert compare_table(numeric, expected, columns, rows)["status"] == "fail"
+
+
+def test_multiple_sort_keys_use_numeric_group_order_and_allow_ties():
+    contract = plan(filters=[], deduplicate_by=[], group_by=["team", "id"],
+                    order_by=[{"column": "team"}, {"column": "id", "numeric": True}])
+    expected = [("A", "2", "1"), ("A", "10", "2"), ("B", "1", "3")]
+    columns = ["team", "id", "amount"]
+    rows = [dict(zip(columns, row, strict=True)) for row in expected]
+    assert compare_table(contract, expected, columns, rows)["status"] == "pass"
+    assert compare_table(contract, expected, columns, [rows[1], rows[0], rows[2]])["status"] == "fail"
+    tied = contract.model_copy(update={"order_by": contract.order_by[:1]})
+    assert compare_table(tied, expected, columns, [rows[1], rows[0], rows[2]])["status"] == "pass"
+    with pytest.raises(ValueError, match="Sort columns"):
+        plan(order_by=[{"column": "absent"}])
 
 
 @pytest.mark.parametrize("operation,total", [("sum", "17.01"), ("mean", "5.67"), ("count", "3.00")])

@@ -8,7 +8,8 @@ import re
 import zipfile
 from collections import Counter
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
-from typing import Any, Literal
+from itertools import pairwise
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -23,6 +24,13 @@ class Aggregate(BaseModel):
     decimals: int = Field(default=0, ge=0, le=6)
 
 
+class TableSort(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    column: str
+    direction: Literal["asc", "desc"] = "asc"
+    numeric: bool = False
+
+
 class TablePlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
     applicable: bool
@@ -35,7 +43,9 @@ class TablePlan(BaseModel):
     exact_total_label: bool = True
     csv_bom: bool | None = None
     aggregates: list[Aggregate] = Field(default_factory=list, max_length=32)
-    output_names: list[str] = Field(default_factory=list, max_length=12)
+    order_by: list[TableSort] = Field(default_factory=list, max_length=8)
+    output_names: list[Annotated[str, Field(pattern=r"^[^/\\]+\.(?:[cC][sS][vV]|[xX][lL][sS][xX])$")]] = Field(
+        default_factory=list, max_length=12, description="Output CSV/XLSX basenames only; no directories or surrounding prose.")
     output_sheet: str | None = Field(default=None, min_length=1, max_length=31)
     unverified: list[str] = Field(default_factory=list, max_length=24)
     out_of_scope: list[str] = Field(default_factory=list, max_length=24)
@@ -44,7 +54,7 @@ class TablePlan(BaseModel):
     def valid_plan(self) -> TablePlan:
         if self.applicable and (not self.requirements or not self.aggregates):
             raise ValueError("An applicable plan needs quoted requirements and aggregates")
-        if not self.applicable and (self.filters or self.deduplicate_by or self.group_by or self.aggregates or self.grand_total):
+        if not self.applicable and (self.filters or self.deduplicate_by or self.group_by or self.aggregates or self.grand_total or self.order_by):
             raise ValueError("An inapplicable plan cannot contain executable conditions")
         if not self.applicable and not self.unverified:
             raise ValueError("Explain why the request cannot be checked")
@@ -55,6 +65,9 @@ class TablePlan(BaseModel):
             raise ValueError("Grand-total labels must identify each grouping column")
         if len(set(names)) != len(names) or len(set(self.deduplicate_by)) != len(self.deduplicate_by):
             raise ValueError("Duplicate output columns or duplicate keys")
+        ordering = [rule.column for rule in self.order_by]
+        if len(set(ordering)) != len(ordering) or set(ordering) - set(names):
+            raise ValueError("Sort columns must uniquely identify output columns")
         for name in self.output_names:
             if "/" in name or "\\" in name or not name.lower().endswith((".csv", ".xlsx")):
                 raise ValueError("Expected output names must be CSV/XLSX basenames")
@@ -236,5 +249,21 @@ def compare_table(plan: TablePlan, expected: list[tuple[str, ...]],
         if difference:
             issues.append({"check": check, "count": sum(difference.values()),
                            "examples": [[str(v) for v in row] for row in list(difference)[:5]]})
+    if plan.order_by:
+        ordered = (row for row in map(canonical, actual)
+                   if not plan.grand_total or row[:len(plan.group_by)] != tuple(plan.grand_total))
+        rules = [(columns.index(rule.column), rule) for rule in plan.order_by]
+        for left, right in pairwise(ordered):
+            out_of_order = False
+            for index, rule in rules:
+                a, b = (number(left[index]), number(right[index])) if rule.numeric else (left[index], right[index])
+                if a == b:
+                    continue
+                out_of_order = a > b if rule.direction == "asc" else a < b
+                if out_of_order:
+                    issues.append({"check": "row_order", "column": rule.column, "direction": rule.direction})
+                break
+            if out_of_order:
+                break
     return {"status": "fail" if issues else "pass", "issues": issues,
-            "checks": ["columns", "aggregates", "group_coverage", "row_multiplicity"]}
+            "checks": ["columns", "aggregates", "group_coverage", "row_multiplicity", *(["row_order"] if plan.order_by else [])]}

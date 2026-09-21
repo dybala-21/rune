@@ -15,6 +15,17 @@ MAX_IMAGE_BYTES = 5 * 1024 * 1024
 _IMAGE_TYPES = {"PNG": "image/png", "JPEG": "image/jpeg", "GIF": "image/gif", "WEBP": "image/webp"}
 
 
+class CachedToolResult(str):
+    """A read served from the run's cache, with its state-aware identity."""
+
+    cache_key: str
+
+    def __new__(cls, text: str, cache_key: str) -> CachedToolResult:
+        result = super().__new__(cls, text)
+        result.cache_key = cache_key
+        return result
+
+
 @dataclass(frozen=True, slots=True)
 class ToolImage:
     data: str = field(repr=False)

@@ -9,8 +9,34 @@ from __future__ import annotations
 from rune.agent.litellm_adapter import (
     _apply_anthropic_cache_control,
     _apply_anthropic_message_cache,
+    _apply_anthropic_tool_cache,
 )
 from rune.agent.model_traits import traits
+
+
+def test_tool_catalog_cache_survives_wire_conversion_without_mutating_schemas():
+    from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+
+    tools = [{"type": "function", "function": {"name": "read", "parameters": {
+        "type": "object", "properties": {}}}}]
+    marked = _apply_anthropic_tool_cache("anthropic/claude-opus-5", tools)
+    converted, _ = AnthropicConfig()._map_tool_helper(marked[-1])
+    assert converted["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in tools[-1]
+    assert _apply_anthropic_tool_cache("gemini/gemini-2.5-flash", tools) is tools
+
+
+def test_anthropic_breakpoints_fit_provider_limit():
+    from rune.agent.prompts import SYSTEM_CACHE_BOUNDARY
+
+    model = "anthropic/claude-opus-5"
+    messages = [{"role": "system", "content": "stable" + SYSTEM_CACHE_BOUNDARY + "task"},
+                {"role": "user", "content": "request"}]
+    messages = _apply_anthropic_message_cache(model, _apply_anthropic_cache_control(model, messages))
+    tools = _apply_anthropic_tool_cache(model, [{"type": "function", "function": {"name": "read"}}])
+    import json
+
+    assert json.dumps([messages, tools]).count('"cache_control"') == 4
 
 
 class TestAnthropicWireTrait:

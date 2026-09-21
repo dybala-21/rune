@@ -1,11 +1,6 @@
-"""Environment Variable Manager.
+"""Load and edit Rune environment files.
 
-Ported from src/utils/env.ts -- .env file loading and management.
-
-Priority (highest to lowest):
-1. os.environ (system environment variables)
-2. .rune/.env (project-level)
-3. ~/.rune/.env (user-level global)
+Precedence: process environment, project .rune/.env, then user ~/.rune/.env.
 """
 
 from __future__ import annotations
@@ -79,8 +74,7 @@ USER_ENV_PATH = _user_env_path()
 
 _VALID_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-# Read-modify-write on a shared file: without this, two overlapping writes both
-# start from the same snapshot and the loser's variables vanish.
+# Serialize file edits so concurrent writes cannot discard each other's changes.
 _env_write_lock = threading.Lock()
 
 _SENSITIVE_DIR_MODE = 0o700
@@ -108,11 +102,9 @@ def _ensure_sensitive_dir(dir_path: Path) -> None:
 
 
 def _write_sensitive_env_file(file_path: Path, content: str) -> None:
-    """Replace an env file atomically, owner-only from the moment it exists.
+    """Replace an env file atomically using an owner-only temporary file.
 
-    These files hold API keys, so a half-written one is worse than no write at
-    all: build it beside the target and rename over it. The temp file is created
-    at 0600 by mkstemp, so the secrets are never briefly world-readable.
+    mkstemp creates the sibling file with mode 0600 before any secrets are written.
     """
     _ensure_sensitive_dir(file_path.parent)
 
@@ -135,12 +127,10 @@ def _write_sensitive_env_file(file_path: Path, content: str) -> None:
 
 
 def _split_env_line(line: str) -> tuple[str, str] | None:
-    """Split one ``.env`` line into ``(key, value)``, or ``None`` if it is not one.
+    """Parse a key/value pair, accepting an export prefix and inline comments.
 
-    Handles the two forms a hand-edited file tends to contain: an ``export``
-    prefix, and a trailing ``# comment``. A quoted value keeps whatever is
-    inside the quotes and drops the rest of the line; an unquoted one ends at
-    the first whitespace-preceded ``#``.
+    Quoted values end at the closing quote. In unquoted values, whitespace
+    followed by # starts a comment. Return None for other lines.
     """
     trimmed = line.strip()
     if not trimmed or trimmed.startswith("#"):
@@ -202,12 +192,7 @@ def _parse_env_file(content: str) -> EnvConfig:
 
 
 def _read_for_edit(file_path: Path) -> str:
-    """Current contents of an env file, for a read-modify-write.
-
-    A file that exists but cannot be read is an error, not an empty file:
-    treating it as empty would rewrite it from nothing and drop every variable
-    already in it.
-    """
+    """Read an env file for editing; fail rather than overwrite unreadable content."""
     if not file_path.exists():
         return ""
     return file_path.read_text(encoding="utf-8")
@@ -274,22 +259,39 @@ def get_env(key: str) -> str | None:
 # ============================================================================
 
 
+def _effective_scope(key: str, user: EnvConfig, project: EnvConfig) -> str | None:
+    scope = "project" if key in project else "user" if key in user else None
+    stored = (project if scope == "project" else user).get(key)
+    if key in os.environ and os.environ[key] != stored:
+        return "process"
+    return scope
+
+
+def effective_env_scope(key: str) -> str | None:
+    """Identify the active value's scope without exposing its contents."""
+    return _effective_scope(key, _read_env_file(_user_env_path()), _read_env_file(_project_env_path()))
+
+
 def set_env(key: str, value: str, scope: str = "user") -> None:
     """Set an environment variable in a .env file and os.environ.
 
     Args:
         key: The variable name.
         value: The variable value.
-        scope: ``"user"`` for ``~/.rune/.env`` or ``"project"`` for ``.rune/.env``.
+        scope: ``"user"``, ``"project"``, or ``"effective"`` to replace the active file value.
     """
-    file_path = _user_env_path() if scope == "user" else _project_env_path()
-
     with _env_write_lock:
+        if scope == "effective":
+            user = _parse_env_file(_read_for_edit(_user_env_path()))
+            project = _parse_env_file(_read_for_edit(_project_env_path()))
+            scope = _effective_scope(key, user, project) or "user"
+            if scope == "process":
+                raise ValueError(f"{key} comes from the launch environment. Update it there and restart Rune.")
+        file_path = _user_env_path() if scope == "user" else _project_env_path()
         _ensure_sensitive_dir(file_path.parent)
         current = _read_for_edit(file_path)
         _write_sensitive_env_file(file_path, _apply_env_edits(current, {key: value}))
-
-    os.environ[key] = value
+        os.environ[key] = value
 
 
 def unset_env(key: str, scope: str = "user") -> None:
@@ -307,8 +309,7 @@ def unset_env(key: str, scope: str = "user") -> None:
         if content.strip():
             _write_sensitive_env_file(file_path, content)
         elif existed:
-            # Only reachable once the file has been read successfully, so this
-            # removes a file we know held nothing else.
+            # The successful read confirmed that no other entries remain.
             file_path.unlink()
 
     os.environ.pop(key, None)
@@ -318,12 +319,7 @@ _NEEDS_QUOTING = ' \t#"\'\n\r'
 
 
 def _format_env_line(key: str, value: str) -> str:
-    """One ``KEY=value`` line, quoted only when the value needs it.
-
-    Newlines are escaped rather than written through. A raw newline would end
-    the line and turn the rest of the value into another variable, so a single
-    write could define any key it liked.
-    """
+    """Format one entry, escaping newlines so values cannot inject extra keys."""
     if value and (any(ch in value for ch in _NEEDS_QUOTING) or value != value.strip()):
         escaped = (
             value.replace("\\", "\\\\")
@@ -343,11 +339,9 @@ def _serialize_env(env: EnvConfig) -> str:
 
 
 def _apply_env_edits(content: str, updates: dict[str, str | None]) -> str:
-    """Apply ``{KEY: value}`` edits to raw .env text, ``None`` to remove a key.
+    """Apply key/value edits while preserving unrelated lines and comments.
 
-    Rewrites only the lines it touches. A .env is hand-edited far more often
-    than a config file, so comments, ordering, and unrelated formatting have to
-    survive a write from the settings UI.
+    A None value removes the key, including duplicate definitions.
     """
     remaining = dict(updates)
     written: set[str] = set()

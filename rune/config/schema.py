@@ -1,10 +1,8 @@
-"""Configuration schema for RUNE.
-
-Ported from src/config/schema.ts - Zod schemas to Pydantic v2 models.
-All 145 config fields with defaults.
-"""
+"""Rune configuration models, defaults, and compatibility aliases."""
 
 from __future__ import annotations
+
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -13,9 +11,6 @@ from rune.llm.reasoning import ReasoningEffort, reasoning_model_key
 # LLM Configuration
 
 class ModelsByTier(BaseModel):
-    # Frontier defaults. Every id here answered a tool call end to end through
-    # the adapter, which is the bar that matters: an agent step always carries
-    # tools, and the newest OpenAI models refuse them on chat/completions.
     best: str = "gpt-6-astra"
     coding: str = "gpt-5.3-codex"
     fast: str = "gpt-5.4-mini"
@@ -47,12 +42,7 @@ class ProviderModels(BaseModel):
             fast="gpt-5.4-mini",
         )
     )
-    # A recommendation and a last resort, not the routing decision. At run
-    # time the client asks the local server what is installed and prefers
-    # that, so these names only matter on a machine with nothing pulled yet
-    # — where qwen3-coder:30b is the model the agent loop has been verified
-    # against end to end. One name for every tier, since a local install
-    # usually holds exactly one.
+    # Installed local models take precedence over these fallback names.
     ollama: ModelsByTier = Field(
         default_factory=lambda: ModelsByTier(
             best="qwen3-coder:30b",
@@ -62,6 +52,13 @@ class ProviderModels(BaseModel):
     )
 
 
+class DecisionRoutingConfig(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    backend: Literal["connected", "jev"] = "connected"
+    timeout_ms: int = Field(default=1500, ge=250, le=5000, alias="timeoutMs")
+
+
 class LLMConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -69,15 +66,16 @@ class LLMConfig(BaseModel):
     default_model: str = Field(default="gpt-6-astra", alias="defaultModel")
     active_provider: str | None = Field(default=None, alias="activeProvider")
     active_model: str | None = Field(default=None, alias="activeModel")
-    # Read the old global setting once, attaching it to the previously selected model.
+    # Migrate the legacy global preference to the previously selected model.
     reasoning_effort: ReasoningEffort | None = Field(default=None, alias="reasoningEffort")
     reasoning_efforts: dict[str, ReasoningEffort | None] = Field(default_factory=dict, alias="reasoningEfforts")
-    # Cloud-escalation profile for /escalate: data leaves the machine only when
-    # the user invokes it (never auto-routed). Model is optional; defaults to the
-    # provider's best tier.
+    # Escalation uses the provider's best tier when no model is specified.
     escalation_provider: str | None = Field(default=None, alias="escalationProvider")
     escalation_model: str | None = Field(default=None, alias="escalationModel")
     models: ProviderModels = Field(default_factory=ProviderModels)
+    decision_routing: DecisionRoutingConfig = Field(
+        default_factory=DecisionRoutingConfig, alias="decisionRouting",
+    )
     # Simple-query fast lane: high-confidence chat/web goals run on the
     # provider's fast tier (docs/design/simple-query-fast-path.md).
     route_simple_queries: bool = Field(default=True, alias="routeSimpleQueries")
@@ -114,22 +112,14 @@ class ApprovalConfig(BaseModel):
     auto_approve_medium: bool = False
     timeout_seconds: int = 300
     session_cache_max: int = 200
-    # Capabilities that always prompt, whatever the risk scoring says. Names are
-    # matched loosely ("file.delete", "file_delete" and "file-delete" are the
-    # same tool) and may be globs. Read by the tool gate; ``mode: bypass`` still
-    # wins, since that switch means "never ask".
+    # Require approval regardless of risk score, unless mode is bypass.
+    # Names accept globs; dots, underscores, and hyphens are equivalent.
     require_explicit_for: list[str] = Field(
         default_factory=list, alias="requireExplicitFor"
     )
-    # The one switch every approval site honors — risky shell commands, MCP
-    # writes, and outbound network calls alike. RUNE_APPROVAL_MODE overrides it
-    # for a single run.
-    #   bypass   — never ask (equivalent to skipping permissions entirely)
-    #   standard — ask only for what cannot be undone: risky commands, MCP
-    #              writes, network writes
-    #   strict   — also ask for network reads and browser interactions
-    # Reads are not gated by default: they carry no undo problem, and a prompt
-    # per read is the fatigue that makes the prompts that matter worthless.
+    # RUNE_APPROVAL_MODE overrides this value for a run.
+    # bypass: skip approvals; standard: gate risky commands and external writes;
+    # strict: also gate network reads and browser interactions.
     mode: str = "standard"
 
 
@@ -158,9 +148,7 @@ class DenyByDefaultConfig(BaseModel):
 class SafetyConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    # Nested form used by config.yaml. An empty allowlist means "use the
-    # shipped default"; a non-empty one replaces it, which is what an
-    # allowlist is for.
+    # An empty allowlist uses the shipped defaults; a non-empty list replaces them.
     deny_by_default: DenyByDefaultConfig = Field(
         default_factory=DenyByDefaultConfig, alias="denyByDefault"
     )
@@ -194,11 +182,7 @@ class SafetyConfig(BaseModel):
 # Hooks Configuration
 
 class SkillGateConfig(BaseModel):
-    """Security gate applied when an auto-distilled skill is written to disk.
-
-    Mirrors the shape already in config.yaml, which nests these under
-    ``hooks.skillGate`` — the fields match SkillSecurityGateConfig.
-    """
+    """Settings for checking generated skills before saving them."""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -263,9 +247,7 @@ class FilesystemConfig(BaseModel):
 # Proactive Configuration
 
 class ProactiveConfig(BaseModel):
-    # The daemon ran proactive whether or not the file said so, while the API
-    # reported this default and showed the toggle as off. On means the two now
-    # agree, and a config with no proactive block keeps behaving as before.
+    # Preserve the daemon default when older configs omit this section.
     enabled: bool = True
     quiet_hours_start: int = 22  # 10 PM
     quiet_hours_end: int = 8    # 8 AM
@@ -342,24 +324,18 @@ class GoalLoopConfig(BaseModel):
 # Root Configuration
 
 class SkillsConfig(BaseModel):
-    """Skill learning/reuse.
+    """Opt-in learning from completed or verified runs and reuse in later tasks.
 
-    ``auto_skill`` gates both halves: distilling a skill from a verified-
-    successful run, and injecting a matching learned skill into a later similar
-    task. Default off (opt-in). Distilling only from completed/verified runs is
-    what separates this from capturing whatever the run claimed worked.
+    ``auto_skill`` controls both generation and reuse of learned skills.
     """
 
     model_config = ConfigDict(populate_by_name=True)
 
     auto_skill: bool = Field(default=False, alias="autoSkill")
 
-    # Gated Skill Learning (T1-1). When on, a distilled skill stays a
-    # CANDIDATE and is only injected once measured to raise the verified rate;
-    # regressions auto-deprecate. Default off → behaviour identical to plain
-    # auto_skill.
+    # Evaluate candidates before reuse and deprecate skills that regress.
     gated_learning: bool = Field(default=False, alias="gatedLearning")
-    # Promotion thresholds (Bayesian decision rule, §4.4).
+    # Evidence thresholds for promoting a candidate skill.
     eval_delta_min: float = Field(default=0.05, alias="evalDeltaMin")
     eval_prob_threshold: float = Field(default=0.95, alias="evalProbThreshold")
     eval_min_samples_paired: int = Field(default=12, alias="evalMinSamplesPaired")
@@ -392,10 +368,10 @@ class RuneConfig(BaseModel):
     openai_api_key: str | None = Field(default=None, alias="openai_api_key")
     anthropic_api_key: str | None = Field(default=None, alias="anthropic_api_key")
 
-    # Google Gemini (simple API key, like OpenAI)
+    # Google Gemini API key
     gemini_api_key: str | None = Field(default=None, alias="gemini_api_key")
 
-    # Google Cloud / Vertex AI (service account, for enterprise)
+    # Google Cloud / Vertex AI service account
     google_credentials_file: str | None = Field(default=None, alias="google_credentials_file")
     vertex_project: str | None = Field(default=None, alias="vertex_project")
     vertex_location: str = Field(default="us-central1", alias="vertex_location")

@@ -52,8 +52,12 @@ async def test_file_read_observes_write_with_session_cache(stream, tmp_path):
     source = tmp_path / "note.txt"
     source.write_text("before edit")
     assert "before edit" in await stream._execute_tool("file_read", {"path": str(source)})
+    for _ in range(2):
+        assert "CACHE HIT" in await stream._execute_tool("file_read", {"path": str(source)})
+    assert stream._stalled_read_tools == {"file_read"}
     written = await stream._execute_tool("file_write", {"path": str(source), "content": "after edit"})
     assert "Written" in written, written
+    assert not stream._stalled_read_tools
     assert "after edit" in await stream._execute_tool("file_read", {"path": str(source)})
 
 
@@ -66,6 +70,7 @@ async def test_distinct_identical_command_calls_both_execute(stream, tmp_path):
 
 async def test_cached_reads_close_ui_events_without_new_execution(tmp_path):
     from rune.agent.tool_adapter import StallState, _build_typed_tool
+    from rune.agent.tool_output import CachedToolResult
     from rune.types import CapabilityResult
 
     path = str(tmp_path / "cached.txt")
@@ -87,6 +92,8 @@ async def test_cached_reads_close_ui_events_without_new_execution(tmp_path):
         reg=CapabilityRegistry(), cache=cache, stall=StallState(),
     )
     for _ in range(2):
-        assert "CACHE HIT" in await tool.function(**params)
+        result = await tool.function(**params)
+        assert isinstance(result, CachedToolResult) and "CACHE HIT" in result
+        assert result.cache_key == cache.generate_key("file_read", params)
     assert [event[0] for event in events] == ["start", "end", "start", "end"]
     assert all(result.metadata == {"cached": True} and result.success for kind, result in events if kind == "end")

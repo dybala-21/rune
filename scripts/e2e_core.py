@@ -89,7 +89,7 @@ def verify(case: str, workspace: Path, answer: str) -> dict:
             "tests_unchanged": (workspace / "test_stats.py").read_text() == CHECKS}
 
 
-async def worker(case: str, provider: str, model: str, result_path: Path) -> None:
+async def worker(case: str, provider: str, model: str, result_path: Path, routing: str = "connected") -> None:
     sys.path.insert(0, str(ROOT))
     from rune.config import get_config
     from rune.utils.logger import configure_logging
@@ -99,7 +99,8 @@ async def worker(case: str, provider: str, model: str, result_path: Path) -> Non
     cfg.llm.active_provider = cfg.llm.default_provider = provider
     cfg.llm.active_model = cfg.llm.default_model = model
     cfg.llm.route_simple_queries = False
-    # Include auxiliary calls in each model's evaluation.
+    cfg.llm.decision_routing.backend = routing
+    # Use the same model for task execution and auxiliary calls.
     tiers = getattr(cfg.llm.models, provider)
     tiers.best = tiers.coding = tiers.fast = model
     cfg.approval.mode = "standard"
@@ -149,10 +150,17 @@ async def worker(case: str, provider: str, model: str, result_path: Path) -> Non
         trace = await asyncio.wait_for(loop.run(goal, context={"workspace_root": str(workspace)}), 170)
         answer = loop._last_answer_text or "".join(text)
         checks = verify(case, workspace, answer)
+        table_verification = getattr(trace, "table_acceptance", {}) or {}
+        if case == "csv":
+            checks["table_verified"] = table_verification.get("status") == "pass"
+            checks["row_order_verified"] = any(
+                "row_order" in result.get("checks", []) and result.get("status") == "pass"
+                for result in table_verification.get("results", []))
         checks["no_desktop_or_browser"] = not any(t.startswith(("desktop", "browser")) for t in tools)
         checks["no_approval_needed"] = not approvals
         report.update(reason=trace.reason, answer=answer, checks=checks, usage=usage_payload(trace),
                       timings=trace.timings, completion_check=trace.completion_check,
+                      table_verification=table_verification,
                       passed=all(checks.values()) and trace.reason in {"completed", "verified"})
     except Exception as exc:
         report.update(passed=False, error=type(exc).__name__)
@@ -165,10 +173,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("/tmp/rune-core-results.json"))
     parser.add_argument("--scenario", choices=SCENARIOS, action="append")
+    parser.add_argument("--routing", choices=("connected", "jev"), default="connected")
     parser.add_argument("--worker", nargs=3, metavar=("SCENARIO", "PROVIDER", "MODEL"), help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.worker:
-        asyncio.run(worker(*args.worker, args.output))
+        asyncio.run(worker(*args.worker, args.output, routing=args.routing))
         return 0
 
     sys.path.insert(0, str(ROOT))
@@ -187,7 +196,8 @@ def main() -> int:
                     with (Path(state) / "worker.log").open("w") as log:
                         try:
                             subprocess.run([sys.executable, str(Path(__file__).resolve()), "--worker", case, provider, model,
-                                            "--output", str(result)], env=env, cwd=work, stdout=log, stderr=log, timeout=190)
+                                            "--output", str(result), "--routing", args.routing],
+                                           env=env, cwd=work, stdout=log, stderr=log, timeout=190)
                         except subprocess.TimeoutExpired:
                             pass
                     report = json.loads(result.read_text()) if result.exists() else {
