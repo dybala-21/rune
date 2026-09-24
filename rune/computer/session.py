@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -18,7 +19,10 @@ from rune.computer.macos import MacHost
 from rune.computer.observation import ObservationProgress, match_condition
 from rune.computer.protocol import DesktopAction, DesktopCondition, DesktopError, DesktopWait
 
-TOOLS = frozenset({"desktop_apps", "desktop_open", "desktop_observe", "desktop_wait", "desktop_act", "think", "ask_user"})
+TOOLS = frozenset({"desktop_apps", "desktop_open", "desktop_observe", "desktop_wait", "desktop_act", "desktop_phase", "think", "ask_user"})
+PREPARATION_TOOLS = frozenset({"web_search", "web_fetch", "file_read", "file_list", "file_search",
+                             "document_read", "document_create", "document_bundle", "document_bundle_inspect",
+                             "table_requirements", "table_verify"})
 _current: ContextVar[DesktopSession | None] = ContextVar("desktop_session", default=None)
 _access: ContextVar[Callable[[], Awaitable[DesktopSession]] | None] = ContextVar("desktop_access", default=None)
 
@@ -52,6 +56,8 @@ class DesktopSession:
     revision: int = 1
     enabled: bool = True
     uncertain: bool = False
+    phase: str = "app"
+    workspace_root: str = ""
     native_review: bool = False
     waiting: bool = False
     view: dict = field(default_factory=dict)
@@ -81,6 +87,8 @@ class DesktopSession:
             self.revoke()
 
     def begin_task(self) -> None:
+        self.phase = "app"
+        self.workspace_root = ""
         self.last_error = ""
         self.action_failed = False
         self.observations = 0
@@ -96,6 +104,8 @@ class DesktopSession:
             return self.connection_error or "Desktop access ended before the task outcome was confirmed."
         if self.uncertain:
             return "A desktop action has an unknown outcome. Inspect the app before continuing."
+        if self.phase != "app":
+            return "Return to the app phase and observe the final result before completing this desktop task."
         if self.last_error or self.action_failed:
             return self.last_error or "The last desktop input was not confirmed."
         if self.unmet_conditions:
@@ -105,6 +115,37 @@ class DesktopSession:
         if requires_input and not self.inputs:
             return "This task required app input, but no desktop input was completed."
         return None
+
+    def change_phase(self, phase: str) -> None:
+        self.check()
+        if phase not in {"app", "prepare"}:
+            raise DesktopError("Choose app or prepare.")
+        if self.pending or self.uncertain or self.action_failed or self.unmet_conditions:
+            raise DesktopError("Resolve the pending or uncertain app action before changing phases.")
+        if phase != self.phase:
+            self.invalidate()
+            self.phase = phase
+
+    def tool_blocker(self, name: str, params: dict) -> str | None:
+        if name not in self.allowed_tools():
+            return "This tool is unavailable in the current desktop phase. Scripts remain unavailable."
+        if name not in PREPARATION_TOOLS:
+            return None
+        self.check(agent=False)
+        if name == "web_fetch" and str(params.get("method", "GET")).upper() not in {"GET", "HEAD"}:
+            return "Desktop preparation permits read-only HTTP requests."
+        if name in {"web_fetch", "web_search"}:
+            return None
+        root = Path(self.workspace_root).resolve() if self.workspace_root else None
+        paths = [value for key, value in params.items()
+                 if key in {"path", "file_path", "directory", "source_path", "output_path", "manifest"}
+                 and isinstance(value, str) and value]
+        if root is None or any(not Path(value).is_absolute() or not Path(value).resolve().is_relative_to(root) for value in paths):
+            return "Preparation files must be inside the selected workspace using absolute paths."
+        return None
+
+    def allowed_tools(self) -> frozenset[str]:
+        return TOOLS if self.phase == "app" else PREPARATION_TOOLS | {"desktop_phase", "think", "ask_user"}
 
     def check(self, *, agent: bool = True) -> None:
         self.sync_connection()
@@ -156,6 +197,8 @@ class DesktopSession:
 
     async def _observe(self, app: str, *, open_app: bool = False) -> dict:
         self.check()
+        if self.phase != "app":
+            raise DesktopError("Return to the app phase before observing native apps.")
         if self.pending:
             raise DesktopError("Resolve the pending action before observing again.")
         self.invalidate()
@@ -239,6 +282,8 @@ class DesktopSession:
     async def act(self, action: DesktopAction) -> dict:
         self.used = True
         self.check()
+        if self.phase != "app":
+            raise DesktopError("Return to the app phase before native input.")
         async with self.lock:
             self.check()
             if self.uncertain:

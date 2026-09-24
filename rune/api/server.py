@@ -1,12 +1,6 @@
-"""FastAPI server for RUNE.
+"""HTTP API and streaming transport for Rune sessions.
 
-Ported from src/api/server.ts - REST + SSE + WebSocket API with token-based
-auth, CORS, streaming agent execution, and session management.
-
-Supports three real-time protocols:
-- SSE (GET /api/v1/events) - Server→Client event stream
-- NDJSON (POST /api/v1/agent/execute) - Streaming execution
-- WebSocket (/ws) - Bidirectional real-time communication
+Streams events over SSE and WebSocket, and execution results as NDJSON.
 """
 
 import asyncio
@@ -476,7 +470,9 @@ def create_app() -> Any:
     from rune.api.run_store import RunStore
     _run_store = RunStore()
     _run_snapshots = RunSnapshots(_run_store)
-    _run_recovery = RunRecovery(_run_snapshots, _run_store)
+    _run_recovery = RunRecovery(_run_snapshots, _run_store, browser_for_session=lambda sid: (
+        _computers.entries[sid].browser if sid in _computers.entries else None
+    ))
 
     # Broadcast helper
 

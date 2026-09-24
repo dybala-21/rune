@@ -1,8 +1,4 @@
-"""Capability registry for RUNE.
-
-Ported from src/capabilities/index.ts - singleton registry with
-policy-based access control and pattern matching.
-"""
+"""Register capabilities and enforce their execution policies."""
 
 from __future__ import annotations
 
@@ -67,10 +63,11 @@ class CapabilityRegistry:
     @timed("tool", name_arg=1)
     async def execute(self, name: str, params: dict[str, Any]) -> CapabilityResult:
         """Execute a capability by name."""
-        from rune.computer.session import TOOLS, current_desktop
-        if current_desktop() is not None and name not in TOOLS:
-            return CapabilityResult(success=False, error="This desktop task can only use native desktop tools, think and ask_user.",
-                                    metadata={"action_status": "not_executed"})
+        from rune.computer.session import current_desktop
+        if desktop := current_desktop():
+            blocker = desktop.tool_blocker(name, params)
+            if blocker:
+                return CapabilityResult(success=False, error=blocker, metadata={"action_status": "not_executed"})
         cap = self._capabilities.get(name)
         if cap is None:
             return CapabilityResult(

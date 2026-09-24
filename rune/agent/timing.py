@@ -124,8 +124,13 @@ def timed_run(fn):
     @wraps(fn)
     async def wrapper(*args, **kwargs):
         with capture_timing(args[0] if args else None) as run:
-            result = await fn(*args, **kwargs)
-            result.timings = timing_snapshot(run)
+            try:
+                result = await fn(*args, **kwargs)
+            finally:
+                snapshot = timing_snapshot(run)
+                if args and hasattr(args[0], "__dict__"):
+                    args[0]._last_run_timings = snapshot
+            result.timings = snapshot
             return result
     return wrapper
 

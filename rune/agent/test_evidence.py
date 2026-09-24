@@ -11,6 +11,10 @@ _UNIT_FAILURE = re.compile(r"^(FAIL|ERROR): ([\w.]+) \(([\w.]+)\)(?: (.+))?$", r
 _UNIT_TOTAL = re.compile(r"^Ran (\d+) tests? in [^\n]+$", re.M)
 _UNIT_COUNTS = re.compile(r"^(?:FAILED|OK)(?: \(([^\n]+)\))?$", re.M)
 _PYTEST_CASE = re.compile(r"^([^\n]+::[^\n]+?)\s+(PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)(?:\s+\[.*\])?$", re.M)
+_PYTEST_TOTAL = re.compile(
+    r"^(?:=+\s*)?((?:\d+ (?:passed|failed|skipped|xfailed|xpassed|errors?|warnings?|deselected)(?:, )?)+)"
+    r" in \d+(?:\.\d+)?s(?: \([^\n]*\))?\s*(?:=+)?$", re.M,
+)
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 _LIMIT = 128
 
@@ -64,9 +68,24 @@ def parse_test_report(output: str) -> TestReport | None:
         complete = not clipped and len(total) == 1 and len(cases) == count and "characters omitted" not in text
         return TestReport("unittest", cases, count, failures, complete)
     matches = list(_PYTEST_CASE.finditer(text))
-    if matches:
+    summaries = list(_PYTEST_TOTAL.finditer(text))
+    if matches or summaries:
         mapping = {"PASSED": "pass", "FAILED": "fail", "ERROR": "fail", "SKIPPED": "skip", "XFAIL": "skip", "XPASS": "unknown"}
         cases = tuple(TestCase(m.group(1)[:500], mapping[m.group(2)]) for m in matches[:_LIMIT])
-        # Verbose case lines need not cover collection errors or a truncated summary.
-        return TestReport("pytest", cases, None, None, False)
+        count = failures = None
+        complete = False
+        if len(summaries) == 1:
+            counts = {key.rstrip("s") if key in {"errors", "warnings"} else key: int(value)
+                      for value, key in re.findall(r"(\d+) (\w+)", summaries[0].group(1))}
+            failures = counts.get("failed", 0) + counts.get("error", 0)
+            if not counts.get("error"):
+                count = sum(counts.get(key, 0) for key in ("passed", "failed", "skipped", "xfailed", "xpassed"))
+                observed = {status: sum(m.group(2) == status for m in matches)
+                            for status in mapping}
+                complete = (not clipped and "characters omitted" not in text
+                            and len(cases) == count and len({c.identity for c in cases}) == count
+                            and all(observed[key] == counts.get(value, 0) for key, value in
+                                    {"PASSED": "passed", "FAILED": "failed", "SKIPPED": "skipped",
+                                     "XFAIL": "xfailed", "XPASS": "xpassed", "ERROR": "error"}.items()))
+        return TestReport("pytest", cases, count, failures, complete)
     return None

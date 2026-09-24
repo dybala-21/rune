@@ -97,6 +97,20 @@ async def test_provider_failure_is_recorded_and_propagated(streaming):
     assert "durationMs" in trace.timings["spans"][0]
 
 
+async def test_interrupted_run_keeps_usage_already_reported():
+    class Runner:
+        @timed_run
+        async def run(self):
+            async def complete(**kwargs):
+                return {"usage": {"prompt_tokens": 20, "completion_tokens": 3}}
+            await timed_completion(complete, {"model": "test"})
+            raise TimeoutError("later request timed out")
+    runner = Runner()
+    with pytest.raises(TimeoutError):
+        await runner.run()
+    assert runner._last_run_timings["usage"]["total_tokens"] == 23
+
+
 async def test_auxiliary_and_stream_usage_are_counted_once_and_missing_usage_is_visible():
     class Runner:
         def __init__(self):

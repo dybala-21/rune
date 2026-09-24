@@ -33,6 +33,9 @@ def request_failure(exc: BaseException) -> RequestFailure:
             ("read_timeout", (httpx.ReadTimeout,), False),
             ("write_timeout", (httpx.WriteTimeout,), False),
             ("connection_error", (httpx.ConnectError,), True),
+            ("read_error", (httpx.ReadError,), False),
+            ("write_error", (httpx.WriteError,), False),
+            ("protocol_error", (httpx.RemoteProtocolError,), False),
         ):
             if isinstance(error, types):
                 return RequestFailure(kind, retryable=retryable)

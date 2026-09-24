@@ -226,14 +226,19 @@ def comparison_evidence(state) -> list[dict[str, Any]]:
             groups.setdefault(commands[0].key, []).append(check)
     pairs = []
     for key, checks in groups.items():
-        before = next((c for c in checks if c.write_sequence == 0 and c.status == "fail"), None)
+        before = next((c for c in checks if c.write_sequence == 0), None)
         after = checks[-1]
-        if before is None or after.sequence <= state.last_write or after.status != "pass":
+        if after.sequence <= state.last_write or after.status != "pass" or not state.last_write:
             continue
         identifier = hashlib.sha256(json.dumps(key).encode()).hexdigest()[:12]
         pair = {"check_id": identifier, "command": after.command[:600], "cwd": after.cwd,
-                "sequences": (before.sequence, after.sequence)}
+                "sequences": (before.sequence if before else 0, after.sequence)}
         for phase, check in (("before", before), ("after", after)):
+            if check is None:
+                pair[phase] = {"runner": "unobserved", "cases": [], "tests_run": None,
+                               "failure_events": None, "failed_tests": None,
+                               "complete": False, "check_status": "unknown"}
+                continue
             report = check.report.snapshot()
             failures = [case for case in check.report.cases if case.status == "fail"]
             accounted = sum(max(1, len(case.subtest_failures)) for case in failures)
