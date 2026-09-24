@@ -16,6 +16,85 @@ from tests.integration.test_desktop_control import allow_native, decide, run_act
 from tests.integration.test_desktop_control import desktop as desktop
 
 
+async def test_preparation_phase_keeps_app_input_and_workspace_access_separate(desktop, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from rune.agent.tool_adapter import ToolAdapterOptions, build_tool_set
+    from rune.capabilities.document_bundle import BundleInspectParams, document_bundle_inspect
+    from rune.capabilities.file import register_file_capabilities
+    from rune.capabilities.registry import CapabilityRegistry
+    from rune.computer.capabilities import PhaseParams, register_desktop_capabilities
+    from rune.computer.protocol import DesktopTarget
+
+    computers, entry, host, _ = desktop
+    registry = CapabilityRegistry()
+    register_file_capabilities(registry)
+    register_desktop_capabilities(registry)
+    (tmp_path / "notes.txt").write_text("prepared content")
+    async with computers.bind(entry):
+        await require_desktop()
+        session = entry.desktop
+        await session.observe("test.editor")
+        tools = build_tool_set(ToolAdapterOptions(workspace_root=str(tmp_path), enable_guardian=False), registry)
+        assert "unavailable" in await tools["file_read"].function(path="notes.txt")
+        assert (await invoke("phase", PhaseParams(phase="prepare"))).success
+        assert "prepared content" in await tools["file_read"].function(path="notes.txt")
+        assert "BLOCKED" in await tools["file_read"].function(path="../outside.txt")
+        monkeypatch.setattr("rune.capabilities.document_bundle.read_snapshot", lambda *args, **kwargs:
+                            SimpleNamespace(manifest={"source": {"path": str(tmp_path.parent / "outside.csv")}}))
+        bundle = await document_bundle_inspect(BundleInspectParams(directory=str(tmp_path / "bundle")))
+        assert not bundle.success and "inside the selected workspace" in bundle.error
+        blocked = await invoke("observe", DesktopTarget(app="test.editor"))
+        assert not blocked.success
+        assert "Return to the app phase" in session.completion_blocker()
+        assert (await invoke("phase", PhaseParams(phase="app"))).success
+        assert not session.view
+        assert (await invoke("observe", DesktopTarget(app="test.editor"))).success
+        session.uncertain = True
+        assert not (await invoke("phase", PhaseParams(phase="prepare"))).success
+        assert all(method != "act" for method, _ in host.calls)
+
+
+async def test_model_sees_only_the_tools_for_each_desktop_phase(desktop, tmp_path, monkeypatch):
+    from rune.agent.litellm_adapter import LiteLLMAgent
+    from rune.agent.tool_adapter import ToolAdapterOptions, build_tool_set
+    from rune.capabilities.file import register_file_capabilities
+    from rune.capabilities.registry import CapabilityRegistry
+    from rune.computer.capabilities import register_desktop_capabilities
+    from tests.unit.test_live_streaming import _chunk, _tc
+
+    computers, entry, _, _ = desktop
+    registry = CapabilityRegistry()
+    register_file_capabilities(registry)
+    register_desktop_capabilities(registry)
+    (tmp_path / "notes.txt").write_text("prepared content")
+    seen = []
+    calls = [("desktop_phase", '{"phase":"prepare"}'), ("file_read", '{"path":"notes.txt"}'),
+             ("desktop_phase", '{"phase":"app"}'), ("desktop_observe", '{"app":"test.editor"}')]
+
+    async def complete(**params):
+        seen.append({tool["function"]["name"] for tool in params["tools"]})
+        async def chunks():
+            if len(seen) <= len(calls):
+                name, args = calls[len(seen) - 1]
+                yield _chunk(tool_calls=_tc(name, args), finish="tool_calls")
+            else:
+                yield _chunk(content="Inspected.", finish="stop")
+        return chunks()
+
+    monkeypatch.setattr("rune.agent.litellm_adapter.litellm.acompletion", complete)
+    async with computers.bind(entry):
+        await require_desktop()
+        tools = build_tool_set(ToolAdapterOptions(workspace_root=str(tmp_path), enable_guardian=False), registry)
+        agent = LiteLLMAgent("openai/gpt-5.4", tools=list(tools.values()))
+        async with agent.run_stream("Prepare and inspect.") as stream:
+            assert "".join([part async for part in stream.stream_text()]) == "Inspected."
+        assert entry.desktop.completion_blocker() is None
+    assert "file_read" not in seen[0] and "desktop_act" in seen[0]
+    assert "file_read" in seen[1] and "desktop_act" not in seen[1]
+    assert seen[1] == seen[2] and seen[0] == seen[3] == seen[4]
+
+
 @pytest.mark.parametrize("failure", ["restart", "exit"])
 async def test_lost_host_revokes_pending_input_and_preview(desktop, failure):
     computers, entry, host, client = desktop
@@ -209,7 +288,7 @@ async def test_successful_retry_clears_read_failure_in_same_task(desktop):
 @pytest.mark.parametrize("native", [True, False])
 async def test_table_checks_follow_execution_mode_even_if_intent_is_misclassified(desktop, monkeypatch, tmp_path, native):
     from rune.agent.table_acceptance import TableAcceptance
-    from rune.computer.session import TOOLS, desktop_scope
+    from rune.computer.session import PREPARATION_TOOLS, TOOLS, desktop_scope
 
     _, entry, _, _ = desktop
     monkeypatch.setenv("RUNE_HOME", str(tmp_path / "home"))
@@ -230,9 +309,10 @@ async def test_table_checks_follow_execution_mode_even_if_intent_is_misclassifie
             context={"workspace_root": str(tmp_path)},
         )
     if native:
-        assert options[0].allowed_tools == sorted(TOOLS)
-        assert options[0].table_acceptance is None and loop._table_acceptance is None
-        assert "table_requirements" not in prompts[0] and "table_verify" not in prompts[0]
+        assert options[0].allowed_tools == sorted(TOOLS | PREPARATION_TOOLS)
+        assert options[0].table_acceptance is loop._table_acceptance
+        assert not loop._table_acceptance.required
+        assert await loop._table_acceptance.blocker() is None
     else:
         assert options[0].table_acceptance is loop._table_acceptance
         assert await loop._table_acceptance.blocker()

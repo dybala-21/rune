@@ -56,6 +56,39 @@ async def test_same_url_actions_dispatch_once_and_report_control_state(screen):
     assert await screen.evaluate("window.saves") == 1
 
 
+async def test_resume_observes_the_live_page_without_repeating_a_click(screen, tmp_path):
+    from rune.agent.execution_journal import ExecutionJournal, reconcile
+    from rune.api.run_snapshot import RunSnapshots
+    from rune.api.run_store import RunStore
+
+    store = RunStore(tmp_path / "resume.db")
+    runs = RunSnapshots(store)
+    runs.start("before", "one", "save")
+    runs.start("after", "one", "continue")
+    try:
+        params = BrowserActParams(action="click", selector=await reference(screen, "Save"))
+        first = ExecutionJournal(store, "before", str(tmp_path))
+        assert (await first.execute("browser_act", params.model_dump(), lambda: browser_act(params))).success
+        assert await screen.evaluate("window.saves") == 1
+        records = reconcile(store.attempts("before"), browser=current_session())
+        next_run = ExecutionJournal(store, "after", str(tmp_path), previous=records)
+        replay = await next_run.execute("browser_act", params.model_dump(), lambda: browser_act(params))
+        assert replay.metadata["replayed"]
+        assert await screen.evaluate("window.saves") == 1
+        assert not (await browser_act(params)).success
+        assert (await browser_observe(BrowserObserveParams())).success
+        assert not current_session().needs_observation
+        runs.start("again", "one", "continue again")
+        records = reconcile([*records, *store.attempts("after")], browser=current_session())
+        again = ExecutionJournal(store, "again", str(tmp_path), previous=records)
+        replay = await again.execute("browser_act", params.model_dump(), lambda: browser_act(params))
+        assert replay.metadata == {"replayed": True}
+        assert "Observe the current page" in replay.output
+        assert await screen.evaluate("window.saves") == 1
+    finally:
+        runs.close()
+
+
 @pytest.mark.parametrize("change", ["replacement", "new_document", "duplicate"])
 async def test_stale_or_ambiguous_reference_never_selects_a_replacement(screen, change):
     ref = await reference(screen, "Save")

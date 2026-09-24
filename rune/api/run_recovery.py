@@ -20,8 +20,9 @@ class ResumeRequest(BaseModel):
 
 
 class RunRecovery:
-    def __init__(self, runs: RunSnapshots, store: RunStore) -> None:
+    def __init__(self, runs: RunSnapshots, store: RunStore, *, browser_for_session=None) -> None:
         self.runs, self.store = runs, store
+        self.browser_for_session = browser_for_session
 
     def workspace_available(self, run_id: str, workspace: str, *, resuming: bool) -> None:
         root = Path(workspace).resolve()
@@ -70,7 +71,8 @@ class RunRecovery:
                             )))
                             break
             records.extend(attempts)
-        return reconcile(records)
+        browser = self.browser_for_session(run["sessionId"]) if self.browser_for_session else None
+        return reconcile(records, browser=browser)
 
     def begin(self, run_id: str) -> tuple[dict[str, Any], dict[str, Any] | None, list[dict[str, Any]]]:
         run = self.runs.get(run_id)

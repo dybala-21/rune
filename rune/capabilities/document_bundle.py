@@ -1,8 +1,7 @@
-"""Render and check an office bundle before publishing its version.
+"""Render and verify office files before publishing a bundle version.
 
-Readers resolve current.json once to get the files for one version. Concurrent
-publishes compare the version observed before rendering. Checks cover saved content and metric
-consistency; they do not validate prose accuracy, formulas, or visual layout.
+Readers resolve current.json once; publishers check for concurrent updates.
+Checks cover saved content and metrics, not prose, formulas or visual layout.
 """
 
 from __future__ import annotations
@@ -192,6 +191,12 @@ def _updates_enabled() -> bool:
 
 
 def _authorize(root: Path, source: Path | None = None, *, write: bool = True) -> None:
+    from rune.computer.session import current_desktop
+    if desktop := current_desktop():
+        params = {"directory": str(root), "source_path": str(source) if source is not None else ""}
+        blocker = desktop.tool_blocker("document_bundle" if write else "document_bundle_inspect", params)
+        if blocker:
+            raise BundleError("permission_denied", blocker)
     guardian = get_guardian()
     check = guardian.validate_file_path(str(root)) if write else guardian.validate_file_read_path(str(root))
     if not check.allowed:

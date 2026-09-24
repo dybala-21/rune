@@ -510,3 +510,35 @@ def test_unittest_versions_produce_the_same_identity(owner):
         f'FAIL: test_values ({owner})\nRan 1 test in 0.001s\nFAILED (failures=1)\n')
     assert report.complete and len(report.cases) == 1
     assert report.cases[0].identity == 'test_example.Cases.test_values'
+
+
+def test_pytest_reports_match_real_runner_and_reject_incomplete_output(tmp_path):
+    from rune.agent.test_evidence import parse_test_report
+
+    source = tmp_path / "test_values.py"
+    source.write_text("import pytest\n@pytest.mark.parametrize('value', [1, 2])\ndef test_value(value): assert value == 1\n")
+    result = subprocess.run([sys.executable, "-m", "pytest", "-v", "--color=no", str(source)],
+                            capture_output=True, text=True, cwd=tmp_path)
+    report = parse_test_report(result.stdout)
+    assert result.returncode == 1 and report.complete
+    assert report.tests_run == 2 and report.failure_events == 1
+    assert {case.status for case in report.cases} == {"pass", "fail"}
+    assert not parse_test_report("test.py::test_one PASSED [100%]\n2 passed in 0.01s\n").complete
+    assert not parse_test_report("test.py::test_one PASSED [100%]\n1 passed, 1 error in 0.01s\n").complete
+
+
+async def test_missing_baseline_is_unknown_and_recorded_pytest_table_needs_no_review(tmp_path, monkeypatch):
+    state = VerificationState()
+    state.changed()
+    state.observe_command("pytest -v", True, "tests/test_one.py::test_value[2] PASSED [100%]\n1 passed in 0.01s\n", str(tmp_path))
+    evidence = comparison_evidence(state)
+    assert evidence[0]["before"]["check_status"] == "unknown"
+    claim = {"check_id": evidence[0]["check_id"], "phase": "before", "metric": "tests_run",
+             "test_id": "*", "value": "1", "source_line": 1}
+    assert check_claims("one test ran before", [claim], evidence)
+    table = recorded_tables(evidence)[0]
+    assert "unknown" in table and "test_value[2]" in table
+    client = AsyncMock()
+    monkeypatch.setattr("rune.llm.client.get_llm_client", lambda: client)
+    assert await ClaimGate().review(state, table) is None
+    client.completion.assert_not_awaited()

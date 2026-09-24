@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -95,10 +96,15 @@ def verify(case: str, workspace: Path, answer: str) -> dict:
 def verified_code_comparison(state) -> bool:
     from rune.agent.test_claims import comparison_evidence
 
-    # The fixture starts with three failures and must pass after the edit.
+    before = {f"test_stats.AverageTests.test_{name}": "pass" if name == "negative" else "fail"
+              for name in ("empty", "negative", "positive", "single")}
+    after = dict.fromkeys(before, "pass")
+    # Added regression tests may increase the total; the original cases must remain.
     return state.passed and any(
-        all(pair[phase]["complete"] and pair[phase]["tests_run"] == 4 for phase in ("before", "after"))
-        and pair["before"]["failed_tests"] == 3 and pair["after"]["failed_tests"] == 0
+        all(pair[phase]["complete"] and expected.items() <= {
+            case["identity"]: case["status"] for case in pair[phase]["cases"]
+        }.items() for phase, expected in (("before", before), ("after", after)))
+        and pair["after"]["failed_tests"] == 0
         for pair in comparison_evidence(state))
 
 
@@ -181,7 +187,9 @@ async def worker(case: str, provider: str, model: str, result_path: Path, routin
                       table_verification=table_verification,
                       passed=all(checks.values()) and trace.reason in {"completed", "verified"})
     except Exception as exc:
-        report.update(passed=False, error=type(exc).__name__)
+        timings = getattr(loop, "_last_run_timings", {})
+        report.update(passed=False, error=type(exc).__name__, timings=timings,
+                      usage=usage_payload(SimpleNamespace(timings=timings)))
     report.update(seconds=round(time.monotonic() - started, 2), first_text_seconds=first_text,
                   tools=tools, approvals=approvals, events=events, routing=routing_decisions)
     result_path.write_text(json.dumps(report, ensure_ascii=False, indent=2))
@@ -199,11 +207,13 @@ def comparison_summary(reports: list[dict]) -> list[dict]:
         seconds = sorted(r["seconds"] for r in rows if "seconds" in r)
         costs = [(r.get("usage") or {}).get("cost") or {} for r in rows]
         complete = bool(rows) and all(c.get("usd") is not None for c in costs)
+        passed = sum(r["passed"] for r in rows)
         summaries.append({"model": model, "scenario": scenario, "backend": backend,
             "attempts": len(rows), "skipped": skipped, "passed": sum(r["passed"] for r in rows),
             "median_seconds": statistics.median(seconds) if seconds and len(seconds) == len(rows) else None,
             "max_seconds": max(seconds) if seconds else None,
             "mean_usd": sum(c["usd"] for c in costs) / len(rows) if complete else None,
+            "usd_per_verified_completion": sum(c["usd"] for c in costs) / passed if complete and passed else None,
             "known_usd": sum(c.get("knownUsd", 0) for c in costs),
             "unpriced_attempts": sum(c.get("usd") is None for c in costs)})
     return summaries

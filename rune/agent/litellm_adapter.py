@@ -1,15 +1,10 @@
-"""LiteLLM streaming adapter, drop-in replacement for PydanticAI Agent.
-
-Provides the same interface as ``pydantic_ai.Agent`` (run_stream,
-stream_text, usage, all_messages, get_output) but calls LiteLLM directly.
-This removes the PydanticAI dependency and enables all LiteLLM providers
-(OpenAI, Anthropic, Gemini, Azure, Ollama, etc.) in a single code path.
-"""
+"""Stream model responses and tool calls through LiteLLM."""
 
 from __future__ import annotations
 
 import json
 import os
+import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -913,8 +908,12 @@ class StreamResult:
         verification_state: Callable[[], Any] | None = None,
         tool_recovery: Callable[[], set[str] | None] | None = None,
         require_verification: bool = True,
+        request_deadline: float | None = None,
+        tool_catalog: Any = None,
     ) -> None:
         self._model = model
+        self._request_deadline = request_deadline
+        self._tool_catalog = tool_catalog
         from rune.llm.reasoning import configured_reasoning_effort
         self._reasoning_effort = configured_reasoning_effort(model)
         self._verification_callback = verification_callback
@@ -1002,10 +1001,10 @@ class StreamResult:
         self._usage = StreamUsage()
         self._round_usage = None
         self._stream: Any = None
+        self.response_started = False
         self._tool_fail_streak: dict[str, int] = {}
         self._blocked_groups: set[str] = set()
         self._native_advisor_events: list[dict[str, Any]] = []
-        # Tool call policy for weak-model guardrails
         if tool_call_policy is None:
             from rune.agent.tool_call_policy import ToolCallPolicy
             tool_call_policy = ToolCallPolicy()
@@ -1128,6 +1127,9 @@ class StreamResult:
                 _force_edit_tool = False
 
             _tools = self._tool_schemas or None
+            if desktop is not None and _tools:
+                allowed = desktop.allowed_tools()
+                _tools = [tool for tool in _tools if tool["function"]["name"] in allowed]
             narrowed_recovery = False
             if verification_pending and _tools and "bash_execute" in self._tool_lookup:
                 extra["tool_choice"] = "required"
@@ -1172,6 +1174,8 @@ class StreamResult:
                 "max_tokens": _effective_max,
                 "stream_options": {"include_usage": True},
                 "temperature": self._temperature,
+                "num_retries": 0,
+                "max_retries": 0,
             }
             _traits = traits(self._model)
             if not _traits.temperature:
@@ -1188,12 +1192,14 @@ class StreamResult:
                 _acompletion_kwargs["extra_headers"] = dict(self._extra_headers)
             _acompletion_kwargs.update(self._provider_extra)
             _acompletion_kwargs.update(extra)
+            if self._request_deadline is not None:
+                remaining = self._request_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("The execution deadline expired.")
+                _acompletion_kwargs["timeout"] = min(600.0, remaining)
 
-            # Guided decoding for local models: replace the native tools param
-            # with a schema the output must satisfy (tool call or final answer),
-            # so a weak model that can't emit native tool_calls still produces a
-            # valid, parseable action. ollama-only (detected via its api_base);
-            # the content-JSON is parsed by the recovery path below.
+            # Ollama's guided mode returns a JSON action instead of native tool calls.
+            # The recovery path below parses the response.
             if self._guided:
                 _acompletion_kwargs.pop("tools", None)
                 _acompletion_kwargs.pop("tool_choice", None)
@@ -1206,7 +1212,7 @@ class StreamResult:
                 if not _allow_final:
                     self._forced_action_turns += 1
                 _gschema = _build_action_schema(
-                    self._tool_schemas, allow_final=_allow_final
+                    _tools or [], allow_final=_allow_final
                 )
                 log.info("guided_decoding_active",
                          tools=len(self._tool_schemas),
@@ -1221,6 +1227,7 @@ class StreamResult:
             from rune.llm.request_params import compatible_completion
 
             self._round_usage = None
+            self.response_started = False
             self._stream = await compatible_completion(_ll.acompletion, _ll.BadRequestError, _acompletion_kwargs)
 
             text_this_turn = ""
@@ -1233,6 +1240,7 @@ class StreamResult:
             _live_ok = self._live_stream and delta and not _suppress_yield
 
             async for chunk in self._stream:
+                self.response_started = True
                 if not chunk.choices:
                     # Usage-only chunk (final)
                     if hasattr(chunk, "usage") and chunk.usage:
@@ -2165,6 +2173,8 @@ class StreamResult:
         """Dispatch through the tool's guards and state-aware read cache."""
         # The optional reasoning field is not a tool argument.
         params.pop("think", None)
+        if self._tool_catalog is not None and name not in self._tool_catalog.loaded:
+            return f"Tool {name} is not loaded. Use tool_search with its exact name first."
 
         recovery = self._tool_recovery() if self._tool_recovery else None
         if recovery and name not in recovery:
@@ -2354,14 +2364,10 @@ class LiteLLMAgent:
     ) -> None:
         self._model, self._provider_extra = _resolve_litellm_model(model)
         self._system_prompt = system_prompt
-        self._tools = tools or []
-        self._tool_schemas = tools_to_openai_schema(self._tools)
-        self._tool_lookup = _build_tool_lookup(self._tools)
+        self.update_tools(tools or [])
         self._requested_max_tokens = max_tokens
         self._max_tokens = _clamp_max_tokens(self._model, max_tokens)
-        # Sampling temperature is 0 everywhere by default. Best-of raises it
-        # for the later attempts so K samples are not near-copies of each
-        # other; see the diversity suffix in cli/best_of.
+        # Best-of runs can raise the temperature to vary later attempts.
         _t_override = os.environ.get("RUNE_TEMPERATURE", "").strip()
         if _t_override:
             try:
@@ -2391,9 +2397,9 @@ class LiteLLMAgent:
         verification_state: Callable[[], Any] | None = None,
         tool_recovery: Callable[[], set[str] | None] | None = None,
         require_verification: bool = True,
+        request_deadline: float | None = None,
     ) -> AsyncIterator[StreamResult]:
-        """Start a streaming run. Mirrors ``Agent.run_stream()``."""
-        # Build messages list
+        """Start a streaming run with the supplied conversation history."""
         messages: list[dict[str, Any]] = []
 
         if self._system_prompt:
@@ -2462,6 +2468,8 @@ class LiteLLMAgent:
             verification_state=verification_state,
             tool_recovery=tool_recovery,
             require_verification=require_verification,
+            request_deadline=request_deadline,
+            tool_catalog=self._tool_catalog,
         )
         self._last_stream_result = stream_result
 
@@ -2480,7 +2488,14 @@ class LiteLLMAgent:
         )
 
     def update_tools(self, tools: list[Any]) -> None:
-        """Replace the tool set (used when tools change mid-loop)."""
+        """Replace the available tools and rebuild their schemas."""
+        from rune.agent.tool_catalog import ToolCatalog
+
         self._tools = tools
         self._tool_schemas = tools_to_openai_schema(tools)
         self._tool_lookup = _build_tool_lookup(tools)
+        self._tool_catalog = None
+        if os.environ.get("RUNE_TOOL_SEARCH", "1") != "0" and ToolCatalog.needed(self._tool_schemas):
+            self._tool_catalog = ToolCatalog(self._tool_schemas)
+            self._tool_schemas = self._tool_catalog.schemas
+            self._tool_lookup["tool_search"] = self._tool_catalog.search

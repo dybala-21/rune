@@ -1,9 +1,4 @@
-"""Regression tests for three paths that were built but never wired.
-
-Each of these shipped as an unreferenced module while the live code either
-did the wrong thing or nothing at all. The tests pin the wiring, not the
-implementation, so a future refactor that orphans them again fails here.
-"""
+"""Regression checks for runtime integration and recorded task outcomes."""
 
 from __future__ import annotations
 
@@ -199,14 +194,12 @@ def test_invalid_skill_name_is_not_persisted(tmp_path, monkeypatch):
     assert write_skill_to_disk(good) is not None
 
 
-# ---------------------------------------------------------------------------
-# The daily tier reported a 100% success rate no matter what happened, and that
-# ratio was injected into the agent's own context.
-# ---------------------------------------------------------------------------
+# Daily summaries count only tasks with a recorded outcome.
 
-def test_daily_summary_does_not_invent_successes():
+def test_daily_summary_does_not_invent_successes(monkeypatch, tmp_path):
     from rune.memory.tiered_memory import TieredMemoryManager
 
+    monkeypatch.setenv("RUNE_HOME", str(tmp_path))
     mgr = TieredMemoryManager.__new__(TieredMemoryManager)
     daily = TieredMemoryManager.promote_to_daily(mgr, [{"goal": "a"}, {"goal": "b"}])
 
@@ -215,9 +208,10 @@ def test_daily_summary_does_not_invent_successes():
     assert daily.successful_tasks == 0
 
 
-def test_daily_summary_counts_real_outcomes():
+def test_daily_summary_counts_real_outcomes(monkeypatch, tmp_path):
     from rune.memory.tiered_memory import TieredMemoryManager
 
+    monkeypatch.setenv("RUNE_HOME", str(tmp_path))
     mgr = TieredMemoryManager.__new__(TieredMemoryManager)
     daily = TieredMemoryManager.promote_to_daily(
         mgr, [{"goal": "a", "success": True}, {"goal": "b", "success": False}]

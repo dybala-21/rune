@@ -1,6 +1,7 @@
 """The model can propose native input; only the user can approve it."""
 
 import json
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -15,6 +16,10 @@ class EmptyParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class PhaseParams(EmptyParams):
+    phase: Literal["app", "prepare"]
+
+
 async def invoke(method: str, params: BaseModel) -> CapabilityResult:
     session = current_desktop()
     if session is None:
@@ -23,6 +28,15 @@ async def invoke(method: str, params: BaseModel) -> CapabilityResult:
     try:
         session.used = True
         session.check()
+        if method == "phase":
+            session.change_phase(params.phase)
+            return CapabilityResult(success=True, output=(
+                f"Desktop phase: {session.phase}. "
+                "Prepare uses web search, read-only HTTP and workspace document tools. "
+                "App input is disabled during preparation. Return to app and obtain a fresh observation before input."
+            ))
+        if session.phase != "app":
+            raise DesktopError("Return to the app phase before reading or controlling native apps.")
         if method == "apps":
             return CapabilityResult(success=True, output=json.dumps(session.status()["apps"], ensure_ascii=False))
         if method == "act":
@@ -50,6 +64,7 @@ async def invoke(method: str, params: BaseModel) -> CapabilityResult:
 
 def register_desktop_capabilities(registry) -> None:
     for name, method, model, description in (
+        ("desktop_phase", "phase", PhaseParams, "Switch between app interaction and preparation. Prepare permits web research and workspace document tools without native input or scripts. Return to app for fresh observation and reviewed input. Resolve uncertain input before switching."),
         ("desktop_apps", "apps", EmptyParams, "List the native apps the user allowed for this conversation."),
         ("desktop_open", "open", DesktopTarget, "Open an allowed macOS app and return its front window screenshot and accessibility controls."),
         ("desktop_observe", "observe", DesktopTarget, "Read an allowed app's window and get a fresh screenshot, observation ID and element refs."),

@@ -22,14 +22,14 @@ def recorded_tables(evidence: list[dict], language: str = "en") -> list[str]:
         return tables
     for pair in evidence:
         before, after = pair["before"], pair["after"]
-        if not all(r["complete"] and r["failed_tests"] is not None for r in (before, after)):
+        if not all((r["complete"] and r["failed_tests"] is not None) or r["runner"] == "unobserved"
+                   for r in (before, after)):
             continue
         cases = [{c["identity"]: c["status"] for c in report["cases"]} for report in (before, after)]
         names = sorted(cases[0].keys() | cases[1].keys())
         command, cwd = pair["command"], pair.get("cwd", "")
         # Skip values that could change the table structure.
         if (len(names) > 12 or not cwd or len(command) >= 600 or len(cwd) > 400
-                or any(not re.fullmatch(r"[\w.:-]+", name) for name in names)
                 or any(re.search(r"[\x00-\x1f\x7f`|<>\\]", text) for text in [command, cwd, *names])):
             continue
         rows = [f"| {labels[0]}: `{command}` — `{cwd}` | {labels[1]} | {labels[2]} |",

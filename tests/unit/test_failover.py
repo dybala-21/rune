@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import time
+from unittest.mock import AsyncMock
+
+import httpx
 import pytest
 
 from rune.agent.failover import (
@@ -13,12 +17,26 @@ from rune.agent.failover import (
 )
 
 
+@pytest.mark.asyncio
+async def test_transport_recovery_respects_delivery_and_deadline(monkeypatch):
+    sleep = AsyncMock()
+    monkeypatch.setattr("rune.agent.failover.asyncio.sleep", sleep)
+    profile = LLMProfile(name="test", provider="openai", model="test")
+    for error in (httpx.ReadTimeout("timeout"), httpx.WriteError("interrupted"), TimeoutError()):
+        result = await FailoverManager([profile]).handle_error(error)
+        assert not result.success
+    response = httpx.Response(429, headers={"Retry-After": "45"})
+    error = httpx.HTTPStatusError("429", request=httpx.Request("POST", "https://example.test"), response=response)
+    assert (await FailoverManager([profile]).handle_error(error, deadline=time.monotonic() + 90)).success
+    sleep.assert_awaited_once_with(45)
+    sleep.reset_mock()
+    assert not (await FailoverManager([profile]).handle_error(error, deadline=time.monotonic() + 20)).success
+    assert not (await FailoverManager([profile]).handle_error(httpx.ConnectError("offline"), response_started=True)).success
+    sleep.assert_not_awaited()
+
+
 class TestBuildProfilesFromConfig:
-    """The primary profile is what the agent loop runs, so it must use the
-    session selection even when only one half (provider or model) was
-    overridden. An all-or-nothing check would upgrade a partial override to the
-    default provider's best tier.
-    """
+    """Preserve session choices when only the provider or model is overridden."""
 
     def _set_llm(self, monkeypatch, provider=None, model=None, default="openai"):
         from rune.config import get_config
@@ -30,7 +48,7 @@ class TestBuildProfilesFromConfig:
         return cfg
 
     def test_model_only_active_keeps_user_model(self, monkeypatch):
-        # `rune -m gpt-5-mini` (no -p) must NOT upgrade to openai's best tier.
+        # A model-only override must keep the selected model.
         self._set_llm(monkeypatch, provider=None, model="gpt-5-mini")
         primary = build_profiles_from_config()[0]
         assert (primary.provider, primary.model) == ("openai", "gpt-5-mini")

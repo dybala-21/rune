@@ -1,6 +1,7 @@
 import asyncio
 import subprocess
 import sys
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -9,11 +10,38 @@ from rune.agent.execution_journal import (
     RecoveryBlocked,
     fingerprint,
     journal_scope,
+    reconcile,
 )
 from rune.api.run_recovery import RunRecovery
 from rune.api.run_snapshot import RunSnapshots
 from rune.api.run_store import RunStore
 from rune.types import CapabilityResult
+
+
+async def test_completed_browser_work_resumes_only_in_the_same_live_session(recovery, tmp_path):
+    from rune.capabilities.browser.session import BrowserSession, browser_session
+
+    store, runs, _ = recovery
+    runs.start("next", "session", "continue")
+    browser = BrowserSession(page=Mock(is_closed=lambda: False), browser=Mock(is_connected=lambda: True))
+    async with browser_session(browser):
+        journal = ExecutionJournal(store, "first", str(tmp_path))
+        invoke = AsyncMock(return_value=CapabilityResult(success=True, output="old refs"))
+        await journal.execute("browser_act", {"action": "click", "selector": "e1"}, invoke)
+        records = store.attempts("first")
+        recovered = reconcile(records, browser=browser)
+        assert browser.needs_observation
+        resumed = ExecutionJournal(store, "next", str(tmp_path), previous=recovered)
+        result = await resumed.execute("browser_act", {"action": "click", "selector": "e1"}, invoke)
+        assert result.metadata["replayed"] and "old refs" not in result.output
+        invoke.assert_awaited_once()
+        browser.uncertain_action = True
+        with pytest.raises(RecoveryBlocked):
+            reconcile(records, browser=browser)
+        with pytest.raises(RecoveryBlocked):
+            resumed.check()
+    with pytest.raises(RecoveryBlocked):
+        reconcile(records, browser=BrowserSession())
 
 
 @pytest.fixture

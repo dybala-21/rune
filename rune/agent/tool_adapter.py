@@ -1,8 +1,4 @@
-"""Tool adapter for RUNE. Bridges capabilities to LLM tool format.
-
-Ported from src/agent/tool-adapter.ts. Covers stall limits, tool set construction,
-cognitive caching integration, and Guardian validation wrappers.
-"""
+"""Expose capabilities as model tools with approval, cache and execution guards."""
 
 from __future__ import annotations
 
@@ -387,12 +383,14 @@ def build_tool_set(
             stall = _FallbackStall()
 
     tools: dict[str, Any] = {}
+    from rune.computer.session import PREPARATION_TOOLS, current_desktop
     from rune.computer.session import TOOLS as DESKTOP_TOOLS
-    from rune.computer.session import current_desktop
     desktop_mode = current_desktop() is not None
+    if desktop_mode and not current_desktop().workspace_root:
+        current_desktop().workspace_root = opts.workspace_root or os.getcwd()
 
     for cap in reg.list_all():
-        if desktop_mode and cap.name not in DESKTOP_TOOLS:
+        if desktop_mode and cap.name not in DESKTOP_TOOLS | PREPARATION_TOOLS:
             continue
         if not desktop_mode and cap.name.startswith("desktop_"):
             continue
@@ -420,7 +418,7 @@ def _build_typed_tool(
     opts: ToolAdapterOptions,
     reg: CapabilityRegistry,
     cache: SessionToolCache | None,
-    stall: Any,  # StallState or StallStateProtocol (duck-typed, #15)
+    stall: Any,  # StallState or StallStateProtocol
 ) -> Any:
     """Create a ToolWrapper with proper parameter JSON schema.
 
@@ -430,21 +428,16 @@ def _build_typed_tool(
     """
     cap_name = cap_def.name
 
-    # Feature 1: Approval denial escalation - consecutive denial counter
-    # Mutable container so the inner async closure can read/write it.
+    # Shared with the tool closure to count consecutive denials.
     _consecutive_denials: list[int] = [0]
 
-    # Network sign-off already granted this run, keyed by method|host. Wrappers
-    # are rebuilt per run, so this never leaks across runs. Host-scoped rather
-    # than URL-scoped: re-asking for every endpoint on a site the user just
-    # approved is the prompt fatigue that makes confirmations worthless.
+    # Reuse approval for the same HTTP method and host within this run.
+    # Tool wrappers are rebuilt between runs.
     _approved_network: set[str] = set()
 
     async def _execute(params: dict[str, Any]) -> str | Any:
-        from rune.computer.session import TOOLS as DESKTOP_TOOLS
         from rune.computer.session import current_desktop
-        if current_desktop() is not None and cap_name not in DESKTOP_TOOLS:
-            return "[BLOCKED] This desktop task cannot execute scripts or use other tool transports."
+        desktop = current_desktop()
         current_step = opts.step_counter() if opts.step_counter else 0
 
         effective_params = dict(params)
@@ -474,6 +467,10 @@ def _build_typed_tool(
             elif cap_name == _BASH_CAPABILITY:
                 directory = os.path.expanduser(effective_params.get("cwd") or ".")
                 effective_params["cwd"] = os.path.join(opts.workspace_root, directory)
+        if desktop is not None:
+            blocker = desktop.tool_blocker(cap_name, effective_params)
+            if blocker:
+                return "[BLOCKED] " + blocker
         if opts.on_tool_start is not None:
             await opts.on_tool_start(cap_name, effective_params)
         if (

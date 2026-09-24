@@ -1,12 +1,9 @@
-"""LLM failover and profile management for RUNE.
-
-Ported from src/agent/failover.ts (368 lines) - multi-provider failover
-with retry, profile switching, thinking reduction, and context compaction.
-"""
+"""Retry and fallback policies for model requests."""
 
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -163,6 +160,8 @@ class FailoverResult:
 
 def classify_error(error: Exception | str) -> FailoverReason:
     """Classify an LLM error into a failover reason."""
+    if isinstance(error, TimeoutError):
+        return "timeout"
     msg = str(error).lower()
 
     if any(k in msg for k in ("401", "unauthorized", "invalid api key", "authentication")):
@@ -325,16 +324,12 @@ class FailoverManager:
 
     _CIRCUIT_BREAKER_THRESHOLD = 3
 
-    async def handle_error(self, error: Exception | str) -> FailoverResult:
-        """Handle an LLM error and execute the failover strategy.
-
-        Returns a :class:`FailoverResult` indicating whether recovery succeeded.
-        """
+    async def handle_error(self, error: Exception | str, *, deadline: float | None = None,
+                           response_started: bool = False) -> FailoverResult:
+        """Choose and apply a recovery action for a failed model request."""
         reason = classify_error(error)
 
-        # Circuit breaker: if the same error signature repeats N times, abort
-        # immediately to prevent infinite error loops.
-        # Exclude transient errors (timeout, rate_limit) - those benefit from retry.
+        # Stop repeated failures, but allow retries for timeouts and rate limits.
         signature = f"{reason}:{str(error)[:100]}"
         if reason not in ("timeout", "rate_limit"):
             self.error_signature_counts[signature] = (
@@ -366,6 +361,23 @@ class FailoverManager:
             retries_left=self._retries_left,
             profiles=self.profiles,
         )
+
+        from rune.llm.failures import request_failure
+
+        failure = request_failure(error) if isinstance(error, BaseException) else None
+        if response_started or (deadline is not None and time.monotonic() >= deadline):
+            strategy = FailoverStrategy(action="abort")
+        elif failure and failure.kind in {
+            "read_timeout", "write_timeout", "timeout", "read_error", "write_error", "protocol_error",
+        }:
+            # The provider may still be generating or billing this request.
+            strategy = FailoverStrategy(action="abort")
+        elif failure and failure.retryable:
+            strategy = (FailoverStrategy(action="retry", delay=max(strategy.delay, failure.retry_after or 0.0))
+                        if self._retries_left > 0 else FailoverStrategy(action="abort"))
+        if (strategy.action == "retry" and deadline is not None
+                and strategy.delay + 1 >= deadline - time.monotonic()):
+            strategy = FailoverStrategy(action="abort")
 
         match strategy.action:
             case "retry":
