@@ -9,6 +9,23 @@ from rune.agent.timing import timed_completion, timed_run, timing_phase
 from rune.types import CompletionTrace
 
 
+async def test_catalog_fingerprint_detects_changes_without_recording_definitions():
+    from rune.agent.timing import capture_timing, timing_snapshot
+
+    async def complete(**kwargs):
+        return {"usage": {"prompt_tokens": 10, "completion_tokens": 1}}
+
+    tool = {"type": "function", "function": {"name": "read", "description": "private description"}}
+    with capture_timing() as run:
+        for tools in ([tool], [tool], [tool, {"type": "function", "function": {"name": "write"}}]):
+            await timed_completion(complete, {"model": "test", "tools": tools})
+    snapshot = timing_snapshot(run)
+    rows = snapshot["spans"]
+    assert rows[0]["toolCatalogHash"] == rows[1]["toolCatalogHash"] != rows[2]["toolCatalogHash"]
+    assert [row["toolCount"] for row in rows] == [1, 1, 2]
+    assert "private description" not in str(snapshot)
+
+
 async def test_stream_timing_includes_generation_and_preserves_events(monkeypatch):
     now = [0.0]
     monkeypatch.setattr("rune.agent.timing.time.monotonic", lambda: now[0])
@@ -35,6 +52,7 @@ async def test_stream_timing_includes_generation_and_preserves_events(monkeypatc
     request, = [row for row in trace.timings["spans"] if row["kind"] == "model"]
     assert request["durationMs"] == 800
     assert request["firstEventMs"] == 500 and request["firstTextMs"] == 800
+    assert request["lastEventMs"] == 800 and request["eventCount"] == 2
     assert request["phase"] == "execution" and request["reasoningEffort"] == "max"
     assert "secret" not in str(trace.timings) and "private" not in str(trace.timings)
 

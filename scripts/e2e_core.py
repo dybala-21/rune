@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run arithmetic, web, CSV and code checks with Grok, Gemini, then Claude.
 
-Each run uses a temporary workspace and inherits credentials from the environment.
+Each run uses a temporary workspace and the configured credentials.
 Usage: .venv/bin/python scripts/e2e_core.py --output /tmp/rune-core-results.json
 """
 
@@ -12,11 +12,14 @@ import asyncio
 import csv
 import json
 import os
+import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 MODELS = (("xai", "grok-4.6"), ("gemini", "gemini-2.5-flash"), ("anthropic", "claude-opus-5"))
@@ -89,6 +92,16 @@ def verify(case: str, workspace: Path, answer: str) -> dict:
             "tests_unchanged": (workspace / "test_stats.py").read_text() == CHECKS}
 
 
+def verified_code_comparison(state) -> bool:
+    from rune.agent.test_claims import comparison_evidence
+
+    # The fixture starts with three failures and must pass after the edit.
+    return state.passed and any(
+        all(pair[phase]["complete"] and pair[phase]["tests_run"] == 4 for phase in ("before", "after"))
+        and pair["before"]["failed_tests"] == 3 and pair["after"]["failed_tests"] == 0
+        for pair in comparison_evidence(state))
+
+
 async def worker(case: str, provider: str, model: str, result_path: Path, routing: str = "connected") -> None:
     sys.path.insert(0, str(ROOT))
     from rune.config import get_config
@@ -106,13 +119,14 @@ async def worker(case: str, provider: str, model: str, result_path: Path, routin
     cfg.approval.mode = "standard"
     cfg.filesystem.allow_paths = [str(Path.cwd())]
 
+    from rune.agent.failover import build_profiles_from_config
     from rune.agent.loop import NativeAgentLoop
     from rune.llm.pricing import usage_payload
     from rune.types import AgentConfig
 
     loop = NativeAgentLoop(AgentConfig(provider=provider, model=model, max_iterations=12,
                                      timeout_seconds=150, _overridden=True))
-    tools, approvals, events, routing = [], [], [], []
+    tools, approvals, events, routing_decisions = [], [], [], []
     text = []
     first_text = None
     started = time.monotonic()
@@ -132,7 +146,7 @@ async def worker(case: str, provider: str, model: str, result_path: Path, routin
 
     async def on_classified(result):
         from dataclasses import asdict
-        routing.append({**asdict(result), "intent_categories": sorted(result.intent_categories)})
+        routing_decisions.append({**asdict(result), "intent_categories": sorted(result.intent_categories)})
 
     async def deny_approval(capability, reason):
         approvals.append({"capability": capability, "reason": reason})
@@ -147,9 +161,13 @@ async def worker(case: str, provider: str, model: str, result_path: Path, routin
     goal = prepare(case, workspace)
     report = {"scenario": case, "provider": provider, "model": model}
     try:
-        trace = await asyncio.wait_for(loop.run(goal, context={"workspace_root": str(workspace)}), 170)
+        # Keep fallback models out of comparisons for the selected model.
+        with patch("rune.agent.failover.build_profiles_from_config", return_value=build_profiles_from_config()[:1]):
+            trace = await asyncio.wait_for(loop.run(goal, context={"workspace_root": str(workspace)}), 170)
         answer = loop._last_answer_text or "".join(text)
         checks = verify(case, workspace, answer)
+        if case == "code":
+            checks["before_after_recorded"] = verified_code_comparison(loop._verification)
         table_verification = getattr(trace, "table_acceptance", {}) or {}
         if case == "csv":
             checks["table_verified"] = table_verification.get("status") == "pass"
@@ -165,18 +183,58 @@ async def worker(case: str, provider: str, model: str, result_path: Path, routin
     except Exception as exc:
         report.update(passed=False, error=type(exc).__name__)
     report.update(seconds=round(time.monotonic() - started, 2), first_text_seconds=first_text,
-                  tools=tools, approvals=approvals, events=events, routing=routing)
+                  tools=tools, approvals=approvals, events=events, routing=routing_decisions)
     result_path.write_text(json.dumps(report, ensure_ascii=False, indent=2))
+
+
+def comparison_summary(reports: list[dict]) -> list[dict]:
+    groups = {}
+    for report in reports:
+        key = (report["model"], report["scenario"], report["requested_backend"])
+        groups.setdefault(key, []).append(report)
+    summaries = []
+    for (model, scenario, backend), rows in groups.items():
+        skipped = sum(bool(r.get("skipped")) for r in rows)
+        rows = [r for r in rows if not r.get("skipped")]
+        seconds = sorted(r["seconds"] for r in rows if "seconds" in r)
+        costs = [(r.get("usage") or {}).get("cost") or {} for r in rows]
+        complete = bool(rows) and all(c.get("usd") is not None for c in costs)
+        summaries.append({"model": model, "scenario": scenario, "backend": backend,
+            "attempts": len(rows), "skipped": skipped, "passed": sum(r["passed"] for r in rows),
+            "median_seconds": statistics.median(seconds) if seconds and len(seconds) == len(rows) else None,
+            "max_seconds": max(seconds) if seconds else None,
+            "mean_usd": sum(c["usd"] for c in costs) / len(rows) if complete else None,
+            "known_usd": sum(c.get("knownUsd", 0) for c in costs),
+            "unpriced_attempts": sum(c.get("usd") is None for c in costs)})
+    return summaries
+
+
+def provider_blocker(report: dict) -> str | None:
+    if report.get("passed"):
+        return None
+    errors = [s["error"] for s in (report.get("timings") or {}).get("spans", []) if s.get("error")]
+    if sum(e.get("status") == 429 for e in errors) >= 2:
+        return "repeated_rate_limit"
+    if any(e.get("status") in {401, 402, 403} for e in errors):
+        return "provider_access_denied"
+    # Stop this provider if the request is rejected before any tool runs.
+    if not report.get("tools") and any(e.get("status") == 400 for e in errors):
+        return "routing_request_rejected"
+    return None
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("/tmp/rune-core-results.json"))
     parser.add_argument("--scenario", choices=SCENARIOS, action="append")
-    parser.add_argument("--routing", choices=("connected", "jev"), default="connected")
+    parser.add_argument("--routing", choices=("connected", "jev", "both"), default="connected")
+    parser.add_argument("--provider", choices=tuple(p for p, _ in MODELS))
+    parser.add_argument("--repeat", type=int, choices=range(1, 21), default=1)
     parser.add_argument("--worker", nargs=3, metavar=("SCENARIO", "PROVIDER", "MODEL"), help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.worker:
+        if args.routing == "both":
+            parser.error("A worker must use one routing backend")
         asyncio.run(worker(*args.worker, args.output, routing=args.routing))
         return 0
 
@@ -185,32 +243,61 @@ def main() -> int:
     # Load credentials before switching to the temporary RUNE_HOME.
     get_config()
     reports = []
-    for case in args.scenario or SCENARIOS:
-        for provider, model in MODELS:
-            with tempfile.TemporaryDirectory(prefix="rune-core-") as state:
-                with tempfile.TemporaryDirectory(prefix=".rune-eval-", dir=ROOT) as work:
-                    result = Path(state) / "result.json"
-                    env = {**os.environ, "RUNE_HOME": str(Path(state) / "home"), "RUNE_WORKSPACE": work,
-                           "RUNE_APPROVAL_MODE": "standard", "LITELLM_LOCAL_MODEL_COST_MAP": "True"}
-                    print(f"{case}: {model}", flush=True)
-                    with (Path(state) / "worker.log").open("w") as log:
-                        try:
-                            subprocess.run([sys.executable, str(Path(__file__).resolve()), "--worker", case, provider, model,
-                                            "--output", str(result), "--routing", args.routing],
-                                           env=env, cwd=work, stdout=log, stderr=log, timeout=190)
-                        except subprocess.TimeoutExpired:
-                            pass
-                    report = json.loads(result.read_text()) if result.exists() else {
-                        "scenario": case, "provider": provider, "model": model, "passed": False, "error": "WorkerTimeoutOrExit"}
-                    diagnostic = (Path(state) / "worker.log").read_text()[-6000:]
-                    for name, value in os.environ.items():
-                        if len(value) >= 16 and any(word in name for word in ("KEY", "TOKEN", "SECRET")):
-                            diagnostic = diagnostic.replace(value, "[redacted]")
-                    report["diagnostic"] = diagnostic
-                    reports.append(report)
-                    args.output.write_text(json.dumps(reports, ensure_ascii=False, indent=2))
-                    print(json.dumps({k: report[k] for k in ("passed", "seconds", "error", "checks", "usage") if k in report}), flush=True)
+    for provider, model in MODELS:
+        if args.provider and args.provider != provider:
+            continue
+        blocked = None
+        for case in args.scenario or SCENARIOS:
+            with tempfile.TemporaryDirectory(prefix=".rune-eval-", dir=ROOT) as work:
+                arms = ("connected", "jev") if args.routing == "both" else (args.routing,)
+                for repeat in range(args.repeat):
+                    # Alternate order to reduce cache bias; keep paths stable and reset data.
+                    for backend in arms if repeat % 2 == 0 else reversed(arms):
+                        if blocked:
+                            report = {"model": model, "provider": provider, "scenario": case, "passed": False,
+                                      "requested_backend": backend, "repeat": repeat + 1, "skipped": blocked}
+                            reports.append(report)
+                            args.output.write_text(json.dumps(reports, ensure_ascii=False, indent=2))
+                            continue
+                        for child in Path(work).iterdir():
+                            if child.is_dir() and not child.is_symlink():
+                                shutil.rmtree(child)
+                            else:
+                                child.unlink()
+                        with tempfile.TemporaryDirectory(prefix="rune-core-") as state:
+                            report = run_worker(case, provider, model, backend, work, state)
+                        report.update(requested_backend=backend, repeat=repeat + 1)
+                        blocked = provider_blocker(report)
+                        reports.append(report)
+                        args.output.write_text(json.dumps(reports, ensure_ascii=False, indent=2))
+                        print(json.dumps({k: report[k] for k in ("model", "scenario", "requested_backend", "repeat",
+                                         "passed", "seconds", "error", "checks", "usage") if k in report}), flush=True)
+    print(json.dumps({"summary": comparison_summary(reports)}, ensure_ascii=False), flush=True)
     return 0 if all(r["passed"] for r in reports) else 1
+
+
+def run_worker(case: str, provider: str, model: str, backend: str, work: str, state: str) -> dict:
+    result = Path(state) / "result.json"
+    env = {**os.environ, "RUNE_HOME": str(Path(state) / "home"), "RUNE_WORKSPACE": work,
+           "RUNE_APPROVAL_MODE": "standard", "LITELLM_LOCAL_MODEL_COST_MAP": "True"}
+    print(f"{case}: {model} ({backend})", flush=True)
+    started = time.monotonic()
+    with (Path(state) / "worker.log").open("w") as log:
+        try:
+            subprocess.run([sys.executable, str(Path(__file__).resolve()), "--worker", case, provider, model,
+                            "--output", str(result), "--routing", backend],
+                           env=env, cwd=work, stdout=log, stderr=log, timeout=190)
+        except subprocess.TimeoutExpired:
+            pass
+    report = json.loads(result.read_text()) if result.exists() else {
+        "scenario": case, "provider": provider, "model": model, "passed": False,
+        "error": "WorkerTimeoutOrExit", "seconds": round(time.monotonic() - started, 2)}
+    diagnostic = (Path(state) / "worker.log").read_text()[-6000:]
+    for name, value in os.environ.items():
+        if len(value) >= 16 and any(word in name for word in ("KEY", "TOKEN", "SECRET")):
+            diagnostic = diagnostic.replace(value, "[redacted]")
+    report["diagnostic"] = diagnostic
+    return report
 
 
 if __name__ == "__main__":

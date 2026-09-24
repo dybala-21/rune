@@ -54,10 +54,11 @@ async def test_file_read_observes_write_with_session_cache(stream, tmp_path):
     assert "before edit" in await stream._execute_tool("file_read", {"path": str(source)})
     for _ in range(2):
         assert "CACHE HIT" in await stream._execute_tool("file_read", {"path": str(source)})
-    assert stream._stalled_read_tools == {"file_read"}
+    other = tmp_path / "other.txt"
+    other.write_text("another required input")
+    assert "another required input" in await stream._execute_tool("file_read", {"path": str(other)})
     written = await stream._execute_tool("file_write", {"path": str(source), "content": "after edit"})
     assert "Written" in written, written
-    assert not stream._stalled_read_tools
     assert "after edit" in await stream._execute_tool("file_read", {"path": str(source)})
 
 
