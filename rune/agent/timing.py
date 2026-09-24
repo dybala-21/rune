@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -138,6 +140,11 @@ async def timed_completion(completion, params):
                        (params.get("extra_body") or {}).get("reasoning", {}).get("effort"))
     started = time.monotonic()
     row = measurement.__enter__()
+    if params.get("tools"):
+        # Store only a hash of the tool catalog.
+        catalog = json.dumps(params["tools"], sort_keys=True, separators=(",", ":"), default=str)
+        row["toolCatalogHash"] = hashlib.sha256(catalog.encode()).hexdigest()[:16]
+        row["toolCount"] = len(params["tools"])
     run["usage"]["calls"] += 1
     run["usage"]["by_model"].setdefault(row["model"], _usage_totals())["calls"] += 1
     try:
@@ -154,7 +161,10 @@ async def timed_completion(completion, params):
         try:
             async for chunk in response:
                 _record_usage(run, row, chunk, streaming=True, request=params)
-                row.setdefault("firstEventMs", round((time.monotonic() - started) * 1000, 1))
+                elapsed = round((time.monotonic() - started) * 1000, 1)
+                row.setdefault("firstEventMs", elapsed)
+                row["lastEventMs"] = elapsed
+                row["eventCount"] = row.get("eventCount", 0) + 1
                 for choice in getattr(chunk, "choices", None) or []:
                     if getattr(getattr(choice, "delta", None), "content", None):
                         row.setdefault("firstTextMs", round((time.monotonic() - started) * 1000, 1))

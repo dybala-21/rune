@@ -920,6 +920,7 @@ class StreamResult:
         self._verification_callback = verification_callback
         self._verification_state = verification_state
         self._tool_recovery = tool_recovery
+        self._recovery_rejections = 0
         self._require_verification = require_verification
         self._verification_sequence = 0
         self._workspace_root = os.path.abspath(os.path.expanduser(workspace_root or os.getcwd()))
@@ -1056,7 +1057,8 @@ class StreamResult:
             _stale_roles.cancel()
         self._artifact_roles_task = None
         self._cached_read_counts: dict[str, int] = {}
-        self._stalled_read_tools: set[str] = set()
+        self._seen_cached_reads: set[str] = set()
+        self._recovery_rejections = 0
         self._artifact_request = ""
         self._task_blocked = ""
         self._tamper_blocks = 0
@@ -1068,6 +1070,7 @@ class StreamResult:
         self._reobs_removed: dict[str, int] = {}
         self._reobs_nudges = 0
         self._policy.reset()
+        report_language = "ko" if any("가" <= char <= "힣" for char in self._request) else "en"
 
         # Classify unresolved files during the first response. Tools wait
         # for the result before checking whether a write invents an input.
@@ -1086,7 +1089,7 @@ class StreamResult:
             recovery_tools = self._tool_recovery() if self._tool_recovery else None
             verification_pending = bool(verification and verification.pending and self._require_verification)
             if verification is not None:
-                context = verification.model_context(since_sequence=self._verification_sequence)
+                context = verification.model_context(since_sequence=self._verification_sequence, language=report_language)
                 self._verification_sequence = verification.sequence
                 if context:
                     # Append evidence without changing the cached system prefix.
@@ -1138,11 +1141,6 @@ class StreamResult:
                     _tools = narrowed
                     extra["tool_choice"] = "required"
                     narrowed_recovery = True
-            if self._stalled_read_tools and _tools:
-                _tools = [tool for tool in _tools
-                          if tool.get("function", {}).get("name") not in self._stalled_read_tools] or None
-                if not _tools:
-                    extra.pop("tool_choice", None)
             if (self._model.startswith(("gemini/", "vertex_ai/gemini-"))
                     and extra.get("tool_choice") == "required" and not narrowed_recovery):
                 # Gemini's ANY mode can exceed its schema limit with the full catalog.
@@ -2165,8 +2163,16 @@ class StreamResult:
     @controlled_tool
     async def _execute_tool(self, name: str, params: dict[str, Any]) -> str | ToolOutput:
         """Dispatch through the tool's guards and state-aware read cache."""
-        # TAFC: strip 'think' reasoning parameter before execution
+        # The optional reasoning field is not a tool argument.
         params.pop("think", None)
+
+        recovery = self._tool_recovery() if self._tool_recovery else None
+        if recovery and name not in recovery:
+            self._recovery_rejections += 1
+            if self._recovery_rejections >= 3:
+                self._task_blocked = "The model repeatedly skipped required verification. The result remains unverified."
+            return "[BLOCKED] Required verification is pending. Use only: " + ", ".join(sorted(recovery)) + "."
+        self._recovery_rejections = 0
 
         # A failed browser action must leave observation tools available.
         _group = "" if name.startswith("browser_") else self._TOOL_GROUPS.get(name, "")
@@ -2227,20 +2233,24 @@ class StreamResult:
 
             if isinstance(result, CachedToolResult):
                 counts = getattr(self, "_cached_read_counts", {})
+                seen = getattr(self, "_seen_cached_reads", set())
+                if result.cache_key not in seen:
+                    # Only new evidence resets the repeat count.
+                    counts.clear()
+                    seen.add(result.cache_key)
+                self._seen_cached_reads = seen
                 count = counts[result.cache_key] = counts.get(result.cache_key, 0) + 1
                 self._cached_read_counts = counts
                 if count >= 2:
-                    self._stalled_read_tools = getattr(self, "_stalled_read_tools", set()) | {name}
                     result = str(result) + (
-                        "\nThis unchanged read is temporarily unavailable. Use the recorded result, "
-                        "perform the required verification, or explain what is missing."
+                        "\nThis exact read returned unchanged cached evidence again. Reuse that evidence, "
+                        "read a different file or range if needed, or perform the next action or verification."
                     )
                 if count >= 4:
                     self._task_blocked = "The model kept requesting unchanged cached results instead of progressing."
             elif not _looks_like_tool_failure(str(result)):
-                # A fresh observation or successful action makes further reads useful again.
                 self._cached_read_counts = {}
-                self._stalled_read_tools = set()
+                self._seen_cached_reads = set()
             result_str = str(result) if result is not None else ""
             if name == "task_blocked":
                 from rune.capabilities.blocked import blocked_reason
