@@ -45,12 +45,14 @@ IntentKind = Literal[
     "research",
     "code_read",
     "code_write",
+    "execution",
+    "calculation",
     "browser_read",
     "browser_write",
     "mixed",
 ]
 
-ToolRequirement = Literal["none", "read", "write"]
+ToolRequirement = Literal["none", "read", "write", "execute"]
 GroundingRequirement = Literal["none", "recommended", "required"]
 IntentResolutionState = Literal["resolved", "unresolved"]
 IntentUnresolvedReason = Literal[
@@ -159,6 +161,30 @@ def resolve_intent_contract(
     }
     category = _CATEGORY_MAP.get(_gt, _gt)
 
+    if category == "browser":
+        return IntentContract(
+            kind="browser_write", tool_requirement="write",
+            grounding_requirement="none", output_expectation=output_expectation,
+            requires_code_verification=False,
+        )
+
+    if ("calculation" in getattr(classification, "intent_categories", ())
+            and _gt in {"chat", "research"}
+            and not {"table", "document"} & set(getattr(classification, "intent_categories", ()))
+            and not requires_execution and output_expectation == "text"):
+        return IntentContract(
+            kind="calculation", tool_requirement="read",
+            grounding_requirement="none", output_expectation="text",
+            requires_code_verification=False,
+        )
+
+    if _gt == "execution":
+        return IntentContract(
+            kind="execution", tool_requirement="execute",
+            grounding_requirement="none", output_expectation=output_expectation,
+            requires_code_verification=False,
+        )
+
     if requires_execution:
         if category == "code":
             return IntentContract(
@@ -168,14 +194,6 @@ def resolve_intent_contract(
                 output_expectation=output_expectation,
                 requires_code_verification=True,
                 requires_code_write_artifact=True,
-            )
-        if category == "browser":
-            return IntentContract(
-                kind="browser_write",
-                tool_requirement="write",
-                grounding_requirement="none",
-                output_expectation=output_expectation,
-                requires_code_verification=True,
             )
         return IntentContract(
             kind="mixed",
@@ -191,15 +209,6 @@ def resolve_intent_contract(
             tool_requirement="read",
             grounding_requirement="required",
             output_expectation="text",
-            requires_code_verification=False,
-        )
-
-    if category == "browser":
-        return IntentContract(
-            kind="browser_read",
-            tool_requirement="read",
-            grounding_requirement="none",
-            output_expectation=output_expectation,
             requires_code_verification=False,
         )
 

@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from rune.agent.provenance import ArtifactRoleHints
@@ -22,6 +22,7 @@ class RoutingDecision:
     model: str
     fallback_reason: str = ""
     artifact_roles: ArtifactRoleHints | None = None
+    diagnostics: dict = field(default_factory=dict)
 
 
 # Pause on service failures, not on uncertainty about an individual request.
@@ -67,6 +68,7 @@ async def classify_request(system: str, content: str) -> RoutingDecision:
     deadline = asyncio.get_running_loop().time() + contract.ROUTING_TIMEOUT
     reason = ""
     artifact_roles = None
+    diagnostics = {}
     if settings.backend == "jev":
         reason = accelerator_status(selected)
         if reason in {"ready", "unverified"}:
@@ -83,9 +85,10 @@ async def classify_request(system: str, content: str) -> RoutingDecision:
                 if _key_id() == key_id:
                     _verified_key = key_id
                 artifact_roles = batch.artifact_roles
+                diagnostics = batch.diagnostics
                 if batch.values is not None:
                     return RoutingDecision(contract.validate_decision(batch.values), "jev", MODEL,
-                                           artifact_roles=artifact_roles)
+                                           artifact_roles=artifact_roles, diagnostics=diagnostics)
                 reason = batch.fallback_reason
             except DecisionAbstained as exc:
                 reason = exc.reason
@@ -98,9 +101,9 @@ async def classify_request(system: str, content: str) -> RoutingDecision:
                         _rejected_key = key_id
                     else:
                         _cooldown = (key_id, time.monotonic() + 30)
-            log.info("decision_fallback", backend="jev", reason=reason)
+            log.info("decision_fallback", backend="jev", reason=reason, **diagnostics)
 
     values = await contract.request_classification(
         get_llm_client(), system, content, selected=selected, deadline=deadline,
     )
-    return RoutingDecision(values, "connected", selected.model, reason, artifact_roles)
+    return RoutingDecision(values, "connected", selected.model, reason, artifact_roles, diagnostics)

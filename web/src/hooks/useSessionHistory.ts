@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { fetchSessionTurns, type SessionTurn } from '../api';
 import { restoreRunMessages, type RunSnapshot } from '../utils/runSnapshot';
 import { computeActivitySummary } from '../utils/tooling';
@@ -33,6 +33,7 @@ function hydrateTurns(turns: SessionTurn[], run?: RunSnapshot | null): SessionHi
     id: nextId(),
     role: t.role === 'assistant' ? 'assistant' as const : 'user' as const,
     content: t.content,
+    attachments: t.attachments, requestId: t.requestId, delivery: 'accepted',
     timestamp: new Date(t.timestamp).getTime() || Date.now(),
   }));
   const toolCalls = run ? run.toolCalls.map((call, index) => ({ ...call, id: call.callId || `${run.runId}:tool:${index}` })) : [];
@@ -54,19 +55,25 @@ export function useSessionHistory() {
   const [loading, setLoading] = useState(false);
   // Guards against a slow load for session A overwriting a later-selected B.
   const reqRef = useRef(0);
+  const requestRef = useRef<AbortController | null>(null);
+  useEffect(() => () => { requestRef.current?.abort(); reqRef.current++; }, []);
 
   const loadSession = useCallback(async (sessionId: string | null) => {
     const reqId = ++reqRef.current;
+    requestRef.current?.abort();
+    setHistoryState(null);
     if (!sessionId) {
       setViewingSessionId(null);
-      setHistoryState(null);
+      setLoading(false);
       return;
     }
 
+    const request = new AbortController();
+    requestRef.current = request;
     setLoading(true);
     setViewingSessionId(sessionId);
     try {
-      const result = await fetchSessionTurns(sessionId);
+      const result = await fetchSessionTurns(sessionId, request.signal);
       if (reqId !== reqRef.current) return; // superseded by a newer selection
       setHistoryState(hydrateTurns(result.turns, result.run));
     } catch {

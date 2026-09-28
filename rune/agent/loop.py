@@ -1190,6 +1190,10 @@ class NativeAgentLoop(EventEmitter):
             self._status = AgentStatus.THINKING
             await self.emit("status_change", self._status)
 
+            from rune.capabilities.browser.session import describe_browser_session
+            browser_state = await describe_browser_session()
+            context = {**(context or {}), "browser_state": browser_state}
+
             from rune.config.defaults import TOKEN_OPTIMIZATION_ENABLED
 
             # Reuse a caller-supplied classification only for the single-turn
@@ -1216,6 +1220,7 @@ class NativeAgentLoop(EventEmitter):
                         goal,
                         previous_goal=_prev_goal,
                         previous_goal_type=_prev_goal_type,
+                        browser_state=browser_state,
                     )
 
             if not getattr(classification, "available", True):
@@ -1438,13 +1443,26 @@ class NativeAgentLoop(EventEmitter):
         """Select tool subset based on goal classification."""
         from rune.config.defaults import TOOLS_CHAT, TOOLS_RESEARCH, TOOLS_WEB
 
+        if resolve_intent_contract(classification, classification.confidence).kind == "calculation":
+            return ["think", "ask_user", "task_blocked", "file_read", "file_list", "file_search", "document_read", "bash_execute"]
+
         match classification.goal_type:
             case "chat":
+                if not classification.intent_categories:
+                    return ["think", "ask_user", "memory_search", "memory_save"]
                 return TOOLS_CHAT
             case "web":
                 return TOOLS_WEB
             case "research":
+                if not classification.intent_categories & {"document", "table"}:
+                    return [name for name in TOOLS_RESEARCH if name not in {
+                        "document_create", "document_bundle", "document_bundle_update", "table_requirements", "table_verify",
+                    }]
                 return TOOLS_RESEARCH
+            case "browser":
+                from rune.capabilities.registry import get_capability_registry
+                return ["think", "ask_user", "task_blocked", "web_search", "web_fetch",
+                        *[name for name in get_capability_registry().list_names() if name.startswith("browser_")]]
             case _:
                 # Full toolset for code_modify, execution, browser, full
                 from rune.capabilities.registry import get_capability_registry
@@ -1611,14 +1629,12 @@ class NativeAgentLoop(EventEmitter):
             }
         goal_category = _CATEGORY_MAP.get(classification.goal_type, "full")
 
-        # Enable deep research prompts (synthesis verification, source quality)
-        # for research/web/full tasks, but NOT for simple chat
         goal_type = getattr(classification, "goal_type", "")
-        is_deep = goal_type in ("research", "web", "full") and goal_type != "chat"
+        is_deep = goal_type in ("research", "full") and not classification.intent_categories & {"desktop", "calculation"}
 
         # Build repo map for code tasks (auto-selects most relevant symbols)
         repo_map_text: str | None = None
-        if goal_category in ("code", "full"):
+        if goal_category in ("code", "full") and "calculation" not in classification.intent_categories:
             try:
                 from rune.intelligence.repo_map import build_repo_map_sync
 
@@ -1653,6 +1669,7 @@ class NativeAgentLoop(EventEmitter):
             },
             repo_map=repo_map_text,
             is_deep_research=is_deep,
+            browser_state=(context or {}).get("browser_state"),
             has_mcp_services=bool(_mcp_servers),
             mcp_server_names=_mcp_servers,
             skill_context=self._build_skill_context(goal, goal_category),
@@ -1687,6 +1704,8 @@ class NativeAgentLoop(EventEmitter):
         from rune.agent.file_outcomes import FileOutcomes, may_have_changed
 
         file_outcomes = FileOutcomes(self._workspace_root)
+        from rune.agent.task_evidence import TaskEvidence
+        task_evidence = TaskEvidence.for_request(goal, classification)
 
         # Initialize rehydration subsystem
         try:
@@ -1751,6 +1770,8 @@ class NativeAgentLoop(EventEmitter):
                 await self.emit("tool_result", _tool_result_event_payload(cap_name, result))
                 return
             file_outcomes.observe(cap_name, _last_tool_params, result, _expected_edit.get())
+            task_evidence.observe(cap_name, result)
+            evidence.browser_writes = task_evidence.browser_actions
             if result.success and cap_name in {"bash_execute", "file_read"}:
                 for path in file_outcomes.reconcile():
                     evidence.writes += 1
@@ -2095,6 +2116,9 @@ class NativeAgentLoop(EventEmitter):
             repo_fix=_repo_fix,
         )
         _explore_budget = _compute_explore_budget(classification, _repo_fix)
+        from rune.agent.role_decisions import RoleDecisions
+
+        role_decisions = RoleDecisions(goal, self._workspace_root)
         agent = LiteLLMAgent(
             model=model,
             system_prompt=system_prompt,
@@ -2139,7 +2163,7 @@ class NativeAgentLoop(EventEmitter):
         if _attachments:
             from rune.agent.attachments import build_user_content
             content, skipped = await build_user_content(
-                goal, _attachments, vision=supports_vision(model)
+                goal, _attachments, vision=supports_vision(model), workspace_root=self._workspace_root
             )
             # Seed whatever came back. When nothing could be sent, the content
             # is a plain string carrying the reasons; appending it is what tells
@@ -2530,6 +2554,7 @@ class NativeAgentLoop(EventEmitter):
                     usage_limits=usage_limits,
                     workspace_root=self._workspace_root,
                     artifact_roles=classification.artifact_roles if classification else None,
+                    role_decisions=role_decisions,
                     verification_state=lambda: self._verification,
                     tool_recovery=(self._table_acceptance.recovery_tools if self._table_acceptance else None),
                     require_verification=verify_freshness_enabled or _require_test_pass,
@@ -2914,9 +2939,20 @@ class NativeAgentLoop(EventEmitter):
                     continue
 
                 intent_contract = resolve_intent_contract(classification, classification.confidence)
-                needs_action = (intent_contract.tool_requirement == "write"
+                if output_text and output_text.strip() and (blocker := task_evidence.blocker(intent_contract, evidence.executions)):
+                    self._record_completion_block("Task outcome", blocker)
+                    _gate_blocked_count += 1
+                    if _gate_blocked_count >= 2:
+                        trace.reason = "max_gate_blocked"
+                        trace.final_step = self._step
+                        break
+                    messages = self._inject_system_message(messages, "[Completion Gate] " + blocker)
+                    continue
+                needs_action = (intent_contract.tool_requirement in {"write", "execute"}
+                                and intent_contract.kind != "browser_write"
                                 and "desktop" not in classification.intent_categories)
-                action_evidence = evidence.writes + evidence.executions
+                action_evidence = (evidence.executions if intent_contract.kind == "execution"
+                                   else evidence.writes + evidence.executions)
                 if needs_action and action_evidence == 0 and output_text and output_text.strip():
                     detail = "No successful action confirms the requested result."
                     self._record_completion_block("Requested action", detail)
@@ -3123,6 +3159,7 @@ class NativeAgentLoop(EventEmitter):
                 gate_input = CompletionGateInput(
                     intent_resolved=bool(output_text),
                     tool_requirement=effective_tool_req,
+                    intent_kind=intent_contract.kind,
                     output_expectation=effective_output_exp,
                     evidence=evidence,
                     changed_files_count=evidence.writes,
@@ -3589,6 +3626,15 @@ class NativeAgentLoop(EventEmitter):
         if consume_block():
             trace.reason = "task_blocked"
             log.info("run_task_blocked", step=self._step)
+
+        if trace.reason == "completed":
+            contract = resolve_intent_contract(classification, classification.confidence)
+            blocker = task_evidence.blocker(contract, evidence.executions)
+            if contract.kind == "execution" and not evidence.executions:
+                blocker = "The requested command has no successful execution evidence."
+            if blocker:
+                self._record_completion_block("Task outcome", blocker)
+                trace.reason = "max_gate_blocked"
 
         # Neither is finishing on top of a failing check. The verdict is
         # mechanical — the last test execution this run saw, whoever ran it —

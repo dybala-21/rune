@@ -422,12 +422,14 @@ def create_app() -> Any:
         uptime_seconds: float
 
     class MessageAttachment(BaseModel):
+        ref: str = ""
         name: str
         mimeType: str = ""
         data: str = ""
 
     class MessageRequest(BaseModel):
         text: str = ""
+        request_id: str = Field(default="", alias="requestId", max_length=128)
         attachments: list[MessageAttachment] | None = None
         # Conversation pin; without it the server-side sticky conversation
         # keeps live-chat continuity.
@@ -470,6 +472,9 @@ def create_app() -> Any:
     from rune.api.run_store import RunStore
     _run_store = RunStore()
     _run_snapshots = RunSnapshots(_run_store)
+    from rune.api.run_admission import RunAdmission, RunBusy
+
+    _admission = RunAdmission(_run_snapshots, _run_store, _computers)
     _run_recovery = RunRecovery(_run_snapshots, _run_store, browser_for_session=lambda sid: (
         _computers.entries[sid].browser if sid in _computers.entries else None
     ))
@@ -538,9 +543,11 @@ def create_app() -> Any:
                     log.debug("web_conv_resolve_failed", error=str(exc)[:100])
                     conv_manager = None
             computer = await _computers.claim(conv_id or session_id or run_id, run_id)
-            if conv_manager is not None and conv_id and resume_from is None:
-                conv_wiring.record_user_turn(conv_manager, conv_id, goal, attachments)
-                await conv_manager._store.save(conv_manager._active[conv_id], embed=False)
+            from rune.api.attachment_store import AttachmentStore
+
+            stored = (_run_snapshots.get(run_id) or {}).get("execution", {}).get("attachments")
+            if stored:
+                attachments = AttachmentStore(_run_store.db).hydrate(conv_id or session_id or "", stored)
 
             _run_snapshots.start(run_id, conv_id or session_id or "", goal)
 
@@ -555,6 +562,12 @@ def create_app() -> Any:
             _run_recovery.workspace_available(run_id, turn_cwd, resuming=resume_from is not None)
             _run_snapshots.record("run_context", {"runId": run_id, "workspace": turn_cwd})
 
+            user_turn = None
+            if conv_manager is not None and conv_id and resume_from is None:
+                user_turn = conv_wiring.record_user_turn(conv_manager, conv_id, goal, attachments,
+                                             request_id=(_run_snapshots.get(run_id) or {}).get("requestId", ""))
+                await conv_manager._store.save(conv_manager._active[conv_id], embed=False)
+
             agent_ctx = await prepare_agent_context(
                 PrepareContextOptions(
                     goal=goal,
@@ -566,6 +579,16 @@ def create_app() -> Any:
                 ),
                 conversation_manager=conv_manager,
             )
+            from rune.agent.document_attachments import DOCUMENT_SUFFIXES, save_document
+
+            for attachment in attachments or []:
+                if attachment.get("ref") and not attachment.get("mimeType", "").startswith("image/") and Path(attachment["name"]).suffix.lower() in DOCUMENT_SUFFIXES:
+                    attachment["path"] = await asyncio.to_thread(
+                        save_document, attachment["name"], attachment["data"], agent_ctx.workspace_root, attachment["ref"],
+                    )
+            if user_turn is not None and any(a.get("path") for a in attachments or []):
+                user_turn.content += conv_wiring.document_copy_context(attachments or [])
+                await conv_manager._store.save(conv_manager._active[conv_id], embed=False)
             _run_recovery.workspace_available(run_id, agent_ctx.workspace_root, resuming=resume_from is not None)
             if conv_manager is not None and conv_id and not workspace:
                 await conv_wiring.set_workspace(conv_id, agent_ctx.workspace_root)
@@ -643,7 +666,7 @@ def create_app() -> Any:
             computer.journal = journal
             _run_snapshots.record("run_context", {
                 "runId": run_id, "workspace": agent_ctx.workspace_root, "recoveryVersion": 1,
-                "execution": {"attachments": attachments or []},
+                "execution": {"attachments": stored or attachments or []},
             })
 
             collected: list[str] = []
@@ -1128,11 +1151,11 @@ def create_app() -> Any:
         model override — without mutating global config."""
 
         async def _run(goal: str, agent_config: Any = None) -> str:
-            run_id = uuid4().hex[:16]
+            run_id, session, _ = await _admission.accept(goal, session_id, sticky=True)
             task = asyncio.create_task(
                 _run_agent_for_client(
                     goal=goal, run_id=run_id, client_id=None,
-                    session_id=session_id, sticky=True,
+                    session_id=session or None, sticky=True,
                     agent_config=agent_config,
                 )
             )
@@ -1210,7 +1233,7 @@ def create_app() -> Any:
     async def run_snapshot(session_id: str = Query(alias="sessionId", min_length=1)) -> dict[str, Any]:
         snapshot = _run_snapshots.latest(session_id)
         if snapshot:
-            from rune.api.conversation_wiring import get_conv_manager
+            from rune.api.conversation_wiring import get_conv_manager, turn_metadata
 
             manager = get_conv_manager()
             conversation = manager._active.get(session_id) if manager else None
@@ -1219,7 +1242,8 @@ def create_app() -> Any:
             if conversation is not None:
                 snapshot["history"] = [
                     {"id": f"history:{session_id}:{index}", "role": turn.role,
-                     "content": turn.content, "timestamp": turn.timestamp.timestamp() * 1000}
+                     "content": turn.content, "timestamp": turn.timestamp.timestamp() * 1000,
+                     **turn_metadata(turn)}
                     for index, turn in enumerate(conversation.turns[-1200:])
                 ]
         return {"run": snapshot}
@@ -1384,8 +1408,13 @@ def create_app() -> Any:
                 if msg_type == "message":
                     text = msg.get("text", "")
                     if text:
-                        run_id = uuid4().hex[:16]
-                        _run_snapshots.start(run_id, msg.get("sessionId") or "", text)
+                        try:
+                            run_id, session, _ = await _admission.accept(
+                                text, msg.get("sessionId"), sticky=True, attachments=msg.get("attachments"),
+                            )
+                        except ValueError as exc:
+                            await ws.send_text(json_encode({"event": "error", "data": {"error": str(exc)}}))
+                            continue
                         ws_attachments = msg.get("attachments") or None
                         task = asyncio.create_task(
                             _run_agent_for_client(
@@ -1393,7 +1422,7 @@ def create_app() -> Any:
                                 run_id=run_id,
                                 client_id=client_id,
                                 attachments=ws_attachments,
-                                session_id=msg.get("sessionId") or None,
+                                session_id=session or None,
                                 sticky=True,
                             )
                         )
@@ -1452,13 +1481,15 @@ def create_app() -> Any:
     )
     @app.post("/api/v1/agent/execute", dependencies=[Depends(auth)])
     async def execute(req: ExecuteRequest) -> Any:
-        run_id = uuid4().hex[:16]
-        _run_snapshots.start(run_id, req.session_id or "", req.goal)
+        try:
+            run_id, session, _ = await _admission.accept(req.goal, req.session_id)
+        except RunBusy as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
         if req.stream:
             # NDJSON streaming response
             return StreamingResponse(
-                _ndjson_execution(req.goal, run_id, session_id=req.session_id),
+                _ndjson_execution(req.goal, run_id, session_id=session or None),
                 media_type="application/x-ndjson",
                 headers={
                     "Cache-Control": "no-cache",
@@ -1471,7 +1502,7 @@ def create_app() -> Any:
         task = asyncio.create_task(
             _run_agent_for_client(
                 goal=req.goal, run_id=run_id, client_id=None,
-                session_id=req.session_id,
+                session_id=session or None,
             )
         )
         _active_tasks[run_id] = task
@@ -1540,28 +1571,38 @@ def create_app() -> Any:
                         )
                     return {"ok": True, "command": cmd_name}
 
-        run_id = uuid4().hex[:16]
         raw_attachments = [
             {
                 "name": os.path.basename(a.name) if a.name else f"attachment_{i}",
                 "mimeType": a.mimeType,
                 "data": a.data,
+                "ref": a.ref,
             }
             for i, a in enumerate(req.attachments or [])
         ]
-        _run_snapshots.start(run_id, req.session_id or "", req.text)
+        try:
+            run_id, session, replayed = await _admission.accept(
+                req.text, req.session_id, sticky=True, request_id=req.request_id, attachments=raw_attachments,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        from rune.api.attachment_store import attachment_refs
+
+        refs = attachment_refs((_run_snapshots.get(run_id) or {}).get("execution", {}).get("attachments", []))
+        if replayed:
+            return {"ok": True, "runId": run_id, "replayed": True, "attachments": refs}
         task = asyncio.create_task(
             _run_agent_for_client(
                 goal=req.text, run_id=run_id, client_id=None,
                 attachments=raw_attachments or None,
-                session_id=req.session_id,
+                session_id=session or None,
                 sticky=True,
             )
         )
         _active_tasks[run_id] = task
         task.add_done_callback(lambda _t, _rid=run_id: _finish_run(_rid))
         # The client uses runId to route events and target Stop.
-        return {"ok": True, "runId": run_id}
+        return {"ok": True, "runId": run_id, "attachments": refs}
 
     @app.post("/api/voice/transcribe", dependencies=[Depends(auth)])
     async def api_voice_transcribe(request: Request) -> dict[str, Any]:
@@ -1629,19 +1670,14 @@ def create_app() -> Any:
         except Exception:
             pass
 
-        if run_id:
-            # Never fall back to another run when the requested run has already ended.
-            if run_id in _active_loops or run_id in _active_tasks:
-                await _stop_run(run_id)
-                return {"ok": True}
-            return {"ok": True, "stopped": False, "reason": "run is not active"}
-
-        # No runId given (an older client): abort the most recent active run.
-        rid = (list(_active_loops.keys())[-1] if _active_loops
-               else list(_active_tasks.keys())[-1] if _active_tasks else "")
-        if rid:
-            await _stop_run(rid)
-        return {"ok": True}
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise HTTPException(status_code=400, detail="A runId is required to stop a task.")
+        if run_id in _active_loops or run_id in _active_tasks:
+            await _stop_run(run_id)
+            task = _active_tasks.get(run_id)
+            stopped = (task is None or task.done()) and run_id not in _active_loops
+            return {"ok": True, "stopped": stopped, "stopping": not stopped}
+        return {"ok": True, "stopped": False, "reason": "run is not active"}
 
     @app.post("/api/approval", dependencies=[Depends(auth)])
     async def api_approval(req: ApprovalRequestModel) -> dict[str, Any]:
@@ -1820,6 +1856,7 @@ def create_app() -> Any:
                             "role": t.role,
                             "content": t.content,
                             "timestamp": t.timestamp.isoformat(),
+                            **conversation_wiring.turn_metadata(t),
                         }
                         for t in conv.turns
                         if t.role in ("user", "assistant")

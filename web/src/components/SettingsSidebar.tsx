@@ -13,6 +13,7 @@ import {
   type ChannelInfo,
 } from '../api';
 import { toast } from '../utils/toast';
+import { SettingsSection, SettingsItem, MemoryField, memoryInputStyle } from './SettingsControls';
 import { DecisionRoutingSettings } from './DecisionRoutingSettings';
 
 interface SettingsSidebarProps {
@@ -62,17 +63,9 @@ const MEMORY_PRESET_VALUES = {
   },
 } as const;
 const MEMORY_PRESET_ORDER = ['speed', 'balanced', 'accuracy'] as const;
-const SAFETY_PRESET_ORDER = ['conservative', 'balanced', 'developer'] as const;
-const SAFETY_PRESET_HINTS: Record<typeof SAFETY_PRESET_ORDER[number], string> = {
-  conservative: 'strict lock',
-  balanced: 'auto rollout',
-  developer: 'balanced lock',
-};
-
 type MemoryPolicyMode = typeof MEMORY_POLICY_MODES[number];
 type MemoryPreset = typeof MEMORY_PRESET_ORDER[number];
 type MemoryDraftPreset = MemoryPreset | 'custom';
-type SafetyPreset = typeof SAFETY_PRESET_ORDER[number];
 
 interface MemoryTuningDraft {
   preset: MemoryDraftPreset;
@@ -113,7 +106,6 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
   const editMemoryDraft: typeof setMemoryDraft = (v) => { memoryDirtyRef.current = true; setMemoryDraft(v); };
   const [savingMemory, setSavingMemory] = useState(false);
   const [memoryError, setMemoryError] = useState<string | null>(null);
-  const [selectedSafetyPreset, setSelectedSafetyPreset] = useState<SafetyPreset | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -129,7 +121,6 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
       if (cfg.status === 'fulfilled') {
         setConfig(cfg.value);
         if (!memoryDirtyRef.current) setMemoryDraft(toMemoryTuningDraft(cfg.value));
-        setSelectedSafetyPreset(cfg.value.safetyTuning.preset);
       }
       if (ch.status === 'fulfilled') setChannels(ch.value.channels);
       if (cron.status === 'fulfilled') setCronCount(cron.value.jobs.length);
@@ -154,7 +145,6 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
       const updated = await fetchConfig();
       setConfig(updated);
       setMemoryDraft(toMemoryTuningDraft(updated));
-      setSelectedSafetyPreset(updated.safetyTuning.preset);
     } catch {
       toast.error("Couldn't change the proactive setting");
     } finally {
@@ -170,7 +160,6 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
       const updated = await fetchConfig();
       setConfig(updated);
       setMemoryDraft(toMemoryTuningDraft(updated));
-      setSelectedSafetyPreset(updated.safetyTuning.preset);
     } catch {
       toast.error("Couldn't change the advisor setting");
     } finally {
@@ -214,7 +203,6 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
       setConfig(updated);
       memoryDirtyRef.current = false;   // saved — the refresh may take over again
       setMemoryDraft(toMemoryTuningDraft(updated));
-      setSelectedSafetyPreset(updated.safetyTuning.preset);
     } catch (error) {
       setMemoryError(error instanceof Error ? error.message : "Couldn't save memory tuning");
     } finally {
@@ -279,15 +267,11 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
       background: 'var(--bg-primary)',
     }}>
       <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
-        {config?.decisionRouting && (
-          <DecisionRoutingSettings routing={config.decisionRouting}
-            onSaved={load} />
-        )}
-
         {/* Proactive toggle */}
         {config && (
           <div style={{ padding: '6px 14px', marginBottom: 4 }}>
             <button
+              role="switch" aria-checked={config.proactiveEnabled}
               onClick={handleToggleProactive}
               disabled={toggling}
               style={{
@@ -313,7 +297,7 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
                 <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
                   Proactive
                 </div>
-                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 1 }}>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 1 }}>
                   Autonomous suggestions
                 </div>
               </div>
@@ -346,6 +330,7 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
         {config && (
           <div style={{ padding: '6px 14px', marginBottom: 4 }}>
             <button
+              role="switch" aria-checked={config.advisorEnabled}
               onClick={handleToggleAdvisor}
               disabled={toggling}
               style={{
@@ -371,7 +356,7 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
                 <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
                   Advisor
                 </div>
-                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 1 }}>
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 1 }}>
                   Stronger-model guidance at key moments
                 </div>
               </div>
@@ -400,189 +385,12 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
           </div>
         )}
 
-        {config && memoryDraft && (
-          <div style={{ padding: '6px 14px', marginBottom: 6 }}>
-            <div style={{
-              padding: '10px 12px',
-              background: 'var(--bg-secondary)',
-              border: '1px solid var(--border-subtle)',
-              borderRadius: 'var(--radius-md)',
-            }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
-                Memory Tuning
-              </div>
-              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2, marginBottom: 10 }}>
-                Scope: project (.rune/.env)
-              </div>
-
-              <div style={{ display: 'grid', gap: 8 }}>
-                <div style={{ display: 'grid', gap: 6 }}>
-                  <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>Preset</span>
-                  <div style={{ display: 'flex', gap: 6 }}>
-                    {MEMORY_PRESET_ORDER.map((preset) => {
-                      const active = memoryDraft.preset === preset;
-                      return (
-                        <button
-                          key={preset}
-                          onClick={() => applyPreset(preset)}
-                          style={{
-                            flex: 1,
-                            padding: '4px 6px',
-                            borderRadius: 'var(--radius-sm)',
-                            border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
-                            background: active ? 'var(--accent-subtle)' : 'var(--bg-tertiary)',
-                            color: active ? 'var(--accent)' : 'var(--text-secondary)',
-                            fontSize: 10,
-                            fontWeight: 600,
-                            cursor: 'pointer',
-                            textTransform: 'capitalize',
-                          }}
-                        >
-                          {preset}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                <label style={{ display: 'grid', gap: 4 }}>
-                  <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>Policy Mode</span>
-                  <select
-                    value={memoryDraft.policyMode}
-                    onChange={(e) => {
-                      const next = e.target.value as MemoryPolicyMode;
-                      editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', policyMode: next } : prev));
-                    }}
-                    style={memoryInputStyle}
-                  >
-                    {MEMORY_POLICY_MODES.map((mode) => (
-                      <option key={mode} value={mode}>{mode}</option>
-                    ))}
-                  </select>
-                </label>
-
-                <MemoryField
-                  label="Semantic Limit (1~20)"
-                  value={memoryDraft.semanticLimit}
-                  onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', semanticLimit: value } : prev))}
-                />
-                <MemoryField
-                  label="Semantic Min Score (0~1)"
-                  value={memoryDraft.semanticMinScore}
-                  onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', semanticMinScore: value } : prev))}
-                />
-                <MemoryField
-                  label="Uncertain Semantic Limit (1~20)"
-                  value={memoryDraft.uncertainSemanticLimit}
-                  onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', uncertainSemanticLimit: value } : prev))}
-                />
-                <MemoryField
-                  label="Uncertain Semantic Min Score (0~1)"
-                  value={memoryDraft.uncertainSemanticMinScore}
-                  onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', uncertainSemanticMinScore: value } : prev))}
-                />
-                <MemoryField
-                  label="Max Episodes (1~50)"
-                  value={memoryDraft.maxEpisodes}
-                  onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', maxEpisodes: value } : prev))}
-                />
-                <MemoryField
-                  label="Context Max Chars (1000~32000)"
-                  value={memoryDraft.contextMaxChars}
-                  onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', contextMaxChars: value } : prev))}
-                />
-              </div>
-
-              {memoryError && (
-                <div style={{ marginTop: 8, fontSize: 10, color: 'var(--danger)' }}>
-                  {memoryError}
-                </div>
-              )}
-
-              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 10 }}>
-                <button
-                  onClick={handleSaveMemoryTuning}
-                  disabled={savingMemory}
-                  style={{
-                    padding: '4px 10px',
-                    background: savingMemory ? 'var(--bg-tertiary)' : 'var(--accent)',
-                    border: 'none',
-                    borderRadius: 'var(--radius-sm)',
-                    color: savingMemory ? 'var(--text-muted)' : 'white',
-                    fontSize: 10,
-                    fontWeight: 600,
-                    cursor: savingMemory ? 'wait' : 'pointer',
-                  }}
-                >
-                  {savingMemory ? 'Saving...' : 'Save Memory Tuning'}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {config && (
-          <div style={{ padding: '6px 14px', marginBottom: 6 }}>
-            <div style={{
-              padding: '10px 12px',
-              background: 'var(--bg-secondary)',
-              border: '1px solid var(--border-subtle)',
-              borderRadius: 'var(--radius-md)',
-            }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
-                Safety Tuning
-              </div>
-              <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2, marginBottom: 10 }}>
-                Current mode: {config.safetyTuning.rolloutMode}
-              </div>
-
-              <div style={{ display: 'grid', gap: 6 }}>
-                {SAFETY_PRESET_ORDER.map((preset) => {
-                  const active = selectedSafetyPreset === preset;
-                  return (
-                    <button
-                      key={preset}
-                      disabled
-                      style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        gap: 8,
-                        padding: '6px 8px',
-                        borderRadius: 'var(--radius-sm)',
-                        border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
-                        background: active ? 'var(--accent-subtle)' : 'var(--bg-tertiary)',
-                        color: active ? 'var(--accent)' : 'var(--text-secondary)',
-                        fontSize: 10,
-                        fontWeight: 600,
-                        cursor: 'not-allowed',
-                        textTransform: 'capitalize',
-                        opacity: 0.5,
-                      }}
-                    >
-                      <span>{preset}</span>
-                      <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>
-                        {SAFETY_PRESET_HINTS[preset]}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-
-              <div style={{ marginTop: 8, fontSize: 9, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-                Read-only. The shell gate builds its own policy and does not read
-                this preset yet, so switching it here would change nothing.
-              </div>
-            </div>
-          </div>
-        )}
-
         {/* Channels */}
         {channels.length > 0 && (
           <div style={{ marginBottom: 4 }}>
             <div style={{
               padding: '8px 14px 4px',
-              fontSize: 10,
+              fontSize: 12,
               fontWeight: 600,
               color: 'var(--text-muted)',
               textTransform: 'uppercase',
@@ -616,7 +424,7 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
                   }}>
                     {ch.name}
                   </div>
-                  <div style={{ fontSize: 9, color: 'var(--text-muted)' }}>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
                     {ch.status} · {ch.sessionCount} session{ch.sessionCount !== 1 ? 's' : ''}
                   </div>
                 </div>
@@ -630,7 +438,7 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
                       border: '1px solid var(--border)',
                       borderRadius: 'var(--radius-sm)',
                       color: 'var(--text-secondary)',
-                      fontSize: 9,
+                      fontSize: 12,
                       cursor: restarting === ch.name ? 'wait' : 'pointer',
                       opacity: restarting === ch.name ? 0.6 : 1,
                     }}
@@ -684,53 +492,12 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
                 background: 'transparent',
                 border: 'none',
                 color: 'var(--text-muted)',
-                fontSize: 10,
+                fontSize: 12,
                 cursor: 'pointer',
                 textAlign: 'left',
               }}
             >
               +{skills.length - 5} more...
-            </button>
-          )}
-        </SettingsSection>
-
-        {/* Environment section */}
-        <SettingsSection
-          icon={
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
-              <rect x="2" y="6.5" width="10" height="5.5" rx="1" />
-              <path d="M4 6.5V4.5a3 3 0 016 0v2" />
-            </svg>
-          }
-          title="Environment"
-          subtitle={`${envVars.length} variables`}
-          onClick={onOpenEnvPanel}
-        >
-          {envVars.slice(0, 5).map((v) => (
-            <SettingsItem
-              key={`${v.key}-${v.scope}`}
-              label={v.key}
-              detail={v.maskedValue.length > 16 ? v.maskedValue.slice(0, 16) + '...' : v.maskedValue}
-              onClick={onOpenEnvPanel}
-              mono
-            />
-          ))}
-          {envVars.length > 5 && (
-            <button
-              onClick={onOpenEnvPanel}
-              style={{
-                display: 'block',
-                width: '100%',
-                padding: '4px 14px 4px 36px',
-                background: 'transparent',
-                border: 'none',
-                color: 'var(--text-muted)',
-                fontSize: 10,
-                cursor: 'pointer',
-                textAlign: 'left',
-              }}
-            >
-              +{envVars.length - 5} more...
             </button>
           )}
         </SettingsSection>
@@ -795,146 +562,177 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
           </SettingsSection>
         )}
 
+        <details className="advanced-settings">
+          <summary>Advanced settings</summary>
+        {config?.decisionRouting && (
+          <DecisionRoutingSettings routing={config.decisionRouting}
+            onSaved={load} />
+        )}
+
+        {config && memoryDraft && (
+          <div style={{ padding: '6px 14px', marginBottom: 6 }}>
+            <div style={{
+              padding: '10px 12px',
+              background: 'var(--bg-secondary)',
+              border: '1px solid var(--border-subtle)',
+              borderRadius: 'var(--radius-md)',
+            }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
+                Memory Tuning
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2, marginBottom: 10 }}>
+                Scope: project (.rune/.env)
+              </div>
+
+              <div style={{ display: 'grid', gap: 8 }}>
+                <div style={{ display: 'grid', gap: 6 }}>
+                  <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Preset</span>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    {MEMORY_PRESET_ORDER.map((preset) => {
+                      const active = memoryDraft.preset === preset;
+                      return (
+                        <button
+                          key={preset}
+                          onClick={() => applyPreset(preset)}
+                          style={{
+                            flex: 1,
+                            padding: '4px 6px',
+                            borderRadius: 'var(--radius-sm)',
+                            border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
+                            background: active ? 'var(--accent-subtle)' : 'var(--bg-tertiary)',
+                            color: active ? 'var(--accent)' : 'var(--text-secondary)',
+                            fontSize: 12,
+                            fontWeight: 600,
+                            cursor: 'pointer',
+                            textTransform: 'capitalize',
+                          }}
+                        >
+                          {preset}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <label style={{ display: 'grid', gap: 4 }}>
+                  <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Policy Mode</span>
+                  <select
+                    value={memoryDraft.policyMode}
+                    onChange={(e) => {
+                      const next = e.target.value as MemoryPolicyMode;
+                      editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', policyMode: next } : prev));
+                    }}
+                    style={memoryInputStyle}
+                  >
+                    {MEMORY_POLICY_MODES.map((mode) => (
+                      <option key={mode} value={mode}>{mode}</option>
+                    ))}
+                  </select>
+                </label>
+
+                <MemoryField
+                  label="Semantic Limit (1~20)"
+                  value={memoryDraft.semanticLimit}
+                  onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', semanticLimit: value } : prev))}
+                />
+                <MemoryField
+                  label="Semantic Min Score (0~1)"
+                  value={memoryDraft.semanticMinScore}
+                  onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', semanticMinScore: value } : prev))}
+                />
+                <MemoryField
+                  label="Uncertain Semantic Limit (1~20)"
+                  value={memoryDraft.uncertainSemanticLimit}
+                  onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', uncertainSemanticLimit: value } : prev))}
+                />
+                <MemoryField
+                  label="Uncertain Semantic Min Score (0~1)"
+                  value={memoryDraft.uncertainSemanticMinScore}
+                  onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', uncertainSemanticMinScore: value } : prev))}
+                />
+                <MemoryField
+                  label="Max Episodes (1~50)"
+                  value={memoryDraft.maxEpisodes}
+                  onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', maxEpisodes: value } : prev))}
+                />
+                <MemoryField
+                  label="Context Max Chars (1000~32000)"
+                  value={memoryDraft.contextMaxChars}
+                  onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', contextMaxChars: value } : prev))}
+                />
+              </div>
+
+              {memoryError && (
+                <div style={{ marginTop: 8, fontSize: 12, color: 'var(--danger)' }}>
+                  {memoryError}
+                </div>
+              )}
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 10 }}>
+                <button
+                  onClick={handleSaveMemoryTuning}
+                  disabled={savingMemory}
+                  style={{
+                    padding: '4px 10px',
+                    background: savingMemory ? 'var(--bg-tertiary)' : 'var(--accent)',
+                    border: 'none',
+                    borderRadius: 'var(--radius-sm)',
+                    color: savingMemory ? 'var(--text-muted)' : 'white',
+                    fontSize: 12,
+                    fontWeight: 600,
+                    cursor: savingMemory ? 'wait' : 'pointer',
+                  }}
+                >
+                  {savingMemory ? 'Saving...' : 'Save Memory Tuning'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Environment section */}
+        <SettingsSection
+          icon={
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+              <rect x="2" y="6.5" width="10" height="5.5" rx="1" />
+              <path d="M4 6.5V4.5a3 3 0 016 0v2" />
+            </svg>
+          }
+          title="Environment"
+          subtitle={`${envVars.length} variables`}
+          onClick={onOpenEnvPanel}
+        >
+          {envVars.slice(0, 5).map((v) => (
+            <SettingsItem
+              key={`${v.key}-${v.scope}`}
+              label={v.key}
+              detail={v.maskedValue.length > 16 ? v.maskedValue.slice(0, 16) + '...' : v.maskedValue}
+              onClick={onOpenEnvPanel}
+              mono
+            />
+          ))}
+          {envVars.length > 5 && (
+            <button
+              onClick={onOpenEnvPanel}
+              style={{
+                display: 'block',
+                width: '100%',
+                padding: '4px 14px 4px 36px',
+                background: 'transparent',
+                border: 'none',
+                color: 'var(--text-muted)',
+                fontSize: 12,
+                cursor: 'pointer',
+                textAlign: 'left',
+              }}
+            >
+              +{envVars.length - 5} more...
+            </button>
+          )}
+        </SettingsSection>
+
+        </details>
       </div>
     </div>
   );
 }
-
-// ── Sub-components ──
-
-function SettingsSection({
-  icon,
-  title,
-  subtitle,
-  onClick,
-  children,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  subtitle?: string;
-  onClick: () => void;
-  children?: React.ReactNode;
-}) {
-  return (
-    <div style={{ marginBottom: 4 }}>
-      {/* Section header */}
-      <button
-        onClick={onClick}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          width: '100%',
-          padding: '10px 14px',
-          background: 'transparent',
-          border: 'none',
-          cursor: 'pointer',
-          textAlign: 'left',
-          transition: 'background 0.1s',
-        }}
-        onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; }}
-        onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
-      >
-        <span style={{ color: 'var(--text-muted)', display: 'flex', flexShrink: 0 }}>{icon}</span>
-        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', flex: 1 }}>{title}</span>
-        {subtitle && (
-          <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{subtitle}</span>
-        )}
-        <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--text-muted)" strokeWidth="1.3" strokeLinecap="round">
-          <path d="M3.5 2L6.5 5L3.5 8" />
-        </svg>
-      </button>
-      {/* Section items */}
-      {children}
-    </div>
-  );
-}
-
-function SettingsItem({
-  label,
-  detail,
-  detailColor,
-  onClick,
-  mono,
-}: {
-  label: string;
-  detail?: string;
-  detailColor?: string;
-  onClick: () => void;
-  mono?: boolean;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 6,
-        width: '100%',
-        padding: '5px 14px 5px 36px',
-        background: 'transparent',
-        border: 'none',
-        cursor: 'pointer',
-        textAlign: 'left',
-        transition: 'background 0.1s',
-      }}
-      onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--bg-hover)'; }}
-      onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
-    >
-      <span style={{
-        fontSize: 11,
-        color: 'var(--text-secondary)',
-        flex: 1,
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        whiteSpace: 'nowrap',
-        fontFamily: mono ? 'var(--font-mono)' : 'var(--font-sans)',
-      }}>
-        {label}
-      </span>
-      {detail && (
-        <span style={{
-          fontSize: 9,
-          color: detailColor ?? 'var(--text-muted)',
-          flexShrink: 0,
-          textTransform: 'capitalize',
-        }}>
-          {detail}
-        </span>
-      )}
-    </button>
-  );
-}
-
-function MemoryField({
-  label,
-  value,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <label style={{ display: 'grid', gap: 4 }}>
-      <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>{label}</span>
-      <input
-        type="text"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        style={memoryInputStyle}
-      />
-    </label>
-  );
-}
-
-const memoryInputStyle: React.CSSProperties = {
-  width: '100%',
-  padding: '5px 8px',
-  borderRadius: 'var(--radius-sm)',
-  border: '1px solid var(--border)',
-  background: 'var(--bg-tertiary)',
-  color: 'var(--text-primary)',
-  fontSize: 11,
-  fontFamily: 'var(--font-mono)',
-};

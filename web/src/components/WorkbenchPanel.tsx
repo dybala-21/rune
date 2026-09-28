@@ -1,7 +1,6 @@
-import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, memo, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { ActivitySummary, FileChange, OrchestrationState, StepInfo, ToolCall, TrustInfo } from '../types';
 import { normalizeToolName, isCodingToolName, argString, inferWorkPhase, inferActivityMode, computeRunVerdict, type WorkPhase } from '../utils/tooling';
-import { RuneMark, type MarkState } from './RuneMark';
 import { checkSummary, describeTrust, trustColors } from '../utils/trust';
 import { fetchWorkspaceDiff, readWorkspaceFile } from '../api';
 import { HighlightedCode } from './Code';
@@ -12,12 +11,16 @@ const TerminalPane = lazy(() => import('./TerminalPane').then(m => ({ default: m
 import { ProgressPane } from './ProgressPane';
 import { DiffText, FileChangesPane } from './FileChangesPane';
 import { desktopAttention, hasFileEdits, preferredWorkbenchTab } from '../utils/workbench';
+import { RetainedPane } from './RetainedPane';
 import { ComputerPane } from './ComputerPane';
+import { ComputerIcon } from './ComputerIcon';
+import { PickerPopover, SelectedCheck } from './PickerPopover';
 
 /** Saved code changes, execution progress, and live workspace tools. */
 
 interface WorkbenchPanelProps {
   sessionId: string;
+  active?: boolean;
   toolCalls: ToolCall[];
   fileChanges?: FileChange[];
   isRunning: boolean;
@@ -32,6 +35,10 @@ interface WorkbenchPanelProps {
   awaiting?: 'approval' | 'question' | null;
   connected?: boolean;
   historical?: boolean;
+  computerRequest?: number;
+  onTabChange?: (tab: BenchTab) => void;
+  expanded?: boolean;
+  onToggleExpand?: () => void;
   onClose: () => void;
 }
 
@@ -192,25 +199,26 @@ function Elapsed({ startedAt }: { startedAt: number }) {
   );
 }
 
-type BenchTab = 'progress' | 'activity' | 'diff' | 'file' | 'terminal' | 'computer';
+export type BenchTab = 'progress' | 'activity' | 'diff' | 'file' | 'terminal' | 'computer';
 
 const TABS: Array<[BenchTab, string]> = [
   ['progress', 'Progress'],
   ['computer', 'Computer'],
-  ['activity', 'Activity'],
-  ['diff', 'Diff'],
+  ['activity', 'Commands'],
+  ['diff', 'Changes'],
   ['file', 'File'],
   ['terminal', 'Terminal'],
 ];
 
 const NO_CHANGES: FileChange[] = [];
 
-export function WorkbenchPanel({ sessionId, toolCalls, fileChanges = NO_CHANGES, isRunning, activitySummary, trust, currentStep = null, orchestration = null, awaiting = null, connected = true, historical = false, onClose }: WorkbenchPanelProps) {
+export function WorkbenchPanel({ sessionId, active = true, toolCalls, fileChanges = NO_CHANGES, isRunning, activitySummary, trust, currentStep = null, orchestration = null, awaiting = null, connected = true, historical = false, computerRequest = 0, onTabChange, expanded = false, onToggleExpand, onClose }: WorkbenchPanelProps) {
+  const panelId = useId();
   // Share the verdict with chat and status indicators; null means no verdict yet.
   const verdictOk = computeRunVerdict(trust, activitySummary);
   const phase = useMemo(() => inferWorkPhase(toolCalls), [toolCalls]);
   const desktopWait = desktopAttention(toolCalls, isRunning && !historical);
-  const waitingLabel = awaiting === 'approval' ? 'Waiting for approval'
+  const waitingLabel = awaiting === 'approval' ? 'Waiting for your approval'
     : awaiting === 'question' ? 'Waiting for your answer'
     : desktopWait === 'connection' ? 'Waiting for app access'
     : desktopWait === 'action' ? 'Review app action' : null;
@@ -221,7 +229,8 @@ export function WorkbenchPanel({ sessionId, toolCalls, fileChanges = NO_CHANGES,
   );
 
   const preferredTab = preferredWorkbenchTab(toolCalls, fileChanges);
-  const [tab, setTab] = useState<BenchTab>(preferredTab);
+  const [tab, setTab] = useState<BenchTab>(computerRequest && !historical ? 'computer' : preferredTab);
+  const [terminalConnected, setTerminalConnected] = useState(false);
   const [workspaceDiff, setWorkspaceDiff] = useState(false);
   const [diffText, setDiffText] = useState('');
   const [diffLoading, setDiffLoading] = useState(false);
@@ -254,18 +263,23 @@ export function WorkbenchPanel({ sessionId, toolCalls, fileChanges = NO_CHANGES,
   }, [historical]);
 
   // Follow opens code changes, but a tab chosen by the user stays put.
-  const [follow, setFollow] = useState(true);
+  const [follow, setFollow] = useState(!computerRequest);
+  const handledComputerRequest = useRef(computerRequest);
+  useEffect(() => { onTabChange?.(tab); }, [tab, onTabChange]);
   const activityCount = toolCalls.length;
   useEffect(() => {
-    // Don't yank the user out of an interactive terminal.
-    if (follow && isRunning && activityCount > 0) {
-      setTab(t => (t === 'terminal' ? t : preferredTab));
+    if (computerRequest !== handledComputerRequest.current) {
+      handledComputerRequest.current = computerRequest;
+      if (computerRequest && !historical) { setTab('computer'); setFollow(false); return; }
     }
-  }, [follow, isRunning, activityCount, preferredTab]);
+    // Search activity on a follow-up turn must not hide the open browser.
+    if (follow && isRunning && activityCount > 0) {
+      setTab(t => (t === 'terminal' || t === 'computer' && preferredTab === 'progress' ? t : preferredTab));
+    }
+  }, [follow, isRunning, activityCount, preferredTab, computerRequest, historical]);
 
-  // Diff is a coding surface; when the run turns out to be research work the
-  // tab disappears, so a user parked there falls back to Progress.
-  const showDiffTab = fileChanges.length > 0 || hasFileEdits(toolCalls) || !historical && mode !== 'research';
+  // Keep Changes visible while a workspace diff is open.
+  const showDiffTab = fileChanges.length > 0 || hasFileEdits(toolCalls) || workspaceDiff;
   useEffect(() => {
     if (!showDiffTab) setTab(t => (t === 'diff' ? 'progress' : t));
   }, [showDiffTab]);
@@ -278,146 +292,85 @@ export function WorkbenchPanel({ sessionId, toolCalls, fileChanges = NO_CHANGES,
 
   const startedAt = toolCalls.length > 0 ? toolCalls[0].timestamp : null;
 
-  let petState: MarkState = 'idle';
-  if (waitingLabel) petState = 'warning';
-  else if (isRunning) petState = phase === 'verifying' ? 'thinking' : 'working';
-  else if (verdictOk !== null) petState = verdictOk ? 'passed' : 'failed';
-
   const trustView = trust ? describeTrust(trust) : null;
   const verdictTitle = trustView?.title ?? (verdictOk ? 'Completed' : 'Failed');
   const verdictColors = trustColors(trustView?.tone ?? (verdictOk ? 'neutral' : 'danger'));
-  // Choose the footer label and color from the same state.
-  const foot = awaiting || waitingLabel
-    ? { text: waitingLabel || 'waiting for you', color: 'var(--warning)' }
-    : isRunning
-      ? { text: `${PHASE_LABEL[phase]}…`, color: 'var(--warning)' }
-      : verdictOk === null
-        ? { text: 'ready', color: 'var(--text-muted)' }
-        : { text: verdictTitle.toLowerCase(), color: trustView?.tone === 'neutral' ? 'var(--text-muted)' : verdictColors.accent };
+  const visibleTabs = TABS.filter(([key]) => key === 'progress'
+    || key === 'computer' && !historical || key === 'diff' && showDiffTab || key === 'terminal' && terminalConnected || key === tab);
+  const selectTab = (next: BenchTab) => { setTab(next); setFollow(false); };
 
   return (
-    <aside style={{
+    <aside className="workbench-panel" data-tab={tab} style={{
       width: '100%',
       height: '100%',
       borderLeft: '1px solid var(--border)',
-      background: 'var(--code-bg)',
       display: 'flex',
       flexDirection: 'column',
       minWidth: 0,
     }}>
-      {/* Header */}
-      <div className="workbench-heading" style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 10,
-        padding: '9px 14px',
-        background: 'var(--bg-secondary)',
-        borderBottom: '1px solid var(--border)',
-      }}>
-        <RuneMark state={petState} size={18} title={`RUNE workbench (${petState})`} />
-        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-primary)' }}>
-          Workbench
-        </span>
-        <span style={{
-          fontFamily: 'var(--font-mono)',
-          fontSize: 10,
-          letterSpacing: '0.06em',
-          textTransform: 'uppercase',
-          color: 'var(--text-muted)',
+      <div className="workbench-toolbar">
+        <div className="workbench-tabs" role="tablist" aria-label="Work panel" onKeyDown={event => {
+          const tabs = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+          const current = tabs.indexOf(document.activeElement as HTMLButtonElement);
+          const next = event.key === 'ArrowRight' ? (current + 1) % tabs.length
+            : event.key === 'ArrowLeft' ? (current - 1 + tabs.length) % tabs.length
+            : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : -1;
+          if (next < 0) return;
+          event.preventDefault();
+          tabs[next]?.focus();
         }}>
-          {waitingLabel || (isRunning ? PHASE_LABEL[phase] : trust?.completionStatus === 'cancelled' ? 'stopped' : toolCalls.length || trust ? 'finished' : 'ready')}
-        </span>
-        {isRunning && startedAt !== null && <Elapsed startedAt={startedAt} />}
-        <button
-          onClick={onClose}
-          title="Collapse workbench (⌘J)"
-          style={{
-            marginLeft: 'auto',
-            fontFamily: 'var(--font-mono)',
-            fontSize: 11,
-            color: 'var(--text-muted)',
-            background: 'none',
-            border: '1px solid var(--border)',
-            borderRadius: 'var(--radius-sm)',
-            padding: '3px 9px',
-            cursor: 'pointer',
-          }}
-        >
-          Collapse
-        </button>
-      </div>
-
-      {/* Tabs */}
-      <div className="workbench-tabs" style={{
-        display: 'flex', gap: 2, padding: '6px 10px 0',
-        borderBottom: '1px solid var(--border)',
-      }}>
-        {TABS.filter(([key]) => historical
-          ? key === 'progress' || key === 'activity' || key === 'diff' && showDiffTab
-          : key !== 'diff' || showDiffTab).map(([key, label]) => (
-          <button
-            key={key}
-            type="button"
-            onClick={() => { setTab(key); setFollow(false); }}
-            aria-pressed={tab === key}
-            style={{
-              padding: '5px 12px', fontSize: 12, cursor: 'pointer',
-              color: tab === key ? 'var(--text-primary)' : 'var(--text-muted)',
-              background: tab === key ? 'var(--code-bg)' : 'none',
-              border: '1px solid', borderColor: tab === key ? 'var(--border)' : 'transparent',
-              borderBottom: 'none', borderRadius: '8px 8px 0 0',
-            }}
-          >
+          {visibleTabs.map(([key, label]) => <button key={key} type="button" role="tab"
+            id={`${panelId}-${key}`} aria-controls={`${panelId}-content`}
+            aria-selected={tab === key} tabIndex={tab === key ? 0 : -1}
+            onClick={() => selectTab(key)}>
+            {key === 'computer' && <ComputerIcon name="computer" size={15} />}
             {label}
-            {key === 'progress' && awaiting && tab !== 'progress' && (
-              <span aria-label="needs your attention" style={{
-                display: 'inline-block', width: 6, height: 6, borderRadius: '50%',
-                background: 'var(--warning)', marginLeft: 5, verticalAlign: 'middle',
-              }} />
-            )}
-          </button>
-        ))}
-        {tab === 'diff' && !historical ? (
-          <button
-            type="button"
-            onClick={() => workspaceDiff ? setWorkspaceDiff(false) : loadDiff()}
-            title={workspaceDiff ? 'Show saved task changes' : 'Inspect current workspace Git diff'}
-            style={{
-              marginLeft: 'auto', background: 'none', border: 'none',
-              color: 'var(--text-muted)', fontSize: 11, cursor: 'pointer', paddingBottom: 4,
-            }}
-          >
-            {diffLoading ? 'Loading…' : workspaceDiff ? 'Task changes' : 'Workspace diff'}
-          </button>
-        ) : !historical && (
-          <button
-            type="button"
-            onClick={() => setFollow(f => !f)}
-            title="Follow code changes and tool activity"
-            aria-pressed={follow}
-            style={{
-              marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6,
-              background: 'none', border: 'none', cursor: 'pointer',
-              color: follow ? 'var(--accent)' : 'var(--text-muted)',
-              fontSize: 11, paddingBottom: 4, fontFamily: 'var(--font-mono)',
-            }}
-          >
-            Follow
-            <span style={{
-              width: 24, height: 14, borderRadius: 99, position: 'relative',
-              background: follow ? 'var(--accent)' : 'var(--bg-tertiary)',
-              border: '1px solid var(--border)', transition: 'background 0.15s',
-            }}>
-              <span style={{
-                position: 'absolute', top: 1, width: 10, height: 10, borderRadius: '50%',
-                background: follow ? '#0A1319' : 'var(--text-muted)',
-                left: follow ? 12 : 2, transition: 'left 0.15s',
-              }} />
-            </span>
-          </button>
-        )}
+            {key === 'diff' && fileChanges.length > 0 && <span className="workbench-count">{fileChanges.length}</span>}
+            {key === 'progress' && waitingLabel && tab !== 'progress' && <span className="workbench-attention" aria-label="Needs your attention" />}
+          </button>)}
+        </div>
+        <div className="workbench-heading-actions">
+          {active && <PickerPopover label="Panel tools" className="workbench-more" trigger={<ComputerIcon name="more" />}>
+            {close => <>
+              <div className="picker-heading"><strong>Panel tools</strong></div>
+              {TABS.filter(([key]) => key === 'activity' || !historical && (key === 'file' || key === 'terminal')).map(([key, label]) => (
+                <button key={key} type="button" role="menuitemradio" aria-checked={tab === key}
+                  tabIndex={-1} className="picker-option" onClick={() => { selectTab(key); close(); }}>
+                  <span className="picker-option-copy"><strong>{key === 'file' ? 'Open file' : label}</strong></span>
+                  {tab === key && <SelectedCheck />}
+                </button>
+              ))}
+              {!historical && <>
+                <button type="button" role="menuitem" tabIndex={-1} className="picker-option"
+                  onClick={() => { loadDiff(); selectTab('diff'); close(); }}>Workspace changes</button>
+                <div className="workbench-menu-divider" />
+                <button type="button" role="menuitemcheckbox" aria-checked={follow} tabIndex={-1} className="picker-option"
+                  onClick={() => { setFollow(value => !value); close(); }}>
+                  <span className="picker-option-copy"><strong>Follow Rune’s activity</strong><small>Switch views as Rune works</small></span>
+                  {follow && <SelectedCheck />}
+                </button>
+              </>}
+            </>}
+          </PickerPopover>}
+          {onToggleExpand && <button type="button" className="workbench-icon-button" onClick={onToggleExpand}
+            title={expanded ? 'Restore panel width' : 'Expand panel'} aria-label={expanded ? 'Restore panel width' : 'Expand panel'} aria-pressed={expanded}>
+            <ComputerIcon name={expanded ? 'shrink' : 'expand'} />
+          </button>}
+          <button type="button" className="workbench-icon-button" onClick={onClose}
+            title="Hide panel (⌘J)" aria-label="Hide panel"><ComputerIcon name="close" /></button>
+        </div>
       </div>
-
+      {(!connected || waitingLabel && (tab !== 'progress' || !awaiting) || isRunning && tab !== 'computer' && tab !== 'progress') && <div className="workbench-notice" role="status">
+        <span>{!connected ? 'Connection lost. Reconnecting…' : waitingLabel || `${PHASE_LABEL[phase]}…`}</span>
+        {isRunning && startedAt !== null && <Elapsed startedAt={startedAt} />}
+      </div>}
+      {tab === 'diff' && !historical && <div className="workbench-view-toolbar">
+        <span>{workspaceDiff ? 'Workspace changes' : 'Changes in this task'}</span>
+        <button type="button" disabled={diffLoading} onClick={() => workspaceDiff ? setWorkspaceDiff(false) : loadDiff()}>
+          {diffLoading ? 'Loading…' : workspaceDiff ? 'Show task changes' : 'Show workspace changes'}
+        </button>
+      </div>}
+      <div className="workbench-content" id={`${panelId}-content`} role="tabpanel" aria-labelledby={`${panelId}-${tab}`} tabIndex={0}>
       {/* Progress view — checklist, step timeline, evidence, verdict */}
       {tab === 'progress' && (
         <ProgressPane
@@ -434,7 +387,7 @@ export function WorkbenchPanel({ sessionId, toolCalls, fileChanges = NO_CHANGES,
       )}
 
       {/* Diff view */}
-      {!historical && tab === 'computer' && <ComputerPane key={sessionId} sessionId={sessionId} />}
+      {!historical && <RetainedPane active={active && tab === 'computer'}><ComputerPane key={sessionId} sessionId={sessionId} active={active && tab === 'computer'} /></RetainedPane>}
       {tab === 'diff' && !workspaceDiff && <FileChangesPane changes={fileChanges} toolCalls={toolCalls} historical={historical} />}
       {tab === 'diff' && workspaceDiff && !historical && (
         <div style={{
@@ -447,12 +400,11 @@ export function WorkbenchPanel({ sessionId, toolCalls, fileChanges = NO_CHANGES,
         </div>
       )}
 
-      {/* Terminal — mounted only when selected so no PTY opens otherwise */}
-      {!historical && tab === 'terminal' && (
+      {!historical && <RetainedPane active={active && tab === 'terminal'}>
         <Suspense fallback={<div className="wb-loading">Loading terminal…</div>}>
-          <TerminalPane />
+          <TerminalPane active={active && tab === 'terminal'} onConnectionChange={setTerminalConnected} />
         </Suspense>
-      )}
+      </RetainedPane>}
 
       {/* File view */}
       {tab === 'file' && (
@@ -464,9 +416,10 @@ export function WorkbenchPanel({ sessionId, toolCalls, fileChanges = NO_CHANGES,
             <input
               value={filePath}
               onChange={e => setFilePath(e.target.value)}
-              placeholder="relative/path/in/workspace"
+              aria-label="File path"
+              placeholder="File path in your workspace"
               style={{
-                flex: 1, background: 'var(--bg-primary)', color: 'var(--text-primary)',
+                flex: 1, minWidth: 0, background: 'var(--bg-primary)', color: 'var(--text-primary)',
                 border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
                 padding: '5px 8px', fontSize: 11.5, fontFamily: 'var(--font-mono)',
               }}
@@ -493,7 +446,7 @@ export function WorkbenchPanel({ sessionId, toolCalls, fileChanges = NO_CHANGES,
                     : <HighlightedCode code={fileContent} lang={langFromPath(filePath)} lineNumbers />)
                 : fileLoaded
                   ? <div style={{ padding: 14, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 11.5 }}>(empty file)</div>
-                  : <div style={{ padding: 14, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 11.5 }}>Open a file from the Activity tab or enter a path.</div>}
+                  : <div style={{ padding: 14, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 11.5 }}>Enter a file path, or choose a file from Commands.</div>}
           </div>
         </div>
       )}
@@ -530,35 +483,13 @@ export function WorkbenchPanel({ sessionId, toolCalls, fileChanges = NO_CHANGES,
           </div>
         )}
         {coding.length === 0 ? (
-          <div style={{ color: 'var(--text-muted)' }}>Waiting for the first edit or command…</div>
+          <div style={{ color: 'var(--text-muted)' }}>No commands or file activity in this task.</div>
         ) : (
           coding.map(tc => <CommandLine key={tc.id} tc={tc} onOpenFile={historical ? undefined : openFile} />)
         )}
       </div>
       )}
 
-      {/* Status footer */}
-      <div style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 12,
-        padding: '9px 14px',
-        borderTop: '1px solid var(--border)',
-        background: 'var(--bg-secondary)',
-        fontFamily: 'var(--font-mono)',
-        fontSize: 11,
-        color: 'var(--text-muted)',
-      }}>
-        <span style={{ color: foot.color }}>{foot.text}</span>
-        {activitySummary && (
-          <span>
-            {activitySummary.filesWritten > 0 && `${activitySummary.filesWritten} edited  `}
-            {activitySummary.bashExecutions > 0 && `${activitySummary.bashExecutions} ran`}
-          </span>
-        )}
-        <span style={{ marginLeft: 'auto', color: connected ? undefined : 'var(--danger)' }}>
-          {connected ? 'daemon · 127.0.0.1' : 'daemon · offline'}
-        </span>
       </div>
     </aside>
   );

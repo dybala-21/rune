@@ -193,9 +193,8 @@ function SectionTitle({ label, count }: { label: string; count?: number }) {
       display: 'flex',
       alignItems: 'baseline',
       gap: 6,
-      fontSize: 10,
-      letterSpacing: '0.08em',
-      textTransform: 'uppercase',
+      fontSize: 12,
+      fontWeight: 550,
       color: 'var(--text-muted)',
       margin: '16px 0 6px',
     }}>
@@ -316,7 +315,7 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
           {spec.title}
         </span>
         {spec.live && spec.note && (
-          <span style={{ color: 'var(--text-muted)', fontSize: 11, flexShrink: 0 }}>
+          <span style={{ color: 'var(--text-muted)', fontSize: 12, flexShrink: 0 }}>
             {spec.note}
           </span>
         )}
@@ -327,7 +326,7 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
         </div>
       )}
       {spec.details?.map(d => (
-        <div key={d} style={{ color: 'var(--text-primary)', fontSize: 11.5, paddingLeft: 21 }}>
+        <div key={d} style={{ color: 'var(--text-primary)', fontSize: 12, paddingLeft: 21 }}>
           {d}
         </div>
       ))}
@@ -339,7 +338,7 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
             style={{
               alignSelf: 'flex-start',
               background: 'none', border: 'none', padding: '0 0 0 21px', cursor: 'pointer',
-              color: 'var(--text-muted)', fontSize: 10.5, fontFamily: 'var(--font-mono)',
+              color: 'var(--text-muted)', fontSize: 12, fontFamily: 'var(--font-mono)',
             }}
           >
             {showEvidence ? '▾ hide evidence' : '▸ show evidence'}
@@ -350,7 +349,7 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
               background: 'var(--bg-primary)', borderRadius: 6,
               border: '1px solid var(--border-subtle, var(--border))',
               color: 'var(--text-secondary, var(--text-primary))',
-              fontSize: 10.5, lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+              fontSize: 12, lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
               maxHeight: 140, overflow: 'auto',
             }}>
               {evidence}
@@ -377,7 +376,7 @@ export const ProgressPane = memo(function ProgressPane({
   if (toolCalls.length === 0 && !orchestration && !trust && !activitySummary && !isRunning && !awaiting) {
     return (
       <div style={{ flex: 1, padding: 14, color: 'var(--text-muted)', fontSize: 12.5 }}>
-        Waiting for the agent to start working…
+        Task progress will appear here when Rune starts working.
       </div>
     );
   }
@@ -397,9 +396,9 @@ export const ProgressPane = memo(function ProgressPane({
       minWidth: 0,
       minHeight: 0,
       overflow: 'auto',
-      padding: '12px 14px',
-      fontSize: 12,
-      lineHeight: 1.55,
+      padding: '16px',
+      fontSize: 13,
+      lineHeight: 1.6,
     }}>
       <StatusBand
         isRunning={isRunning}
@@ -419,7 +418,7 @@ export const ProgressPane = memo(function ProgressPane({
               {truncate(orchestration.description, 120)}
             </div>
           )}
-          <div style={{ color: 'var(--text-muted)', fontSize: 11, marginBottom: 4 }}>
+          <div style={{ color: 'var(--text-muted)', fontSize: 12, marginBottom: 4 }}>
             {orchestration.completed}/{orchestration.total} complete
           </div>
           {orchestration.tasks.map(t => (
@@ -432,9 +431,9 @@ export const ProgressPane = memo(function ProgressPane({
               <span style={{ color: 'var(--text-primary)', flex: 1 }}>
                 {t.description || t.taskId}
               </span>
-              {t.role && <span style={{ color: 'var(--text-muted)', fontSize: 10.5 }}>{t.role}</span>}
+              {t.role && <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>{t.role}</span>}
               {t.retries > 0 && (
-                <span style={{ color: 'var(--warning)', fontSize: 10.5 }}>retry {t.retries}</span>
+                <span style={{ color: 'var(--warning)', fontSize: 12 }}>retry {t.retries}</span>
               )}
             </div>
           ))}
@@ -487,7 +486,7 @@ export const ProgressPane = memo(function ProgressPane({
                     <StatusGlyph kind={kind} />
                   </span>
                   <span style={{
-                    color: 'var(--text-muted)', flexShrink: 0, fontSize: 10.5,
+                    color: 'var(--text-muted)', flexShrink: 0, fontSize: 12,
                     fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums',
                     minWidth: 14, textAlign: 'right',
                   }}>
@@ -498,12 +497,12 @@ export const ProgressPane = memo(function ProgressPane({
                     color: live ? 'var(--text-primary)' : 'var(--text-muted)',
                     flex: 1,
                     fontFamily: 'var(--font-mono)',
-                    fontSize: 11.5,
+                    fontSize: 12,
                   }}>
                     {g.summary}
                   </span>
                   {g.failedCount > 0 && (
-                    <span style={{ color: 'var(--warning)', fontSize: 10.5, flexShrink: 0 }}>
+                    <span style={{ color: 'var(--warning)', fontSize: 12, flexShrink: 0 }}>
                       {g.failedCount} failed
                     </span>
                   )}
@@ -514,7 +513,7 @@ export const ProgressPane = memo(function ProgressPane({
                     {g.sources.map(src => (
                       <div key={`${src.kind}:${src.label}`} style={{
                         display: 'flex', gap: 6, alignItems: 'baseline',
-                        fontSize: 10.5, color: 'var(--text-muted)',
+                        fontSize: 12, color: 'var(--text-muted)',
                       }}>
                         <span style={{ flexShrink: 0, opacity: 0.8 }}>
                           {src.kind === 'search' ? '⌕' : '↳'}
@@ -542,7 +541,7 @@ export const ProgressPane = memo(function ProgressPane({
         </div>
       )}
       {isRunning && currentStep && (
-        <div style={{ color: 'var(--text-muted)', fontSize: 10.5, marginTop: 2 }}>
+        <div style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 2 }}>
           step {currentStep.stepNumber} in progress
         </div>
       )}
@@ -561,7 +560,7 @@ export const ProgressPane = memo(function ProgressPane({
                   style={{
                     color: 'var(--text-primary)', flex: 1, textAlign: 'left',
                     background: 'none', border: 'none', padding: 0, cursor: 'pointer',
-                    fontFamily: 'var(--font-mono)', fontSize: 11.5,
+                    fontFamily: 'var(--font-mono)', fontSize: 12,
                     textDecoration: 'underline dotted', textUnderlineOffset: 3,
                     whiteSpace: 'pre-wrap', wordBreak: 'break-all',
                   }}
@@ -569,10 +568,10 @@ export const ProgressPane = memo(function ProgressPane({
               ) : (
                 <span title={path} style={{
                   color: 'var(--text-primary)', flex: 1, wordBreak: 'break-all',
-                  fontFamily: 'var(--font-mono)', fontSize: 11.5,
+                  fontFamily: 'var(--font-mono)', fontSize: 12,
                 }}>{shortPath(path)}</span>
               )}
-              <span style={{ color: 'var(--text-muted)', fontSize: 10.5, flexShrink: 0 }}>
+              <span style={{ color: 'var(--text-muted)', fontSize: 12, flexShrink: 0 }}>
                 {verbs.join(' · ')}
               </span>
             </div>

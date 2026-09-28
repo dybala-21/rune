@@ -5,6 +5,8 @@ from __future__ import annotations
 from fnmatch import fnmatch
 from typing import Any
 
+from pydantic import ValidationError
+
 from rune.agent.timing import timed
 from rune.capabilities.types import TOOL_GROUPS, CapabilityDefinition
 from rune.types import CapabilityResult, RiskLevel
@@ -91,6 +93,17 @@ class CapabilityRegistry:
                 normalized = validated.model_dump(mode="json", by_alias=True)
             else:
                 validated, normalized = params, params
+        except ValidationError as exc:
+            details = "; ".join(
+                f"{'.'.join(map(str, error['loc']))}: {error['msg']}"
+                for error in exc.errors(include_input=False, include_url=False)[:3]
+            )
+            return CapabilityResult(success=False, error=f"Invalid arguments for {name}: {details[:1000]}",
+                                    metadata={"action_status": "not_executed"})
+        except Exception as exc:
+            return CapabilityResult(success=False, error=f"Capability '{name}' failed before execution: {exc}",
+                                    metadata={"action_status": "not_executed"})
+        try:
             from rune.agent.execution_journal import active_journal
             from rune.agent.run_control import dispatch_scope
             journal = active_journal()

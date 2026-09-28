@@ -98,6 +98,7 @@ async def test_selection_survives_reload_and_auxiliary_calls_stay_on_xai(monkeyp
 
 
 @pytest.mark.parametrize("model,efforts", [
+    ("xai/grok-4.7", ("low", "medium", "high", "xhigh")),
     ("xai/grok-4.6", ("low", "medium", "high", "xhigh")),
     ("grok-4.5", ("low", "medium", "high", "xhigh")),
     ("xai/grok-4.3-latest", ("none", "low", "medium", "high", "xhigh")),

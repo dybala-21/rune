@@ -1,4 +1,7 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { ConversationWorkbenches } from './components/ConversationWorkbenches';
+import { useWorkbenchState } from './hooks/useWorkbenchState';
+import { toast } from './utils/toast';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAgent } from './hooks/useAgent';
 import { useSessionHistory } from './hooks/useSessionHistory';
 import { ChatPanel } from './components/ChatPanel';
@@ -13,7 +16,6 @@ const EnvPanel = lazy(() => import('./components/EnvPanel').then(m => ({ default
 const CronPanel = lazy(() => import('./components/CronPanel').then(m => ({ default: m.CronPanel })));
 const MCPPanel = lazy(() => import('./components/MCPPanel').then(m => ({ default: m.MCPPanel })));
 const MarkdownPanel = lazy(() => import('./components/MarkdownPanel').then(m => ({ default: m.MarkdownPanel })));
-import { WorkbenchPanel } from './components/WorkbenchPanel';
 import { ResumeRunCard } from './components/ResumeRunCard';
 import { CommandK, type Command } from './components/CommandK';
 import { WorkspaceChip } from './components/WorkspaceChip';
@@ -43,15 +45,26 @@ export function App() {
   const [mcpPanelOpen, setMcpPanelOpen] = useState(false);
   const [markdownPanelOpen, setMarkdownPanelOpen] = useState(false);
   const [configInfo, setConfigInfo] = useState<ConfigInfo | null>(null);
-  const [workbenchOpen, setWorkbenchOpen] = useState(false);
+  const liveWorkbench = useWorkbenchState(getLiveSessionId());
+  const historyWorkbench = useWorkbenchState(history.viewingSessionId);
+  const viewedWorkbench = history.viewingSessionId ? historyWorkbench : liveWorkbench;
+  const { open: workbenchOpen, setOpen: setWorkbenchOpen, tab: workbenchTab,
+    expanded: computerExpanded, dismissed: workbenchDismissed, setDismissed: setWorkbenchDismissed,
+    setComputerRequest, setTab: setWorkbenchTab } = viewedWorkbench;
   const inputAreaRef = useRef<InputAreaHandle>(null);
   const [chatDragOver, setChatDragOver] = useState(false);
   const chatDragDepth = useRef(0);
-  const [workbenchDismissed, setWorkbenchDismissed] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteSessions, setPaletteSessions] = useState<SessionInfo[]>([]);
 
   const isViewingHistory = history.viewingSessionId !== null;
+  const openComputer = useCallback(() => {
+    if (isViewingHistory) return;
+    setComputerRequest(value => value + 1);
+    setWorkbenchTab('computer');
+    setWorkbenchDismissed(false);
+    setWorkbenchOpen(true);
+  }, [isViewingHistory, setComputerRequest, setWorkbenchTab, setWorkbenchDismissed, setWorkbenchOpen]);
   const desktopWait = desktopAttention(agent.toolCalls, !isViewingHistory && agent.state === 'running');
   const attentionLabel = desktopWait === 'connection' ? 'Waiting for app access' : desktopWait === 'action' ? 'Review app action' : undefined;
 
@@ -123,14 +136,6 @@ export function App() {
   }, []);
 
   const hasWorkbenchContent = displayToolCalls.length > 0 || displayFileChanges.length > 0;
-  // Reset when the task clears, without closing a panel the user just opened.
-  useEffect(() => {
-    if (!hasWorkbenchContent) {
-      setWorkbenchOpen(false);
-      setWorkbenchDismissed(false);
-    }
-  }, [hasWorkbenchContent, history.viewingSessionId]);
-
   useEffect(() => {
     if (!hasWorkbenchContent || workbenchOpen || workbenchDismissed) return;
     // Open once real work is visible: edits/commands for coding runs, or a
@@ -138,12 +143,12 @@ export function App() {
     if (shouldOpenWorkbench(displayToolCalls, displayFileChanges)) {
       setWorkbenchOpen(true);
     }
-  }, [displayToolCalls, displayFileChanges, hasWorkbenchContent, workbenchOpen, workbenchDismissed]);
+  }, [displayToolCalls, displayFileChanges, hasWorkbenchContent, workbenchOpen, workbenchDismissed, setWorkbenchOpen]);
 
-  // ⌘K opens the palette; ⌘J toggles the workbench; Esc aborts a live run
-  // (the composer is blurred while running, so it can't catch Esc itself).
+  // Let focused controls handle Escape before applying app shortcuts.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if (e.key === 'Escape' && !isViewingHistory && agent.state === 'running') {
         e.preventDefault();
         agent.abort();
@@ -151,21 +156,21 @@ export function App() {
       }
       if (!(e.metaKey || e.ctrlKey)) return;
       const key = e.key.toLowerCase();
-      if (key === 'k') {
+      if (key === 'b' && e.shiftKey && !isViewingHistory) {
+        e.preventDefault();
+        openComputer();
+      } else if (key === 'k') {
         e.preventDefault();
         setPaletteOpen(o => !o);
       } else if (key === 'j') {
         e.preventDefault();
-        setWorkbenchOpen(open => {
-          // Closing counts as a dismissal so auto-open doesn't fight the user.
-          setWorkbenchDismissed(open);
-          return !open;
-        });
+        setWorkbenchDismissed(workbenchOpen);
+        setWorkbenchOpen(!workbenchOpen);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [isViewingHistory, agent.state, agent.abort]);
+  }, [isViewingHistory, agent.state, agent.abort, openComputer, workbenchOpen, setWorkbenchOpen, setWorkbenchDismissed]);
 
   // Dropping a file anywhere outside the composer would otherwise make the
   // browser navigate away to that file, losing the session. Swallow drops that
@@ -191,6 +196,7 @@ export function App() {
   }, [paletteOpen]);
 
   const handleSelectSession = (sessionId: string | null) => {
+    agent.cancelConversationLoad();
     history.loadSession(sessionId);
     if (window.matchMedia('(max-width: 820px)').matches) setSidebarOpen(false);
   };
@@ -206,19 +212,15 @@ export function App() {
     if (window.matchMedia('(max-width: 820px)').matches) setSidebarOpen(false);
   };
 
-  // Typing in a past conversation resumes it: load it live (restoring turns +
-  // workspace), leave history view, then send. No separate "Continue" step.
-  const handleSendFromHistory = (text: string, attachments?: Parameters<typeof agent.sendMessage>[1]) => {
+  const continueHistory = async (text?: string, attachments?: Parameters<typeof agent.sendMessage>[1]) => {
     const id = history.viewingSessionId;
+    if (!id) return false;
+    const loaded = await agent.loadConversation(id, text !== undefined);
+    if (!loaded || viewedSessionRef.current !== id) return false;
     history.loadSession(null);
-    if (id) {
-      agent.sendMessage(`/load ${id}`);
-      // Give the load a beat to pin the session/workspace before the real turn.
-      setTimeout(() => agent.sendMessage(text, attachments), 120);
-    } else {
-      agent.sendMessage(text, attachments);
-    }
+    return text === undefined ? true : agent.sendMessage(text, attachments);
   };
+
 
   const handleOpenSkillPanel = (selectedName?: string) => {
     setSkillsPanelInitial(selectedName);
@@ -229,6 +231,7 @@ export function App() {
     { id: 'new', label: 'New chat', run: handleNewChat },
   ];
   if (!isViewingHistory) {
+    paletteCommands.push({ id: 'computer', label: 'Open Computer', hint: '⌘⇧B', run: openComputer });
     paletteCommands.push({
       id: 'workbench',
       label: workbenchOpen ? 'Hide workbench' : 'Show workbench',
@@ -405,13 +408,8 @@ export function App() {
               </span>
               <div className="notice-actions">
                 <button
-                  onClick={() => {
-                    // /load pins the live chat to this conversation, then we
-                    // leave history view.
-                    const id = history.viewingSessionId;
-                    if (id) agent.sendMessage(`/load ${id}`);
-                    handleSelectSession(null);
-                  }}
+                  onClick={() => { void continueHistory().catch(error => toast.error(error instanceof Error ? error.message : 'Could not load this chat.')); }}
+                  disabled={!agent.connected || agent.loadingConversation || agent.state !== 'idle'}
                   style={{
                     padding: '5px 14px',
                     background: 'var(--bg-tertiary)',
@@ -422,7 +420,7 @@ export function App() {
                     fontWeight: 600,
                   }}
                 >
-                  Continue this chat
+                  {agent.loadingConversation ? 'Opening chat…' : 'Continue this chat'}
                 </button>
                 <button
                   onClick={() => handleSelectSession(null)}
@@ -514,6 +512,8 @@ export function App() {
           <div
             className="chat-workbench-grid"
             data-bench={workbenchOpen ? 'open' : 'closed'}
+            data-computer={workbenchTab === 'computer'}
+            data-expanded={computerExpanded}
             style={{
               flex: 1,
               overflow: 'hidden',
@@ -522,6 +522,7 @@ export function App() {
             }}
           >
             <div
+              className="chat-column"
               style={{
                 minWidth: 0,
                 display: 'flex',
@@ -563,8 +564,12 @@ export function App() {
                   Drop files to attach
                 </div>
               )}
-              <ChatPanel
-                conversationKey={history.viewingSessionId ?? 'live'}
+              {isViewingHistory && !displayMessages.length ? (
+                <div role="status" style={{ padding: 24, color: 'var(--text-muted)' }}>
+                  {history.loading ? 'Loading conversation…' : 'No saved messages in this conversation.'}
+                </div>
+              ) : <ChatPanel
+                conversationKey={history.viewingSessionId ?? getLiveSessionId()}
                 messages={displayMessages}
                 toolCalls={displayToolCalls}
                 thinkingBlocks={displayThinkingBlocks}
@@ -583,9 +588,9 @@ export function App() {
                 delegateEvents={displayDelegateEvents}
                 compactionEvents={displayCompactionEvents}
                 currentStepInfo={isViewingHistory ? null : agent.currentStepInfo}
-                pendingQuestion={isViewingHistory ? null : agent.pendingQuestion}
+                pendingQuestion={isViewingHistory || agent.state === 'stopping' ? null : agent.pendingQuestion}
                 onRespondQuestion={agent.respondQuestion}
-                pendingApproval={isViewingHistory ? null : agent.pendingApproval}
+                pendingApproval={isViewingHistory || agent.state === 'stopping' ? null : agent.pendingApproval}
                 onRespondApproval={agent.respondApproval}
                 onSuggest={
                   !isViewingHistory && agent.connected && agent.state === 'idle'
@@ -597,7 +602,7 @@ export function App() {
                      the stream. The picker self-hides once a folder is set. */
                   !isViewingHistory && touchedWorkspace ? <InlineWorkspacePicker /> : null
                 }
-              />
+              />}
 
               {!workbenchOpen && shouldOpenWorkbench(displayToolCalls, displayFileChanges) && (
                 <button
@@ -625,13 +630,11 @@ export function App() {
                 </button>
               )}
 
+            </div>
+            <div className="chat-composer">
               {/* Input area */}
               {isViewingHistory ? (
                 <div style={{
-                  position: 'absolute',
-                  bottom: 92,
-                  left: 0,
-                  right: 0,
                   textAlign: 'center',
                   zIndex: 11,
                   pointerEvents: 'none',
@@ -649,40 +652,19 @@ export function App() {
                 </div>
               ) : null}
               <InputArea
+                conversationKey={history.viewingSessionId ?? getLiveSessionId()}
                 ref={inputAreaRef}
-                onSend={isViewingHistory ? handleSendFromHistory : agent.sendMessage}
+                onSend={isViewingHistory ? continueHistory : agent.sendMessage}
                 onAbort={agent.abort}
                 isRunning={!isViewingHistory && agent.state !== 'idle'}
-                attentionLabel={attentionLabel}
+                isStopping={agent.state === 'stopping' || agent.state === 'submitting'}
+                attentionLabel={agent.state === 'submitting' ? 'Sending…' : agent.state === 'stopping' ? 'Stopping…' : attentionLabel}
+                sendBlockedReason={isViewingHistory && agent.state !== 'idle' ? 'Your live task is still running. Go Back to live to view or stop it.' : agent.loadingConversation ? 'Opening conversation…' : undefined}
                 disabled={!agent.connected}
               />
             </div>
 
-            {/* Workbench occupies the second grid track; always mounted so
-                the width can animate, but its body only renders when open. */}
-            <div style={{ minWidth: 0, overflow: 'hidden' }}>
-              {workbenchOpen && (
-                <WorkbenchPanel
-                  sessionId={history.viewingSessionId ?? getLiveSessionId()}
-                  key={history.viewingSessionId ?? getLiveSessionId()}
-                  historical={isViewingHistory}
-                  toolCalls={displayToolCalls}
-                  fileChanges={displayFileChanges}
-                  isRunning={!isViewingHistory && agent.state === 'running'}
-                  activitySummary={displayActivitySummary}
-                  trust={displayTrust}
-                  currentStep={isViewingHistory ? null : agent.currentStepInfo}
-                  orchestration={isViewingHistory ? null : agent.orchestration}
-                  awaiting={
-                    isViewingHistory ? null : agent.state === 'waiting_approval' ? 'approval'
-                      : agent.state === 'waiting_question' ? 'question'
-                      : null
-                  }
-                  connected={agent.connected}
-                  onClose={() => { setWorkbenchOpen(false); setWorkbenchDismissed(true); }}
-                />
-              )}
-            </div>
+            <ConversationWorkbenches agent={agent} live={liveWorkbench} history={historyWorkbench} historyState={history.historyState} />
           </div>
         </div>
       </div>

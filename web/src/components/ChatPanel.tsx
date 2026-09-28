@@ -1,3 +1,4 @@
+import { latestTurn } from '../utils/retry';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type {
   ChatMessage,
@@ -33,8 +34,8 @@ interface ChatPanelProps {
   toolCalls: ToolCall[];
   thinkingBlocks: ThinkingBlock[];
   isRunning: boolean;
-  /** Re-run the last turn (Regenerate on the latest assistant message). */
-  onRegenerate?: () => void;
+  /** Retry the user request associated with the visible result. */
+  onRegenerate?: (userMessageId: string) => void;
   /** Resend an edited user message as a new turn. */
   onEditResend?: (text: string) => void;
   activitySummary: ActivitySummary | null;
@@ -84,13 +85,10 @@ export function ChatPanel({
     | { type: 'delegate'; item: DelegateItem }
     | { type: 'compaction'; item: CompactionItem };
 
-  // Rebuilt only when a source list changes, not on every streaming re-render.
-  const lastAssistantId = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === 'assistant') return messages[i].id;
-    }
-    return null;
-  }, [messages]);
+  const turn = useMemo(() => latestTurn(messages), [messages]);
+  const retryUserId = turn.user?.id;
+  const retry = !isRunning && onRegenerate && retryUserId
+    ? () => onRegenerate(retryUserId) : undefined;
 
   // Only the answer after the latest user turn can still be streaming.
   const streamingAnswerId = useMemo(() => {
@@ -234,7 +232,8 @@ export function ChatPanel({
                 <div key={item.item.id} style={{ marginTop: needsGap ? 12 : 0 }}>
                   <TrustCard
                     trust={item.item.trust}
-                    onEscalate={onSuggest ? () => onSuggest('/escalate') : undefined}
+                    onRetry={item.item.id === turn.retryAnchor?.id ? retry : undefined}
+                    onEscalate={item.item.id === turn.retryAnchor?.id && retry && onSuggest ? () => onSuggest('/escalate') : undefined}
                   />
                 </div>
               );
@@ -254,19 +253,14 @@ export function ChatPanel({
                   streaming={
                     isRunning
                     && item.item.role === 'assistant'
-                    && item.item.id === lastAssistantId
+                    && item.item.id === streamingAnswerId
                   }
-                  onRegenerate={
-                    !isRunning
-                    && item.item.role === 'assistant'
-                    && item.item.id === lastAssistantId
-                      ? onRegenerate
-                      : undefined
-                  }
+                  onRegenerate={item.item.role === 'assistant' && item.item.id === turn.retryAnchor?.id ? retry : undefined}
                   onEdit={
                     !isRunning && item.item.role === 'user' ? onEditResend : undefined
                   }
                 />
+                {item.item.role === 'system' && item.item.id === turn.retryAnchor?.id && retry && <button className="msg-action-btn" onClick={retry}>Retry request</button>}
               </div>
             );
           }

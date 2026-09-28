@@ -13,7 +13,10 @@ from rune.utils.logger import get_logger
 log = get_logger(__name__)
 
 _PROPERTIES = {
-    "goal_type": {"type": "string", "enum": ["chat", "web", "research", "code_modify", "execution", "browser", "full"]},
+    "goal_type": {
+        "type": "string", "enum": ["chat", "web", "research", "code_modify", "execution", "browser", "full"],
+        "description": "Route by the requested outcome. Reading or summarizing even an already open webpage is web. Browser requires interaction with webpage controls, not merely an open browser or use of a page-reading tool. Native app state/features use full with desktop intent.",
+    },
     "confidence": {"type": "number", "minimum": 0, "maximum": 1,
                    "description": "Confidence as a fraction from 0 to 1, never a percentage."},
     "reason": {"type": "string", "description": "One short phrase explaining the routing decision."},
@@ -21,7 +24,7 @@ _PROPERTIES = {
         "type": "boolean",
         "description": "True only for required code, script, shell or test execution. False for native app input, including calculations in Calculator, unless the user also requests code/tests to run.",
     },
-    "intent_categories": {"type": "array", "items": {"type": "string", "enum": ["email", "document", "table", "desktop"]}},
+    "intent_categories": {"type": "array", "items": {"type": "string", "enum": ["email", "document", "table", "desktop", "calculation"]}},
     "requires_desktop_input": {"type": "boolean"},
     "is_related_to_previous": {"type": "boolean"},
     "table_output": {
@@ -107,6 +110,17 @@ def validate_decision(data: dict[str, Any]) -> dict[str, Any]:
         raise InvalidClassification("invalid_table_output")
     if not isinstance(data["calculation_expression"], str):
         raise InvalidClassification("invalid_calculation_expression")
+    desktop = "desktop" in data["intent_categories"]
+    if data["requires_desktop_input"] and not desktop:
+        raise InvalidClassification("inconsistent_desktop_input")
+    if desktop and data["goal_type"] != "full":
+        raise InvalidClassification("inconsistent_desktop_route")
+    if data["table_output"] != "none" and data["goal_type"] in {"chat", "web"}:
+        raise InvalidClassification("inconsistent_table_route")
+    # Deliverables may need calculation; only direct answers carry an expression.
+    if data["calculation_expression"] and (data["goal_type"] != "chat"
+            or data["requires_execution"] or data["table_output"] != "none"):
+        raise InvalidClassification("inconsistent_calculation_route")
     return data
 
 

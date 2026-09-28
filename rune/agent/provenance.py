@@ -254,6 +254,7 @@ async def classify_roles(
     import json as _json
 
     from rune.agent.litellm_adapter import _resolve_litellm_model, litellm
+    from rune.agent.timing import timing_phase
     from rune.llm.reasoning import reasoning_control
     from rune.llm.request_params import compatible_completion
 
@@ -267,17 +268,18 @@ async def classify_roles(
     efforts = reasoning_control(resolved).efforts
     effort = next((level for level in ("none", "minimal", "low") if level in efforts), None)
     try:
-        resp = await asyncio.wait_for(
-            compatible_completion(litellm.acompletion, litellm.BadRequestError, {
-                "model": resolved,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 1200,
-                "reasoning_effort": effort,
-                "timeout": _CLASSIFY_TIMEOUT_S,
-                **extra,
-            }),
-            timeout=_CLASSIFY_TIMEOUT_S,
-        )
+        with timing_phase("file_roles"):
+            resp = await asyncio.wait_for(
+                compatible_completion(litellm.acompletion, litellm.BadRequestError, {
+                    "model": resolved,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 1200,
+                    "reasoning_effort": effort,
+                    "timeout": _CLASSIFY_TIMEOUT_S,
+                    **extra,
+                }),
+                timeout=_CLASSIFY_TIMEOUT_S,
+            )
         text = resp.choices[0].message.content or ""
     except Exception as exc:  # noqa: BLE001
         log.debug("artifact_role_error", error=str(exc)[:120])

@@ -11,6 +11,7 @@ _UNIT_FAILURE = re.compile(r"^(FAIL|ERROR): ([\w.]+) \(([\w.]+)\)(?: (.+))?$", r
 _UNIT_TOTAL = re.compile(r"^Ran (\d+) tests? in [^\n]+$", re.M)
 _UNIT_COUNTS = re.compile(r"^(?:FAILED|OK)(?: \(([^\n]+)\))?$", re.M)
 _PYTEST_CASE = re.compile(r"^([^\n]+::[^\n]+?)\s+(PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)(?:\s+\[.*\])?$", re.M)
+_PYTEST_FAILURE = re.compile(r"^(?:FAILED|ERROR) ([^\n]+::[^\n]+?)(?: - [^\n]*)?$", re.M)
 _PYTEST_TOTAL = re.compile(
     r"^(?:=+\s*)?((?:\d+ (?:passed|failed|skipped|xfailed|xpassed|errors?|warnings?|deselected)(?:, )?)+)"
     r" in \d+(?:\.\d+)?s(?: \([^\n]*\))?\s*(?:=+)?$", re.M,
@@ -33,6 +34,7 @@ class TestReport:
     tests_run: int | None
     failure_events: int | None
     complete: bool
+    passed_tests: int | None = None
 
     def snapshot(self) -> dict:
         return asdict(self)
@@ -66,18 +68,32 @@ def parse_test_report(output: str) -> TestReport | None:
         count = int(total[-1].group(1))
         cases = tuple(TestCase(key, status, tuple(subtests.get(key, []))) for key, status in list(statuses.items())[:_LIMIT])
         complete = not clipped and len(total) == 1 and len(cases) == count and "characters omitted" not in text
-        return TestReport("unittest", cases, count, failures, complete)
+        passed = sum(case.status == "pass" for case in cases) if complete else None
+        if (passed is None and not clipped and "characters omitted" not in text
+                and len(total) == len(summaries) == 1 and failures == 0):
+            passed = count - sum(int(counts.get(key, 0)) for key in ("skipped", "expected failures"))
+            if not 0 <= passed <= count:
+                passed = None
+        return TestReport("unittest", cases, count, failures, complete, passed)
     matches = list(_PYTEST_CASE.finditer(text))
     summaries = list(_PYTEST_TOTAL.finditer(text))
     if matches or summaries:
         mapping = {"PASSED": "pass", "FAILED": "fail", "ERROR": "fail", "SKIPPED": "skip", "XFAIL": "skip", "XPASS": "unknown"}
-        cases = tuple(TestCase(m.group(1)[:500], mapping[m.group(2)]) for m in matches[:_LIMIT])
-        count = failures = None
+        statuses = {m.group(1)[:500]: mapping[m.group(2)] for m in matches}
+        for match in _PYTEST_FAILURE.finditer(text):
+            identity = match.group(1)
+            # A shortened or split parametrized ID cannot identify a test reliably.
+            if len(identity) <= 500 and not identity.endswith("...") and identity.count("[") == identity.count("]"):
+                statuses[identity] = "fail"
+        cases = tuple(TestCase(identity, status) for identity, status in list(statuses.items())[:_LIMIT])
+        count = failures = passed = None
         complete = False
         if len(summaries) == 1:
             counts = {key.rstrip("s") if key in {"errors", "warnings"} else key: int(value)
                       for value, key in re.findall(r"(\d+) (\w+)", summaries[0].group(1))}
             failures = counts.get("failed", 0) + counts.get("error", 0)
+            if not clipped and "characters omitted" not in text:
+                passed = counts.get("passed", 0)
             if not counts.get("error"):
                 count = sum(counts.get(key, 0) for key in ("passed", "failed", "skipped", "xfailed", "xpassed"))
                 observed = {status: sum(m.group(2) == status for m in matches)
@@ -87,5 +103,5 @@ def parse_test_report(output: str) -> TestReport | None:
                             and all(observed[key] == counts.get(value, 0) for key, value in
                                     {"PASSED": "passed", "FAILED": "failed", "SKIPPED": "skipped",
                                      "XFAIL": "xfailed", "XPASS": "xpassed", "ERROR": "error"}.items()))
-        return TestReport("pytest", cases, count, failures, complete)
+        return TestReport("pytest", cases, count, failures, complete, passed)
     return None

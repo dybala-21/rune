@@ -890,8 +890,7 @@ class TestIntentEnginePipeline:
         assert contract.kind == "chat"
         assert contract.tool_requirement == "read"  # continuation → read
 
-    def test_execution_goal_requires_code_write(self) -> None:
-        """Execution goals should produce code_write contracts."""
+    def test_execution_goal_requires_command_evidence(self) -> None:
         cls = ClassificationResult(
             goal_type="execution",
             confidence=0.9,
@@ -899,8 +898,9 @@ class TestIntentEnginePipeline:
             requires_execution=True,
         )
         contract = resolve_intent_contract(cls, 0.9)
-        assert contract.tool_requirement == "write"
-        assert contract.requires_code_verification is True
+        assert contract.kind == "execution"
+        assert contract.tool_requirement == "execute"
+        assert contract.requires_code_verification is False
 
     def test_web_goal_requires_grounding(self) -> None:
         """Web goals should have required grounding."""

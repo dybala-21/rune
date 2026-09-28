@@ -17,7 +17,7 @@ class Rates:
     long_output_factor: float = 2.0
 
 
-# USD per million tokens; reviewed 2026-09-20. Unknown models stay unpriced.
+# USD per million tokens. Unknown models stay unpriced.
 # https://developers.openai.com/api/docs/models/gpt-6-astra
 # https://developers.openai.com/api/docs/models/gpt-5.4-mini
 # https://developers.openai.com/api/docs/models/gpt-4o
@@ -31,6 +31,7 @@ _RATES = {
     "openai/gpt-6-astra": Rates(10, 50, 1, 12.5, 272000, 1.5),
     "openai/gpt-5.4-mini": Rates(.75, 4.5, .075),
     "openai/gpt-4o": Rates(2.5, 10, 1.25),
+    "xai/grok-4.7": Rates(2, 6, .5, long_above=199999),
     "xai/grok-4.6": Rates(2, 6, .5, long_above=199999),
     "xai/grok-4.5": Rates(2, 6, .3, long_above=199999),
     "xai/grok-4.3": Rates(1.25, 2.5, .2, long_above=199999),

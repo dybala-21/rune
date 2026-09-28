@@ -220,3 +220,105 @@ def test_plain_text_estimation_is_unchanged():
     from rune.agent.loop import NativeAgentLoop
 
     assert NativeAgentLoop._estimate_tokens({"role": "user", "content": "a" * 400}) == 100
+
+
+@pytest.fixture
+def upload_workspace():
+    import tempfile
+    from pathlib import Path
+
+    with tempfile.TemporaryDirectory(prefix="rune-upload-test-", dir="/tmp") as directory:
+        yield Path(directory)
+
+
+@pytest.mark.asyncio
+async def test_uploaded_documents_are_readable_without_inlining_their_content(upload_workspace):
+    import base64
+    import json
+    from pathlib import Path
+
+    from rune.capabilities.document import DocumentReadParams, document_read
+
+    source = 'item,total\n한글,42\n'
+    content, notes = await build_user_content('read the table', [{
+        'name': '../../report.csv', 'mimeType': 'text/csv',
+        'data': base64.b64encode(source.encode()).decode(),
+    }], vision=False, workspace_root=str(upload_workspace))
+    assert not notes
+    assert content_text(content) == 'read the table'
+    manifest = json.loads(content[1]['text'].splitlines()[1])
+    path = Path(manifest[0]['path'])
+    assert path.parent == upload_workspace.resolve()
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert source not in str(content)
+    result = await document_read(DocumentReadParams(path=str(path)))
+    assert result.success and '한글,42' in result.output
+
+
+@pytest.mark.asyncio
+async def test_document_upload_rejects_corrupt_data_and_isolation_escape(upload_workspace, monkeypatch):
+    content, notes = await build_user_content('read', [{
+        'name': 'x.pdf', 'mimeType': 'application/pdf', 'data': '!!!',
+    }], vision=False, workspace_root=str(upload_workspace))
+    assert 'corrupted' in notes[0]
+    assert not list(upload_workspace.iterdir())
+    monkeypatch.setenv('RUNE_ISOLATION_ROOT', str(upload_workspace / 'worker'))
+    _, notes = await build_user_content('read', [{
+        'name': 'x.csv', 'mimeType': 'text/csv', 'data': 'YSwxCg==',
+    }], vision=False, workspace_root=str(upload_workspace))
+    assert 'Isolation violation' in notes[0]
+    assert not list(upload_workspace.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_upload_count_limit_prevents_partial_storage(upload_workspace):
+    content, notes = await build_user_content('read', [
+        {'name': f'{i}.csv', 'data': 'YSwxCg=='} for i in range(11)
+    ], vision=False, workspace_root=str(upload_workspace))
+    assert 'at most 10 files' in notes[0]
+    assert not list(upload_workspace.iterdir())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('extension', ['pdf', 'docx', 'xlsx', 'pptx'])
+async def test_office_uploads_reach_the_document_reader(upload_workspace, extension):
+    import base64
+    import json
+
+    from rune.capabilities.document import (
+        DocBlock,
+        DocSheet,
+        DocumentCreateParams,
+        DocumentReadParams,
+        document_create,
+        document_read,
+    )
+
+    source = upload_workspace / f'source.{extension}'
+    created = await document_create(DocumentCreateParams(
+        path=str(source), format=extension, title='Upload check',
+        blocks=[DocBlock(type='paragraph', text='Attachment check 42')],
+        sheets=[DocSheet(name='Data', rows=[['value'], [42]])],
+    ))
+    assert created.success, created.error
+    content, notes = await build_user_content('read', [{
+        'name': source.name, 'mimeType': '', 'data': base64.b64encode(source.read_bytes()).decode(),
+    }], vision=False, workspace_root=str(upload_workspace))
+    assert not notes
+    path = json.loads(content[1]['text'].splitlines()[1])[0]['path']
+    assert path != str(source)
+    result = await document_read(DocumentReadParams(path=path))
+    assert result.success and '42' in result.output
+
+
+@pytest.mark.asyncio
+async def test_protected_workspace_denies_upload_without_creating_files(upload_workspace, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr('rune.agent.document_attachments.get_guardian', lambda: SimpleNamespace(
+        validate_file_path=lambda _: SimpleNamespace(allowed=False, reason='Protected workspace'),
+    ))
+    _, notes = await build_user_content('read', [{'name': 'a.csv', 'data': 'YSwxCg=='}],
+                                        vision=False, workspace_root=str(upload_workspace))
+    assert 'Protected workspace' in notes[0]
+    assert not list(upload_workspace.iterdir())

@@ -1,30 +1,38 @@
-"""Shared fixtures for E2E tests that hit real LLM APIs."""
+"""Explicitly enabled tests against the configured model providers."""
 
-from __future__ import annotations
-
-import os
+from pathlib import Path
 
 import pytest
 
-# Skip entire module if no API key is available
-_has_api_key = bool(
-    os.environ.get("OPENAI_API_KEY")
-    or os.environ.get("ANTHROPIC_API_KEY")
-)
+from tests.e2e.live_config import configure_model, select_model
 
 
 def pytest_collection_modifyitems(config, items):
-    """Auto-skip e2e tests when no API key is set."""
-    if _has_api_key:
+    live = [item for item in items if Path(__file__).parent in item.path.parents]
+    if not live:
         return
-    skip_marker = pytest.mark.skip(reason="No LLM API key — skipping e2e tests")
-    for item in items:
-        if "e2e" in str(item.fspath):
-            item.add_marker(skip_marker)
+    if not config.getoption("--run-live"):
+        for item in live:
+            item.add_marker(pytest.mark.skip(reason="Use --run-live to enable model API calls"))
+        return
+    from rune.config import get_config
+
+    try:
+        selection = select_model(get_config(), config.getoption("--live-provider"), config.getoption("--live-model"))
+    except ValueError as exc:
+        raise pytest.UsageError(str(exc)) from exc
+    config._rune_live_selection = selection
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _load_dotenv():
-    """Load ~/.rune/.env so API keys are available."""
-    from rune.config.loader import _load_dotenv as load_env
-    load_env()
+@pytest.fixture(autouse=True)
+def live_model(request, monkeypatch):
+    from rune.config import loader
+
+    selection = request.config._rune_live_selection
+    cfg = loader.get_config().model_copy(deep=True)
+    configure_model(cfg, *selection)
+    backend = request.config.getoption("--decision-backend")
+    if backend:
+        cfg.llm.decision_routing.backend = backend
+    monkeypatch.setattr(loader, "_config", cfg)
+    return selection

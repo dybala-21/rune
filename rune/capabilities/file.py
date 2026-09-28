@@ -132,7 +132,8 @@ async def file_read(params: FileReadParams) -> CapabilityResult:
     # read: duplicate rows the model would silently double-count live
     # outside whatever offset/limit it asked for.
     from rune.capabilities.table_profile import profile_table
-    profile = profile_table(text, file_path.name)
+    table_evidence: dict = {}
+    profile = profile_table(text, file_path.name, evidence=table_evidence)
     if profile:
         if not numbered.endswith("\n"):
             numbered += "\n"
@@ -141,7 +142,8 @@ async def file_read(params: FileReadParams) -> CapabilityResult:
     return CapabilityResult(
         success=True,
         output=numbered,
-        metadata={"path": str(file_path), "lines": len(lines), "total_size": size},
+        metadata={"path": str(file_path), "lines": len(lines), "total_size": size,
+                  **({"table_profile": table_evidence} if table_evidence else {})},
     )
 
 

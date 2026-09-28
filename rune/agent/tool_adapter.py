@@ -431,8 +431,7 @@ def _build_typed_tool(
     # Shared with the tool closure to count consecutive denials.
     _consecutive_denials: list[int] = [0]
 
-    # Reuse approval for the same HTTP method and host within this run.
-    # Tool wrappers are rebuilt between runs.
+    # Cache read approvals for this run. Recheck every write.
     _approved_network: set[str] = set()
 
     async def _execute(params: dict[str, Any]) -> str | Any:
@@ -613,7 +612,8 @@ def _build_typed_tool(
             # worker) or run with approval mode "bypass".
             if net_request.is_write:
                 err = CapabilityResult(
-                    success=False, error="No approval channel for a network write."
+                    success=False, error="No approval channel for a network write.",
+                    metadata={"action_status": "not_executed"},
                 )
                 if opts.on_tool_end is not None:
                     await opts.on_tool_end(cap_name, err)
@@ -623,7 +623,7 @@ def _build_typed_tool(
                 )
             net_request = None
         if net_request is not None and opts.approval_callback is not None:
-            if net_request.cache_key not in _approved_network:
+            if net_request.is_write or net_request.cache_key not in _approved_network:
                 approved = await opts.approval_callback(
                     net_request.display, net_request.reason
                 )
@@ -631,6 +631,7 @@ def _build_typed_tool(
                     err = CapabilityResult(
                         success=False,
                         error="User declined the network operation.",
+                        metadata={"action_status": "not_executed"},
                     )
                     if opts.on_tool_end is not None:
                         await opts.on_tool_end(cap_name, err)
@@ -638,15 +639,22 @@ def _build_typed_tool(
                         f"{DENIED_PREFIX} User declined: {net_request.display}. "
                         "Do NOT retry it; find another source or report the blocker."
                     )
-                _approved_network.add(net_request.cache_key)
+                if not net_request.is_write:
+                    _approved_network.add(net_request.cache_key)
 
         # -- Feature 3: MCP write operation approval guard -------
         if (
             cap_name.startswith("mcp.")
-            and opts.approval_callback is not None
             and approval_mode() != "bypass"
         ):
             if is_mcp_write_operation(cap_name):
+                if opts.approval_callback is None:
+                    reason = "External service write needs approval but this session has no approval channel."
+                    if opts.on_tool_end is not None:
+                        await opts.on_tool_end(cap_name, CapabilityResult(
+                            success=False, error=reason, metadata={"action_status": "not_executed"},
+                        ))
+                    return f"{BLOCKED_PREFIX} {reason}"
                 parts = cap_name.split(".")
                 service_name = parts[1] if len(parts) > 1 else "unknown"
                 tool_name = ".".join(parts[2:]) if len(parts) > 2 else cap_name
@@ -660,6 +668,7 @@ def _build_typed_tool(
                     err = CapabilityResult(
                         success=False,
                         error="User declined the service operation.",
+                        metadata={"action_status": "not_executed"},
                     )
                     if opts.on_tool_end is not None:
                         await opts.on_tool_end(cap_name, err)
@@ -698,6 +707,11 @@ def _build_typed_tool(
                 opts.table_acceptance.observe(cap_name, effective_params, result)
         except Exception as exc:
             result = CapabilityResult(success=False, error=f"Execution error: {exc}")
+        finally:
+            if (cache is not None and cap_name == "web_fetch"
+                    and str(effective_params.get("method") or "GET").upper() != "GET"):
+                # The write may have succeeded even if its response was lost.
+                cache.invalidate_web()
         # A capability can refuse and ask to be asked. The execution policy's
         # allowlist does this: Guardian never sees the verdict, so without this
         # the refusal was a dead end — no prompt anywhere, and the metadata
@@ -787,6 +801,16 @@ def _build_typed_tool(
     # --- Wrapper that receives **kwargs from LiteLLMAgent's tool executor ---
     async def _wrapper(**kwargs: Any) -> str | Any:
         return await _execute(kwargs)
+
+    async def _reject(params: dict[str, Any], error: str) -> None:
+        if opts.on_tool_start is not None:
+            await opts.on_tool_start(cap_name, params)
+        if opts.on_tool_end is not None:
+            await opts.on_tool_end(cap_name, CapabilityResult(
+                success=False, error=error, metadata={"action_status": "not_executed"},
+            ))
+
+    _wrapper._rune_reject = _reject
 
     _wrapper.__name__ = cap_name
     _wrapper.__doc__ = cap_def.description
@@ -1107,7 +1131,8 @@ def enrich_error_message(
         return [
             "Recovery options:",
             "  1. Try an alternative approach that does not require this API",
-            "  2. Use browser_navigate to access the resource directly",
+            "  2. Use a browser only if an authorized webpage can provide the missing data or operation. "
+            "An API authentication failure alone is not a reason to open a browser or bypass access controls.",
         ]
 
     def _build_hints_build_error() -> list[str]:
@@ -1304,9 +1329,7 @@ _NETWORK_READ_CAPS = frozenset({
     "web_search", "browser_navigate", "browser_observe", "browser_extract",
     "browser_find", "browser_screenshot", "browser_discover_apis",
 })
-# Interactions: a click can submit a form or place an order. Gated in "all"
-# mode only — the target is a UI ref, so there is no reliable signal for
-# "this click is the checkout button" to gate on by default.
+# Browser input needs approval in strict mode: a click may submit a form.
 _NETWORK_ACT_CAPS = frozenset({
     "browser_act", "browser_batch", "browser_workflow",
 })
@@ -1407,6 +1430,7 @@ def _network_approval_request(
             f"{cap_name} {action} {selector}".strip(),
             f"Browser interaction: {action or cap_name}",
             f"{cap_name}|{action}",
+            is_write=True,
         )
 
     return None

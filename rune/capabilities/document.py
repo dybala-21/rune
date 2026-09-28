@@ -390,6 +390,7 @@ _READERS = {
     "pptx": (_read_pptx, "python-pptx"),
     "pdf": (_read_pdf, "pypdf"),
     "csv": (_read_text, ""),
+    "tsv": (_read_text, ""),
     "html": (_read_text, ""),
     "txt": (_read_text, ""),
     "md": (_read_text, ""),
@@ -427,13 +428,19 @@ async def document_read(params: DocumentReadParams) -> CapabilityResult:
         log.debug("document_read_failed", ext=ext, error=str(exc))
         return CapabilityResult(success=False, error=f"Failed to read {ext}: {exc}")
 
+    from rune.capabilities.table_profile import profile_table
+    table_evidence: dict = {}
+    profile = profile_table(text, file_path.name, evidence=table_evidence)
     truncated = len(text) > params.max_chars
     if truncated:
         text = text[: params.max_chars] + f"\n... [truncated, {len(text)} total chars]"
+    if profile:
+        text += "\n" + profile
     return CapabilityResult(
         success=True,
         output=text,
-        metadata={"path": str(file_path), "format": ext, "truncated": truncated},
+        metadata={"path": str(file_path), "format": ext, "truncated": truncated,
+                  **({"table_profile": table_evidence} if table_evidence else {})},
     )
 
 

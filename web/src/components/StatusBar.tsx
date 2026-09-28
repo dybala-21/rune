@@ -30,7 +30,7 @@ interface StatusBarProps {
 }
 
 const STATE_LABELS: Record<AgentState, string> = {
-  idle: 'Ready', running: 'Running', waiting_approval: 'Awaiting approval', waiting_question: 'Awaiting answer',
+  idle: 'Ready', submitting: 'Sending…', running: 'Running', stopping: 'Stopping…', waiting_approval: 'Awaiting approval', waiting_question: 'Awaiting answer',
 };
 
 function formatTokensCompact(n: number): string {
@@ -80,7 +80,7 @@ export function StatusBar({
     <div className="toolbar-actions">
       <div className="toolbar-workspace">{trailing}</div>
       {onToggleWorkbench && <button className="toolbar-button work-toggle" onClick={onToggleWorkbench}
-        title="Toggle Work panel (⌘J)" aria-label="Toggle Work panel" aria-pressed={workbenchOpen}>
+        title="Show or hide work panel (⌘J)" aria-label={workbenchOpen ? 'Hide work panel' : 'Show work panel'} aria-expanded={workbenchOpen}>
         <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true">
           <rect x="2" y="3" width="12" height="10" rx="2" /><path d="M9 3v10" />
         </svg><span>Work</span>

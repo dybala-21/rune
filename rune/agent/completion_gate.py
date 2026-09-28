@@ -38,7 +38,7 @@ def strip_rehydrated(content: str) -> str:
 
 # Type aliases
 
-ToolRequirement = Literal["none", "read", "write"]
+ToolRequirement = Literal["none", "read", "write", "execute"]
 OutputExpectation = Literal["text", "file", "either"]
 
 # Evidence data classes
@@ -115,6 +115,7 @@ class CompletionGateInput:
     """All inputs needed to evaluate the completion gate."""
     # Core requirements
     tool_requirement: ToolRequirement = "none"
+    intent_kind: str = ""
     output_expectation: OutputExpectation = "text"
     intent_resolved: bool = False
     requires_code_verification: bool = False
@@ -307,7 +308,7 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
 
     # R02: Tool Usage
     needs_tools = inp.tool_requirement != "none"
-    has_tool_usage = (ev.reads + ev.writes + ev.executions) > 0
+    has_tool_usage = (ev.reads + ev.writes + ev.executions + ev.browser_reads + ev.web_fetches + ev.web_searches) > 0
     r02_ok = (not needs_tools) or has_tool_usage
     r02 = RequirementTraceItem(
         id=REQUIREMENT_IDS["TOOL_USAGE"],
@@ -323,14 +324,14 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
 
     # R03: Read Evidence
     needs_read = inp.tool_requirement in ("read", "write")
-    r03_ok = (not needs_read) or ev.reads > 0 or ev.file_reads > 0
+    r03_ok = (not needs_read) or ev.reads > 0 or ev.file_reads > 0 or ev.browser_reads > 0 or ev.web_fetches > 0 or ev.web_searches > 0
     r03 = RequirementTraceItem(
         id=REQUIREMENT_IDS["READ_EVIDENCE"],
-        description="File read evidence",
+        description="Read evidence",
         required=needs_read,
         status="done" if r03_ok else "blocked",
-        evidence=f"reads={ev.reads}, file_reads={ev.file_reads}, samples={_clip_list(es.reads)}",
-        failure_reason="" if r03_ok else "No file reads observed",
+        evidence=f"reads={ev.reads}, file_reads={ev.file_reads}, browser_reads={ev.browser_reads}, samples={_clip_list(es.reads)}",
+        failure_reason="" if r03_ok else "No reads observed",
     )
     requirements.append(r03)
     if r03.required and r03.status != "done":
@@ -338,21 +339,22 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
 
     # R04: Write Evidence
     needs_write = inp.tool_requirement == "write"
-    r04_ok = (not needs_write) or ev.writes > 0
+    write_count = ev.browser_writes if inp.intent_kind == "browser_write" else ev.writes
+    r04_ok = (not needs_write) or write_count > 0
     r04 = RequirementTraceItem(
         id=REQUIREMENT_IDS["WRITE_EVIDENCE"],
-        description="File write evidence",
+        description="Browser input evidence" if inp.intent_kind == "browser_write" else "File write evidence",
         required=needs_write,
         status="done" if r04_ok else "blocked",
-        evidence=f"writes={ev.writes}, samples={_clip_list(es.writes)}",
-        failure_reason="" if r04_ok else "No file writes observed",
+        evidence=f"writes={write_count}, samples={_clip_list(es.writes)}",
+        failure_reason="" if r04_ok else "No requested changes observed",
     )
     requirements.append(r04)
     if r04.required and r04.status != "done":
         missing.append(r04.id)
 
     # R05: Execution Evidence
-    needs_exec = inp.tool_requirement == "write"
+    needs_exec = inp.tool_requirement == "execute" or (inp.tool_requirement == "write" and inp.intent_kind != "browser_write")
     r05_ok = (not needs_exec) or ev.executions > 0
     r05 = RequirementTraceItem(
         id=REQUIREMENT_IDS["EXECUTION_EVIDENCE"],

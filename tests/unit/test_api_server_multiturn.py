@@ -60,6 +60,7 @@ async def _noop_post_process(_input):
 def isolated_wiring(tmp_path, monkeypatch):
     """Point RUNE_HOME at a tmp dir and reset the wiring singletons."""
     monkeypatch.setenv("RUNE_HOME", str(tmp_path))
+    monkeypatch.setenv("RUNE_WORKSPACE", str(tmp_path / "workspace"))
     from rune.api import conversation_wiring
 
     conversation_wiring._reset_for_tests()

@@ -46,6 +46,33 @@ async def reference(page, name):
     return next(el.ref for el in elements if el.name == name)
 
 
+async def test_observation_does_not_wait_for_background_network_requests(screen):
+    pending = asyncio.Event()
+    release = asyncio.Event()
+
+    async def route(request):
+        if request.request.url.endswith("/pending"):
+            pending.set()
+            await release.wait()
+            await request.fulfill(body="done")
+        else:
+            await request.fulfill(content_type="text/html", body=(
+                '<label>Count<input value="5"></label><button>Calculate</button>'
+                '<script>fetch("/pending")</script>'
+            ))
+
+    await screen.route("http://rune.test/**", route)
+    try:
+        await screen.goto("http://rune.test/fixture", wait_until="domcontentloaded")
+        await asyncio.wait_for(pending.wait(), 3)
+        result = await asyncio.wait_for(browser_observe(BrowserObserveParams()), 3)
+        assert result.success and "Calculate" in result.output
+        assert not release.is_set()
+    finally:
+        release.set()
+        await screen.unroute_all(behavior="wait")
+
+
 async def test_same_url_actions_dispatch_once_and_report_control_state(screen):
     result = await browser_act(BrowserActParams(action="click", selector=await reference(screen, "Approved")))
     assert result.success and result.metadata["control_state"]["checked"] is True
@@ -54,6 +81,45 @@ async def test_same_url_actions_dispatch_once_and_report_control_state(screen):
     assert saved.success and saved.metadata["action_status"] == "dispatched"
     assert not saved.metadata["page_changed"]
     assert await screen.evaluate("window.saves") == 1
+
+
+async def test_displayed_brackets_preserve_reference_identity(screen):
+    ref = await reference(screen, "Save")
+    result = await browser_act(BrowserActParams(action="click", selector=f"[{ref}]"))
+    assert result.success and await screen.evaluate("window.saves") == 1
+    await screen.locator("#save").evaluate("el => el.outerHTML = el.outerHTML")
+    stale = await browser_act(BrowserActParams(action="click", selector=f"[{ref}]"))
+    assert not stale.success and await screen.evaluate("window.saves") == 1
+
+
+async def test_successful_input_is_not_repeated_just_to_verify_it(screen):
+    from rune.agent.run_control import RunControl, control_scope
+
+    ref = await reference(screen, "Save")
+    with control_scope(RunControl("first")):
+        assert (await browser_act(BrowserActParams(action="click", selector=ref))).success
+        assert (await browser_observe(BrowserObserveParams())).success
+        replay = await browser_act(BrowserActParams(action="click", selector=f"[{ref}]"))
+        assert replay.success and replay.metadata["replayed"]
+        assert await screen.evaluate("window.saves") == 1
+        assert (await browser_act(BrowserActParams(action="click", selector=ref, repeat=True))).success
+        assert await screen.evaluate("window.saves") == 2
+    with control_scope(RunControl("next")):
+        assert (await browser_act(BrowserActParams(action="click", selector=ref))).success
+        assert await screen.evaluate("window.saves") == 3
+
+
+async def test_extract_reads_current_refs_and_does_not_hide_empty_matches(screen):
+    from rune.capabilities.browser.capabilities import BrowserExtractParams, browser_extract
+
+    await screen.set_content('<label>Count<input value="1"></label>')
+    ref = await reference(screen, "Count")
+    await screen.get_by_role("textbox").fill("5")
+    result = await browser_extract(BrowserExtractParams(selector=f"[{ref}]", attribute="value"))
+    assert result.success and "current input value: '5'" in result.output
+    assert "HTML value attribute: '1'" in result.output
+    missing = await browser_extract(BrowserExtractParams(selector="spinbutton"))
+    assert not missing.success and "browser_observe" in missing.error
 
 
 async def test_resume_observes_the_live_page_without_repeating_a_click(screen, tmp_path):
@@ -227,6 +293,39 @@ async def test_explicit_open_replaces_a_closed_page_without_reusing_references(s
     assert await reference(reopened, "Save") != ref
     result = await browser_act(BrowserActParams(action="click", selector=ref))
     assert not result.success and result.metadata["action_status"] == "not_executed"
+
+
+@pytest.mark.parametrize("entry_point", ["open", "navigate"])
+async def test_entry_points_preserve_drafts_until_an_explicit_reload(screen, entry_point):
+    from rune.capabilities.browser.core import (
+        BrowserNavigateParams,
+        BrowserOpenParams,
+        browser_navigate,
+        browser_open,
+    )
+
+    url = "http://rune.test/draft"
+    await screen.route("http://rune.test/**", lambda route: route.fulfill(
+        body='<title>Draft</title><label>Name<input id="name"></label>', content_type="text/html"))
+    await screen.goto(url)
+    await screen.locator("#name").fill("unsaved 사용자 입력")
+    await screen.context.add_cookies([{"name": "session", "value": "retained", "url": url}])
+    original = current_session().browser
+    operation, params = ((browser_open, BrowserOpenParams) if entry_point == "open"
+                         else (browser_navigate, BrowserNavigateParams))
+    reused = await operation(params(url=url))
+    assert reused.success and reused.metadata["skipped_navigation"]
+    assert original.is_connected() and current_session().page is screen
+    assert await screen.locator("#name").input_value() == "unsaved 사용자 입력"
+    assert "Interactive Elements" in reused.output
+
+    refreshed = await operation(params(url=url, reload=True))
+    assert refreshed.success and not refreshed.metadata["skipped_navigation"]
+    assert await screen.locator("#name").input_value() == ""
+    moved = await operation(params(url=url + "?next=1"))
+    assert moved.success and screen.url.endswith("?next=1")
+    assert original.is_connected() and current_session().page is screen
+    assert next(cookie for cookie in await screen.context.cookies() if cookie["name"] == "session")["value"] == "retained"
 
 
 async def test_cancellation_closes_owned_browser_and_operations_serialize(screen):

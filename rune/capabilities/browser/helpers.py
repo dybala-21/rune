@@ -19,7 +19,6 @@ log = get_logger(__name__)
 # Configuration constants (mirrored from TS CONFIG)
 
 DOM_SETTLE_TIMEOUT_MS = 2000
-NETWORK_IDLE_TIMEOUT_MS = 5000
 MUTATION_QUIET_PERIOD_MS = 500
 MUTATION_MAX_WAIT_MS = 3000
 ACTION_TIMEOUT_MS = 10_000
@@ -70,19 +69,11 @@ _DOM_SETTLE_JS = """
 
 
 async def wait_for_dom_settle(page: Any) -> None:
-    """Wait for the page DOM to stabilise after navigation or action.
-
-    Two-phase strategy matching the TypeScript implementation:
-    1. Race between ``networkidle`` and a hard timeout.
-    2. MutationObserver quiet-period detection for SPA hydration.
-    """
-    # Phase 1: network settle (best-effort).
+    """Wait for a readable document and a bounded quiet period in its DOM."""
     try:
-        await page.wait_for_load_state("networkidle", timeout=NETWORK_IDLE_TIMEOUT_MS)
-    except Exception:
-        pass  # Timeout or navigation - continue to phase 2.
-
-    # Phase 2: MutationObserver quiet period.
+        await page.wait_for_load_state("domcontentloaded", timeout=DOM_SETTLE_TIMEOUT_MS)
+    except Exception as exc:
+        log.debug("browser_document_wait_failed", error=str(exc))
     try:
         await page.evaluate(
             _DOM_SETTLE_JS,
@@ -372,12 +363,18 @@ def format_interactive_elements(
 
 
 def is_element_ref(value: str) -> bool:
-    return re.fullmatch(r"e(?:[0-9a-f]{32}_)?\d+", value) is not None
+    return bool(element_ref(value))
+
+
+def element_ref(value: str) -> str:
+    candidate = value[1:-1] if value.startswith("[") and value.endswith("]") else value
+    return candidate if re.fullmatch(r"e(?:[0-9a-f]{32}_)?\d+", candidate) else ""
 
 
 async def find_element_locator(page: Any, ref: str) -> Any | None:
     """Return the observed node, never a replacement selected by a similar name."""
     store = get_element_store()
+    ref = element_ref(ref)
     meta, handle = store.get(ref), store.handles.get(ref)
     if meta is None or handle is None or store.page is not page or store.last_url != page.url:
         return None

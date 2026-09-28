@@ -4,6 +4,7 @@
   "private": true,
   "description": "RUNE desktop shell — a hardened Electron window over the RUNE web UI + daemon.",
   "main": "main.js",
+  "engines": { "node": ">=22.12.0" },
   "scripts": {
     "start": "electron .",
     "dev": "RUNE_UI_URL=http://localhost:5173 electron .",
@@ -11,7 +12,7 @@
     "dist": "electron-builder"
   },
   "devDependencies": {
-    "electron": "^33.0.0",
+    "electron": "^44.4.5",
     "electron-builder": "^26.0.0"
   },
   "build": {
@@ -19,7 +20,9 @@
     "productName": "RUNE",
     "files": [
       "main.js",
-      "preload.js"
+      "preload.js",
+      "browser-host.js",
+      "browser-shield.js"
     ],
     "directories": {
       "output": "release",
@@ -53,5 +56,8 @@
       "owner": "dybala-21",
       "repo": "rune"
     }
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
   }
 }

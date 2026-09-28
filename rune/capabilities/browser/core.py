@@ -39,14 +39,27 @@ async def _get_browser(profile: str | None = None) -> tuple[Any, Any]:
         if profile is not None and profile not in {"managed", "visible"}:
             raise RuntimeError("Attached Chrome requires an authenticated, explicitly selected tab")
         if session.page is not None:
+            if session.profile == "native" and session.browser.is_connected():
+                from rune.browser.native import select_native_page
+                await select_native_page(session)
+                return session.browser, session.page
             if session.page.is_closed() or not session.browser.is_connected():
                 if profile is None:
                     raise RuntimeError("The browser was closed. Open it again and read fresh element references")
-            elif profile is None or profile == session.profile:
+            else:
+                # Keep the current page when switching browser entry points.
                 return session.browser, session.page
             await session.release_resources()
         if profile is None:
             raise RuntimeError("No browser is open in this run. Use browser_navigate or browser_open first")
+        if session.native_host:
+            from rune.browser.native import connect_native
+            try:
+                await connect_native(session)
+                return session.browser, session.page
+            except BaseException:
+                await session.release_resources()
+                raise
         try:
             from playwright.async_api import async_playwright
         except ImportError:
@@ -127,16 +140,17 @@ async def _accessibility_snapshot(page: Any, selector: str = "") -> str:
 # Parameter schemas
 class BrowserNavigateParams(BaseModel):
     url: str = Field(description="URL to navigate to")
+    reload: bool = Field(default=False, description="Reload even if this exact URL is already open. Discards unsaved page state; use only when a refresh is needed.")
 
 
-class BrowserOpenParams(BaseModel):
-    url: str = Field(description="URL to open in visible browser")
+class BrowserOpenParams(BrowserNavigateParams):
+    url: str = Field(description="URL to open in the conversation's browser")
 
 
 # Capability implementations
 @browser_operation
 async def browser_navigate(params: BrowserNavigateParams) -> CapabilityResult:
-    """Navigate to a URL in a headless background browser for data extraction."""
+    """Navigate in the conversation's browser, preserving an already open URL."""
     from rune.capabilities.browser.helpers import (
         extract_interactive_elements,
         format_interactive_elements,
@@ -157,10 +171,13 @@ async def browser_navigate(params: BrowserNavigateParams) -> CapabilityResult:
         monitor = get_network_monitor()
         await monitor.attach(page)
 
-        response = await page.goto(params.url, wait_until="domcontentloaded", timeout=30_000)
-
-        await wait_for_dom_settle(page)
+        skipped = page.url == params.url and not params.reload
+        response = None
+        if not skipped:
+            response = await page.goto(params.url, wait_until="domcontentloaded", timeout=30_000)
+            await wait_for_dom_settle(page)
         elements = await extract_interactive_elements(page)
+        current_session().needs_observation = False
 
         status = response.status if response else 0
         title = await page.title()
@@ -190,16 +207,19 @@ async def browser_navigate(params: BrowserNavigateParams) -> CapabilityResult:
         # round-trip and buys nothing.
         element_section = format_interactive_elements(elements)
 
+        location = f"Already open: {url}" if skipped else f"Navigated to: {url}"
+        status_line = f"\nStatus: {status}" if response else ""
         return CapabilityResult(
             success=True,
             output=(
-                f"Navigated to: {url}\nTitle: {title}\nStatus: {status}"
+                f"{location}\nTitle: {title}{status_line}"
                 f"{api_section}{element_section}"
             ),
             metadata={
                 "url": url,
                 "title": title,
                 "status": status,
+                "skipped_navigation": skipped,
                 "interactive_count": len(elements),
             },
         )
@@ -216,7 +236,7 @@ async def browser_navigate(params: BrowserNavigateParams) -> CapabilityResult:
 
 @browser_operation
 async def browser_open(params: BrowserOpenParams) -> CapabilityResult:
-    """Open a URL in a visible browser the user can see and interact with."""
+    """Open a browser for the user, reusing the conversation's page when possible."""
     from rune.capabilities.browser.helpers import (
         extract_interactive_elements,
         format_interactive_elements,
@@ -232,34 +252,24 @@ async def browser_open(params: BrowserOpenParams) -> CapabilityResult:
     try:
         _, page = await _get_browser("visible")
 
-        # Preserve in-page work only when this exact URL is already open.
-        if page.url == params.url:
-            title = await page.title()
-            url = page.url
-            log.debug("browser_open_same_url", current=url, requested=params.url)
-            return CapabilityResult(
-                success=True,
-                output=(
-                    f"Browser already open on this site: {url}\n"
-                    f"Title: {title}\n"
-                    f"Use browser_observe/browser_act to interact with the current page."
-                ),
-                metadata={"url": url, "title": title, "skipped_navigation": True},
-            )
-
-        response = await page.goto(params.url, wait_until="domcontentloaded", timeout=30_000)
-
-        await wait_for_dom_settle(page)
+        skipped = page.url == params.url and not params.reload
+        response = None
+        if not skipped:
+            response = await page.goto(params.url, wait_until="domcontentloaded", timeout=30_000)
+            await wait_for_dom_settle(page)
         elements = await extract_interactive_elements(page)
+        current_session().needs_observation = False
 
         status = response.status if response else 0
         title = await page.title()
         url = page.url
 
+        location = f"Already open: {url}" if skipped else f"Opened in Rune browser: {url}"
+        status_line = f"\nStatus: {status}" if response else ""
         return CapabilityResult(
             success=True,
             output=(
-                f"Opened in visible browser: {url}\nTitle: {title}\nStatus: {status}"
+                f"{location}\nTitle: {title}{status_line}"
                 f"{format_interactive_elements(elements)}"
             ),
             metadata={
@@ -267,6 +277,7 @@ async def browser_open(params: BrowserOpenParams) -> CapabilityResult:
                 "title": title,
                 "status": status,
                 "profile": current_session().profile,
+                "skipped_navigation": skipped,
                 "interactive_count": len(elements),
             },
         )

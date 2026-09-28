@@ -4,6 +4,8 @@ import { abortedMessage } from './runEvents';
 
 export interface RunSnapshot {
   runId: string;
+  requestId?: string;
+  execution?: { attachments?: import('../types').SentAttachment[] };
   parentRunId?: string;
   recoveryVersion?: number;
   fileChanges?: FileChange[];
@@ -46,7 +48,8 @@ export function restoreRunMessages(messages: ChatMessage[], run: RunSnapshot): C
   }
   const restored = index < 0 ? [...messages] : messages.slice(0, index);
   restored.push({ id: userId, role: 'user', content: run.goal, timestamp: run.startedAt,
-    ...(index >= 0 && messages[index].attachments ? { attachments: messages[index].attachments } : {}) });
+    requestId: run.requestId, delivery: 'accepted',
+    attachments: run.execution?.attachments ?? (index >= 0 ? messages[index].attachments : undefined) });
   const text = run.answer ?? run.text;
   if (text) restored.push({ id: `${run.runId}:answer`, role: 'assistant', content: text,
     timestamp: run.answer === undefined ? run.textStartedAt ?? run.startedAt : run.updatedAt ?? run.startedAt });

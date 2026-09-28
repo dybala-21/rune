@@ -97,8 +97,19 @@ def test_config_failure_keeps_the_write_gate(monkeypatch):
     assert req is not None
 
 
-def test_denied_post_is_blocked_and_approved_host_is_cached(approval_cfg):
-    """End-to-end through the tool wrapper: deny blocks, approve caches by host."""
+@pytest.fixture
+def fetch_executor(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from rune.capabilities.registry import get_capability_registry
+    from rune.types import CapabilityResult
+
+    execute = AsyncMock(return_value=CapabilityResult(success=True, output="response"))
+    monkeypatch.setattr(get_capability_registry().get("web_fetch"), "execute", execute)
+    return execute
+
+
+def test_denied_post_is_blocked_and_each_write_needs_approval(approval_cfg, fetch_executor):
     import asyncio
 
     from rune.agent.tool_adapter import ToolAdapterOptions, build_tool_set
@@ -119,24 +130,25 @@ def test_denied_post_is_blocked_and_approved_host_is_cached(approval_cfg):
     out = asyncio.run(fetch(url="https://x.test/order.do", method="POST"))
     assert "User declined" in out and "Do NOT retry" in out
     assert len(asked) == 1
+    fetch_executor.assert_not_awaited()
 
-    # Approved once → a second POST to the same host doesn't re-prompt.
     verdict["approve"] = True
     asyncio.run(fetch(url="https://x.test/order.do", method="POST"))
     assert len(asked) == 2
     asyncio.run(fetch(url="https://x.test/other.do", method="POST"))
-    assert len(asked) == 2, "same host should reuse the granted approval"
+    assert len(asked) == 3
 
     # A different host is a fresh decision.
     asyncio.run(fetch(url="https://other.test/a.do", method="POST"))
-    assert len(asked) == 3
+    assert len(asked) == 4
 
     # GET never prompts.
     asyncio.run(fetch(url="https://third.test/page"))
-    assert len(asked) == 3
+    assert len(asked) == 4
+    assert fetch_executor.await_count == 4
 
 
-def test_write_without_approval_channel_fails_closed(approval_cfg):
+def test_write_without_approval_channel_fails_closed(approval_cfg, fetch_executor):
     """No channel to ask on: a read proceeds, an irreversible write does not."""
     import asyncio
 
@@ -147,10 +159,11 @@ def test_write_without_approval_channel_fails_closed(approval_cfg):
 
     out = asyncio.run(fetch(url="https://x.test/order.do", method="POST"))
     assert "no approval channel" in out
+    fetch_executor.assert_not_awaited()
 
-    # A GET is not a hazard — it still runs (and fails on DNS, not on the gate).
     read = asyncio.run(fetch(url="https://x.test/page"))
     assert "no approval channel" not in read
+    fetch_executor.assert_awaited_once()
 
 
 def test_approval_decisions_from_the_ui_are_honored():

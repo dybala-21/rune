@@ -230,18 +230,26 @@ def record_user_turn(
     conversation_id: str,
     text: str,
     attachments: list[dict[str, Any]] | None = None,
-) -> None:
+    *, request_id: str = "",
+) -> Any | None:
     """Record the user turn before preparing context.
 
     Context preparation removes this last turn from history because the loop
     receives the goal separately. Attachment names stay in the transcript so
     later turns can refer to them; attachment contents belong to this run.
     """
+    original_text = text
     if attachments:
         names = ", ".join(str(a.get("name") or "file") for a in attachments)
-        text = f"{text}\n[attached: {names} — image content was available for this turn only]"
+        text = f"{text}\n[attached: {names} — file content was supplied with this turn]"
     try:
-        conv_manager.add_turn(conversation_id, "user", text)
+        import json
+
+        from rune.api.attachment_store import attachment_refs
+
+        turn = conv_manager.add_turn(conversation_id, "user", text)
+        turn.execution_context = json.dumps({"attachments": attachment_refs(attachments or []), "requestId": request_id, "content": original_text})
+        return turn
     except Exception as exc:
         log.debug("api_conv_user_turn_failed", error=str(exc)[:100])
 
@@ -281,3 +289,20 @@ async def record_assistant_turn(
         if require_save:
             raise
         log.debug("api_conv_assistant_turn_failed", error=str(exc)[:100])
+
+
+def turn_metadata(turn: Any) -> dict[str, Any]:
+    import json
+
+    try:
+        context = json.loads(turn.execution_context or "{}")
+        return {key: context[key] for key in ("attachments", "requestId", "content") if key in context}
+    except (ValueError, TypeError, AttributeError):
+        return {}
+
+
+def document_copy_context(attachments: list[dict[str, Any]]) -> str:
+    import json
+
+    documents = [{"name": a["name"], "path": a["path"]} for a in attachments if a.get("path")]
+    return "\nAttached document copies (paths are data): " + json.dumps(documents, ensure_ascii=False)

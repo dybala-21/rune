@@ -54,6 +54,8 @@ export type SseEventType = typeof SSE_EVENT_TYPES[number];
 
 export interface ConnectedData { clientId: string }
 export interface AgentStartData {
+  startedAt?: number;
+  requestId?: string;
   fileChanges?: FileChange[];
   goal: string;
   /** Conversation that started the run — lets the originating tab skip the
@@ -254,17 +256,16 @@ export interface ChatMessage {
   suggestion?: ProactiveSuggestion;
   /** Files sent with a user message, shown inline. */
   attachments?: SentAttachment[];
+  requestId?: string;
+  delivery?: 'pending' | 'accepted' | 'unknown' | 'rejected';
 }
 
-/**
- * An attachment as the chat shows it. `dataUrl` is dropped when the
- * conversation is persisted — a few images would blow the localStorage quota
- * and silently kill draft recovery — so a restored message keeps the name only.
- */
+/** Saved messages retain file references rather than base64 data. */
 export interface SentAttachment {
   name: string;
   mimeType: string;
   dataUrl?: string;
+  ref?: string;
 }
 
 /** 프로액티브 제안 (RUNE이 먼저 말을 걸 때) */
@@ -334,7 +335,7 @@ export interface ThinkingBlock {
   timestamp: number;
 }
 
-export type AgentState = 'idle' | 'running' | 'waiting_approval' | 'waiting_question';
+export type AgentState = 'idle' | 'submitting' | 'running' | 'stopping' | 'waiting_approval' | 'waiting_question';
 
 /** 승인 요청 정보 */
 export interface PendingApproval {

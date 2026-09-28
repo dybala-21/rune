@@ -2,7 +2,7 @@
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from rune.capabilities.browser.capabilities import (
     BrowserActParams,
@@ -15,42 +15,51 @@ from rune.capabilities.browser.core import BrowserNavigateParams, BrowserOpenPar
 from rune.capabilities.browser.discover import BrowserDiscoverApisParams
 
 
-class NavigateStep(BaseModel):
+def _step_schema(schema: dict) -> None:
+    tag = schema["properties"]["type"]
+    tag["enum"] = [tag.pop("const")]
+
+
+class Step(BaseModel):
+    model_config = ConfigDict(extra="forbid", json_schema_extra=_step_schema)
+
+
+class NavigateStep(Step):
     type: Literal["navigate"]
     params: BrowserNavigateParams
 
 
-class OpenStep(BaseModel):
+class OpenStep(Step):
     type: Literal["open"]
     params: BrowserOpenParams
 
 
-class ObserveStep(BaseModel):
+class ObserveStep(Step):
     type: Literal["observe"]
     params: BrowserObserveParams = Field(default_factory=BrowserObserveParams)
 
 
-class ActStep(BaseModel):
+class ActStep(Step):
     type: Literal["act"]
     params: BrowserActParams
 
 
-class ScreenshotStep(BaseModel):
+class ScreenshotStep(Step):
     type: Literal["screenshot"]
     params: BrowserScreenshotParams = Field(default_factory=BrowserScreenshotParams)
 
 
-class ExtractStep(BaseModel):
+class ExtractStep(Step):
     type: Literal["extract"]
     params: BrowserExtractParams
 
 
-class FindStep(BaseModel):
+class FindStep(Step):
     type: Literal["find"]
     params: BrowserFindParams
 
 
-class DiscoverStep(BaseModel):
+class DiscoverStep(Step):
     type: Literal["discover_apis"]
     params: BrowserDiscoverApisParams = Field(default_factory=BrowserDiscoverApisParams)
 

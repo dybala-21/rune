@@ -8,6 +8,12 @@ export function belongsToConversation(
   return true;
 }
 
+export function belongsToRun(
+  event: { sessionId?: string | null; runId?: string }, sessionId: string, runId: string,
+): boolean {
+  return belongsToConversation(event, sessionId, runId) && (event.runId ? event.runId === runId : !runId);
+}
+
 export function abortedMessage(data: AgentAbortedData, fallbackId: string, timestamp: number): ChatMessage {
   return {
     id: data.runId ? `aborted-${data.runId}` : fallbackId,

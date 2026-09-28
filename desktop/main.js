@@ -1,13 +1,9 @@
-// RUNE desktop shell: window + daemon supervision only.
-//
-// Security invariant: all privileged capability (files, shell, browser, MCP)
-// lives in the Python daemon behind Guardian. This process must expose no
-// fs/shell surface to the renderer, so a renderer compromise cannot pivot to
-// the OS. Threat model: docs/design/desktop-app.md §10.
+// The daemon owns execution and input leases; the shell hosts browser tabs.
+// Remote pages have no preload, filesystem bridge, or shell access.
 
 'use strict';
 
-const { app, BrowserWindow, dialog, shell, session } = require('electron');
+const { app, BrowserWindow, dialog, shell, session, ipcMain } = require('electron');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const http = require('node:http');
@@ -27,6 +23,26 @@ const DEV_URL = process.env.RUNE_UI_URL || null;
 const UI_URL = DEV_URL || ORIGIN;
 
 let mainWindow = null;
+let browserHost = null;
+
+ipcMain.handle('rune:browser-layout', (event, payload) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents
+      || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('Unknown browser surface');
+  if (!browserHost) return false;
+  if (!payload) { browserHost.hide(); return true; }
+  const { sessionId, bounds } = payload;
+  const [width, height] = mainWindow.getContentSize();
+  if (typeof sessionId !== 'string' || !bounds || !['x', 'y', 'width', 'height'].every(k => Number.isFinite(bounds[k]))) throw new Error('Invalid browser layout');
+  const zoom = mainWindow.webContents.getZoomFactor();
+  const x = Math.max(0, Math.round(bounds.x * zoom)), y = Math.max(0, Math.round(bounds.y * zoom));
+  if (x >= width || y >= height || bounds.width <= 0 || bounds.height <= 0) { browserHost.hide(); return false; }
+  const box = { x, y, width: Math.max(1, Math.min(width - x, Math.round(bounds.width * zoom))),
+    height: Math.max(1, Math.min(height - y, Math.round(bounds.height * zoom))) };
+  return browserHost.mount(sessionId, box);
+});
+ipcMain.on('rune:browser-takeover', event => {
+  if (browserHost && event.sender === browserHost.shield.webContents) void browserHost.takeover();
+});
 
 /** Poll `url` until it responds, or reject after `timeoutMs`. */
 function waitForBackend(url, timeoutMs = 30000) {
@@ -174,6 +190,9 @@ function createWindow() {
   });
 
   mainWindow.loadURL(UI_URL);
+  const { BrowserHost } = require('./browser-host');
+  browserHost = new BrowserHost(mainWindow, ORIGIN);
+  browserHost.start().catch(error => console.error('[browser-host] startup:', error.message));
 
   mainWindow.webContents.on('did-finish-load', () => {
     console.log(`[rune-desktop] window loaded ${mainWindow.webContents.getURL()}`);
@@ -192,6 +211,7 @@ function createWindow() {
     setTimeout(() => { console.error('[smoke] timeout'); app.exit(2); }, 20000);
   }
 
+  mainWindow.on('close', () => { browserHost?.close(); browserHost = null; });
   mainWindow.on('closed', () => { mainWindow = null; });
 
   watchForReload();

@@ -66,6 +66,10 @@ async def test_file_roles_survive_independent_routing_abstention(setup, monkeypa
     assert result.decision_backend == ("connected" if uncertain_routing else "jev")
     assert result.fallback_reason == ("uncertain" if uncertain_routing else "")
     assert result.artifact_roles.matching_roles(goal) == {"source.csv": "input", "summary.csv": "output"}
+    assert result.decision_details["uncertain_fields"] == (["goal_type"] if uncertain_routing else [])
+    assert result.decision_details["reused_file_roles"] == 2
+    assert result.decision_details["confidence_by_field"]["desktop"] == .99
+    assert "source.csv" not in str(result.decision_details)
     assert external.await_count == 1 and client.completion.await_count == int(uncertain_routing)
     assert decision_router.accelerator_status() == "ready"
 
@@ -119,6 +123,13 @@ def test_role_hints_cannot_cross_requests_or_serialized_runs():
     raw = json.loads(to_wire(result))
     raw["artifact_roles"] = asdict(hints)
     assert from_wire(json.dumps(raw)).artifact_roles is None
+
+
+def test_data_calculations_do_not_require_a_command_or_output_file():
+    questions, expressions = jev.build_questions({"request_to_classify": "Count and sum expenses.csv"})
+    result = jev.decode_answers(payload(questions, goal_type="research", calculation="data"), questions, expressions)
+    assert result["intent_categories"] == ["calculation"]
+    assert result["requires_execution"] is False and result["table_output"] == "none"
 
 
 def test_file_role_batch_excludes_ambiguous_names_and_respects_limits(monkeypatch):
