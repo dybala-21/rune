@@ -56,10 +56,9 @@ class TestGoalClassifyToToolSelect:
 
         loop = NativeAgentLoop(config=agent_config)
         tools = loop._select_tools(result)
-        # Chat tools should include think, memory_search, file_write
         assert "think" in tools
         assert "memory_search" in tools
-        assert "file_write" in tools
+        assert "file_write" not in tools
         assert "bash_execute" not in tools
 
     def test_research_goal_selects_research_tools(

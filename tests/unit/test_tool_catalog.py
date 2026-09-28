@@ -4,6 +4,39 @@ from unittest.mock import AsyncMock
 from rune.agent.tool_catalog import ToolCatalog
 
 
+async def test_browser_family_includes_input_and_keeps_step_schema_on_vertex():
+    import pytest
+    from jsonschema import ValidationError, validate
+    from litellm.llms.vertex_ai.gemini.vertex_and_google_ai_studio_gemini import VertexGeminiConfig
+
+    from rune.capabilities.browser.capabilities import register_browser_capabilities
+    from rune.capabilities.browser.extended import BrowserBatchParams
+    from rune.capabilities.registry import CapabilityRegistry
+
+    registry = CapabilityRegistry()
+    register_browser_capabilities(registry)
+    schemas = [{"type": "function", "function": {"name": cap.name, "description": cap.description,
+                "parameters": cap.parameters_model.model_json_schema()}} for cap in registry.list_all()]
+    catalog = ToolCatalog(schemas)
+    found = json.loads(await catalog.search("browser"))
+    assert {"browser_act", "browser_observe", "browser_batch"} <= {item["name"] for item in found["tools"]}
+    original = BrowserBatchParams.model_json_schema()
+    converted = VertexGeminiConfig()._map_function([{"type": "function", "function": {
+        "name": "browser_batch", "parameters": original,
+    }}], {})[0]["function_declarations"][0]["parameters"]
+    for schema in (original, converted):
+        validate({"actions": [{"type": "act", "params": {"action": "click", "selector": "#calculate"}}]}, schema)
+        for invalid in [{"type": "click", "ref": "#calculate"}, {"type": "act", "name": "click", "ref": "#calculate"},
+                        {"type": "act", "params": {"selector": "#calculate"}}]:
+            with pytest.raises(ValidationError):
+                validate({"actions": [invalid]}, schema)
+    rejected = await registry.execute("browser_batch", {"actions": [
+        {"action": "click", "selector": "#calculate"},
+    ]})
+    assert not rejected.success and rejected.metadata["action_status"] == "not_executed"
+    assert len(rejected.error) < 1200 and "type" in rejected.error
+
+
 async def test_discovery_keeps_core_stable_and_loads_exact_tools_once():
     schemas = [{"type": "function", "function": {"name": name, "description": name + " " + "x" * 1500,
                 "parameters": {"type": "object", "properties": {}}}}
@@ -47,7 +80,9 @@ async def test_stream_discovers_a_tool_before_dispatch(monkeypatch):
     monkeypatch.setattr("rune.agent.litellm_adapter.litellm.acompletion", complete)
     agent = LiteLLMAgent("openai/gpt-5.4", tools=tools)
     async with agent.run_stream("Export a document") as stream:
-        assert "not loaded" in await stream._execute_tool("office_export_7", {})
+        from rune.capabilities.output_prefixes import looks_like_failure_output
+        rejected = await stream._execute_tool("office_export_7", {})
+        assert "not loaded" in rejected and looks_like_failure_output(rejected)
         export.assert_not_awaited()
         assert "".join([part async for part in stream.stream_text()]) == "Export completed."
     assert "office_export_7" not in seen[0] and "office_export_7" in seen[1]

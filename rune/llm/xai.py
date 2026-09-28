@@ -14,10 +14,11 @@ log = get_logger(__name__)
 
 # https://docs.x.ai/developers/models
 MODELS = (
-    "grok-4.6", "grok-4.5", "grok-4.3", "grok-build-0.1",
+    "grok-4.7", "grok-4.6", "grok-4.5", "grok-4.3", "grok-build-0.1",
     "grok-4.20-0309-reasoning", "grok-4.20-0309-non-reasoning",
 )
 REASONING = {
+    "grok-4.7": ("low", "medium", "high", "xhigh"),
     "grok-4.6": ("low", "medium", "high", "xhigh"),
     "grok-4.5": ("low", "medium", "high", "xhigh"),
     "grok-4.3": ("none", "low", "medium", "high", "xhigh"),

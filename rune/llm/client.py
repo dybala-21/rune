@@ -372,11 +372,14 @@ class LLMClient:
         if tools:
             kwargs["tools"] = tools
         if response_format is not None:
-            from rune.llm.structured import supported_format
+            from rune.llm.structured import native_output_config, supported_format
+            native_format = native_output_config(resolved_model, response_format)
             selected_format = supported_format(resolved_model, response_format)
-            if selected_format is not None:
+            if native_format is not None:
+                kwargs["output_config"] = native_format
+            elif selected_format is not None:
                 kwargs["response_format"] = selected_format
-            if response_format.get("type") == "json_schema" and (selected_format or {}).get("type") != "json_schema":
+            if native_format is None and response_format.get("type") == "json_schema" and (selected_format or {}).get("type") != "json_schema":
                 import json
 
                 contract = "Return JSON matching this schema:\n" + json.dumps(

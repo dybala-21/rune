@@ -56,7 +56,7 @@ def _fmt(value: Decimal) -> str:
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 
-def profile_table(text: str, filename: str) -> str:
+def profile_table(text: str, filename: str, *, evidence: dict | None = None) -> str:
     """The footer for *text* read from *filename*, or "" when not a table."""
     if not profile_enabled():
         return ""
@@ -106,6 +106,7 @@ def profile_table(text: str, filename: str) -> str:
 
     blank_notes: list[str] = []
     sum_notes: list[str] = []
+    sums: dict[str, str] = {}
     for col in range(min(len(header), _MAX_COLUMNS)):
         name = header[col].strip() or f"column {col + 1}"
         values = [r[col] for r in data if col < len(r)]
@@ -116,6 +117,7 @@ def profile_table(text: str, filename: str) -> str:
         parsed = [_decimal(v) for v in present]
         if present and all(p is not None for p in parsed):
             total = sum(p for p in parsed if p is not None)
+            sums[name] = _fmt(total)
             note = f"{name} sum={_fmt(total)}"
             if extra_copies:
                 unique_total = Decimal(0)
@@ -147,4 +149,6 @@ def profile_table(text: str, filename: str) -> str:
         rows=len(data),
         duplicates=extra_copies,
     )
+    if evidence is not None:
+        evidence.update(complete=True, rows=len(data), extra_duplicate_rows=extra_copies, sums=sums)
     return "\n".join(lines)

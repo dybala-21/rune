@@ -14,6 +14,7 @@ from rune.agent.attachments import content_text
 
 if TYPE_CHECKING:
     from rune.agent.provenance import ArtifactRoleHints
+    from rune.agent.role_decisions import RoleDecisions
 
 _litellm_mod: Any = None
 
@@ -904,6 +905,7 @@ class StreamResult:
         workspace_root: str = "",
         request: str | None = None,
         artifact_roles: ArtifactRoleHints | None = None,
+        role_decisions: RoleDecisions | None = None,
         verification_callback: Callable[[str, bool, str], Any] | None = None,
         verification_state: Callable[[], Any] | None = None,
         tool_recovery: Callable[[], set[str] | None] | None = None,
@@ -928,6 +930,11 @@ class StreamResult:
              if m.get("role") == "user"), "",
         )
         self._artifact_role_hints = artifact_roles
+        from rune.agent.role_decisions import RoleDecisions
+
+        self._role_decisions = (role_decisions if role_decisions is not None
+                               and role_decisions.matches(self._request, self._workspace_root)
+                               else RoleDecisions(self._request, self._workspace_root))
         self._messages = list(messages)
         self._tool_schemas = tool_schemas
         self._tool_lookup = tool_lookup
@@ -1051,10 +1058,7 @@ class StreamResult:
         self._artifact_ledger = None
         self._artifact_nudges = 0
         self._artifact_roles_tried = False
-        _stale_roles = getattr(self, "_artifact_roles_task", None)
-        if _stale_roles is not None and not _stale_roles.done():
-            _stale_roles.cancel()
-        self._artifact_roles_task = None
+        await self._close_artifact_roles()
         self._cached_read_counts: dict[str, int] = {}
         self._seen_cached_reads: set[str] = set()
         self._recovery_rejections = 0
@@ -1972,16 +1976,21 @@ class StreamResult:
         if not provenance_enabled():
             return None
         if getattr(self, "_artifact_ledger", None) is None:
+            if not self._role_decisions.matches(self._request, self._workspace_root):
+                from rune.agent.role_decisions import RoleDecisions
+
+                self._role_decisions = RoleDecisions(self._request, self._workspace_root)
             self._artifact_ledger = ArtifactLedger.for_request(
                 self._request, root=self._workspace_root,
             )
             self._artifact_request = self._request
             hints = getattr(self, "_artifact_role_hints", None)
             if hints is not None:
-                roles = hints.matching_roles(self._request)
-                self._apply_artifact_roles(self._artifact_ledger, roles)
-                if roles:
-                    log.info("artifact_roles_reused", count=len(roles))
+                self._role_decisions.remember(hints.matching_roles(self._request))
+            roles = self._role_decisions.roles
+            self._apply_artifact_roles(self._artifact_ledger, roles)
+            if roles:
+                log.info("artifact_roles_reused", count=len(roles))
             log.info("artifact_ledger_init",
                      referenced=sorted(self._artifact_ledger.referenced)[:10])
         return self._artifact_ledger
@@ -1996,26 +2005,35 @@ class StreamResult:
         if getattr(self, "_artifact_roles_task", None) is not None:
             return
         import asyncio as _aio
-        try:
-            self._artifact_roles_task = _aio.ensure_future(
-                self._classify_artifact_roles()
-            )
-        except Exception:
-            self._artifact_roles_task = None
+        self._artifact_roles_task = _aio.create_task(self._classify_artifact_roles())
+
+    async def _close_artifact_roles(self) -> None:
+        import asyncio as _aio
+
+        pending = getattr(self, "_artifact_roles_task", None)
+        if pending is None:
+            return
+        if not pending.done():
+            pending.cancel()
+        results = await _aio.gather(pending, return_exceptions=True)
+        self._artifact_roles_task = None
+        for result in results:
+            if isinstance(result, Exception):
+                log.debug("artifact_role_task_error", error=type(result).__name__)
 
     async def _classify_artifact_roles(self) -> None:
         """Wait for file roles before a tool can write a missing input.
 
-        Each run gets one fallback call, for names not already classified.
-        On failure, existing roles and filesystem evidence still apply.
+        Successful decisions are shared by correction streams in this request.
+        A failed lookup can be retried; filesystem evidence is never cached here.
         """
         import asyncio as _aio
         pending = getattr(self, "_artifact_roles_task", None)
         if pending is not None and _aio.current_task() is not pending:
             try:
                 await _aio.shield(pending)
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("artifact_role_task_error", error=type(exc).__name__)
             return
         ledger = self._ledger()
         if ledger is None or ledger.referenced <= ledger.roles.keys():
@@ -2028,6 +2046,7 @@ class StreamResult:
             getattr(self, "_artifact_request", ""),
             sorted(ledger.referenced - ledger.roles.keys()), self._model, None,
         )
+        self._role_decisions.remember(roles)
         self._apply_artifact_roles(ledger, roles)
 
     def _apply_artifact_roles(self, ledger: Any, roles: dict[str, str]) -> None:
@@ -2174,7 +2193,11 @@ class StreamResult:
         # The optional reasoning field is not a tool argument.
         params.pop("think", None)
         if self._tool_catalog is not None and name not in self._tool_catalog.loaded:
-            return f"Tool {name} is not loaded. Use tool_search with its exact name first."
+            error = f"[ERROR] Tool {name} is not loaded. Use tool_search with its exact name first. No action was executed."
+            reject = getattr(self._tool_lookup.get(name), "_rune_reject", None)
+            if reject is not None:
+                await reject(params, error)
+            return error
 
         recovery = self._tool_recovery() if self._tool_recovery else None
         if recovery and name not in recovery:
@@ -2191,8 +2214,8 @@ class StreamResult:
 
         if _group and _group in self._blocked_groups:
             return (
-                f"[BLOCKED — {_group} tools disabled after repeated failures. "
-                f"Use web_search or web_fetch instead.]"
+                    f"[BLOCKED] {_group} tools disabled after repeated failures. "
+                    f"Use web_search or web_fetch instead."
             )
 
         if self._tool_fail_streak.get(name, 0) >= _MAX_FAILS:
@@ -2203,12 +2226,12 @@ class StreamResult:
             if _group:
                 self._blocked_groups.add(_group)
                 return (
-                    f"[BLOCKED — {name} failed {_MAX_FAILS} times. "
-                    f"All {_group} tools disabled. Use web_search instead.]"
+                    f"[BLOCKED] {name} failed {_MAX_FAILS} times. "
+                    f"All {_group} tools disabled. Use web_search instead."
                 )
             return (
-                f"[BLOCKED — {name} failed {_MAX_FAILS} times. "
-                f"Try a different approach.]"
+                f"[BLOCKED] {name} failed {_MAX_FAILS} times. "
+                f"Try a different approach."
             )
 
         func = self._tool_lookup.get(name)
@@ -2288,6 +2311,7 @@ class StreamResult:
                 self._tool_fail_streak[name] = 0
                 if name in {"browser_observe", "browser_navigate", "browser_open"}:
                     self._tool_fail_streak.pop("browser_act", None)
+                    self._tool_fail_streak.pop("browser_batch", None)
                 if name in {"desktop_observe", "desktop_open"}:
                     self._tool_fail_streak.pop("desktop_act", None)
             return result.with_text(result_str) if isinstance(result, ToolOutput) else result_str
@@ -2393,6 +2417,7 @@ class LiteLLMAgent:
         usage_limits: Any = None,
         workspace_root: str = "",
         artifact_roles: ArtifactRoleHints | None = None,
+        role_decisions: RoleDecisions | None = None,
         verification_callback: Callable[[str, bool, str], Any] | None = None,
         verification_state: Callable[[], Any] | None = None,
         tool_recovery: Callable[[], set[str] | None] | None = None,
@@ -2464,6 +2489,7 @@ class LiteLLMAgent:
             workspace_root=workspace_root,
             request=goal,
             artifact_roles=artifact_roles,
+            role_decisions=role_decisions,
             verification_callback=verification_callback,
             verification_state=verification_state,
             tool_recovery=tool_recovery,
@@ -2473,7 +2499,10 @@ class LiteLLMAgent:
         )
         self._last_stream_result = stream_result
 
-        yield stream_result
+        try:
+            yield stream_result
+        finally:
+            await stream_result._close_artifact_roles()
 
     def native_advisor_events(self) -> list[dict[str, Any]]:
         if self._last_stream_result is None:

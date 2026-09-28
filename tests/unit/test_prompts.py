@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from rune.agent.goal_classifier import ClassificationResult
 from rune.agent.prompts import (
     AGENT_SYSTEM_PROMPT,
@@ -396,6 +398,28 @@ class TestBuildContinuationPrompt:
     def test_contains_no_repeat_instruction(self):
         result = build_continuation_prompt(reason="more work needed")
         assert "Do NOT repeat" in result
+
+
+@pytest.mark.asyncio
+async def test_web_loop_keeps_lookup_guidance_and_live_state_out_of_the_cached_prefix(tmp_path, monkeypatch):
+    from rune.agent.loop import NativeAgentLoop
+    from rune.agent.prompts import SYSTEM_CACHE_BOUNDARY
+
+    monkeypatch.setenv("RUNE_HOME", str(tmp_path))
+    loop = NativeAgentLoop()
+    monkeypatch.setattr(loop, "_build_skill_context", lambda *args: None)
+    classification = ClassificationResult(goal_type="web", confidence=.9, tier=2)
+    context = {"workspace_root": str(tmp_path), "browser_state": {
+        "status": "open", "url": "https://example.test/first", "title": "First page"}}
+    first = await loop._build_system_prompt("Read the price on that page", classification, context)
+    context["browser_state"] = {"status": "closed"}
+    second = await loop._build_system_prompt("Read the price on that page", classification, context)
+    assert PROMPT_WEB_EFFICIENCY in first and PROMPT_WEB_DEEP not in first
+    first_prefix, first_tail = first.split(SYSTEM_CACHE_BOUNDARY)
+    second_prefix, second_tail = second.split(SYSTEM_CACHE_BOUNDARY)
+    assert first_prefix == second_prefix
+    assert "https://example.test/first" in first_tail
+    assert '"status": "closed"' in second_tail and "https://example.test/first" not in second
 
 
 class TestClassificationResultExtendedFields:

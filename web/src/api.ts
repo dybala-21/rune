@@ -50,6 +50,14 @@ export function resetWebAuth(): void {
   _webAuthPromise = null;
 }
 
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) { super(message); }
+}
+
+export function uncertainDelivery(error: unknown): boolean {
+  return error instanceof TypeError || error instanceof ApiError && error.status >= 500;
+}
+
 async function post<T>(path: string, body?: unknown, retried = false, signal?: AbortSignal): Promise<T> {
   await ensureWebAuth();
 
@@ -72,27 +80,21 @@ async function post<T>(path: string, body?: unknown, retried = false, signal?: A
   }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error((err as { error?: string }).error || (typeof err.detail === 'string' ? err.detail : res.statusText));
+    throw new ApiError((err as { error?: string }).error || (typeof err.detail === 'string' ? err.detail : res.statusText), res.status);
   }
   return res.json() as Promise<T>;
 }
 
 /** v1 RPC 호출 */
-async function rpc<T>(method: string, params: unknown = {}): Promise<T> {
+async function rpc<T>(method: string, params: unknown = {}, signal?: AbortSignal): Promise<T> {
   const result = await post<{ success: boolean; data?: T; error?: { message: string } }>(
     '/api/v1/rpc',
-    { method, params },
+    { method, params }, false, signal,
   );
   if (!result.success) {
     throw new Error(result.error?.message || 'Request failed');
   }
   return result.data as T;
-}
-
-export interface MessageAttachment {
-  name: string;
-  mimeType: string;
-  data: string;  // base64
 }
 
 // Keep the conversation across reloads in this tab. New Chat rotates the ID.
@@ -142,11 +144,21 @@ export interface ComputerState {
   url?: string;
   capturedAt?: number;
   controls?: Array<{ ref: string; role: string; name: string; disabled: boolean }>;
+  native?: boolean;
+  tabs?: Array<{ id: string; title: string; url: string }>;
+  tabId?: string;
+  viewport?: { width: number; height: number };
+}
+
+declare global {
+  interface Window {
+    rune?: { desktop: boolean; browserLayout?: (value: { sessionId: string; bounds: { x: number; y: number; width: number; height: number } } | null) => Promise<boolean> };
+  }
 }
 
 export async function fetchComputer(sessionId: string): Promise<ComputerState> {
   await ensureWebAuth();
-  const response = await fetch(`/api/computer/state?sessionId=${encodeURIComponent(sessionId)}`, {
+  const response = await fetch(`/api/computer/state?sessionId=${encodeURIComponent(sessionId)}&preview=${!window.rune?.browserLayout}`, {
     credentials: 'include', cache: 'no-store', signal: AbortSignal.timeout(8000),
   });
   if (!response.ok) throw new Error(`Could not read the browser (${response.status}).`);
@@ -159,6 +171,19 @@ export function controlComputer(state: ComputerState, action: 'pause' | 'takeove
 
 export function actOnComputer(state: ComputerState, action: 'click' | 'type' | 'select' | 'check' | 'uncheck' | 'scroll', ref = '', value = ''): Promise<ComputerState> {
   return post('/api/computer/action', { sessionId: state.sessionId, lease: state.lease, frameId: state.frameId, action, ref, value });
+}
+
+export function navigateComputer(sessionId: string, action: 'open' | 'back' | 'forward' | 'reload' | 'select_tab' | 'new_tab' | 'close_tab', url = '', tabId = ''): Promise<ComputerState> {
+  return post('/api/computer/navigate', { sessionId, action, url, tabId, preview: !window.rune?.browserLayout });
+}
+
+export interface BrowserInput {
+  action: 'click' | 'drag' | 'scroll' | 'text' | 'key';
+  x?: number; y?: number; dx?: number; dy?: number; text?: string;
+}
+
+export function inputComputer(state: ComputerState, input: BrowserInput): Promise<ComputerState> {
+  return post('/api/computer/input', { sessionId: state.sessionId, lease: state.lease, frameId: state.frameId, ...input });
 }
 
 export function stopComputer(runId: string): Promise<{ ok: boolean }> {
@@ -256,19 +281,33 @@ export async function setReasoningEffort(
   return result;
 }
 
-export function sendMessage(text: string, attachments?: MessageAttachment[]) {
+export interface MessageAttachment {
+  name: string;
+  mimeType: string;
+  data?: string;
+  ref?: string;
+}
+
+export async function sendMessage(text: string, attachments?: MessageAttachment[], requestId: string = crypto.randomUUID()) {
   const sessionId = liveSessionId();
-  return post<{ ok: boolean; runId?: string }>(
-    '/api/message', { text, attachments, sessionId },
-  ).then(res => {
-    if (res?.runId && sessionId === liveSessionId()) setCurrentRunId(res.runId);
-    return res;
-  });
+  const previousRunId = getCurrentRunId();
+  type Reply = { ok: boolean; runId?: string; replayed?: boolean; attachments?: import('./types').SentAttachment[]; run?: import('./utils/runSnapshot').RunSnapshot };
+  const send = () => post<Reply>('/api/message', { text, attachments, sessionId, requestId });
+  let res: Reply;
+  try { res = await send(); }
+  catch (error) {
+    if (!uncertainDelivery(error) || text.trimStart().startsWith('/')) throw error;
+    res = await send();
+  }
+  if (res?.runId && sessionId === liveSessionId()
+      && [previousRunId, res.runId].includes(getCurrentRunId())) setCurrentRunId(res.runId);
+  return res;
 }
 
 export function sendAbort() {
-  // Without a run ID, the server may stop a run from another tab.
-  return post('/api/abort', { runId: getCurrentRunId() });
+  const runId = getCurrentRunId();
+  if (!runId) return Promise.reject(new Error('The task is still being identified. Try stopping again shortly.'));
+  return post<{ stopped?: boolean; stopping?: boolean }>('/api/abort', { runId });
 }
 
 export function transcribeAudio(audioBase64: string, mimeType: string) {
@@ -328,13 +367,20 @@ export async function fetchSessions(params?: {
 }
 
 export interface SessionTurn {
+  attachments?: import('./types').SentAttachment[];
+  requestId?: string;
   role: string;
   content: string;
   timestamp: string;
 }
 
-export async function fetchSessionTurns(sessionId: string): Promise<{ turns: SessionTurn[]; run?: import('./utils/runSnapshot').RunSnapshot | null }> {
-  return rpc('sessions.turns', { sessionId });
+export interface SessionContents {
+  turns: SessionTurn[];
+  run?: import('./utils/runSnapshot').RunSnapshot | null;
+}
+
+export async function fetchSessionTurns(sessionId: string, signal?: AbortSignal): Promise<SessionContents> {
+  return rpc('sessions.turns', { sessionId }, signal);
 }
 
 export async function fetchSessionEvents(sessionId: string, params?: {

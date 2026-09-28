@@ -4,6 +4,7 @@ import json
 import re
 
 _CORE = {"think", "ask_user", "task_blocked", "bash_execute", "project_map", "table_requirements", "table_verify"}
+_BROWSER = ("browser_observe", "browser_act", "browser_navigate", "browser_extract", "browser_batch")
 
 
 class ToolCatalog:
@@ -39,7 +40,12 @@ class ToolCatalog:
             if score:
                 ranked.append((-score, name))
         exact = next((name for name in self.all if name.lower() == query.lower().strip()), None)
-        names = [exact] if exact else [name for _, name in sorted(ranked)[:5]]
+        if exact:
+            names = [exact]
+        elif query.lower().strip() == "browser":
+            names = [name for name in _BROWSER if name in self.all]
+        else:
+            names = [name for _, name in sorted(ranked)[:5]]
         for name in names:
             if name not in self.loaded:
                 self.schemas.append(self.all[name])

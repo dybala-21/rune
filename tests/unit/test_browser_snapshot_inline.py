@@ -1,5 +1,9 @@
 """Navigate hands back the refs it already extracted, so observe isn't needed."""
 
+from unittest.mock import AsyncMock, Mock
+
+import pytest
+
 from rune.capabilities.browser.helpers import (
     MAX_LISTED_ELEMENTS,
     ElementMeta,
@@ -49,3 +53,22 @@ def test_navigate_and_open_return_the_snapshot():
         body = inspect.getsource(fn)
         assert "elements = await extract_interactive_elements(page)" in body, fn.__name__
         assert "format_interactive_elements(elements)" in body, fn.__name__
+
+
+@pytest.mark.asyncio
+async def test_browser_context_does_not_open_missing_sessions_or_guess_after_errors():
+    from rune.capabilities.browser.session import (
+        BrowserSession,
+        browser_session,
+        describe_browser_session,
+    )
+
+    session = BrowserSession()
+    async with browser_session(session):
+        assert await describe_browser_session() == {"status": "unavailable"}
+        assert session.browser is None and session.page is None
+        session.browser = Mock(is_connected=lambda: True)
+        session.page = Mock(is_closed=lambda: False, title=AsyncMock(side_effect=RuntimeError("disconnected")))
+        assert await describe_browser_session() == {"status": "unknown"}
+        session.browser.is_connected = lambda: False
+        assert await describe_browser_session() == {"status": "closed"}

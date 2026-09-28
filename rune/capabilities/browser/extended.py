@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from rune.capabilities.browser.session import browser_operation, current_session
 from rune.capabilities.browser.steps import BrowserStep
@@ -18,11 +18,19 @@ from rune.utils.logger import get_logger
 log = get_logger(__name__)
 
 
-# Parameter schemas
+def _batch_schema(schema: dict) -> None:
+    # Vertex accepts anyOf; keep the discriminator for local validation only.
+    items = schema["properties"]["actions"]["items"]
+    items["anyOf"] = items.pop("oneOf")
+    items.pop("discriminator", None)
+
+
 class BrowserBatchParams(BaseModel):
     """Parameters for batch browser operations."""
+    model_config = ConfigDict(json_schema_extra=_batch_schema)
     actions: list[BrowserStep] = Field(description=(
         "Browser tool calls in order, each with type and params. Stops after a failure. "
+        'Example: {"type":"act","params":{"action":"click","selector":"CURRENT_REF"}}. '
         "Refs remain valid only while the observed node, name and page are unchanged. "
         "After navigation or replacing controls, read the returned refs before continuing."
     ), min_length=1, max_length=20)
@@ -49,6 +57,7 @@ async def _run_steps(steps: list[dict[str, Any]], type_key: str) -> CapabilityRe
     reg = get_capability_registry()
     results: list[str] = []
     image_paths: list[str] = []
+    evidence: list[dict] = []
     changed = False
     allowed = {"navigate", "open", "observe", "act", "screenshot", "extract", "find", "discover_apis"}
     for i, step in enumerate(steps):
@@ -60,16 +69,19 @@ async def _run_steps(steps: list[dict[str, Any]], type_key: str) -> CapabilityRe
         except Exception as exc:
             result = CapabilityResult(success=False, error=str(exc))
         results.append(f"Step {i+1} ({step_type}): {result.output if result.success else result.error}")
+        evidence.append({"tool": f"browser_{step_type}", "success": result.success,
+                         "metadata": result.metadata or {}, "error": result.error})
         if not result.success:
             results.extend(f"Step {j+1}: Not executed because an earlier step failed."
                            for j in range(i + 1, len(steps)))
             return CapabilityResult(success=False, error=result.error, output="\n".join(results),
-                                    metadata={"action_status": "unknown" if changed else
+                                    metadata={"browser_steps": evidence, "action_status": "unknown" if changed else
                                               (result.metadata or {}).get("action_status", "unknown")})
         changed |= step_type in {"act", "navigate", "open"}
         if step_type == "screenshot" and result.metadata.get("path"):
             image_paths.append(result.metadata["path"])
-    return CapabilityResult(success=True, output="\n".join(results), metadata={"image_paths": image_paths[-2:]})
+    return CapabilityResult(success=True, output="\n".join(results),
+                            metadata={"image_paths": image_paths[-2:], "browser_steps": evidence})
 
 
 @browser_operation

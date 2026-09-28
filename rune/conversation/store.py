@@ -256,7 +256,7 @@ class ConversationStore:
         with self._conn:
             if self._conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'web_runs'").fetchone():
                 for table in ("web_run_maintenance", "web_tool_attempts", "web_run_resumptions",
-                              "web_run_events", "web_run_interactions"):
+                              "web_run_events", "web_run_interactions", "web_run_requests"):
                     if not self._conn.execute("SELECT 1 FROM sqlite_master WHERE name = ?", (table,)).fetchone():
                         continue
                     if table == "web_run_resumptions":
@@ -270,6 +270,8 @@ class ConversationStore:
                         (conversation_id,),
                     )
                 self._conn.execute("DELETE FROM web_runs WHERE session_id = ?", (conversation_id,))
+            if self._conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'web_attachments'").fetchone():
+                self._conn.execute("DELETE FROM web_attachments WHERE session_id = ?", (conversation_id,))
             self._conn.execute("DELETE FROM turns WHERE conversation_id = ?", (conversation_id,))
             self._conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
         log.debug("conversation_deleted", id=conversation_id)

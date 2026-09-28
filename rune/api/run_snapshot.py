@@ -7,6 +7,7 @@ import time
 from collections import OrderedDict, deque
 from typing import Any
 
+from rune.api.attachment_store import Upload
 from rune.api.questions import InteractionResponses
 from rune.api.run_store import RunStore
 
@@ -76,7 +77,8 @@ class RunSnapshots:
                 self._runs[run_id] = run
         return self._runs.get(run_id)
 
-    def start(self, run_id: str, session_id: str, goal: str, *, parent_id: str | None = None) -> None:
+    def start(self, run_id: str, session_id: str, goal: str, *, parent_id: str | None = None,
+              request: tuple[str, str] | None = None, uploads: list[Upload] | None = None) -> None:
         self.open()
         existing = self._get(run_id)
         if existing is not None:
@@ -98,11 +100,15 @@ class RunSnapshots:
             for key in ("workspace", "recoveryVersion", "execution", "fileChanges"):
                 if key in parent:
                     run[key] = copy.deepcopy(parent[key])
+        if uploads:
+            run["execution"] = {"attachments": [upload.info for upload in uploads]}
+        if request:
+            run["requestId"] = request[0]
         if self._store is not None:
             if parent_id:
                 self._store.create_resumption(parent_id, self._snapshot(run))
             else:
-                self._store.create(self._snapshot(run))
+                self._store.create(self._snapshot(run), request=request, uploads=uploads)
         self._runs[run_id] = run
 
     def record(
@@ -131,7 +137,9 @@ class RunSnapshots:
         self._apply(run, event, data, now)
         if event in {"agent_complete", "agent_aborted", "usage_update"} and "usage" in run:
             data = {**data, "usage": copy.deepcopy(run["usage"])}
-        return {**data, "seq": run["seq"], "sessionId": run["sessionId"]}
+        identity = {"requestId": run["requestId"]} if run.get("requestId") else {}
+        return {**data, **identity, "seq": run["seq"], "sessionId": run["sessionId"],
+                **({"startedAt": run["startedAt"]} if event == "agent_start" else {})}
 
     @staticmethod
     def _apply(run: dict[str, Any], event: str, data: dict[str, Any], now: float) -> None:

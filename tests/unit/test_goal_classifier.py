@@ -104,6 +104,17 @@ async def test_unrelated_followup_does_not_inherit_desktop(monkeypatch):
     assert result.is_domain_change and not result.intent_categories
 
 
+async def test_live_browser_context_reuses_the_existing_routing_call(monkeypatch):
+    stub = client(monkeypatch, response(verdict(goal_type="web", is_related_to_previous=True)))
+    state = {"status": "open", "url": "https://example.test/list", "title": "Results"}
+    result = await classify_goal("Read the first result", previous_goal="Find the list",
+                                 previous_goal_type="web", browser_state=state)
+    assert result.available and not result.is_domain_change
+    assert stub.completion.await_count == 1
+    messages = stub.completion.call_args.kwargs["messages"]
+    assert json.loads(messages[-1]["content"])["browser_state"] == state
+
+
 async def test_provider_error_fails_closed_without_unbounded_retry(monkeypatch):
     stub = client(monkeypatch, RuntimeError("provider unavailable"))
     result = await classify_goal("Save a document")

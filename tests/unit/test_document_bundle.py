@@ -138,7 +138,9 @@ async def test_tool_is_available_and_anchors_workspace_paths(office, monkeypatch
     assert "document_bundle" not in get_allowed_tools("safe")
     assert "document_read" in get_allowed_tools("safe")
     for goal_type in ("chat", "research"):
-        selected = NativeAgentLoop()._select_tools(ClassificationResult(goal_type=goal_type, confidence=1, tier=1))
+        selected = NativeAgentLoop()._select_tools(ClassificationResult(
+            goal_type=goal_type, confidence=1, tier=1, intent_categories=frozenset({"document"}),
+        ))
         assert "document_bundle" in selected
     reg = CapabilityRegistry()
     register_document_bundle_capability(reg)

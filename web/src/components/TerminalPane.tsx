@@ -6,92 +6,96 @@ import { fetchTerminalStatus, mintTerminalToken } from '../api';
 
 type Phase = 'checking' | 'disabled' | 'idle' | 'connecting' | 'connected' | 'closed';
 
-/**
- * Embedded shell tab. Off unless the daemon has the terminal capability
- * enabled; then it mints a one-shot token and opens the PTY WebSocket.
- * Runs in the conversation's workspace.
- */
-export function TerminalPane() {
+/** The shell lives until it exits, is explicitly ended, or the conversation closes. */
+export function TerminalPane({ active = true, onConnectionChange }: { active?: boolean; onConnectionChange?: (connected: boolean) => void }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const generation = useRef(0);
   const [phase, setPhase] = useState<Phase>('checking');
   const [error, setError] = useState('');
+  useEffect(() => { onConnectionChange?.(phase === 'connected' || phase === 'connecting'); }, [phase, onConnectionChange]);
+
+  const disconnect = () => {
+    generation.current++;
+    const ws = wsRef.current;
+    if (ws) {
+      ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null;
+      ws.close();
+    }
+    wsRef.current = null;
+    termRef.current?.dispose();
+    termRef.current = null;
+    fitRef.current = null;
+  };
 
   useEffect(() => {
     let live = true;
     fetchTerminalStatus()
       .then(r => { if (live) setPhase(r.enabled ? 'idle' : 'disabled'); })
-      .catch(() => { if (live) setPhase('disabled'); });
-    return () => { live = false; };
+      .catch(e => { if (live) { setPhase('idle'); setError(String(e)); } });
+    return () => { live = false; disconnect(); };
   }, []);
+
+  useEffect(() => {
+    if (!active || !hostRef.current) return;
+    const fit = () => {
+      if (hostRef.current?.clientWidth && hostRef.current.clientHeight) fitRef.current?.fit();
+    };
+    const observer = new ResizeObserver(fit);
+    observer.observe(hostRef.current);
+    fit();
+    return () => observer.disconnect();
+  }, [active, phase]);
 
   const connect = async () => {
-    if (!hostRef.current) return;
+    if (!hostRef.current || phase === 'connecting' || phase === 'connected') return;
+    disconnect();
+    const version = generation.current;
     setError('');
     setPhase('connecting');
-    let token: string;
     try {
-      const r = await mintTerminalToken();
-      token = r.token;
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Couldn't get a terminal token");
+      const { token } = await mintTerminalToken();
+      if (version !== generation.current || !hostRef.current) return;
+      const term = new Terminal({
+        fontSize: 12.5, fontFamily: 'ui-monospace, monospace', cursorBlink: true,
+        theme: { background: '#0E1116', foreground: '#E8EDF2', cursor: '#7DD3E8' },
+      });
+      const fit = new FitAddon();
+      term.loadAddon(fit);
+      term.open(hostRef.current);
+      termRef.current = term;
+      fitRef.current = fit;
+      if (hostRef.current.clientWidth && hostRef.current.clientHeight) fit.fit();
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(`${proto}://${location.host}/ws/terminal?token=${encodeURIComponent(token)}`);
+      wsRef.current = ws;
+      ws.onopen = () => {
+        setPhase('connected');
+        ws.send(JSON.stringify(['set_size', term.rows, term.cols]));
+        term.onData(data => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify(['stdin', data])));
+        term.onResize(({ rows, cols }) => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify(['set_size', rows, cols])));
+      };
+      ws.onmessage = event => {
+        try {
+          const message = JSON.parse(event.data);
+          if (Array.isArray(message) && message[0] === 'stdout') term.write(message[1]);
+          else if (Array.isArray(message) && message[0] === 'disconnect') {
+            term.write('\r\n[process exited]\r\n');
+            setPhase('closed');
+          }
+        } catch (error) { console.debug('Invalid terminal message', error); }
+      };
+      ws.onerror = () => { setError('Terminal connection failed.'); setPhase('closed'); };
+      ws.onclose = () => setPhase('closed');
+    } catch (error) {
+      if (version !== generation.current) return;
+      disconnect();
+      setError(error instanceof Error ? error.message : 'Could not open the shell.');
       setPhase('idle');
-      return;
     }
-
-    const term = new Terminal({
-      fontSize: 12.5,
-      fontFamily: 'var(--font-mono), ui-monospace, monospace',
-      cursorBlink: true,
-      theme: { background: '#0E1116', foreground: '#E8EDF2', cursor: '#7DD3E8' },
-    });
-    const fit = new FitAddon();
-    term.loadAddon(fit);
-    term.open(hostRef.current);
-    fit.fit();
-    termRef.current = term;
-
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(`${proto}://${location.host}/ws/terminal?token=${encodeURIComponent(token)}`);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      setPhase('connected');
-      const send = () => ws.readyState === WebSocket.OPEN
-        && ws.send(JSON.stringify(['set_size', term.rows, term.cols]));
-      send();
-      term.onData(d => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify(['stdin', d])));
-      term.onResize(({ rows, cols }) =>
-        ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify(['set_size', rows, cols])));
-    };
-    ws.onmessage = (ev) => {
-      try {
-        const msg = JSON.parse(ev.data);
-        if (Array.isArray(msg) && msg[0] === 'stdout') term.write(msg[1]);
-        else if (Array.isArray(msg) && msg[0] === 'disconnect') { term.write('\r\n[process exited]\r\n'); setPhase('closed'); }
-      } catch { /* ignore */ }
-    };
-    ws.onerror = () => {
-      setError('Terminal connection failed.');
-      // Fall back so the retry button + message reappear instead of a blank
-      // pane stuck on "connecting".
-      setPhase(p => (p === 'connected' ? 'closed' : 'idle'));
-    };
-    ws.onclose = () => setPhase(p => (p === 'connected' ? 'closed' : 'idle'));
-
-    const onWinResize = () => { try { fit.fit(); } catch { /* not attached */ } };
-    window.addEventListener('resize', onWinResize);
-    (term as unknown as { _cleanup?: () => void })._cleanup = () =>
-      window.removeEventListener('resize', onWinResize);
   };
-
-  useEffect(() => () => {
-    wsRef.current?.close();
-    const t = termRef.current as unknown as { _cleanup?: () => void } | null;
-    t?._cleanup?.();
-    termRef.current?.dispose();
-  }, []);
 
   if (phase === 'checking') {
     return <Centered>Checking terminal availability…</Centered>;
@@ -115,6 +119,7 @@ export function TerminalPane() {
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+      {(phase === 'connected' || phase === 'connecting') && <div className="workbench-view-toolbar"><span>{phase === 'connecting' ? 'Connecting…' : 'Shell running'}</span><button type="button" onClick={() => { disconnect(); setPhase('closed'); }}>End shell</button></div>}
       {phase === 'idle' || phase === 'closed' ? (
         <div style={{ padding: 14 }}>
           <button

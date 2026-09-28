@@ -32,11 +32,11 @@ class TestAbort:
         assert body["stopped"] is False
         assert "not active" in body["reason"]
 
-    def test_omitting_the_run_id_still_works_for_older_clients(self, client):
-        body = client.post("/api/abort", json={}).json()
+    def test_omitting_the_run_id_is_rejected(self, client):
+        response = client.post("/api/abort", json={})
 
-        assert body["ok"] is True
-        assert "stopped" not in body
+        assert response.status_code == 400
+        assert "runId" in response.json()["detail"]
 
 
 class TestActiveRuns:

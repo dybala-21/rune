@@ -3,12 +3,12 @@ import { before, after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'vite';
 
-let server, RunRecovery, restoreRunMessages, abortedMessage, upsertRunMessage, belongsToConversation, api;
+let server, RunRecovery, restoreRunMessages, abortedMessage, upsertRunMessage, belongsToConversation, belongsToRun, api;
 before(async () => {
   server = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), server: { middlewareMode: true, hmr: false, ws: false, watch: null }, appType: 'custom', optimizeDeps: { noDiscovery: true, include: [] } });
   ({ RunRecovery } = await server.ssrLoadModule('/src/utils/runRecovery.ts'));
   ({ restoreRunMessages } = await server.ssrLoadModule('/src/utils/runSnapshot.ts'));
-  ({ abortedMessage, upsertRunMessage, belongsToConversation } = await server.ssrLoadModule('/src/utils/runEvents.ts'));
+  ({ abortedMessage, upsertRunMessage, belongsToConversation, belongsToRun } = await server.ssrLoadModule('/src/utils/runEvents.ts'));
   api = await server.ssrLoadModule('/src/api.ts');
 });
 after(async () => { await server?.close(); });
@@ -148,4 +148,63 @@ test('question and approval retries retain the accepted response ID', async t =>
     assert.deepEqual(bodies[0], bodies[1]);
     mock.mock.restore();
   }
+});
+
+
+test('newer events from an earlier run cannot alter the current run', () => {
+  const received = [];
+  const recovery = new RunRecovery((type, data) => {
+    if (belongsToRun(data, 'chat', 'current')) received.push(type);
+  });
+  let seq = 20;
+  for (const type of ['agent_complete', 'agent_error', 'text_delta', 'tool_result', 'question']) {
+    recovery.receive(type, { sessionId: 'chat', runId: 'previous', seq: seq++ });
+  }
+  recovery.receive('text_delta', { sessionId: 'chat', runId: 'current', seq: 1 });
+  assert.deepEqual(received, ['text_delta']);
+  assert.equal(belongsToRun({ sessionId: 'chat' }, 'chat', 'current'), false);
+});
+
+test('a stop request without an identified run never reaches the server', async t => {
+  api.setCurrentRunId('');
+  const fetch = t.mock.method(globalThis, 'fetch', async () => { throw new Error('Must not send'); });
+  await assert.rejects(api.sendAbort(), /identified/);
+  assert.equal(fetch.mock.callCount(), 0);
+});
+
+
+test('message transport retries the same identity once and leaves intentional repeats distinct', async t => {
+  const storage = new Map();
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage');
+  Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, value: {
+    getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value),
+  } });
+  t.after(() => { if (descriptor) Object.defineProperty(globalThis, 'sessionStorage', descriptor); else delete globalThis.sessionStorage; });
+  api.resetWebAuth();
+  api.setLiveSessionId('retry-chat');
+  const sent = [];
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    if (url === '/api/v1/auth/bootstrap') return Response.json({});
+    sent.push(JSON.parse(options.body));
+    if (sent.length === 1) throw new TypeError('connection lost after acceptance');
+    return Response.json({ ok: true, runId: `run-${sent.length}` });
+  });
+  await api.sendMessage('same words');
+  assert.equal(sent.length, 2);
+  assert.deepEqual(sent[0], sent[1]);
+  await api.sendMessage('same words');
+  assert.notEqual(sent[2].requestId, sent[0].requestId);
+});
+
+
+test('slash commands are not automatically replayed without a durable command receipt', async t => {
+  api.resetWebAuth();
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async (url) => {
+    if (url === '/api/v1/auth/bootstrap') return Response.json({});
+    calls++;
+    throw new TypeError('response lost');
+  });
+  await assert.rejects(api.sendMessage('/escalate'), /response lost/);
+  assert.equal(calls, 1);
 });

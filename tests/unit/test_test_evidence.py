@@ -55,6 +55,64 @@ def test_before_after_and_subtests_survive_latest_result_replacement(state):
     assert '"subtest_failures"' not in context
 
 
+def test_passed_counts_are_distinct_from_total_tests_and_failure_events(state):
+    evidence = comparison_evidence(state)
+    assert evidence[0]["before"]["passed_tests"] == 1
+    assert evidence[0]["after"]["passed_tests"] == 2
+    answer = "One test passed before the edit."
+    claim = {"run": 0, "test": -1, "metric": "passed_tests", "value": 1,
+             "source_line": 1, "quote": answer}
+    assert not check_claims(answer, referenced_claims([claim], answer, evidence), evidence)
+    claim["value"] = 2
+    assert check_claims(answer, referenced_claims([claim], answer, evidence), evidence)
+
+
+def test_summary_passes_do_not_invent_unobserved_test_identities():
+    from rune.agent.test_evidence import parse_test_report
+
+    report = parse_test_report("3 failed, 1 passed, 2 skipped in 0.01s\n")
+    assert report.passed_tests == 1 and report.tests_run == 6
+    assert not report.complete and not report.cases
+    partial = parse_test_report("FAIL: test_values (test_example.Cases)\nRan 2 tests in 0.001s\nFAILED (failures=1)\n")
+    assert partial.passed_tests is None
+
+
+def test_pytest_failure_summary_keeps_names_without_inventing_passed_cases(tmp_path):
+    state = VerificationState()
+    state.observe_command("pytest test_stats.py", False,
+                          "FAILED test_stats.py::AverageTests::test_empty - AssertionError: ValueError not raised\n"
+                          "1 failed, 3 passed in 0.01s\n", str(tmp_path))
+    state.changed()
+    state.observe_command("pytest test_stats.py", True, "4 passed in 0.01s\n", str(tmp_path))
+    evidence = comparison_evidence(state)
+    report = evidence[0]["before"]
+    assert not report["complete"] and len(report["cases"]) == 1
+    assert report["cases"][0]["identity"] == "test_stats.py::AverageTests::test_empty"
+    assert report["passed_tests"] == 3
+    answer = "test_empty failed."
+    claim = {"run": 0, "test": 0, "metric": "status", "value": "fail", "source_line": 1, "quote": answer}
+    assert not check_claims(answer, referenced_claims([claim], answer, evidence), evidence)
+
+
+@pytest.mark.parametrize("output,passed", [
+    ("....\nRan 4 tests in 0.01s\nOK\n", True),
+    ("...s\nRan 4 tests in 0.01s\nOK (skipped=1)\n", False),
+    ("...x\nRan 4 tests in 0.01s\nOK (expected failures=1)\n", False),
+    ("4 passed in 0.01s\n", True),
+    ("3 passed, 1 skipped in 0.01s\n", False),
+])
+def test_all_passed_can_be_proven_without_inventing_test_names(tmp_path, output, passed):
+    state = VerificationState()
+    state.changed()
+    state.observe_command("python3 -m unittest", True, output, str(tmp_path))
+    evidence = comparison_evidence(state)
+    assert not evidence[0]["after"]["complete"] and not evidence[0]["after"]["cases"]
+    answer = "All tests passed."
+    claim = {"run": 1, "test": -1, "metric": "all_tests_status", "value": "pass",
+             "source_line": 1, "quote": answer}
+    assert bool(check_claims(answer, referenced_claims([claim], answer, evidence), evidence)) is not passed
+
+
 def test_recorded_tables_share_the_existing_context_budget(monkeypatch, state):
     original = VerificationState.evidence_context
 
@@ -327,7 +385,7 @@ async def test_review_deadline_is_shared_and_an_outage_does_not_trigger_a_rewrit
     client.completion.side_effect = None
     client.completion.return_value = {"choices": [{"message": {"content": json.dumps({"claims": [], "explanation_issues": []})}}]}
     assert await ClaimGate(attempts=1, _review_seconds=17.4).review(state, "Corrected answer.") is None
-    assert client.completion.call_args.kwargs["timeout"] == 30.0
+    assert client.completion.call_args.kwargs["timeout"] == pytest.approx(42.6)
 
 
 @pytest.mark.parametrize("broken", ["claims", "explanations", "both", "extra_claim", "extra_explanation"])

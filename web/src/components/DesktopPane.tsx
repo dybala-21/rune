@@ -1,8 +1,9 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { controlComputer, fetchComputer, stopComputer } from '../api';
 import { desktopRequest, type DesktopSetup, type DesktopState } from '../desktopApi';
+import { ComputerIcon } from './ComputerIcon';
 
-export function DesktopPane({ sessionId, setupOnMount = false }: { sessionId: string; setupOnMount?: boolean }) {
+export function DesktopPane({ sessionId, setupOnMount = false, visible = true }: { sessionId: string; setupOnMount?: boolean; visible?: boolean }) {
   const instructionId = useId();
   const [view, setView] = useState<DesktopState | null>(null);
   const [setup, setSetup] = useState<DesktopSetup | null>(null);
@@ -13,6 +14,8 @@ export function DesktopPane({ sessionId, setupOnMount = false }: { sessionId: st
   const [stopping, setStopping] = useState(false);
   const [instruction, setInstruction] = useState('');
   const [checked, setChecked] = useState(false);
+  useEffect(() => { setChecked(false); }, [visible, view?.runId, view?.revision, view?.uncertainAction]);
+  useEffect(() => { setConsent(false); }, [visible, apps, view?.enabled]);
   const active = useRef(true);
   const inflight = useRef(false);
   const latest = useRef(view);
@@ -34,7 +37,7 @@ export function DesktopPane({ sessionId, setupOnMount = false }: { sessionId: st
   }, [sessionId, setupOnMount]);
 
   useEffect(() => {
-    if (!setup?.available || setup.accessibility && setup.screenRecording) return;
+    if (!visible || !setup?.available || setup.accessibility && setup.screenRecording) return;
     let disposed = false;
     let checking = false;
     const check = async () => {
@@ -50,9 +53,12 @@ export function DesktopPane({ sessionId, setupOnMount = false }: { sessionId: st
     const timer = setInterval(() => void check(), 3000);
     window.addEventListener('focus', check);
     return () => { disposed = true; clearInterval(timer); window.removeEventListener('focus', check); };
-  }, [setup?.available, setup?.accessibility, setup?.screenRecording]);
+  }, [visible, setup?.available, setup?.accessibility, setup?.screenRecording]);
+
+  useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
 
   useEffect(() => {
+    if (!visible) return;
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
     active.current = true;
@@ -66,8 +72,8 @@ export function DesktopPane({ sessionId, setupOnMount = false }: { sessionId: st
       if (!disposed) timer = setTimeout(poll, 1000);
     };
     void poll();
-    return () => { disposed = true; active.current = false; clearTimeout(timer); };
-  }, [sessionId]);
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [sessionId, visible]);
 
   const perform = async (action: () => Promise<unknown>) => {
     if (inflight.current) return;
@@ -91,7 +97,7 @@ export function DesktopPane({ sessionId, setupOnMount = false }: { sessionId: st
     finally { if (active.current) setStopping(false); }
   };
 
-  return <section className="computer-pane" aria-label="This Mac">
+  return <section className="computer-pane desktop-pane" aria-label="This Mac">
     <div className="computer-toolbar">
       <span className={`computer-status ${pending || paused ? 'held' : ''}`}><span className="computer-status-dot" />
         {!view ? 'Reading app access…' : view.accessRequested ? 'Connect apps to continue this task' : paused ? 'Paused' : view.nativeReview ? 'Waiting for approval on Mac' : pending ? 'Review next action' : view.waiting ? 'Waiting for the app…' : view.enabled ? 'Selected apps connected' : 'Desktop access is off'}
@@ -108,13 +114,13 @@ export function DesktopPane({ sessionId, setupOnMount = false }: { sessionId: st
     {error && <div role="alert" className="computer-error">{error}</div>}
     {view?.connectionError && <p role="status" className="computer-warning">{view.connectionError}</p>}
     {view && !view.enabled && <div className="computer-card">
-      <strong>Work in your Mac apps</strong>
-      <p className="computer-note">Choose the apps Rune may see and use for 30 minutes. Rune uses them when the task needs app access; other requests can use answers, search, coding and file tools. Rune Computer asks you to confirm access in a macOS dialog. Each input also needs native approval in this preview.</p>
-      {view?.accessRequested && <p role="status" className="computer-note">This request is waiting for app access. Connect the requested app below and Rune will continue the same task.</p>}
+      <div className="desktop-setup-heading"><ComputerIcon name="computer" size={23} /><strong>Connect your Mac apps</strong></div>
+      <p className="computer-note">Choose which apps Rune can see and use for 30 minutes. You approve access and each action in a Mac dialog.</p>
+      {view?.accessRequested && <p role="status" className="computer-note">Connect the requested app to continue this task.</p>}
       <button disabled={busy || !!view?.runId && !view.accessRequested} onClick={() => void perform(async () => {
         const next = await desktopRequest<DesktopSetup>('setup');
         if (active.current) setSetup(next);
-      })}>{setup ? 'Refresh permissions and apps' : 'Set up app access'}</button>
+      })}>{setup ? 'Refresh apps and permissions' : 'Choose apps'}</button>
       {setup && !setup.available && <p role="status" className="computer-note">{setup.error}</p>}
       {setup?.available && <>
         <p className="computer-note">Accessibility: {setup.accessibility ? 'Allowed' : 'Required'} · Screen Recording: {setup.screenRecording ? 'Allowed' : 'Required'}</p>
@@ -141,7 +147,7 @@ export function DesktopPane({ sessionId, setupOnMount = false }: { sessionId: st
         <div className="desktop-app-list" aria-label="Allowed apps">
           {setup.apps.map(app => <label key={app.id}><input type="checkbox" checked={apps.includes(app.id)} disabled={busy}
             onChange={e => setApps(old => e.target.checked ? [...old, app.id] : old.filter(id => id !== app.id))} />
-            <span>{app.name}<small>{app.id}</small></span></label>)}
+            <span title={app.id}>{app.name}</span></label>)}
         </div>
         <label className="desktop-consent"><input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} />
           <span>I allow the selected app windows and their text to be sent to this conversation’s model provider.</span></label>
@@ -159,8 +165,8 @@ export function DesktopPane({ sessionId, setupOnMount = false }: { sessionId: st
     {view?.observation && <div className="computer-browser">
       <div className="computer-address">{view.title || view.app}</div>
       <img src={`/api/desktop/frame/${encodeURIComponent(view.observation)}?sessionId=${encodeURIComponent(sessionId)}`} alt={`App preview: ${view.title || view.app}`} />
-      <div className="computer-caption"><span>Window preview · {view.width} × {view.height}</span>
-        <span>{view.conditionCheck ? 'Screen condition matched' : view.progress?.change === 'changed' ? 'Screen changed' : view.progress?.change === 'unchanged' ? 'Screen unchanged' : 'Observed state'}</span></div>
+      <div className="computer-caption"><span>Window preview</span>
+        <span>{view.conditionCheck ? 'Screen condition matched' : view.progress?.change === 'changed' ? 'Screen changed' : ''}</span></div>
       {view.inputObservation?.change === 'no_visible_change' && <p role="status" className="computer-note">No visible change after the last input. Rune should check the result before repeating it.</p>}
     </div>}
     {pending && <div className="computer-card" aria-label="Review desktop action">

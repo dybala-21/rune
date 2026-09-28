@@ -171,6 +171,38 @@ async def test_completion_preserves_the_supported_response_contract(monkeypatch)
         _format_type.cache_clear()
 
 
+async def test_opus_schema_survives_an_outdated_model_catalog(monkeypatch):
+    from copy import deepcopy
+    from unittest.mock import AsyncMock
+
+    from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+
+    from rune.agent.litellm_adapter import litellm
+    from rune.agent.test_claims import _FORMAT
+    from rune.llm.structured import _format_type
+
+    monkeypatch.setattr(litellm, "supports_response_schema", lambda **_: False)
+    completion = AsyncMock(return_value={"choices": []})
+    monkeypatch.setattr(litellm, "acompletion", completion)
+    original = deepcopy(_FORMAT)
+    _format_type.cache_clear()
+    try:
+        for effort in (None, "low"):
+            await LLMClient().completion(messages=[{"role": "user", "content": "Check this answer."}],
+                model="claude-opus-5", provider=Provider.ANTHROPIC, response_format=_FORMAT, reasoning_effort=effort)
+            sent = completion.call_args.kwargs
+            wire = AnthropicConfig().transform_request(
+                model="claude-opus-5", messages=sent["messages"],
+                optional_params={"output_config": sent["output_config"], "max_tokens": 4096},
+                litellm_params={}, headers={})
+            assert wire["output_config"]["format"]["schema"]["required"] == original["json_schema"]["schema"]["required"]
+            assert "response_format" not in sent and "tools" not in wire
+            assert sent["output_config"].get("effort") == effort
+        assert original == _FORMAT
+    finally:
+        _format_type.cache_clear()
+
+
 @pytest.mark.parametrize("format_type", ["json_schema", "json_object", None])
 async def test_schema_is_sent_once_and_fallback_keeps_the_contract(monkeypatch, format_type):
     import json
@@ -183,7 +215,7 @@ async def test_schema_is_sent_once_and_fallback_keeps_the_contract(monkeypatch, 
     completion = AsyncMock(return_value={"choices": []})
     monkeypatch.setattr(litellm, "acompletion", completion)
     messages = [{"role": "system", "content": "Route the request."}, {"role": "user", "content": "Write a file."}]
-    await LLMClient().completion(messages=messages, model="claude-opus-5", provider=Provider.ANTHROPIC,
+    await LLMClient().completion(messages=messages, model="claude-haiku-4-5-20251001", provider=Provider.ANTHROPIC,
                                  response_format=RESPONSE_FORMAT, cache_system=True)
     sent = completion.call_args.kwargs
     assert sent["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
@@ -219,7 +251,8 @@ async def test_auxiliary_reasoning_override_reaches_provider_without_becoming_a_
     assert "reasoning_effort" not in seen[1].get("extra_body", {})
 
 
-async def test_grok_structured_checks_use_low_effort_unless_explicitly_overridden(monkeypatch):
+@pytest.mark.parametrize("model", ["grok-4.6", "grok-4.7"])
+async def test_grok_structured_checks_use_low_effort_unless_explicitly_overridden(monkeypatch, model):
     from rune.agent.classification_response import RESPONSE_FORMAT
     from rune.agent.litellm_adapter import litellm
 
@@ -232,7 +265,7 @@ async def test_grok_structured_checks_use_low_effort_unless_explicitly_overridde
     monkeypatch.setattr(litellm, "acompletion", complete)
     for effort in (None, "xhigh"):
         await LLMClient().completion(messages=[{"role": "user", "content": "check evidence"}],
-            model="grok-4.6", provider=Provider.XAI, response_format=RESPONSE_FORMAT, reasoning_effort=effort)
+            model=model, provider=Provider.XAI, response_format=RESPONSE_FORMAT, reasoning_effort=effort)
     await LLMClient().completion(messages=[{"role": "user", "content": "table requirements"}],
-        model="grok-4.6", provider=Provider.XAI, timeout=30)
+        model=model, provider=Provider.XAI, timeout=30)
     assert [p["extra_body"]["reasoning_effort"] for p in seen] == ["low", "xhigh", "low"]

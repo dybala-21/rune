@@ -6,28 +6,30 @@ import { checkEvidence, checkSummary, describeTrust, trustColors } from '../util
 
 interface TrustCardProps {
   trust: TrustInfo;
+  onRetry?: () => void;
   /** Re-run the last request on the escalation model. */
   onEscalate?: () => void;
 }
 
 /** Show the checks supporting a result and any remaining verification gaps. */
-export function TrustCard({ trust, onEscalate }: TrustCardProps) {
+export function TrustCard({ trust, onRetry, onEscalate }: TrustCardProps) {
   const [showEvidence, setShowEvidence] = useState(false);
   const [esc, setEsc] = useState<EscalationStatus | null>(null);
   // Cloud retry asks for one confirm first — that click is the moment code
   // leaves the machine, so it shouldn't fire on a single tap.
   const [confirmCloud, setConfirmCloud] = useState(false);
   const view = describeTrust(trust);
+  const hasEscalationAction = Boolean(onEscalate);
   useEffect(() => {
     setEsc(null);
     setConfirmCloud(false);
-    if (!view.canEscalate) return;
+    if (!view.canEscalate || !hasEscalationAction) return;
     let live = true;
     fetchEscalationStatus().then(s => live && setEsc(s)).catch(error => {
       console.warn('Could not load retry options', error);
     });
     return () => { live = false; };
-  }, [view.canEscalate, trust.reason]);
+  }, [view.canEscalate, trust.reason, hasEscalationAction]);
   const gate = trust.evidenceGate;
   const evidence = checkEvidence(trust);
   const { accent, background } = trustColors(view.tone);
@@ -74,7 +76,7 @@ export function TrustCard({ trust, onEscalate }: TrustCardProps) {
             {showEvidence ? 'hide evidence' : 'show evidence'}
           </button>
         )}
-        {view.canEscalate && (
+        {view.canEscalate && onEscalate && (
           <div style={{ marginTop: 8 }}>
             {esc?.enabled ? (
               esc.isCloud && confirmCloud ? (
@@ -170,6 +172,7 @@ export function TrustCard({ trust, onEscalate }: TrustCardProps) {
         )}
       </div>
 
+      {onRetry && <button type="button" className="msg-action-btn" onClick={onRetry} style={{ marginTop: 8 }}>Retry request</button>}
       <TableChecks data={trust.tableAcceptance} />
       {trust.artifactReceipts?.map(receipt => receipt.scope === 'download' ? (
         <div key={receipt.id} style={{ marginTop: 8, fontSize: 12, lineHeight: 1.6 }}>

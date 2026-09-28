@@ -1,3 +1,6 @@
+import { ConversationLoader } from '../utils/conversationLoader';
+import { latestTurn, retryAttachments } from '../utils/retry';
+import { retryRequestId, updateDelivery } from '../utils/messageDelivery';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { restoreRunMessages, type RunSnapshot } from '../utils/runSnapshot';
 import { toast } from '../utils/toast';
@@ -5,7 +8,7 @@ import { useSSE } from './useSSE';
 import * as api from '../api';
 import { computeActivitySummary } from '../utils/tooling';
 import { describeTrust } from '../utils/trust';
-import { abortedMessage, belongsToConversation, upsertRunMessage } from '../utils/runEvents';
+import { abortedMessage, belongsToConversation, belongsToRun, upsertRunMessage } from '../utils/runEvents';
 import type {
   AgentState,
   ChatMessage,
@@ -209,11 +212,11 @@ function loadPersistedLiveState(): LoadedLiveDraft {
 
 /** Keep attachment names in drafts; base64 data can exceed localStorage's quota. */
 function withoutAttachmentData(messages: ChatMessage[]): ChatMessage[] {
-  return messages.map(m => (
-    m.attachments?.length
-      ? { ...m, attachments: m.attachments.map(({ name, mimeType }) => ({ name, mimeType })) }
-      : m
-  ));
+  return messages.map(message => ({
+    ...message,
+    delivery: message.delivery === 'pending' ? 'unknown' : message.delivery,
+    attachments: message.attachments?.map(({ name, mimeType, ref }) => ({ name, mimeType, ref })),
+  }));
 }
 
 function persistLiveState(state: PersistedLiveState): void {
@@ -243,7 +246,26 @@ export function useAgent() {
     hasSavedDraft ? initialState.state : null,
   );
 
-  const [state, setState] = useState<AgentState>('idle');
+  const [state, setAgentState] = useState<AgentState>('idle');
+  const stateRef = useRef(state);
+  const setState = useCallback((next: AgentState | ((previous: AgentState) => AgentState)) => {
+    stateRef.current = typeof next === 'function' ? next(stateRef.current) : next;
+    setAgentState(stateRef.current);
+  }, []);
+  const conversationLoader = useRef(new ConversationLoader());
+  const [loadingConversation, setLoadingConversation] = useState(false);
+  const cancelConversationLoad = useCallback(() => {
+    conversationLoader.current.cancel();
+    setLoadingConversation(false);
+  }, []);
+  useEffect(() => {
+    const loader = conversationLoader.current;
+    return () => loader.cancel();
+  }, []);
+  const submitting = useRef(false);
+  const pendingRequest = useRef<string | undefined>(undefined);
+  const acceptedRequest = useRef<string | undefined>(undefined);
+  const latestRunStartedAt = useRef(0);
   const [messages, setMessages] = useState<ChatMessage[]>(initialLiveState.messages);
   const [toolCalls, setToolCalls] = useState<ToolCall[]>(initialLiveState.toolCalls);
   const [thinkingBlocks, setThinkingBlocks] = useState<ThinkingBlock[]>(initialLiveState.thinkingBlocks);
@@ -346,9 +368,12 @@ export function useAgent() {
     persistLiveState(createEmptyLiveState());
   }, [savedDraft.available]);
 
-  // Shared reset for New Chat and /load; callers choose the next session ID.
+  // Callers choose the next conversation before replacing its visible state.
   const clearConversationState = useCallback(() => {
     api.setCurrentRunId('');
+    pendingRequest.current = undefined;
+    acceptedRequest.current = undefined;
+    latestRunStartedAt.current = 0;
     pendingTextRef.current = '';
     assistantMsgIdRef.current = null;
     savedDraftStateRef.current = null;
@@ -369,6 +394,7 @@ export function useAgent() {
     setDelegateEvents([]);
     setCompactionEvents([]);
     setCurrentStepInfo(null);
+    setOrchestration(null);
     setSavedDraft(EMPTY_SAVED_DRAFT);
     setDraftDecisionPending(false);
     // Cancel any pending save of the conversation we just cleared.
@@ -381,15 +407,17 @@ export function useAgent() {
   }, []);
 
   const resetLiveConversation = useCallback(() => {
+    cancelConversationLoad();
     api.rotateLiveSessionId();
     clearConversationState();
-  }, [clearConversationState]);
+  }, [clearConversationState, cancelConversationLoad]);
 
   const followResumedRun = useCallback((sessionId: string) => {
+    cancelConversationLoad();
     api.setLiveSessionId(sessionId);
     clearConversationState();
     refresh();
-  }, [clearConversationState, refresh]);
+  }, [clearConversationState, refresh, cancelConversationLoad]);
 
   // Debounce draft saves to avoid serializing the conversation on every token.
   // Flush the pending save on unmount.
@@ -421,54 +449,85 @@ export function useAgent() {
     if (pendingPersistRef.current) persistLiveState(pendingPersistRef.current);
   }, []);
 
+  const applyRunSnapshot = useCallback((run: RunSnapshot | null) => {
+    if (pendingRequest.current && run?.requestId !== pendingRequest.current) return;
+    const unconfirmed = latestTurn(messagesRef.current).user;
+    if (unconfirmed?.delivery === 'unknown' && unconfirmed.requestId !== run?.requestId) return;
+    if (run && run.startedAt < latestRunStartedAt.current) return;
+    if (!run) {
+      setInterruptedRun(null);
+      setFileChanges([]);
+      setState('idle');
+      pendingQuestionRef.current = null;
+      setPendingQuestion(null);
+      setPendingApproval(null);
+      return;
+    }
+    if (run.sessionId !== api.getLiveSessionId()) return;
+    latestRunStartedAt.current = run.startedAt;
+    acceptedRequest.current = run.requestId;
+    setTokenUsage(run.usage ?? null);
+    setInterruptedRun(run.status === 'interrupted' ? run : null);
+    beginLiveSession();
+    api.setCurrentRunId(run.runId);
+    const active = !['completed', 'failed', 'cancelled', 'interrupted'].includes(run.status);
+    pendingTextRef.current = active ? run.text : '';
+    assistantMsgIdRef.current = active && run.text ? `${run.runId}:answer` : null;
+    currentStepRef.current = run.stepNumber;
+    runSeqRef.current = Math.max(runSeqRef.current, 1);
+    setMessages(previous => restoreRunMessages(previous, run));
+    const calls = run.toolCalls.map((call, index) => ({
+      ...call, runId: run.runId, id: call.callId || `${run.runId}:tool:${index}`, run: runSeqRef.current,
+    }));
+    setToolCalls(calls);
+    setLastTrust(run.trust);
+    setFileChanges(run.fileChanges ?? []);
+    pendingQuestionRef.current = run.question;
+    setPendingQuestion(run.question);
+    setPendingApproval(run.approval ? {
+      ...run.approval, receivedAt: Date.now(),
+      timeoutMs: Math.max(0, run.approval.expiresAt - Date.now()),
+    } : null);
+    setState(active && stateRef.current === 'stopping' ? 'stopping' : run.approval ? 'waiting_approval' : run.question ? 'waiting_question' : active ? 'running' : 'idle');
+    setCurrentStepInfo(active ? { stepNumber: run.stepNumber, tokens: 0 } : null);
+    setActivitySummary(active ? null : computeActivitySummary(calls, run.durationMs ?? 0, run.success === true));
+  }, [beginLiveSession, setState]);
+
+  const loadConversation = useCallback(async (sessionId: string, forMessage = false) => {
+    setLoadingConversation(true);
+    try {
+      return await conversationLoader.current.load(sessionId, {
+        read: api.fetchSessionTurns,
+        currentSession: api.getLiveSessionId,
+        isBusy: () => submitting.current || stateRef.current !== 'idle',
+        forMessage,
+        activate: (id, contents) => {
+          clearConversationState();
+          api.setLiveSessionId(id);
+          setMessages(trimTail(contents.turns, MAX_MESSAGES).map(turn => ({
+            id: nextId(), role: turn.role === 'assistant' ? 'assistant' : 'user',
+            content: turn.content, attachments: turn.attachments, requestId: turn.requestId, delivery: 'accepted', timestamp: new Date(turn.timestamp).getTime() || Date.now(),
+          })));
+          applyRunSnapshot(contents.run ?? null);
+          if (stateRef.current !== 'idle') refresh();
+          window.dispatchEvent(new Event('rune:workspace-changed'));
+        },
+      });
+    } finally {
+      if (!conversationLoader.current.pending) setLoadingConversation(false);
+    }
+  }, [clearConversationState, applyRunSnapshot, refresh]);
+
   useEffect(() => {
     const unsubs: (() => void)[] = [];
 
-    unsubs.push(sseOn('run_snapshot', (raw) => {
-      const run = raw as RunSnapshot;
-      if (!run) {
-        setInterruptedRun(null);
-        setFileChanges([]);
-        setState('idle');
-        pendingQuestionRef.current = null;
-        setPendingQuestion(null);
-        setPendingApproval(null);
-        return;
-      }
-      if (run.sessionId !== api.getLiveSessionId()) return;
-      setTokenUsage(run.usage ?? null);
-      setInterruptedRun(run.status === 'interrupted' ? run : null);
-      beginLiveSession();
-      api.setCurrentRunId(run.runId);
-      const active = !['completed', 'failed', 'cancelled', 'interrupted'].includes(run.status);
-      pendingTextRef.current = active ? run.text : '';
-      assistantMsgIdRef.current = active && run.text ? `${run.runId}:answer` : null;
-      currentStepRef.current = run.stepNumber;
-      runSeqRef.current = Math.max(runSeqRef.current, 1);
-      setMessages(previous => restoreRunMessages(previous, run));
-      const calls = run.toolCalls.map((call, index) => ({
-        ...call, runId: run.runId, id: call.callId || `${run.runId}:tool:${index}`, run: runSeqRef.current,
-      }));
-      setToolCalls(calls);
-      setLastTrust(run.trust);
-      setFileChanges(run.fileChanges ?? []);
-      pendingQuestionRef.current = run.question;
-      setPendingQuestion(run.question);
-      setPendingApproval(run.approval ? {
-        ...run.approval, receivedAt: Date.now(),
-        timeoutMs: Math.max(0, run.approval.expiresAt - Date.now()),
-      } : null);
-      setState(run.approval ? 'waiting_approval' : run.question ? 'waiting_question' : active ? 'running' : 'idle');
-      setCurrentStepInfo(active ? { stepNumber: run.stepNumber, tokens: 0 } : null);
-      setActivitySummary(active ? null : computeActivitySummary(calls, run.durationMs ?? 0, run.success === true));
-    }));
+    unsubs.push(sseOn('run_snapshot', raw => applyRunSnapshot(raw as RunSnapshot | null)));
 
-    // Events are broadcast to all clients. Filter by conversation, while
-    // accepting untagged events from older daemons.
+    // Once a run is known, every update must carry its identity.
     const onOwnRun = <T,>(event: SseEventType, handler: (data: T) => void) =>
       sseOn(event, (raw) => {
         const d = raw as { runId?: string; sessionId?: string };
-        if (!belongsToConversation(d, api.getLiveSessionId(), api.getCurrentRunId())) return;
+        if (!belongsToRun(d, api.getLiveSessionId(), api.getCurrentRunId())) return;
         handler(raw as T);
       });
 
@@ -477,13 +536,19 @@ export function useAgent() {
       // Require an identity before replacing this conversation's run state.
       const ownRun = Boolean(data.sessionId || data.runId)
         && belongsToConversation(data, api.getLiveSessionId(), api.getCurrentRunId());
-      if (!ownRun) return;
+      if (!ownRun || data.startedAt && data.startedAt < latestRunStartedAt.current) return;
+      if (pendingRequest.current && data.requestId !== pendingRequest.current) return;
+      if (data.startedAt) latestRunStartedAt.current = data.startedAt;
+      if (data.requestId) {
+        acceptedRequest.current = data.requestId;
+        setMessages(prev => updateDelivery(prev, data.requestId!, 'accepted'));
+      }
       setInterruptedRun(null);
       setFileChanges(data.fileChanges ?? []);
       if (data.runId) api.setCurrentRunId(data.runId);
 
       beginLiveSession();
-      setState('running');
+      if (stateRef.current !== 'stopping') setState('running');
       pendingTextRef.current = '';
       assistantMsgIdRef.current = null;
       setActivitySummary(null);
@@ -806,7 +871,7 @@ export function useAgent() {
       setOrchestration(prev => prev && { ...prev, completed: data.completedCount });
     }));
 
-    unsubs.push(sseOn('context_compaction', (raw) => {
+    unsubs.push(onOwnRun('context_compaction', (raw) => {
       const data = raw as ContextCompactionData;
       setCompactionEvents(prev => appendWithLimit(prev, {
         id: nextId(),
@@ -829,22 +894,8 @@ export function useAgent() {
       const data = raw as CommandResultData;
       // Command results are also broadcast to every tab.
       if (data.requestSessionId && data.requestSessionId !== api.getLiveSessionId()) return;
-      // /load: pin the live chat to the loaded conversation and show its turns.
-      if (data.data?.action === 'load_session' && data.data.sessionId) {
-        clearConversationState();
-        api.setLiveSessionId(data.data.sessionId);
-        const turns = data.data.turns ?? [];
-        setMessages(turns.map(t => ({
-          id: nextId(),
-          role: t.role === 'assistant' ? 'assistant' as const : 'user' as const,
-          content: t.content,
-          timestamp: Date.now(),
-        })));
-        // Refresh the workspace picker after loading a conversation.
-        if (data.data.workspace) {
-          window.dispatchEvent(new CustomEvent('rune:workspace-changed'));
-        }
-      }
+      // Session changes are acknowledged by the requested RPC, never a broadcast.
+      if (data.data?.action === 'load_session') return;
       if (data.output) {
         setMessages(prev => appendWithLimit(prev, {
           id: nextId(),
@@ -866,7 +917,7 @@ export function useAgent() {
     }));
 
     return () => { unsubs.forEach(fn => fn()); };
-  }, [sseOn, flushTextDelta, beginLiveSession, clearConversationState]);
+  }, [sseOn, flushTextDelta, beginLiveSession, applyRunSnapshot, setState]);
 
 
   // Snapshot for client-side slash commands (/retry, /copy, /export, /stats).
@@ -881,30 +932,72 @@ export function useAgent() {
     }, MAX_MESSAGES));
   }, []);
 
-  const postToServer = useCallback((text: string, apiAttachments?: { name: string; mimeType: string; data: string }[]) => {
+  const postToServer = useCallback(async (text: string, apiAttachments: api.MessageAttachment[] | undefined, requestId: string) => {
     const sessionId = api.getLiveSessionId();
-    api.sendMessage(text, apiAttachments).catch(err => {
-      if (sessionId !== api.getLiveSessionId()) return;
+    submitting.current = true;
+    pendingRequest.current = text.trimStart().startsWith('/') ? undefined : requestId;
+    api.setCurrentRunId('');
+    setState('submitting');
+    try {
+      const result = await api.sendMessage(text, apiAttachments, requestId);
+      if (sessionId !== api.getLiveSessionId()) return true;
+      acceptedRequest.current = requestId;
+      setMessages(prev => updateDelivery(prev, requestId, 'accepted', result.attachments));
+      if (stateRef.current === 'submitting') setState(result.runId ? 'running' : 'idle');
+      // A replayed run may already be complete.
+      if (result.replayed) refresh();
+      return true;
+    } catch (error) {
+      if (sessionId !== api.getLiveSessionId()) return false;
+      if (acceptedRequest.current === requestId) return true;
+      if (api.uncertainDelivery(error)) {
+        try {
+          const { run } = await api.fetchRunSnapshot(sessionId);
+          if (sessionId !== api.getLiveSessionId()) return false;
+          if (run?.requestId === requestId) {
+            api.setCurrentRunId(run.runId);
+            acceptedRequest.current = requestId;
+            setMessages(prev => updateDelivery(prev, requestId, 'accepted', run.execution?.attachments));
+            if (stateRef.current === 'submitting') setState('running');
+            refresh();
+            return true;
+          }
+        } catch { /* Keep the request identity when its receipt is also unreachable. */ }
+      }
+      const uncertain = api.uncertainDelivery(error);
+      setMessages(prev => updateDelivery(prev, requestId, uncertain ? 'unknown' : 'rejected'));
+      if (stateRef.current === 'submitting') setState('idle');
       setMessages(prev => appendWithLimit(prev, {
-        id: nextId(),
-        role: 'system',
-        content: `Failed to send: ${err instanceof Error ? err.message : String(err)}`,
-        timestamp: Date.now(),
-        level: 'error',
+        id: `delivery-${requestId}`, role: 'system', level: 'error', timestamp: Date.now(),
+        content: uncertain && !text.trimStart().startsWith('/')
+          ? 'Delivery could not be confirmed. Retry to check this request without starting a duplicate.'
+          : `Failed to send: ${error instanceof Error ? error.message : String(error)}`,
       }, MAX_MESSAGES));
-    });
-  }, []);
+      if (error instanceof api.ApiError && error.status === 409) refresh();
+      return false;
+    } finally {
+      submitting.current = false;
+      if (pendingRequest.current === requestId) pendingRequest.current = undefined;
+    }
+  }, [setState, refresh]);
 
-  // Re-run the most recent user turn (the Regenerate action, same as /retry).
-  const regenerate = useCallback(() => {
-    const lastUser = [...messagesRef.current].reverse().find(m => m.role === 'user');
-    if (!lastUser) return;
+  const regenerate = useCallback((userMessageId?: string) => {
+    if (submitting.current || stateRef.current !== 'idle') return;
+    const lastUser = latestTurn(messagesRef.current).user;
+    if (!lastUser) { pushSystem('Nothing to retry.'); return; }
+    if (userMessageId && lastUser.id !== userMessageId) return;
+    let attachments;
+    try { attachments = retryAttachments(lastUser); }
+    catch (error) { pushSystem(error instanceof Error ? error.message : String(error)); return; }
+    cancelConversationLoad();
     beginLiveSession();
-    setMessages(prev => appendWithLimit(prev, {
-      id: nextId(), role: 'user', content: lastUser.content, timestamp: Date.now(),
+    const retryId = retryRequestId(lastUser, lastUser.content, lastUser.attachments);
+    const requestId = retryId ?? crypto.randomUUID();
+    setMessages(prev => retryId ? updateDelivery(prev, requestId, 'pending') : appendWithLimit(prev, {
+      ...lastUser, id: nextId(), timestamp: Date.now(), requestId, delivery: 'pending',
     }, MAX_MESSAGES));
-    postToServer(lastUser.content);
-  }, [beginLiveSession, postToServer]);
+    void postToServer(lastUser.content, attachments.length ? attachments : undefined, requestId);
+  }, [beginLiveSession, postToServer, pushSystem, cancelConversationLoad]);
 
   // Client-side slash commands; everything else goes to the server and
   // answers over the command_result SSE event.
@@ -920,15 +1013,9 @@ export function useAgent() {
         return true;
 
       case '/retry':
-      case '/r': {
-        const lastUser = [...msgs].reverse().find(m => m.role === 'user');
-        if (!lastUser) { pushSystem('Nothing to retry.'); return true; }
-        setMessages(prev => appendWithLimit(prev, {
-          id: nextId(), role: 'user', content: lastUser.content, timestamp: Date.now(),
-        }, MAX_MESSAGES));
-        postToServer(lastUser.content);
+      case '/r':
+        regenerate();
         return true;
-      }
 
       case '/copy':
       case '/cp': {
@@ -1000,15 +1087,21 @@ export function useAgent() {
       default:
         return false;
     }
-  }, [pushSystem, postToServer, resetLiveConversation]);
+  }, [pushSystem, regenerate, resetLiveConversation]);
 
   const sendMessage = useCallback((text: string, pendingAttachments?: PendingAttachment[]) => {
+    if (submitting.current || stateRef.current !== 'idle') return false;
+    const load = /^\/load\s+(\S+)\s*$/i.exec(text.trim());
+    if (load && !pendingAttachments?.length) return loadConversation(load[1]);
+    cancelConversationLoad();
     if (text.trim().startsWith('/') && !pendingAttachments?.length && handleClientCommand(text)) {
-      return;
+      return true;
     }
     beginLiveSession();
-    setMessages(prev => appendWithLimit(prev, {
-      id: nextId(),
+    const retryId = retryRequestId(latestTurn(messagesRef.current).user, text, pendingAttachments);
+    const requestId = retryId ?? crypto.randomUUID();
+    setMessages(prev => retryId ? updateDelivery(prev, requestId, 'pending') : appendWithLimit(prev, {
+      id: nextId(), requestId, delivery: 'pending',
       role: 'user',
       content: text,
       timestamp: Date.now(),
@@ -1023,8 +1116,8 @@ export function useAgent() {
       mimeType: a.mimeType,
       data: a.dataUrl.replace(/^data:[^;]+;base64,/, ''),
     }));
-    postToServer(text, apiAttachments);
-  }, [beginLiveSession, handleClientCommand, postToServer]);
+    return postToServer(text, apiAttachments, requestId);
+  }, [beginLiveSession, handleClientCommand, postToServer, cancelConversationLoad, loadConversation]);
 
   const pushSystemError = useCallback((prefix: string, err: unknown) => {
     const message = err instanceof Error ? err.message : String(err);
@@ -1038,13 +1131,22 @@ export function useAgent() {
   }, []);
 
   const abort = useCallback(() => {
-    // Release the input immediately; agent_aborted confirms the server's stop.
+    if (['idle', 'submitting', 'stopping'].includes(stateRef.current)) return;
+    const runId = api.getCurrentRunId();
+    const previous = stateRef.current;
     flushTextDelta();
-    setState('idle');
-    pendingQuestionRef.current = null;
-    setPendingQuestion(null);
-    api.sendAbort().catch(err => pushSystemError('Failed to stop the run', err));
-  }, [pushSystemError, flushTextDelta]);
+    setState('stopping');
+    api.sendAbort().then(result => {
+      if (api.getCurrentRunId() !== runId || stateRef.current !== 'stopping') return;
+      if (result.stopped) setState('idle');
+      refresh();
+    }).catch(error => {
+      if (api.getCurrentRunId() !== runId || stateRef.current !== 'stopping') return;
+      setState(previous);
+      pushSystemError('Failed to stop the run', error);
+      refresh();
+    });
+  }, [pushSystemError, flushTextDelta, refresh, setState]);
 
   const respondApproval = useCallback(async (decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) => {
     const approval = pendingApprovalRef.current;
@@ -1103,6 +1205,9 @@ export function useAgent() {
     restoreSavedDraft,
     discardSavedDraft,
     resetLiveConversation,
+    loadConversation,
+    loadingConversation,
+    cancelConversationLoad,
     sendMessage,
     regenerate,
     abort,

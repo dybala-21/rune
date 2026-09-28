@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -28,6 +28,7 @@ class DecisionBatch:
     values: dict | None
     artifact_roles: ArtifactRoleHints | None = None
     fallback_reason: str = ""
+    diagnostics: dict = field(default_factory=dict)
 
 
 class DecisionAbstained(Exception):
@@ -57,7 +58,7 @@ def build_questions(state: dict) -> tuple[dict, dict[str, str]]:
         "goal_type": _choice("Choose the requested outcome, following routing_rules.", {
             "chat": "Conversation or a general question, including direct arithmetic answers.",
             "web": "Online lookup or reading a URL, without interacting with webpage controls.",
-            "research": "Read-only analysis of code or a project.",
+            "research": "Read-only analysis of files, data, code or a project, including data sums and counts.",
             "code_modify": "Create, save, or edit files or code.",
             "execution": "Run commands, tests, builds, installs, or deployments.",
             "browser": "Interact with webpage controls, forms, seats, or bookings.",
@@ -70,7 +71,7 @@ def build_questions(state: dict) -> tuple[dict, dict[str, str]]:
         }),
         "requires_execution": _choice("Does correctness require running code, scripts, commands, or tests?", {
             "yes": "The user requests code/tests/commands to run, or executing them is required for correctness.",
-            "no": "Reading, analysis, prose, or document work verifiable by reading. Native app input alone does not require code execution.",
+            "no": "Reading, analysis, or answers from code-computed file profiles. File sums/counts and native app input alone do not require a command run.",
         }),
         "email": _choice("Is the request work on email itself?", {
             "yes": "Work on an inbox, email message, draft, or reply.",
@@ -86,6 +87,7 @@ def build_questions(state: dict) -> tuple[dict, dict[str, str]]:
             "xlsx": "Save or revise an XLSX aggregation of existing source data.",
         }),
         "calculation": _choice("Which COMPLETE literal numeric expression is the user asking to evaluate directly?", {
+            "data": "Compute an answer from supplied data/files, without a requested command/test run, native app interaction, or saved deliverable.",
             "none": "No direct numeric arithmetic evaluation was requested. Use none for native app tasks, identifiers, dates, code-writing, or quoted examples not to evaluate.",
             "unavailable": "A direct numeric expression must be evaluated, but its complete verbatim text is missing from the candidates.",
             **{key: f"The complete requested expression is exactly: {value}" for key, value in expressions.items()},
@@ -137,7 +139,8 @@ def _routing_values(picked: dict[str, str], confidences: dict[str, float], expre
     if picked["desktop"] != "none" and picked["calculation"] != "none":
         raise DecisionAbstained("inconsistent_decision")
     if (picked["desktop"] != "none" and picked["goal_type"] in {"chat", "web", "research", "browser"}
-            or picked["calculation"] != "none" and picked["goal_type"] != "chat"
+            or picked["calculation"] not in {"none", "data"} and picked["goal_type"] != "chat"
+            or picked["calculation"] == "data" and (picked["goal_type"] != "research" or picked["requires_execution"] != "no")
             or picked["table_output"] != "none" and picked["goal_type"] not in {"code_modify", "full"}):
         raise DecisionAbstained("inconsistent_decision")
     intents = [key for key in ("email", "document") if picked[key] == "yes"]
@@ -145,6 +148,8 @@ def _routing_values(picked: dict[str, str], confidences: dict[str, float], expre
         intents.append("desktop")
     if picked["table_output"] != "none":
         intents.append("table")
+    if picked["calculation"] != "none":
+        intents.append("calculation")
     values = {
         "goal_type": picked["goal_type"],
         # Distribution confidence is not comparable to the connected model's score.
@@ -213,9 +218,15 @@ async def classify(system: str, content: str, *, timeout: float, api_key: str | 
     roles = {name: picked[key] for key, name in file_questions.items()
              if picked[key] != "unknown" and confidences[key] >= MIN_ROLE_CONFIDENCE}
     hints = ArtifactRoleHints.for_request(request, roles) if roles else None
+    diagnostics = {
+        "confidence_by_field": {name: confidences[name] for name in routing_names},
+        "uncertain_fields": [name for name in routing_names
+                             if picked[name] == "unknown" or confidences[name] < MIN_CONFIDENCE],
+        "role_questions": len(file_questions), "reused_file_roles": len(roles),
+    }
     try:
         values = _routing_values({key: picked[key] for key in routing_names},
                                  {key: confidences[key] for key in routing_names}, expressions)
     except DecisionAbstained as exc:
-        return DecisionBatch(None, hints, exc.reason)
-    return DecisionBatch(values, hints)
+        return DecisionBatch(None, hints, exc.reason, diagnostics)
+    return DecisionBatch(values, hints, diagnostics=diagnostics)

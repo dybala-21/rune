@@ -3,35 +3,18 @@
 These tests verify the full RUNE pipeline:
   goal classification → system prompt → LLM call → response
 
-Requires a valid OPENAI_API_KEY or ANTHROPIC_API_KEY in the environment.
-Each test has a 60-second timeout to avoid hanging on slow API calls.
+Enable with --run-live; --live-provider and --live-model override the selection
+for this process without changing the user's saved settings.
 """
 
 from __future__ import annotations
 
-import os
-
 import pytest
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _has_key() -> bool:
-    return bool(
-        os.environ.get("OPENAI_API_KEY")
-        or os.environ.get("ANTHROPIC_API_KEY")
-    )
-
-
-needs_api = pytest.mark.skipif(not _has_key(), reason="No LLM API key")
-
 
 # =========================================================================
 # 1. Chat / 인사 시나리오
 # =========================================================================
 
-@needs_api
 class TestChatScenario:
     """Simple chat / greeting — classify as chat, get a text reply."""
 
@@ -60,7 +43,6 @@ class TestChatScenario:
 # 2. LLM Direct Completion 시나리오
 # =========================================================================
 
-@needs_api
 class TestLLMCompletion:
     """Verify raw LLM completion works end-to-end via LiteLLM."""
 
@@ -121,7 +103,6 @@ class TestLLMCompletion:
 # 3. Intent Engine 시나리오
 # =========================================================================
 
-@needs_api
 class TestIntentEngineScenario:
     """Full intent engine classification with Tier-1 and Tier-2."""
 
@@ -165,7 +146,6 @@ class TestIntentEngineScenario:
 # 4. Agent Loop 시나리오 (chat-only, no tools)
 # =========================================================================
 
-@needs_api
 class TestAgentLoopChat:
     """Run the agent loop for a simple chat goal (no tool calls needed)."""
 
@@ -200,7 +180,6 @@ class TestAgentLoopChat:
 # 5. Goal Classifier — 다양한 카테고리 시나리오
 # =========================================================================
 
-@needs_api
 class TestGoalClassifierVariety:
     """Test Tier-2 classification across diverse goal types."""
 
@@ -231,7 +210,6 @@ class TestGoalClassifierVariety:
 # 6. Completion Gate + Evidence 통합 시나리오
 # =========================================================================
 
-@needs_api
 class TestCompletionGateWithRealClassification:
     """Classify a real goal, then evaluate the completion gate."""
 
@@ -284,7 +262,6 @@ class TestCompletionGateWithRealClassification:
 # 7. Failover 시나리오 (simulated API error → real recovery)
 # =========================================================================
 
-@needs_api
 class TestFailoverRecovery:
     """Simulate an error then verify the system can recover with a real call."""
 
@@ -322,7 +299,6 @@ class TestFailoverRecovery:
 # 8. Memory Bridge 시나리오
 # =========================================================================
 
-@needs_api
 class TestMemoryBridgeSkillExtraction:
     """Extract a skill template from a real classification + tool trace."""
 

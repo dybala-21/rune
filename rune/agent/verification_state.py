@@ -160,7 +160,8 @@ class VerificationState:
             covered = {sequence for pair in comparisons if recorded_tables([pair], language)
                        for sequence in pair["sequences"]}
             recorded = ("\n\nRecorded comparison (copy exactly if a table fits the requested format; "
-                        "keep explanations outside it):\n\n" + "\n\n".join(tables))
+                        "the table covers test counts and names, so do not repeat those in prose):\n\n"
+                        + "\n\n".join(tables))
             compact = {**data, "checks": [row for row in data["checks"] if row["sequence"] not in covered],
                        "recorded_comparison_sequences": sorted(covered)}
             if len(json.dumps(compact)) + len(recorded) <= 12000:
@@ -182,7 +183,7 @@ class VerificationState:
                  "Required recorded checks have passed; compose the final answer without rerunning unchanged checks. "
                  "Explain the original behavior from inspected code and observed results, including the actual exception or return value. "
                  "Do not infer a test's inputs or assertions from its name and status; omit those details unless observed. "
-                 "A failing example does not establish what happens for every input."))
+                 "Keep numerical comparisons scoped to observed inputs; state broader conditions only when derived from code."))
 
     def snapshot(self) -> dict[str, Any]:
         return {

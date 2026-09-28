@@ -9,6 +9,8 @@ from typing import Any
 
 from filelock import FileLock
 
+from rune.api.attachment_store import AttachmentStore, Upload
+
 
 class RunStore:
     def __init__(self, path: Path | None = None) -> None:
@@ -44,6 +46,23 @@ class RunStore:
                     snapshot TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_web_runs_session ON web_runs(session_id);
+                CREATE TABLE IF NOT EXISTS web_attachments (
+                    ref TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    mime TEXT NOT NULL,
+                    digest TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    content BLOB NOT NULL,
+                    UNIQUE(session_id, digest, name, mime)
+                );
+                CREATE TABLE IF NOT EXISTS web_run_requests (
+                    session_id TEXT NOT NULL,
+                    request_id TEXT NOT NULL,
+                    payload_hash TEXT NOT NULL,
+                    run_id TEXT NOT NULL REFERENCES web_runs(run_id) ON DELETE CASCADE,
+                    PRIMARY KEY (session_id, request_id)
+                );
                 CREATE TABLE IF NOT EXISTS web_run_events (
                     run_id TEXT NOT NULL REFERENCES web_runs(run_id) ON DELETE CASCADE,
                     seq INTEGER NOT NULL,
@@ -88,13 +107,27 @@ class RunStore:
             raise RuntimeError("Run store is not open")
         return self._db
 
-    def create(self, snapshot: dict[str, Any]) -> None:
+    def create(self, snapshot: dict[str, Any], *, request: tuple[str, str] | None = None,
+               uploads: list[Upload] | None = None) -> None:
         with self.db:
+            AttachmentStore(self.db).commit(snapshot["sessionId"], uploads or [])
             self.db.execute(
                 "INSERT INTO web_runs VALUES (?, ?, ?, ?, ?)",
                 (snapshot["runId"], snapshot["sessionId"], snapshot["status"],
                  snapshot["seq"], json.dumps(snapshot, ensure_ascii=False)),
             )
+            if request:
+                self.db.execute("INSERT INTO web_run_requests VALUES (?, ?, ?, ?)",
+                                (snapshot["sessionId"], request[0], request[1], snapshot["runId"]))
+
+    def requested_run(self, session_id: str, request_id: str, payload_hash: str) -> str | None:
+        row = self.db.execute(
+            "SELECT payload_hash, run_id FROM web_run_requests WHERE session_id = ? AND request_id = ?",
+            (session_id, request_id),
+        ).fetchone()
+        if row and row[0] != payload_hash:
+            raise ValueError("This request ID was already used with different content.")
+        return row[1] if row else None
 
     def append(
         self, run: dict[str, Any], event: str, data: dict[str, Any], timestamp: float,
@@ -159,6 +192,14 @@ class RunStore:
         return [row[0] for row in self.db.execute(
             "SELECT run_id FROM web_runs WHERE status NOT IN ('completed', 'failed', 'cancelled', 'interrupted')"
         )]
+
+    def active_for_session(self, session_id: str) -> str | None:
+        row = self.db.execute(
+            "SELECT run_id FROM web_runs WHERE session_id = ? "
+            "AND status NOT IN ('completed', 'failed', 'cancelled', 'interrupted') "
+            "ORDER BY rowid DESC LIMIT 1", (session_id,),
+        ).fetchone()
+        return row[0] if row else None
 
     def attempts(self, run_id: str) -> list[dict[str, Any]]:
         return [json.loads(row[0]) for row in self.db.execute(

@@ -95,6 +95,17 @@ def _allow_guardian(monkeypatch):
 
 class TestFileReadCarriesTheProfile:
     @pytest.mark.asyncio
+    async def test_document_reader_uses_the_same_complete_profile_before_truncating(self, tmp_path):
+        from rune.capabilities.document import DocumentReadParams, document_read
+        f = tmp_path / "sales.csv"
+        f.write_text(CSV_WITH_DUPS)
+        direct = await file_read(FileReadParams(path=str(f), limit=1))
+        document = await document_read(DocumentReadParams(path=str(f), max_chars=10))
+        assert document.success and document.metadata["truncated"]
+        assert document.metadata["table_profile"] == direct.metadata["table_profile"]
+        assert "data rows: 4" in document.output and "400 without the duplicate rows" in document.output
+
+    @pytest.mark.asyncio
     async def test_csv_read_ends_with_the_footer(self, tmp_path):
         f = tmp_path / "sales.csv"
         f.write_text(CSV_WITH_DUPS)
@@ -111,6 +122,9 @@ class TestFileReadCarriesTheProfile:
         assert res.success
         assert "east" not in res.output.split("[table profile")[0]
         assert "data rows: 4" in res.output
+        assert res.metadata["table_profile"]["complete"] is True
+        assert res.metadata["table_profile"]["rows"] == 4
+        assert res.metadata["table_profile"]["extra_duplicate_rows"] == 1
 
     @pytest.mark.asyncio
     async def test_plain_text_read_is_untouched(self, tmp_path):
@@ -119,3 +133,4 @@ class TestFileReadCarriesTheProfile:
         res = await file_read(FileReadParams(path=str(f)))
         assert res.success
         assert "[table profile" not in res.output
+        assert "table_profile" not in res.metadata

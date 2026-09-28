@@ -89,17 +89,17 @@ test('past executions expose saved evidence without live workspace controls', ()
   };
   const past = renderToStaticMarkup(createElement(WorkbenchPanel, { ...props, historical: true }));
   assert.match(past, />Progress</);
-  assert.match(past, />Activity</);
+  assert.match(past, /aria-label="Panel tools"/);
   assert.match(past, /report\.py/);
-  assert.match(past, />Diff</);
+  assert.match(past, />Changes</);
   assert.doesNotMatch(past, />(File|Terminal|Follow)</);
   assert.doesNotMatch(past, /<button[^>]*title="report\.py"/);
   const live = renderToStaticMarkup(createElement(WorkbenchPanel, props));
-  assert.match(live, />Terminal</);
+  assert.match(live, /aria-label="Panel tools"/);
   assert.match(live, /Requested changes/);
 });
 
-for (const [awaiting, label] of [['approval', 'Waiting for approval'], ['question', 'Waiting for your answer']]) {
+for (const [awaiting, label] of [['approval', 'Waiting for your approval'], ['question', 'Waiting for your answer']]) {
   test(`workbench keeps ${awaiting} visible after tools have run`, () => {
     const html = renderToStaticMarkup(createElement(WorkbenchPanel, {
       toolCalls: [{ id: 'read', toolName: 'file_read', args: {}, timestamp: 1, result: 'source', success: true }],
@@ -141,7 +141,7 @@ test('native access waits remain actionable in chat without the work panel', asy
   const input = renderToStaticMarkup(createElement(InputArea, {
     isRunning: true, disabled: false, attentionLabel: 'Waiting for app access', onSend() {}, onAbort() {},
   }));
-  assert.match(input, /placeholder="Waiting for app access/);
+  assert.match(input, /Waiting for app access/);
   const failed = { ...props, isRunning: false, onRegenerate() {}, toolCalls: [{ ...call, result: 'Permission required', success: false }] };
   const recovery = renderToStaticMarkup(createElement(ChatPanel, failed));
   assert.match(recovery, /App access required/);

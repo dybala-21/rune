@@ -60,6 +60,7 @@ class BrowserActParams(BaseModel):
     action: Literal["click", "type", "scroll", "select", "check", "uncheck"] = Field(description="Click, fill, scroll, select, or set a checkbox state")
     selector: str = Field(description="Element ref from the current observation, or a CSS selector matching exactly one element")
     value: str = Field(default="", description="Value for type/select actions")
+    repeat: bool = Field(default=False, description="True only for an intentional repeated input requested by the user. Do not repeat a successful action to verify it; its response already contains the resulting page.")
 
 
 class BrowserScreenshotParams(BaseModel):
@@ -68,10 +69,10 @@ class BrowserScreenshotParams(BaseModel):
 
 
 class BrowserExtractParams(BaseModel):
-    selector: str = Field(description="CSS selector for elements to extract")
+    selector: str = Field(description="Current element ref or CSS selector. Accessibility roles such as spinbutton/status are not HTML tag names; use the observed ref or a real CSS selector.")
     attribute: str = Field(
         default="",
-        description="Attribute to extract (empty for text content)",
+        description="HTML attribute to extract (empty for text content). value is the original attribute, not the live form value; use browser_observe for current input values.",
     )
 
 
@@ -185,6 +186,7 @@ async def browser_observe(params: BrowserObserveParams) -> CapabilityResult:
 async def browser_act(params: BrowserActParams) -> CapabilityResult:
     """Dispatch once against the observed node and report the resulting state."""
     from rune.capabilities.browser.helpers import (
+        element_ref,
         extract_interactive_elements,
         find_element_locator,
         format_interactive_elements,
@@ -205,6 +207,9 @@ async def browser_act(params: BrowserActParams) -> CapabilityResult:
     try:
         _, page = await _get_browser()
         action = params.action
+        if session.needs_observation:
+            return CapabilityResult(success=False, error="The selected tab changed. Read it with browser_observe before acting.",
+                                    metadata={"action_status": "not_executed"})
         target = None
         if action != "scroll":
             if is_element_ref(params.selector):
@@ -230,6 +235,19 @@ async def browser_act(params: BrowserActParams) -> CapabilityResult:
         before_url = page.url
         before_snapshot = await _accessibility_snapshot(page)
         before_state = await _control_state(target) if target is not None else {}
+        from rune.agent.run_control import current_control
+        control = current_control()
+        key = (control.run_id if control else None, action, element_ref(params.selector) or params.selector, params.value)
+        previous = session.last_input
+        if (control and action != "scroll" and not params.repeat and previous
+                and previous["key"] == key and previous["page"] is page
+                and previous["state"] == (before_url, before_snapshot, before_state)):
+            return CapabilityResult(success=True, output=(
+                "This action already succeeded in this run and the observed page is unchanged. "
+                "It was not dispatched again. Use the result below; observe to verify, or set repeat=true "
+                "only for an intentional repeated input requested by the user.\n" + previous["output"]
+            ), metadata={"replayed": True, "action_status": "not_executed"})
+        session.last_input = None
         try:
             if action == "click":
                 await target.click(timeout=10_000)
@@ -289,18 +307,22 @@ async def browser_act(params: BrowserActParams) -> CapabilityResult:
                             "by this interaction — browser_discover_apis lists them."
                         )
             api_text = "\n".join(api_sections)
-            return CapabilityResult(success=True, output=(
+            result = CapabilityResult(success=True, output=(
                 f"Action dispatched: {action} on {params.selector}\nURL: {page.url}\n{summary}"
                 f"\n{after_snapshot}{format_interactive_elements(elements)}{api_text}"
             ), metadata={"action_status": "dispatched", "action": action, "selector": params.selector,
                          "url": page.url, "page_changed": changed, "control_state": after_state,
                          "elements_refreshed": len(elements)})
+            if control and action != "scroll":
+                session.last_input = {"key": key, "page": page,
+                                      "state": (page.url, after_snapshot, after_state), "output": result.output}
+            return result
         except Exception as exc:
             log.debug("browser_post_action_observation_failed", error=str(exc))
             return CapabilityResult(success=True, output=(
                 f"Action dispatched: {action}. Reading the resulting page failed: {exc}. "
                 "Observe the page again; do not repeat the action to obtain its result."
-            ), metadata={"action_status": "dispatched", "observation_failed": True})
+            ), metadata={"action_status": "dispatched", "action": action, "observation_failed": True})
     except Exception as exc:
         return CapabilityResult(success=False, error=f"Action was not dispatched: {exc}",
                                 metadata={"action_status": "not_executed"})
@@ -373,17 +395,24 @@ async def browser_screenshot(params: BrowserScreenshotParams) -> CapabilityResul
 
 @browser_operation
 async def browser_extract(params: BrowserExtractParams) -> CapabilityResult:
-    """Extract text or attributes from elements matching a CSS selector."""
+    """Read observed elements or CSS matches without changing the page."""
     log.debug("browser_extract", selector=params.selector, attribute=params.attribute)
 
     try:
         _, page = await _get_browser()
-        elements = await page.query_selector_all(params.selector)
+        from rune.capabilities.browser.helpers import find_element_locator, is_element_ref
+        if is_element_ref(params.selector):
+            target = await find_element_locator(page, params.selector)
+            elements = [target] if target is not None else []
+        else:
+            elements = await page.query_selector_all(params.selector)
 
         if not elements:
             return CapabilityResult(
-                success=True,
-                output=f"No elements found matching: {params.selector}",
+                success=False,
+                error=(f"No elements found matching: {params.selector}. "
+                       "Use browser_observe for the current values and refs; do not repeat this selector. "
+                       "Accessibility roles in snapshots are not HTML tag names."),
                 metadata={"count": 0},
             )
 
@@ -391,6 +420,11 @@ async def browser_extract(params: BrowserExtractParams) -> CapabilityResult:
         for el in elements:
             if params.attribute:
                 val = await el.get_attribute(params.attribute)
+                if params.attribute == "value":
+                    live = await el.evaluate("el => 'value' in el ? String(el.value) : null")
+                    if live is not None and live != val:
+                        values.append(f"HTML value attribute: {val!r}; current input value: {live!r}")
+                        continue
                 if val is not None:
                     values.append(val)
             else:
@@ -493,17 +527,16 @@ def register_browser_capabilities(registry: CapabilityRegistry) -> None:
     registry.register(CapabilityDefinition(
         name="browser_navigate",
         description=(
-            "Navigate to a URL in a headless background browser and return a "
+            "Navigate to a URL in the conversation's browser and return a "
             "compact snapshot: page title, status, and the interactive elements "
             "with their ref IDs — there is no need to call browser_observe right "
             "after navigating. "
-            "Reach for the browser only when a page must be INTERACTED with "
-            "(clicking, filling forms, content that appears after a click). For "
+            "Use when page state, dynamic rendering or interaction is needed. For "
             "plain retrieval prefer web_search or web_fetch, and for a documented "
             "API endpoint or a .json/.txt/.md URL call web_fetch directly — the "
             "browser is far slower for those. "
-            "The user CANNOT see this browser. Use browser_open instead when the "
-            "user wants to see, watch, or interact with the browser."
+            "Reuses the current session and preserves an already open exact URL "
+            "unless reload=true. A new turn does not require navigation."
         ),
         domain=Domain.BROWSER,
         risk_level=RiskLevel.MEDIUM,
@@ -514,11 +547,12 @@ def register_browser_capabilities(registry: CapabilityRegistry) -> None:
     registry.register(CapabilityDefinition(
         name="browser_open",
         description=(
-            "Open a URL in a VISIBLE browser the user can see. "
+            "Open a URL for the user in Rune's conversation browser. "
             "Use when the user wants to watch the browser, interact with a site, "
             "log in, make a purchase, or says things like 'open', 'show me', "
-            "'launch', 'pull up'. Opens a Rune-managed browser with "
-            "its own profile; existing Chrome tabs are not attached."
+            "'launch', 'pull up'. Reuses the existing session without resetting "
+            "its page state. The Computer panel shows the page or its preview; "
+            "without a session, launches a visible browser. Existing Chrome tabs are not attached."
         ),
         domain=Domain.BROWSER,
         risk_level=RiskLevel.MEDIUM,
@@ -541,7 +575,7 @@ def register_browser_capabilities(registry: CapabilityRegistry) -> None:
     ))
     registry.register(CapabilityDefinition(
         name="browser_act",
-        description="Perform an action on a page element (click/type/scroll/select)",
+        description="Interact with required page controls (click/type/scroll/select). Use fresh refs from the current page. For information already available through search, fetch or an API, use those tools instead.",
         domain=Domain.BROWSER,
         risk_level=RiskLevel.MEDIUM,
         group="browser",

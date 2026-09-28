@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -37,6 +37,12 @@ class BrowserSession:
     uncertain_action: bool = False
     needs_observation: bool = False
     bound_task: asyncio.Task | None = None
+    native_host: Any = None
+    owner_id: str = ""
+    native_target: str = ""
+    tabs: list[dict] = field(default_factory=list)
+    acquire_control: Callable[[], Awaitable[None]] | None = None
+    last_input: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         _sessions.add(self)
@@ -66,6 +72,14 @@ class BrowserSession:
                 except Exception as exc:
                     log.debug("browser_resource_close_failed", resource=method, error=str(exc))
         self.browser = self.page = self.playwright = self.monitor = None
+        if self.profile == "native" and self.native_host:
+            try:
+                await self.native_host.request(self.owner_id, "close")
+            except Exception as exc:
+                log.debug("native_browser_close_failed", error=str(exc))
+        self.native_target = ""
+        self.last_input = None
+        self.tabs.clear()
         self.observe_history.clear()
 
     async def close(self) -> None:
@@ -85,6 +99,28 @@ def current_session() -> BrowserSession:
     if session.closed:
         raise RuntimeError("This browser session has ended")
     return session
+
+
+async def describe_browser_session() -> dict[str, Any]:
+    """Read bounded routing context without opening a browser or taking a screenshot."""
+    session = _current.get()
+    if session is None or session.page is None or session.closed:
+        return {"status": "unavailable"}
+    if not session.browser.is_connected():
+        return {"status": "closed"}
+    try:
+        async with asyncio.timeout(1):
+            if session.profile == "native":
+                from rune.browser.native import select_native_page
+                await select_native_page(session)
+            if session.page.is_closed():
+                return {"status": "closed"}
+            title = await session.page.title()
+            return {"status": "open", "url": session.page.url[:1000], "title": title[:160],
+                    "needs_observation": session.needs_observation}
+    except Exception as exc:
+        log.debug("browser_context_unavailable", error=type(exc).__name__)
+        return {"status": "unknown"}
 
 
 @asynccontextmanager
@@ -116,9 +152,12 @@ def with_browser_session(function: Callable) -> Callable:
 def browser_operation(function: Callable) -> Callable:
     @wraps(function)
     async def wrapped(*args: Any, **kwargs: Any) -> Any:
-        async with current_session().operation():
-            from rune.agent.run_control import current_control
-            control = current_control()
+        from rune.agent.run_control import current_control
+        session = current_session()
+        control = current_control()
+        if control is not None and session.acquire_control and session._owner is not asyncio.current_task():
+            await session.acquire_control()
+        async with session.operation():
             if control is not None:
                 control.check()
             return await function(*args, **kwargs)

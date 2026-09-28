@@ -206,6 +206,8 @@ class SessionToolCache:
                 return f"web_search:{h}"
 
             case "web_fetch":
+                if str(params.get("method") or "GET").upper() != "GET":
+                    return None
                 # Everything that changes the output is part of the key:
                 # selector-extracted content differs from the full page, and
                 # truncated fetches (fast lane, budget scaling) must not be
@@ -338,6 +340,11 @@ class SessionToolCache:
         }
 
     # -- Invalidation --------------------------------------------------------
+
+    def invalidate_web(self) -> None:
+        """Discard page reads after an API write whose affected URLs are unknown."""
+        for key in [key for key, entry in self.entries.items() if entry.capability_name == "web_fetch"]:
+            self._remove_entry(key)
 
     def invalidate_file(self, file_path: str) -> None:
         """Invalidate all cache entries related to a file path."""
