@@ -1,13 +1,4 @@
-"""Autonomous executor - adaptive autonomy engine for RUNE.
-
-Ported from src/agent/autonomous.ts (991 lines).
-Manages a learning autonomy system where the agent can escalate from
-SUGGEST to INFORM_DO to JUST_DO based on user feedback patterns, with
-demotion via a sliding window of recent executions.
-
-Governance flags (shadow_mode, kill_switch) allow operators to disable
-autonomous execution globally.
-"""
+"""Adjust autonomy from explicit feedback, with risk limits and operator controls."""
 
 from __future__ import annotations
 
@@ -69,11 +60,7 @@ class AutonomyDecision:
 
 @dataclass(slots=True)
 class AutonomousExecution:
-    """Full execution record matching TS AutonomousExecution (12 fields).
-
-    Used by ``AutonomousExecutor.record_execution()`` to track individual
-    autonomous actions with complete audit context.
-    """
+    """Audit context for one autonomous execution."""
 
     id: str
     timestamp: float = field(default_factory=time.monotonic)
@@ -151,11 +138,7 @@ _DOMAIN_PATTERNS: list[tuple[TaskDomain, re.Pattern[str]]] = [
 
 
 class AutonomousExecutor:
-    """Adaptive autonomy engine.
-
-    Learns from user feedback to escalate or reduce autonomy per-command
-    pattern.  Supports serialisation for persistence across sessions.
-    """
+    """Learn and persist per-command autonomy from user feedback."""
 
     __slots__ = (
         "_policy",
@@ -176,12 +159,11 @@ class AutonomousExecutor:
         self._shadow_mode: bool = False
         self._kill_switch: bool = False
 
-    # -- Properties ---------------------------------------------------------
+    # Properties
 
     @property
     def shadow_mode(self) -> bool:
-        """When ``True``, decisions are logged but never executed autonomously.
-        All commands fall back to SUGGEST."""
+        """Log decisions but force SUGGEST while shadow mode is enabled."""
         return self._shadow_mode
 
     @shadow_mode.setter
@@ -208,7 +190,7 @@ class AutonomousExecutor:
         """Sliding window of (pattern_key, feedback) tuples."""
         return list(self._history)
 
-    # -- Core decision logic ------------------------------------------------
+    # Core decision logic
 
     def decide(
         self,
@@ -216,16 +198,7 @@ class AutonomousExecutor:
         domain: TaskDomain | None = None,
         risk_score: float = 0.5,
     ) -> AutonomyDecision:
-        """Determine the autonomy level for *command*.
-
-        Parameters:
-            command: The command string being evaluated.
-            domain: Explicit domain override; auto-classified if ``None``.
-            risk_score: Risk score in [0, 1].
-
-        Returns:
-            An :class:`AutonomyDecision` with the resolved level.
-        """
+        """Choose autonomy from the command, domain and risk score."""
         resolved_domain = domain or self._classify_domain(command)
         pattern_key = self._pattern_key(command, resolved_domain)
 
@@ -244,8 +217,7 @@ class AutonomousExecutor:
             resolved_domain, AutonomyLevel.SUGGEST
         )
 
-        # Risk gate: if risk exceeds the threshold for the base level,
-        # downgrade to a safer level.
+        # Downgrade autonomy when risk exceeds the current level's threshold.
         level = base_level
         for check_level in (AutonomyLevel.JUST_DO, AutonomyLevel.INFORM_DO):
             threshold = self._policy.risk_thresholds.get(check_level, 0.0)
@@ -258,15 +230,13 @@ class AutonomousExecutor:
             alpha = 0.3
             stats.avg_risk = alpha * risk_score + (1 - alpha) * stats.avg_risk
 
-        # Pattern-based promotion: if the user has repeatedly approved this
-        # pattern, the level may be promoted above the base.
+        # Repeated explicit approvals may raise autonomy above the domain default.
         if stats is not None:
             promoted = self._check_promotion(pattern_key, stats)
             if promoted is not None and promoted > level:
                 level = promoted
 
-        # Demotion check: recent failures in the sliding window pull
-        # everything down.
+        # Recent failures can reverse a promotion.
         if self._check_demotion_window():
             level = min(level, AutonomyLevel.SUGGEST)
 
@@ -284,7 +254,7 @@ class AutonomousExecutor:
             pattern_key=pattern_key,
         )
 
-    # -- Feedback -----------------------------------------------------------
+    # Feedback
 
     def record_feedback(
         self,
@@ -292,14 +262,7 @@ class AutonomousExecutor:
         feedback: ExecutionFeedback,
         risk_score: float | None = None,
     ) -> None:
-        """Record user feedback for a completed execution.
-
-        Parameters:
-            pattern_key: The pattern key identifying the command.
-            feedback: The user's feedback on the execution.
-            risk_score: Optional risk score from the decision that triggered
-                this execution.  Used to maintain a rolling average via EMA.
-        """
+        """Record feedback and update the pattern's risk average when supplied."""
         stats = self._patterns.setdefault(pattern_key, PatternStats())
         stats.total_executions += 1
         stats.last_used = time.monotonic()
@@ -325,22 +288,11 @@ class AutonomousExecutor:
         )
 
     def record_execution(self, execution: AutonomousExecution) -> None:
-        """Record a full autonomous execution with all context fields.
-
-        Mirrors TS ``autonomy.recordExecution(execution)``. Stores the
-        execution in history and delegates to ``record_feedback()`` for
-        pattern stats updates.
-        """
+        """Keep execution outcomes separate from the user's feedback."""
         self._execution_history.append(execution)
-
-        # Derive pattern_key and feedback, then delegate to record_feedback
-        pattern_key = f"{execution.domain}:{execution.action[:60]}"
         if execution.user_feedback is not None:
-            feedback = execution.user_feedback
-        else:
-            feedback: ExecutionFeedback = "approved" if execution.success else "full_revert"
-
-        self.record_feedback(pattern_key, feedback)
+            pattern_key = f"{execution.domain}:{execution.action[:60]}"
+            self.record_feedback(pattern_key, execution.user_feedback)
 
         log.debug(
             "autonomy_execution_recorded",
@@ -355,17 +307,14 @@ class AutonomousExecutor:
         """Return a copy of the execution history."""
         return list(self._execution_history)
 
-    # -- Promotion / demotion -----------------------------------------------
+    # Promotion / demotion
 
     def _check_promotion(
         self,
         pattern_key: str,
         stats: PatternStats,
     ) -> AutonomyLevel | None:
-        """Check if *pattern_key* qualifies for promotion.
-
-        Returns the promoted level or ``None`` if no change.
-        """
+        """Return the promoted level, or None if the pattern does not qualify."""
         cond = self._policy.promotion_conditions
         min_approved: int = cond.get("min_approved", 5)
         min_rate: float = cond.get("min_approval_rate", 0.9)
@@ -397,8 +346,7 @@ class AutonomousExecutor:
             approval_rate=f"{approval_rate:.2%}",
         )
 
-        # Record promotion in learned.md so the user sees it in session
-        # briefing. This makes self-improving visible.
+        # Record promotions in learned.md for the next session briefing.
         try:
             from rune.memory.markdown_store import save_learned_fact
 
@@ -420,11 +368,7 @@ class AutonomousExecutor:
         return promoted
 
     def _check_demotion_window(self) -> bool:
-        """Inspect the sliding window of recent executions for demotion triggers.
-
-        Returns ``True`` if demotion is warranted (too many reverts or
-        manual corrections in the window).
-        """
+        """Check recent reverts and corrections for a demotion trigger."""
         cond = self._policy.demotion_conditions
         window_size: int = cond.get("window_size", 20)
         max_reverts: int = cond.get("max_reverts_in_window", 2)
@@ -452,7 +396,7 @@ class AutonomousExecutor:
             return True
         return False
 
-    # -- Domain classification ----------------------------------------------
+    # Domain classification
 
     def _classify_domain(self, command: str) -> TaskDomain:
         """Classify *command* into a :type:`TaskDomain` using regex heuristics."""
@@ -462,20 +406,17 @@ class AutonomousExecutor:
                 return domain
         return "unknown"
 
-    # -- Helpers ------------------------------------------------------------
+    # Helpers
 
     @staticmethod
     def _pattern_key(command: str, domain: TaskDomain) -> str:
-        """Derive a stable pattern key from the command and domain.
-
-        Strips arguments / paths to group similar commands together.
-        """
+        """Group commands by domain and executable, ignoring arguments and paths."""
         # Normalise: take the first two tokens of the command
         tokens = command.strip().split()
         base = " ".join(tokens[:2]) if len(tokens) >= 2 else (tokens[0] if tokens else "")
         return f"{domain}:{base}"
 
-    # -- Serialisation ------------------------------------------------------
+    # Serialisation
 
     def serialize(self) -> dict[str, Any]:
         """Serialise internal state for persistence."""

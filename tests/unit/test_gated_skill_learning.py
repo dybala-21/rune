@@ -1,11 +1,4 @@
-"""Tests for Gated Skill Learning Phase 0 (T1-1).
-
-Covers the lifecycle state machine and the observational skill_evals log.
-Phase 0 is measurement-only: these assert the data plumbing, not (yet) any
-change to injection behaviour.
-
-Design: docs/design/gated-skill-learning.md
-"""
+"""Check skill lifecycle transitions and recorded evaluation outcomes."""
 
 from __future__ import annotations
 
@@ -51,9 +44,9 @@ class TestLifecycle:
         with pytest.raises(ValueError):
             set_state(s, "bogus")
 
-    def test_unknown_stored_state_falls_back_to_default(self):
+    def test_unknown_stored_state_requires_evaluation(self):
         s = Skill(name="x", description="d", metadata={"state": "bogus"})
-        assert get_state(s) == LEGACY_DEFAULT_STATE
+        assert get_state(s) == SkillState.CANDIDATE
 
     def test_retired_is_not_injectable(self):
         s = Skill(name="x", description="d")
@@ -65,12 +58,10 @@ class TestLifecycle:
         [SkillState.CANDIDATE, SkillState.SHADOW, SkillState.ACTIVE,
          SkillState.DEPRECATED],
     )
-    def test_phase0_injection_is_permissive(self, state):
-        # Phase 0 keeps everything except RETIRED injectable so behaviour is
-        # unchanged. (Phase 1 narrows this to ACTIVE.)
+    def test_only_active_skills_are_injected(self, state):
         s = Skill(name="x", description="d")
         set_state(s, state)
-        assert is_injectable(s)
+        assert is_injectable(s) == (state == SkillState.ACTIVE)
 
 
 class TestSkillEvalsLog:
@@ -204,9 +195,9 @@ class TestGatedInjection:
         set_state(cand, SkillState.CANDIDATE)
         reg.register(cand)
 
-        # Ungated: candidate is injected (legacy behaviour preserved).
+        # Disabling background evaluation must not admit unevaluated skills.
         assert build_skill_context_for_goal(
-            "deploy the app", reg, gated=False) is not None
+            "deploy the app", reg, gated=False) is None
         # Gated: candidate filtered out -> no context.
         assert build_skill_context_for_goal(
             "deploy the app", reg, gated=True) is None
@@ -242,8 +233,7 @@ class TestEvaluatorOrchestration:
         assert get_state(skill) == SkillState.ACTIVE
 
     def test_run_cycle_holds_without_control_data(self, store):
-        # Phase 0 observational data only (no 'without' arm) -> HOLD, candidate
-        # drifts to shadow but is never promoted without a control arm.
+        # Without a control arm, observational data can enter shadow but never promote the skill.
         from rune.skills.evaluation import HOLD, SkillEvaluator
         from rune.skills.registry import SkillRegistry
 
@@ -491,14 +481,13 @@ class TestPersistence:
         assert path and Path(path).exists()
         assert s.file_path == path
 
-        # Registry's flat parser must recover the state + scalar metadata,
-        # and drop the non-scalar 'steps'.
+        # Lifecycle updates preserve both scalar and structured metadata.
         reparsed = _parse_skill_file(Path(path))
         assert reparsed is not None
         assert get_state(reparsed) == SkillState.CANDIDATE
         assert reparsed.description == "does a thing"
         assert reparsed.metadata.get("source") == "auto_distill"
-        assert "steps" not in reparsed.metadata  # non-scalar skipped
+        assert reparsed.metadata["steps"] == [1, 2, 3]
         assert "step one" in reparsed.body
 
     def test_persist_state_updates_disk(self, tmp_dir, monkeypatch):

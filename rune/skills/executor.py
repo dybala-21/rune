@@ -1,8 +1,4 @@
-"""Skill execution for RUNE.
-
-Parses a skill body into executable steps, builds execution contexts
-for agent prompt injection, and validates skill requirements.
-"""
+"""Build skill context, validate prerequisites and execute instruction steps."""
 
 from __future__ import annotations
 
@@ -22,8 +18,6 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 
-# SkillExecutionContext
-
 @dataclass(slots=True)
 class SkillExecutionContext:
     """Context object injected into the agent prompt for skill execution."""
@@ -42,17 +36,7 @@ def build_skill_context(
     include_body: bool = True,
     max_body_chars: int = 0,
 ) -> SkillExecutionContext:
-    """Convert a skill into an agent-injectable execution context.
-
-    Parameters
-    ----------
-    skill:
-        The loaded skill to convert.
-    include_body:
-        Whether to include the full skill body (instructions) in the context.
-    max_body_chars:
-        If > 0, truncate the body to this many characters.
-    """
+    """Build prompt context, optionally including the body with a positive character limit."""
     body = skill.body
     if not include_body:
         body_for_prompt = ""
@@ -63,7 +47,6 @@ def build_skill_context(
 
     sections: list[str] = []
 
-    # Skill header
     sections.append(f"## Active Skill: {skill.name}")
     sections.append(f"Description: {skill.description}")
 
@@ -102,7 +85,6 @@ def build_skill_context(
             script_path = f"{base_path}/scripts/{script}" if base_path else script
             sections.append(f"- `{script_path}`")
 
-    # Skill instructions (body)
     if include_body:
         sections.append(f"\n### Skill Instructions\n{body_for_prompt}")
     else:
@@ -137,19 +119,12 @@ def build_skill_context_for_goal(
     registry: SkillRegistry | None = None,
     *,
     gated: bool = False,
+    workspace: str | Path | None = None,
 ) -> SkillExecutionContext | None:
-    """Find the best-matching skill for a goal and return its context.
-
-    Uses the skill registry's keyword/fuzzy search to rank skills,
-    then returns the context for the highest-scoring match.
-
-    When ``gated`` is set (Gated Skill Learning on), only ACTIVE skills —
-    those measured to raise the verified rate — are eligible; candidates and
-    skills under evaluation are filtered out (T1-1).
-    """
+    """Return context for the best matching skill; gated selection permits only active skills."""
     from rune.skills.registry import get_skill_registry
 
-    reg = registry or get_skill_registry()
+    reg = registry or get_skill_registry(workspace=workspace)
 
     try:
         matches: list[SkillMatch] = reg.search(goal)
@@ -157,9 +132,8 @@ def build_skill_context_for_goal(
         log.warning("skill_search_failed", goal=goal[:50])
         return None
 
-    if gated:
-        from rune.skills.lifecycle import is_injectable
-        matches = [m for m in matches if is_injectable(m.skill, gated=True)]
+    from rune.skills.lifecycle import is_injectable
+    matches = [m for m in matches if is_injectable(m.skill, gated=gated)]
 
     if not matches:
         log.debug("no_matching_skills", goal=goal[:50])
@@ -185,13 +159,15 @@ def merge_skill_contexts(contexts: list[SkillExecutionContext]) -> str:
 # Requirement validation
 
 def validate_skill_requirements(skill: Skill) -> list[str]:
-    """Validate that a skill's requirements are satisfied.
-
-    Returns a list of human-readable strings describing missing requirements.
-    An empty list means all requirements are met.
-    """
+    """Return unmet requirements; an empty list means all checks passed."""
     requires = skill.metadata.get("requires") or {}
     missing: list[str] = []
+    if not isinstance(requires, dict) or any(
+        not isinstance(requires.get(key, []), list)
+        or any(not isinstance(value, str) for value in requires.get(key, []))
+        for key in ("env", "bins", "mcp")
+    ):
+        return ["Invalid skill requirements metadata"]
 
     # Check environment variables
     for var in requires.get("env") or []:
@@ -220,10 +196,7 @@ async def build_full_execution_context(
     memory_context: str | None = None,
     registry: SkillRegistry | None = None,
 ) -> str:
-    """Build the combined context string for agent execution.
-
-    Merges optional memory context with skill context looked up by goal.
-    """
+    """Combine memory and goal-matched skill context for execution."""
     sections: list[str] = []
 
     if include_memory and memory_context:
@@ -241,11 +214,7 @@ _STEP_RE = re.compile(r"^\s*(?:\d+\.\s+|[-*]\s+)(.+)$", re.MULTILINE)
 
 
 def _parse_skill_body(body: str) -> list[str]:
-    """Parse a skill body (Markdown) into a list of instruction steps.
-
-    Extracts ordered/unordered list items as individual steps.
-    If no list items are found, treats each non-empty paragraph as a step.
-    """
+    """Parse list items as steps, falling back to nonempty paragraphs."""
     steps: list[str] = []
 
     for m in _STEP_RE.finditer(body):
@@ -262,24 +231,7 @@ def _parse_skill_body(body: str) -> list[str]:
 
 
 async def execute_skill(skill: Skill, context: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Execute a skill given an optional context.
-
-    Parameters
-    ----------
-    skill:
-        The skill to execute.
-    context:
-        Arbitrary context dict (may include "agent", "session", "args", etc.).
-
-    Returns
-    -------
-    dict with keys:
-        - success (bool)
-        - steps_executed (int)
-        - total_steps (int)
-        - results (list[str]): per-step result descriptions
-        - error (str|None)
-    """
+    """Execute skill steps through an optional agent and return counts, results and errors."""
     ctx = context or {}
     steps = _parse_skill_body(skill.body)
 

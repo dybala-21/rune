@@ -68,6 +68,10 @@ Return ONLY JSON matching the supplied schema. Do not emit code.
 - Put non-data requirements (styling, prose, non-tabular deliverables) in out_of_scope. A request to give
   a file link or explain check results is ordinary delivery, not an unsupported data condition. The tool
   returns a file link and measured results for the agent to report.
+- Reporting the computed totals in the final reply is delivery, not a new unsupported calculation.
+  Example: "preserve the source and report each group's totals" is covered by source_revision and
+  the existing aggregate values. Do not put this sentence in unverified. Only unsupported
+  DATA transformations belong there; non-data presentation requirements belong in out_of_scope.
 - If no supported aggregate is requested, return applicable=false, empty executable fields and explain
   the unsupported scope in unverified. Never invent aggregates just to make the task checkable.
 The plan checks data only. It cannot establish full task completion or visual quality.
@@ -221,18 +225,26 @@ class TableAcceptance:
                 "contract": contract, **preview,
                 "next": "Create the requested table, then call table_verify with this contract ID. "
                 "The preview contains aggregates computed from the source; complete previews follow the requested ordering. "
+                "When complete is true, write these exact columns and rows directly with file_write or document_create; "
+                "no helper script or repeated aggregation is needed. "
                 "If complete is false, compute every row from the source; never infer missing rows from the sample. "
                 "Apply the contract's columns, order and conditions. Unsupported conditions are not verified.",
             }, ensure_ascii=False), metadata={"tableContract": copy.deepcopy(contract)})
 
     async def verify(self, contract_id: str, output_path: str, sheet: str | None,
                      header_row: int) -> CapabilityResult:
-        self._recovering = False
         contract = self.contracts.get(contract_id)
         if contract is None:
             raise ValueError("Unknown contract; call table_requirements with the original source first")
         plan = TablePlan.model_validate(contract["plan"])
         path = str(Path(output_path).expanduser().resolve())
+        if path == contract["source_path"]:
+            return CapabilityResult(
+                success=False,
+                error="Verify the saved output, not the original source. Output verification already checks source preservation.",
+                metadata={"action_status": "not_executed"},
+            )
+        self._recovering = False
         report: dict[str, Any] = {"contract_id": contract_id, "output_path": path,
                                   "output_locator": str(Path(output_path).expanduser().absolute()),
                                   "sheet": sheet, "header_row": header_row, "status": "inconclusive",

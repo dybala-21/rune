@@ -1,14 +1,4 @@
-"""CLI entry point for RUNE (package form).
-
-Phase 9 adds uvloop installation at the very top so every ``asyncio.run()``
-call in the CLI benefits automatically.
-
-Can be invoked via::
-
-    python -m rune.cli.main
-    rune --message "..."
-    rune  (interactive REPL)
-"""
+"""Provide CLI commands and wire interactive or one-shot agent sessions."""
 
 from __future__ import annotations
 
@@ -25,6 +15,7 @@ import typer
 from rich.console import Console
 
 from rune import __version__
+from rune.agent.run_outcome import run_outcome
 
 # App
 
@@ -49,6 +40,8 @@ import contextlib
 
 from rune.cli.advisor_cmd import advisor_app
 from rune.cli.bench_cmd import bench_app
+from rune.cli.cloud_cmd import cloud_app
+from rune.cli.connector_cmd import connector_app
 from rune.cli.memory_cmd import memory_app
 from rune.cli.self_cmd import self_app
 
@@ -61,10 +54,10 @@ app.add_typer(self_app, name="self")
 app.add_typer(memory_app, name="memory")
 app.add_typer(advisor_app, name="advisor")
 app.add_typer(bench_app, name="bench")
+app.add_typer(connector_app, name="connector")
+app.add_typer(cloud_app, name="cloud")
 
-# Scheduled-task compatibility: a lightweight passthrough subcommand so
-# external schedulers can run `send briefing` without knowing the full
-# internal CLI surface.
+# Expose send briefing for external schedulers.
 @app.command("send")
 def send_cmd(
     what: Annotated[str, typer.Argument(help="What to send (e.g., 'briefing')")],
@@ -72,10 +65,8 @@ def send_cmd(
     if what != "briefing":
         console.print(f"[red]Unknown send target:[/red] {what}")
         raise typer.Exit(2)
-    # Delegate to the daemon/API layer if available. For now, print a minimal
-    # acknowledgement so the scheduled task has an execution result.
+    # This compatibility command currently returns an acknowledgement only.
     console.print("briefing sent")
-
 
 
 # Global callback
@@ -144,11 +135,7 @@ def main(
     from rune.utils.logger import configure_logging
     configure_logging(level=log_level)
 
-    # Apply -p/-m to the whole session, not just the main agent: set the
-    # session-active provider/model so auxiliary subsystems (classifier, gates,
-    # learning) use the chosen provider instead of falling back to
-    # default_provider, and so the failover primary profile (what the agent loop
-    # runs) is the requested model rather than the default provider's best tier.
+    # Apply provider/model overrides to the agent, classifiers, verification and failover.
     if provider or model:
         from rune.config import get_config
         llm_cfg = get_config().llm
@@ -167,9 +154,7 @@ def main(
         if voice:
             _handle_voice_mode(model=model, provider=provider)
         elif message:
-            # Recursion guard: a best-of attempt subprocess sets RUNE_IN_BEST_OF,
-            # so even if --best-of ever leaks into a child it collapses to a
-            # single run instead of fanning out again.
+            # Prevent best-of child processes from spawning another sample set.
             effective_best_of = best_of
             if best_of < 1:
                 console.print("[red]--best-of must be >= 1.[/red]")
@@ -189,8 +174,7 @@ def main(
         elif tui:
             _start_interactive(model=model, provider=provider)
         else:
-            # Default terminal surface is the minimal REPL; the full-screen
-            # TUI is opt-in via --tui.
+            # Use the REPL by default; --tui selects the full-screen interface.
             if not _ensure_llm_key():
                 console.print(
                     "[red]No API key configured. "
@@ -275,7 +259,7 @@ def _handle_voice_mode(
                 trace = await loop.run(text, context=run_context)
 
                 # TTS output (if available)
-                if voice_svc.has_tts and trace.reason == "completed":
+                if voice_svc.has_tts and run_outcome(trace).success:
                     output = getattr(trace, "final_output", "") or ""
                     if output:
                         await voice_svc.speak_and_play(output[:500])
@@ -291,22 +275,9 @@ def _handle_voice_mode(
 
 
 def _defer_memory_work() -> None:
-    """Keep the memory work off the path of a process that is about to exit.
+    """Defer model-based memory work when a one-shot process is about to exit.
 
-    Consolidation, daily promotion and the vector index used to run once the
-    answer was already on screen, holding the process open a further 7.8s
-    median across 119 runs. They make their own model calls, so on a short
-    request they cost more than the request did.
-
-    Two placements were measured and both were worse than none. Waiting for
-    them at the end is the original 7.8s. Starting them at the beginning looks
-    free while nothing is pending, but every deferred episode is a model call
-    the *next* run pays before it can answer: with two pending, a trivial
-    request went from 4.2s to 6.0s and the agent's own first call was pushed
-    0.6s later. So a one-shot run does neither. It writes the episode and
-    leaves it; the sweep belongs to something that is not answering a user.
-    The TUI sweeps after each turn and the daemon does it on a 10-minute
-    heartbeat task, so the backlog is drained by whichever is running.
+    Local session flushing still runs so the next long-lived process can consolidate it.
     """
     try:
         from rune.agent import memory_bridge
@@ -363,13 +334,7 @@ def _handle_non_interactive(
     loop.on("text_delta", _on_text_delta)
     loop.on("tool_call", _on_tool_call)
 
-    # A best-of-K attempt subprocess sets RUNE_IN_BEST_OF. Such a run is a
-    # throwaway sample, not a real session: it must not leave persistent
-    # side-effects (episode learning, memory promotion) or it pollutes the
-    # self-improving store with K-1 discarded attempts. Memory reads (rule
-    # injection, classification) stay on so each sample runs under production
-    # conditions; only writes are suppressed. MCP stays on so attempts keep full
-    # tool capability.
+    # Discarded best-of runs may read memory and use MCP, but must not persist learning.
     _throwaway = bool(os.environ.get("RUNE_IN_BEST_OF"))
 
     async def _run() -> Any:
@@ -395,19 +360,11 @@ def _handle_non_interactive(
         except Exception:
             pass  # MCP init is best-effort
 
-        # Classification needs nothing but the message, and it is a network
-        # round trip — around 1.15s. Leaving it until after the context is
-        # prepared meant opening the store, migrating the schema and warming
-        # the embedding engine first, and only then starting to wait. Start
-        # it here and collect it below: same call, same inputs, same answer,
-        # roughly a second of it spent alongside work that was happening
-        # anyway.
+        # Start classification while memory and environment context are being prepared.
         _classify_task = None
         _handed_down = None
         if _throwaway:
-            # A best-of attempt child: the parent already classified this
-            # exact message and handed the result down. Asking again is the
-            # same model call with the same answer, K times per run.
+            # Reuse the parent's classification for this identical best-of request.
             try:
                 from rune.agent.goal_classifier import from_wire
                 _handed_down = from_wire(
@@ -422,8 +379,7 @@ def _handle_non_interactive(
             except Exception:
                 pass
 
-        # --session <id>: load prior turns and persist this exchange.
-        # Throwaway best-of samples never persist.
+        # Load and save explicit sessions, excluding throwaway best-of samples.
         conv_manager = None
         conv_id: str | None = None
         if session and not _throwaway:
@@ -445,8 +401,7 @@ def _handle_non_interactive(
             goal=message, channel="cli", conversation_id=conv_id or "",
         ), conversation_manager=conv_manager)
 
-        # Classify once: goal_type drives both rule injection and learning,
-        # so they share one key.
+        # Use one goal type for rule injection and learning.
         classification = None
         goal_type: str | None = None
         try:
@@ -483,10 +438,7 @@ def _handle_non_interactive(
             ctx.goal,
             context=run_context,
             message_history=ctx.messages if ctx.messages else None,
-            # Reuse the classification already computed above, but only when the
-            # goal passed to the loop is byte-identical to what we classified
-            # (sanitize/@-expansion can change it). loop.run further restricts
-            # reuse to the single-turn case.
+            # Reuse classification only if sanitizing and path expansion left the goal unchanged.
             classification=classification if ctx.goal == message else None,
         )
 
@@ -500,7 +452,7 @@ def _handle_non_interactive(
 
         if output_parts:
             print()
-        if trace.reason != "completed":
+        if not run_outcome(trace).success:
             from rune.agent.escalation import (
                 escalation_hint,
                 escalation_setup_hint,
@@ -508,8 +460,7 @@ def _handle_non_interactive(
                 run_was_verifiable,
             )
 
-            # Say why we didn't claim success, then the next step: /escalate, or
-            # how to set it up if there's no escalation model yet.
+            # Explain incomplete status and the available escalation path.
             _note = honest_failure_note(trace.reason, run_was_verifiable(trace))
             if _note:
                 console.print(f"[yellow]⚠ {_note}[/yellow]")
@@ -528,7 +479,7 @@ def _handle_non_interactive(
                 _learned = await post_process_agent_result(PostProcessInput(
                     verification=getattr(trace, "verification", None),
                     context=ctx,
-                    success=(trace.reason == "completed"),
+                    success=(run_outcome(trace).success),
                     answer="".join(output_parts),
                     reason=trace.reason,
                     evidence_gate=trace.evidence_gate,
@@ -544,11 +495,7 @@ def _handle_non_interactive(
             except Exception:
                 pass  # best-effort memory save
 
-            # A one-shot run is a whole session; flush its events into the
-            # daily tier on exit, or promotion never runs for anyone who only
-            # uses --message. This one stays: it is local bookkeeping, not a
-            # model call, and it is what the consolidation above was holding
-            # the process open for.
+            # Flush one-shot session events locally before exit so daily memory can promote them.
             try:
                 from rune.memory.manager import get_memory_manager
                 await get_memory_manager().promote_memories()
@@ -569,8 +516,7 @@ def _handle_non_interactive(
     async def _run_and_grade() -> None:
         nonlocal _exit_code
         trace = await _run()
-        # A run whose last mechanical check failed exits nonzero: scripts and
-        # benches read the exit code as the claim, and this one is not "done".
+        # Return nonzero when the last mechanical check failed.
         if trace is not None and getattr(trace, "reason", "") == "checks_failed":
             _exit_code = 1
 
@@ -724,16 +670,13 @@ def _simple_repl(model: str | None = None, provider: str | None = None) -> None:
             message_history=ctx.messages if ctx.messages else None,
         )
 
-        # Prefer the loop's final answer; fall back to streamed text. The
-        # streamed text can be empty depending on the render path, and a missing
-        # assistant turn makes the next turn re-run already-answered tasks.
+        # Prefer the final answer over streamed text so continuation history contains the reply.
         from rune.agent.agent_context import resolve_assistant_answer
         answer = resolve_assistant_answer(
             getattr(run_loop, "_last_answer_text", ""), "".join(collected_text),
         )
 
-        # Record the assistant turn and persist so /sessions can list this
-        # conversation and a later /load can resume it.
+        # Persist the assistant turn for session listing and later continuation.
         if conv_manager and conv_state["id"] and answer:
             with contextlib.suppress(Exception):
                 conv_manager.add_turn(
@@ -753,7 +696,7 @@ def _simple_repl(model: str | None = None, provider: str | None = None) -> None:
                 classification_hint=getattr(run_loop, "_last_goal_type", "") or None,
                 verification=getattr(trace, "verification", None),
                 context=ctx,
-                success=(trace.reason == "completed"),
+                success=(run_outcome(trace).success),
                 answer=answer,
                 reason=trace.reason,
                 evidence_gate=trace.evidence_gate,
@@ -762,8 +705,7 @@ def _simple_repl(model: str | None = None, provider: str | None = None) -> None:
             ))
 
     async def _action_run_agent(goal: str, agent_config: Any = None) -> str:
-        """run_agent hook for slash actions (/escalate): optional per-run
-        model override on a temporary loop, same conversation."""
+        """Run a slash-action turn with model overrides scoped to that run."""
         if agent_config is not None:
             tmp = NativeAgentLoop(config=agent_config)
             tmp.on("text_delta", _on_text_delta)
@@ -798,8 +740,7 @@ def _simple_repl(model: str | None = None, provider: str | None = None) -> None:
                 console.print(out)
 
     async def _dispatch_command(text: str) -> bool:
-        """Run a slash command via the shared registry + server-side actions
-        (same engine the web app uses; foreground so the prompt blocks)."""
+        """Dispatch a slash command through the shared registry and server-side actions."""
         from pathlib import Path
 
         from rune.api import command_actions
@@ -835,8 +776,7 @@ def _simple_repl(model: str | None = None, provider: str | None = None) -> None:
 
     console.print("[dim]Type your message. /exit to quit, /help for commands.[/dim]\n")
 
-    # One event loop for the whole session: slash actions keep background
-    # state (file tracker, locks) that has to survive across turns.
+    # Keep one event loop so background state and locks survive between turns.
     aio = asyncio.new_event_loop()
     last_goal = ""
 
@@ -1003,8 +943,7 @@ def web(
     import asyncio
     from pathlib import Path
 
-    # Locate the bundled web/dist directory.
-    # 1. Check RUNE_WEB_STATIC_DIR env override
+    # Locate bundled web assets, preferring RUNE_WEB_STATIC_DIR.
     env_dist = os.environ.get("RUNE_WEB_STATIC_DIR", "")
     # 2. Relative to package (for pipx / pip install)
     pkg_dist = Path(__file__).parent.parent.parent / "web" / "dist"
@@ -1085,8 +1024,7 @@ def web(
         _force_exit()
 
 
-# Daemon lifecycle commands. `start` runs `rune web` detached — that path
-# already creates the socket/pid file and serves the API + web UI.
+# Run rune web detached for daemon startup; it already owns the socket and API lifecycle.
 
 def _daemon_paths() -> tuple[str, str]:
     from rune.daemon.main import _default_config
@@ -1133,8 +1071,7 @@ def daemon_start(
 
     from rune.utils.paths import rune_home
     log_path = rune_home() / "daemon.log"
-    # Never resolve `rune` from PATH: a different install (e.g. a global npm
-    # rune-agent) would serve its own bundled web UI.
+    # Use this installation rather than a different rune executable found on PATH.
     launcher = sys.argv[0] if sys.argv else ""
     if (launcher and os.path.isfile(launcher) and os.access(launcher, os.X_OK)
             and "rune" in os.path.basename(launcher).lower()):
@@ -1455,11 +1392,7 @@ def _print_banner() -> None:
 
 
 def _ensure_llm_key() -> bool:
-    """Check the session can reach an LLM: a local provider or an API key.
-
-    A fully-local session (ollama) needs no API key; requiring a cloud key here
-    would force local-only users to create one just to start.
-    """
+    """Check whether a local provider or configured API key can serve the session."""
     from rune.config import get_config
     config = get_config()
     provider = config.llm.active_provider or config.llm.default_provider
@@ -1497,10 +1430,7 @@ def _get_extension_source_dir():
 
 
 def _install_extension_to_home():
-    """Copy bundled extension to ~/.rune/extension/rune-browser-bridge/.
-
-    Returns the target directory. Raises typer.Exit(1) on failure.
-    """
+    """Copy the bundled browser bridge into the user extension directory."""
     import shutil
 
     src = _get_extension_source_dir()

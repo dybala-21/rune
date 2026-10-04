@@ -1,21 +1,18 @@
-"""Keep an isolated worker's file writes inside its worktree.
-
-cwd only confines relative paths and Guardian only blocks system paths, so a
-worker could still write an absolute / ``..`` / ``~`` path outside its
-workspace. When RUNE_ISOLATION_ROOT is set, file capabilities call enforce()
-before writing. No root set (normal single-agent runs) -> no-op.
-"""
+"""Confine worker file writes to RUNE_ISOLATION_ROOT when set."""
 
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 ISOLATION_ENV = "RUNE_ISOLATION_ROOT"
+_root: ContextVar[str | None] = ContextVar("workspace_isolation", default=None)
 
 
 def isolation_root() -> str | None:
     """Return the active isolation root (realpath), or None if not isolating."""
-    raw = os.environ.get(ISOLATION_ENV)
+    raw = _root.get() or os.environ.get(ISOLATION_ENV)
     if not raw:
         return None
     try:
@@ -24,9 +21,21 @@ def isolation_root() -> str | None:
         return raw
 
 
+@contextmanager
+def isolation_scope(root: str):
+    parent = isolation_root()
+    resolved = os.path.realpath(root)
+    if parent and not is_within(resolved):
+        raise ValueError("A nested workspace cannot expand the active isolation boundary")
+    token = _root.set(resolved)
+    try:
+        yield
+    finally:
+        _root.reset(token)
+
+
 def _resolve(path: str, root: str) -> str:
-    # expanduser first: `~/foo` means home (outside the worktree), not a literal
-    # `~` subdir. realpath collapses symlinks and `..`.
+    # Expand ~ before resolving symlinks and .. so home paths cannot appear workspace-relative.
     p = os.path.expanduser(path)
     p = p if os.path.isabs(p) else os.path.join(root, p)
     return os.path.realpath(p)

@@ -1,8 +1,4 @@
-"""Provider-specific prompt supplements for multi-provider compatibility.
-
-Adds minimal guidance to help non-Claude models use tools correctly.
-Claude's base prompt is already optimized — no supplement needed.
-"""
+"""Small tool-use reminders for providers that need them."""
 
 from __future__ import annotations
 
@@ -10,26 +6,20 @@ from __future__ import annotations
 PROVIDER_SUPPLEMENT: dict[str, str] = {
     "openai": (
         "\n## Tool Usage\n"
-        "When asked to modify code, call file_edit immediately.\n"
-        "Example: user says 'fix bug in main.py'\n"
-        "  1. file_read(path='main.py')\n"
-        "  2. file_edit(path='main.py', search='...', replace='...')\n"
-        "Never describe what you will do — call the tool.\n"
+        "For requested changes, inspect the relevant context, then use the tools to implement and verify. "
+        "A read or review request does not authorize edits.\n"
     ),
     "gemini": (
         "\n## Tool Usage\n"
-        "Call one tool at a time. Wait for the result before the next call.\n"
-        "After reading a file, proceed to edit it — do not just describe changes.\n"
+        "Batch independent reads when useful. Wait for prerequisites before dependent calls, "
+        "and keep changes to the same resource sequential. "
+        "Implement requested changes with tools; preserve files for read or review requests.\n"
     ),
 }
 
 
 def get_prompt_supplement(model: str) -> str:
-    """Get provider-specific prompt supplement from a model string.
-
-    Accepts 'anthropic/claude-...' or 'gpt-4o' format.
-    Returns empty string for unknown providers or providers that don't need supplements.
-    """
+    """Return a provider supplement for a model name, or an empty string when unnecessary."""
     provider = _extract_provider(model)
     return PROVIDER_SUPPLEMENT.get(provider, "")
 

@@ -9,9 +9,11 @@ import os
 import re
 import time
 from collections.abc import Awaitable, Callable, Coroutine
+from copy import deepcopy
 from dataclasses import dataclass, field
-from fnmatch import fnmatch
-from typing import Any, NamedTuple, Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
+
+from pydantic import ValidationError
 
 from rune.agent.cognitive_cache import WEB_FETCH_DEFAULT_MAX_LENGTH, SessionToolCache
 from rune.agent.tool_output import ToolOutput, output_for_model
@@ -26,6 +28,15 @@ from rune.capabilities.output_prefixes import (
 from rune.capabilities.registry import CapabilityRegistry, get_capability_registry
 from rune.capabilities.types import CapabilityDefinition
 from rune.safety.approval_context import approval_granted
+from rune.safety.tool_policy import (
+    _FILE_MUTATING_CAPABILITIES,
+    _capability_asked_for_approval,
+    _GuardianResult,
+    _network_approval_request,
+    _validate_with_guardian,
+    approval_mode,
+    is_mcp_write_operation,
+)
 from rune.types import CapabilityResult
 from rune.utils.env import env_flag as _env_flag
 from rune.utils.env import env_int as _env_int
@@ -92,10 +103,7 @@ STALL_LIMITS: dict[str, Any] = {
 # Multiplier applied when "extended" stall mode is active
 EXTENDED_MULTIPLIER: float = 1.5
 
-# StallState - unified type lives in loop.py (#15)
-# To avoid circular imports (loop.py imports from tool_adapter.py), we use
-# a Protocol for duck-typed stall state. The canonical dataclass is
-# ``rune.agent.loop.StallState``.
+# Use a protocol to share stall state without circular imports from loop.py.
 
 @runtime_checkable
 class StallStateProtocol(Protocol):
@@ -118,13 +126,7 @@ class StallStateProtocol(Protocol):
 
 @dataclass(slots=True)
 class StallState:
-    """Concrete stall state for use outside the agent loop.
-
-    The canonical stall state lives in ``rune.agent.loop.StallState`` with
-    additional fields.  This lightweight version satisfies
-    :class:`StallStateProtocol` and is safe to instantiate in tests and the
-    tool adapter when the full loop state is not available.
-    """
+    """Provide minimal stall state when the full loop state is unavailable."""
     bash_stalled: bool = False
     bash_stalled_reason: str = ""
     bash_stalled_intent: str = ""
@@ -145,11 +147,7 @@ class StallState:
 # Effective limits with optional extension
 
 def get_effective_stall_limits(extended: bool = False) -> dict[str, Any]:
-    """Return stall limits, optionally scaled by EXTENDED_MULTIPLIER.
-
-    Numeric values are multiplied and rounded up; nested dicts are
-    recursively scaled.
-    """
+    """Scale numeric stall limits recursively when extended mode is enabled."""
     if not extended:
         return dict(STALL_LIMITS)
 
@@ -169,9 +167,7 @@ def get_effective_stall_limits(extended: bool = False) -> dict[str, Any]:
 class ToolAdapterOptions:
     """Options passed to :func:`build_tool_set`."""
     profile_name: str = ""
-    # Directory relative tool paths anchor to (file_* path params, bash cwd).
-    # Empty = process cwd, which matches the CLI/TUI where the process runs in
-    # the project; the daemon serves many workspaces so it must pass this.
+    # Resolve relative paths under this workspace; daemon runs must not inherit process cwd.
     workspace_root: str = ""
     enable_guardian: bool = True
     sandbox_policy: str = "balanced"
@@ -188,8 +184,7 @@ class ToolAdapterOptions:
     table_acceptance: Any = None
 
 
-# web_fetch maxLength while the fast lane is active: a simple lookup
-# needs snippet-level grounding, not a full-page dump.
+# Cap fast-lane fetches to the content needed for a simple lookup.
 _FAST_LANE_FETCH_MAX_CHARS = 8_000
 
 
@@ -205,8 +200,7 @@ def _write_fetch_max(params: dict[str, Any], value: int) -> None:
 
 
 def _cap_fast_lane_fetch(params: dict[str, Any]) -> dict[str, Any]:
-    # An explicit maxLength (even 0) is respected up to the cap; only an
-    # absent value falls back to the lane cap.
+    # Respect an explicit maxLength, including zero, up to the lane cap.
     current = _read_fetch_max(params)
     lane_max = (
         min(current, _FAST_LANE_FETCH_MAX_CHARS)
@@ -217,20 +211,7 @@ def _cap_fast_lane_fetch(params: dict[str, Any]) -> dict[str, Any]:
     return params
 
 
-# File-mutating capability names
-
-_FILE_MUTATING_CAPABILITIES = frozenset({
-    "file_write", "file_edit", "file_delete",
-    "document_create", "document_bundle", "document_bundle_update",
-})
-
 _BASH_CAPABILITY = "bash_execute"
-
-# Default pattern for detecting MCP write operations
-_MCP_WRITE_PATTERN = re.compile(
-    r"create|update|delete|remove|send|post|put|patch|write|insert|modify|edit|add|move|archive",
-    re.IGNORECASE,
-)
 
 # Smart file expansion threshold (lines)
 _SMART_EXPAND_MAX_LINES = 500
@@ -258,21 +239,6 @@ _STRICT_STATUS_MARKER_SUFFIXES = (
     "_EXIT",
     "_STATUS",
 )
-
-
-def is_mcp_write_operation(cap_name: str) -> bool:
-    """Detect whether an MCP capability name represents a write operation.
-
-    Write operations include create, update, delete, write, send, post, put,
-    patch, and similar verbs found in the tool name portion of the capability.
-    """
-    if not cap_name.startswith("mcp."):
-        return False
-    parts = cap_name.split(".")
-    if len(parts) < 3:
-        return False
-    tool_name = ".".join(parts[2:])
-    return bool(_MCP_WRITE_PATTERN.search(tool_name))
 
 
 def _cap_benchmark_bash_timeout(params: dict[str, Any]) -> dict[str, Any]:
@@ -339,25 +305,13 @@ def build_tool_set(
     options: ToolAdapterOptions | None = None,
     registry: CapabilityRegistry | None = None,
 ) -> dict[str, Any]:
-    """Build a dict of ToolWrapper objects from the capability registry.
-
-    Each tool wrapper:
-    1. Checks the cognitive cache for a hit.
-    2. Validates via Guardian if enabled.
-    3. Executes the capability.
-    4. Stores the result in the cognitive cache.
-    5. Invalidates cache entries on file mutations.
-    6. Tracks stall state.
-
-    Returns ``ToolWrapper`` objects with proper JSON schemas derived
-    from each capability's ``parameters_model`` (Pydantic BaseModel).
-    """
+    """Wrap registry capabilities with schemas, approval, caching and stall tracking."""
 
     opts = options or ToolAdapterOptions()
     reg = registry or get_capability_registry()
     cache = opts.cognitive_cache
 
-    # Use provided stall state or create one from loop.StallState (#15)
+    # Use provided stall state or create one from loop.StallState
     stall = opts.stall_state
     if stall is None:
         try:
@@ -420,12 +374,7 @@ def _build_typed_tool(
     cache: SessionToolCache | None,
     stall: Any,  # StallState or StallStateProtocol
 ) -> Any:
-    """Create a ToolWrapper with proper parameter JSON schema.
-
-    Returns a lightweight ``ToolWrapper`` that carries *name*, *description*,
-    *json_schema*, and *function*, compatible with ``tools_to_openai_schema()``
-    in ``litellm_adapter.py``.
-    """
+    """Wrap a capability and its parameter schema for tools_to_openai_schema()."""
     cap_name = cap_def.name
 
     # Shared with the tool closure to count consecutive denials.
@@ -474,6 +423,7 @@ def _build_typed_tool(
             await opts.on_tool_start(cap_name, effective_params)
         if (
             cap_name == "file_read"
+            and not effective_params.get("raw")
             and (effective_params.get("offset") or effective_params.get("limit"))
             and cache is not None
         ):
@@ -501,10 +451,9 @@ def _build_typed_tool(
         ):
             effective_params = _cap_fast_lane_fetch(effective_params)
 
-        # -- Feature 2: Budget-aware web.fetch maxLength scaling --
+        # Feature 2: Budget-aware web.fetch maxLength scaling
         if cap_name == "web_fetch" and opts.budget_percent > 0.4:
-            # Absent maxLength means the capability default, so scale from
-            # that — not from an unrelated constant.
+            # Scale absent maxLength from the capability default.
             current_max = _read_fetch_max(effective_params)
             if current_max is None:
                 current_max = WEB_FETCH_DEFAULT_MAX_LENGTH
@@ -550,6 +499,33 @@ def _build_typed_tool(
 
                     return CachedToolResult(hit.output, cache_key)
 
+        try:
+            normalized_params = (cap_def.parameters_model.model_validate(effective_params).model_dump(mode="json", by_alias=True)
+                                 if cap_def.parameters_model is not None else deepcopy(effective_params))
+        except ValidationError as exc:
+            details = "; ".join(
+                f"{'.'.join(map(str, error['loc']))}: {error['msg']}"
+                for error in exc.errors(include_input=False, include_url=False)[:3]
+            )
+            result = CapabilityResult(success=False, error=f"Invalid arguments for {cap_name}: {details[:1000]}",
+                                      metadata={"action_status": "not_executed"})
+            if opts.on_tool_end is not None:
+                await opts.on_tool_end(cap_name, result)
+            return f"{ERROR_PREFIX} {result.error}"
+
+        approved_revisions = {}
+
+        async def request_approval(command: str, reason: str) -> bool:
+            nonlocal approved_revisions
+            from rune.safety.approval_request import action_request, request_scope
+
+            action = action_request(cap_name, normalized_params)
+            with request_scope(action):
+                accepted = await opts.approval_callback(command, reason)
+            if accepted:
+                approved_revisions = action["revisions"]
+            return accepted
+
         # 2. Guardian validation
         approval_cleared = False
         if opts.enable_guardian:
@@ -566,7 +542,7 @@ def _build_typed_tool(
                 approval_cleared = True
             if guard_result.requires_approval:
                 if opts.approval_callback is not None:
-                    approved = await opts.approval_callback(cap_name, guard_result.reason)
+                    approved = await request_approval(cap_name, guard_result.reason)
                     if not approved:
                         # Feature 1: Denial escalation
                         _consecutive_denials[0] += 1
@@ -600,19 +576,13 @@ def _build_typed_tool(
                         await opts.on_tool_end(cap_name, err)
                     return f"{BLOCKED_PREFIX} Guardian requires approval: {guard_result.reason}"
 
-        # -- Network approval guard -------------------------------
-        # Guardian validates commands and paths; it has no notion of the
-        # network, so outbound writes had no gate at all. Same shape as the
-        # MCP write guard below.
+        # Network writes need their own approval gate beyond command and path validation.
         net_request = _network_approval_request(cap_name, effective_params)
         if net_request is not None and opts.approval_callback is None:
-            # No channel to ask on. Reads proceed (a strict-mode read is a
-            # preference, not a hazard); a write does not — it cannot be
-            # undone, so fail closed. Headless callers wire a callback (bench,
-            # worker) or run with approval mode "bypass".
-            if net_request.is_write:
+            # Without an approval channel, allow reads but block writes unless approval is bypassed.
+            if net_request.is_write or net_request.single_use:
                 err = CapabilityResult(
-                    success=False, error="No approval channel for a network write.",
+                    success=False, error="No approval channel for this network operation.",
                     metadata={"action_status": "not_executed"},
                 )
                 if opts.on_tool_end is not None:
@@ -623,8 +593,8 @@ def _build_typed_tool(
                 )
             net_request = None
         if net_request is not None and opts.approval_callback is not None:
-            if net_request.is_write or net_request.cache_key not in _approved_network:
-                approved = await opts.approval_callback(
+            if net_request.is_write or net_request.single_use or net_request.cache_key not in _approved_network:
+                approved = await request_approval(
                     net_request.display, net_request.reason
                 )
                 if not approved:
@@ -639,10 +609,11 @@ def _build_typed_tool(
                         f"{DENIED_PREFIX} User declined: {net_request.display}. "
                         "Do NOT retry it; find another source or report the blocker."
                     )
-                if not net_request.is_write:
+                if not net_request.is_write and not net_request.single_use:
                     _approved_network.add(net_request.cache_key)
+            approval_cleared = True
 
-        # -- Feature 3: MCP write operation approval guard -------
+        # Feature 3: MCP write operation approval guard
         if (
             cap_name.startswith("mcp.")
             and approval_mode() != "bypass"
@@ -660,7 +631,7 @@ def _build_typed_tool(
                 tool_name = ".".join(parts[2:]) if len(parts) > 2 else cap_name
                 params_preview = json.dumps(effective_params, indent=2)[:300]
                 reason = f"External service write operation: {cap_name}\n{params_preview}"
-                approved = await opts.approval_callback(
+                approved = await request_approval(
                     f"[{service_name}] {tool_name}",
                     reason,
                 )
@@ -673,6 +644,7 @@ def _build_typed_tool(
                     if opts.on_tool_end is not None:
                         await opts.on_tool_end(cap_name, err)
                     return f"{DENIED_PREFIX} User declined the service operation."
+                approval_cleared = True
 
         # 2.5 Edit-loop circuit breaker — blocks at tool dispatch level
         if cap_name in ("file_edit", "file_write") and stall is not None:
@@ -699,7 +671,7 @@ def _build_typed_tool(
 
             with acceptance_scope(opts.table_acceptance):
                 if approval_cleared:
-                    with approval_granted():
+                    with approval_granted(cap_name, normalized_params, revisions=approved_revisions):
                         result = await reg.execute(cap_name, effective_params)
                 else:
                     result = await reg.execute(cap_name, effective_params)
@@ -712,10 +684,7 @@ def _build_typed_tool(
                     and str(effective_params.get("method") or "GET").upper() != "GET"):
                 # The write may have succeeded even if its response was lost.
                 cache.invalidate_web()
-        # A capability can refuse and ask to be asked. The execution policy's
-        # allowlist does this: Guardian never sees the verdict, so without this
-        # the refusal was a dead end — no prompt anywhere, and the metadata
-        # saying "requires_approval" was read by nothing.
+        # Capabilities can request approval after their own policy checks refuse execution.
         if _capability_asked_for_approval(result):
             reason = str((result.metadata or {}).get("reason") or result.error or "")
             granted = False
@@ -723,10 +692,9 @@ def _build_typed_tool(
                 log.info("approval_bypassed", capability=cap_name, gate="capability")
                 granted = True
             elif opts.approval_callback is not None:
-                granted = await opts.approval_callback(cap_name, reason)
+                granted = await request_approval(cap_name, reason)
             else:
-                # Nothing to ask on (cron, proactive, scheduled runs). Fail
-                # closed and say so, rather than looking like the tool broke.
+                # Fail closed when a background run has no approval channel.
                 log.info("capability_approval_no_channel", capability=cap_name)
                 result = CapabilityResult(
                     success=False,
@@ -741,7 +709,7 @@ def _build_typed_tool(
             if granted:
                 _consecutive_denials[0] = 0
                 try:
-                    with acceptance_scope(opts.table_acceptance), approval_granted():
+                    with acceptance_scope(opts.table_acceptance), approval_granted(cap_name, normalized_params, revisions=approved_revisions):
                         result = await reg.execute(cap_name, effective_params)
                     if opts.table_acceptance is not None:
                         opts.table_acceptance.observe(cap_name, effective_params, result)
@@ -798,7 +766,7 @@ def _build_typed_tool(
 
         return output
 
-    # --- Wrapper that receives **kwargs from LiteLLMAgent's tool executor ---
+    # Wrapper that receives **kwargs from LiteLLMAgent's tool executor
     async def _wrapper(**kwargs: Any) -> str | Any:
         return await _execute(kwargs)
 
@@ -832,8 +800,6 @@ def _build_typed_tool(
             log.debug("tool_schema_fallback", tool=cap_name, error=str(exc)[:100])
     elif cap_def.raw_json_schema is not None:
         # MCP tools provide raw JSON schema without Pydantic model
-        from copy import deepcopy
-
         schema = deepcopy(cap_def.raw_json_schema)
 
     return ToolWrapper(
@@ -851,14 +817,12 @@ def _format_tool_output(
     params: dict[str, Any],
     result: CapabilityResult,
 ) -> str:
-    """Format a capability result with appropriate output prefixes.
-
-    Mirrors ``formatToolResult`` in tool-adapter.ts. Prepends structured
-    prefixes so the loop summary can deterministically parse tool outputs.
-    """
+    """Format tool output with structured prefixes consumed by the execution loop."""
     parts: list[str] = []
 
     if result.success:
+        if cap_name == "file_read" and result.metadata.get("raw") is True:
+            return result.output or ""
         # file_read: path prefix + content + end anchor
         if cap_name == "file_read":
             path = str(params.get("file_path") or params.get("path", ""))
@@ -869,9 +833,7 @@ def _format_tool_output(
             command = params.get("command", "")
             if isinstance(command, str):
                 parts.append(f"{BASH_CMD_PREFIX}{command}{BASH_EXIT_PREFIX}0]")
-        # web_fetch: only when the opt-in citation-support check is enabled, prepend
-        # the fetched URL so that check can match this full page (not just the search
-        # snippet) to the citation. Gated so the default path is never altered.
+        # Include fetched URLs only for opt-in citation support checks.
         if cap_name == "web_fetch" and _env_flag("RUNE_CITATION_SUPPORT"):
             _src = ""
             if result.metadata and isinstance(result.metadata, dict):
@@ -926,7 +888,7 @@ def _format_tool_output(
     return text
 
 
-# Error enrichment (ported from tool-adapter.ts:1911-2152)
+# Error enrichment
 
 def enrich_error_message(
     cap_name: str,
@@ -934,13 +896,7 @@ def enrich_error_message(
     params: dict[str, Any],
     ws_markers: list[str] | None = None,
 ) -> str:
-    """도구 에러 메시지에 복구 가이드를 덧붙인다.
-
-    긴 if/elif 체인을 패턴(조건)과 렌더링(힌트 생성)을 분리해
-    유지보수성을 높인다.
-
-    Ported from ``enrichErrorMessage`` in tool-adapter.ts.
-    """
+    """도구 오류에 해당하는 복구 안내를 덧붙인다."""
 
     error_lower = error.lower()
 
@@ -1249,7 +1205,7 @@ def enrich_error_message(
     return error
 
 
-# Bash preflight probe (ported from tool-adapter.ts:1700-1806)
+# Bash preflight probe
 
 @dataclass(slots=True)
 class BashPreflightSnapshot:
@@ -1271,11 +1227,7 @@ _preflight_cache: BashPreflightSnapshot | None = None
 
 
 async def resolve_bash_preflight(force: bool = False) -> BashPreflightSnapshot:
-    """Probe the bash environment for tool availability.
-
-    Checks: curl, wget, node, go.
-    Caches the result for ``_BASH_PREFLIGHT_TTL_S`` seconds.
-    """
+    """Cache bash tool-availability probes for _BASH_PREFLIGHT_TTL_S seconds."""
     global _preflight_cache
 
     if not force and _preflight_cache is not None:
@@ -1322,220 +1274,6 @@ async def resolve_bash_preflight(force: bool = False) -> BashPreflightSnapshot:
     return snapshot
 
 
-# Network approval helper
-
-# Reads: no state leaves the machine that wasn't already public.
-_NETWORK_READ_CAPS = frozenset({
-    "web_search", "browser_navigate", "browser_observe", "browser_extract",
-    "browser_find", "browser_screenshot", "browser_discover_apis",
-})
-# Browser input needs approval in strict mode: a click may submit a form.
-_NETWORK_ACT_CAPS = frozenset({
-    "browser_act", "browser_batch", "browser_workflow",
-})
-
-
-_APPROVAL_MODES = ("bypass", "standard", "strict")
-
-
-def approval_mode() -> str:
-    """The single switch every approval site honors.
-
-    ``bypass`` never asks, ``standard`` asks only for operations that cannot be
-    undone, ``strict`` also asks for network reads and browser interactions.
-    Env wins over config so a headless run can opt out without editing files;
-    an unreadable config keeps the default rather than opening the gates.
-    """
-    env = os.environ.get("RUNE_APPROVAL_MODE", "").strip().lower()
-    if env in _APPROVAL_MODES:
-        return env
-    try:
-        from rune.config.loader import get_config
-
-        mode = str(getattr(get_config().approval, "mode", "standard")).strip().lower()
-        return mode if mode in _APPROVAL_MODES else "standard"
-    except Exception as exc:
-        log.debug("approval_mode_config_read_failed", error=str(exc)[:100])
-        return "standard"
-
-
-def _network_writes_possible() -> bool:
-    """Whether a non-GET web_fetch can actually reach the network.
-
-    The gate must agree with the executor: when writes are disabled there is
-    nothing to sign off on, and web_fetch refuses the call itself.
-    """
-    return os.environ.get("RUNE_HYBRID_API", "0") == "1"
-
-
-def _url_host(url: str) -> str:
-    try:
-        from urllib.parse import urlparse
-
-        return urlparse(url).netloc or url[:60]
-    except Exception:
-        return url[:60]
-
-
-class _NetworkApproval(NamedTuple):
-    display: str
-    reason: str
-    cache_key: str
-    is_write: bool = False
-
-
-def _network_approval_request(
-    cap_name: str, params: dict[str, Any]
-) -> _NetworkApproval | None:
-    """Sign-off needed for this network call? → (display, reason, cache key).
-
-    A network write leaves the machine and has no undo — no trash, no
-    checkpoint, no working-tree revert — so a POST is gated even though a GET
-    read is not. Strictness comes from :func:`approval_mode`.
-    """
-    mode = approval_mode()
-    if mode == "bypass":
-        return None
-
-    if cap_name == "web_fetch":
-        method = str(params.get("method") or "GET").upper()
-        url = str(params.get("url") or "")
-        host = _url_host(url)
-        if method != "GET" and _network_writes_possible():
-            return _NetworkApproval(
-                f"{method} {url[:120]}",
-                f"Network write to {host} — this cannot be undone",
-                f"{method}|{host}",
-                is_write=True,
-            )
-        if mode == "strict":
-            return _NetworkApproval(f"GET {url[:120]}", f"Fetch {host}", f"GET|{host}")
-        return None
-
-    if mode != "strict":
-        return None
-
-    if cap_name in _NETWORK_READ_CAPS:
-        target = str(params.get("url") or params.get("query") or "")
-        return _NetworkApproval(
-            f"{cap_name} {target[:120]}".strip(),
-            f"Network read: {cap_name}",
-            f"{cap_name}|{_url_host(target) if target.startswith('http') else target[:60]}",
-        )
-
-    if cap_name in _NETWORK_ACT_CAPS:
-        action = str(params.get("action") or "")
-        selector = str(params.get("selector") or "")
-        return _NetworkApproval(
-            f"{cap_name} {action} {selector}".strip(),
-            f"Browser interaction: {action or cap_name}",
-            f"{cap_name}|{action}",
-            is_write=True,
-        )
-
-    return None
-
-
-# Guardian validation helper
-
-@dataclass(slots=True)
-class _GuardianResult:
-    """Internal result from Guardian validation."""
-    blocked: bool = False
-    requires_approval: bool = False
-    reason: str = ""
-
-
-def _capability_asked_for_approval(result: CapabilityResult) -> bool:
-    """Whether a capability refused and flagged the call as approvable.
-
-    The shell gate returns this when an executable is not allowlisted, which
-    is a question for the user, not a failure of the tool.
-    """
-    if result.success:
-        return False
-    meta = result.metadata
-    return bool(isinstance(meta, dict) and meta.get("requires_approval"))
-
-
-def _normalise_cap_name(name: str) -> str:
-    """file.delete / file-delete / file_delete are the same tool to an operator."""
-    return name.strip().lower().replace(".", "_").replace("-", "_")
-
-
-def _explicit_approval_patterns() -> list[str]:
-    """Capabilities the operator marked as always-prompt, normalised."""
-    try:
-        from rune.config import get_config
-
-        raw = get_config().approval.require_explicit_for or []
-    except Exception as exc:
-        log.debug("require_explicit_for_read_failed", error=str(exc))
-        return []
-    return [_normalise_cap_name(str(x)) for x in raw if str(x).strip()]
-
-
-def _requires_explicit_approval(cap_name: str) -> bool:
-    """Whether ``approval.requireExplicitFor`` names this capability."""
-    target = _normalise_cap_name(cap_name)
-    return any(fnmatch(target, pat) for pat in _explicit_approval_patterns())
-
-
-def _validate_with_guardian(cap_name: str, params: dict[str, Any]) -> _GuardianResult:
-    """Validate a tool call with Guardian.
-
-    Returns a :class:`_GuardianResult` indicating whether the call is
-    blocked, requires approval, or is allowed (both fields False).
-    """
-    try:
-        from rune.safety.guardian import get_guardian
-
-        guardian = get_guardian()
-
-        if cap_name == "bash_execute":
-            command = params.get("command", "")
-            result = guardian.validate(command, cwd=params.get("cwd"))
-            if not result.allowed:
-                return _GuardianResult(blocked=True, reason=f"Guardian blocked bash: {result.reason}")
-            if result.requires_approval:
-                return _GuardianResult(requires_approval=True, reason=result.reason)
-
-        elif cap_name in _FILE_MUTATING_CAPABILITIES:
-            file_path = params.get("file_path") or params.get("path") or params.get("directory", "")
-            result = guardian.validate_file_path(file_path)
-            if not result.allowed:
-                return _GuardianResult(blocked=True, reason=f"Guardian blocked file write: {result.reason}")
-            write_approval = result.requires_approval
-            write_reason = result.reason
-            if cap_name == "document_bundle":
-                result = guardian.validate_file_read_path(params.get("source_path", ""))
-                if not result.allowed:
-                    return _GuardianResult(blocked=True, reason=f"Guardian blocked source read: {result.reason}")
-            if write_approval:
-                return _GuardianResult(requires_approval=True, reason=write_reason)
-
-        elif cap_name in ("file_read", "document_read", "document_bundle_inspect"):
-            file_path = params.get("file_path") or params.get("path") or params.get("directory", "")
-            result = guardian.validate_file_read_path(file_path)
-            if not result.allowed:
-                return _GuardianResult(blocked=True, reason=f"Guardian blocked file read: {result.reason}")
-
-    except Exception as exc:
-        log.error("guardian_validation_error", error=str(exc))
-        # Fail closed: block if Guardian itself errors
-        return _GuardianResult(blocked=True, reason=f"Guardian validation error (fail-closed): {exc}")
-
-    # Operator-pinned prompts. Guardian scores risk from the command and path;
-    # this list is the operator saying "ask me anyway" for a whole capability.
-    if _requires_explicit_approval(cap_name):
-        return _GuardianResult(
-            requires_approval=True,
-            reason=f"{cap_name} requires explicit approval (approval.requireExplicitFor)",
-        )
-
-    return _GuardianResult()
-
-
 # Stall tracking helper
 
 def _detect_cycle_pattern(history: list[str], max_cycle_len: int = 4) -> int:
@@ -1557,10 +1295,7 @@ def _update_stall_state(
     result: CapabilityResult,
     elapsed_ms: float,
 ) -> None:
-    """Update stall state after a tool call.
-
-    Uses duck typing (#15). Stall may be loop.StallState or any compatible object.
-    """
+    """Update a compatible stall state after a tool call."""
     if cap_name == "bash_execute" and not result.success:
         # Track consecutive bash failures via the stall flag
         error_text = result.error or ""
@@ -1572,7 +1307,7 @@ def _update_stall_state(
             stall.bash_stalled = True
             stall.bash_stalled_reason = "command_not_found"
             stall.bash_stalled_intent = params.get("command", "")[:100]
-        # Record error signature (#15)
+        # Record error signature
         if hasattr(stall, "record_error") and error_text:
             stall.record_error(error_text[:80])
 
@@ -1589,7 +1324,7 @@ def _update_stall_state(
     elif cap_name == "file_read" and result.success:
         stall.file_read_exhausted = False
 
-    # Web stall counters (#15)
+    # Web stall counters
     if cap_name == "web_fetch":
         if hasattr(stall, "web_fetch_count"):
             stall.web_fetch_count += 1
@@ -1604,7 +1339,7 @@ def _update_stall_state(
     if cap_name == "web_search" and hasattr(stall, "web_search_count"):
         stall.web_search_count += 1
 
-    # Browser find stall (#15)
+    # Browser find stall
     if cap_name == "browser_find" and not result.success:
         if hasattr(stall, "browser_no_match_count"):
             stall.browser_no_match_count += 1
@@ -1621,7 +1356,7 @@ def _update_stall_state(
             if stall.file_edit_counts[fp] >= same_file_limit:
                 stall.stall_warning_issued = True
 
-    # General error signature recording (#15)
+    # General error signature recording
     if not result.success and result.error and cap_name != "bash_execute":
         if hasattr(stall, "record_error"):
             stall.record_error(result.error[:80])
@@ -1637,7 +1372,7 @@ def _update_stall_state(
             stall.cycle_detected = cycle_len > 0
 
 
-# Shell prefix helpers (ported from tool-adapter.ts:1505-1510)
+# Shell prefix helpers
 
 def strip_shell_prefixes(command: str) -> str:
     """Strip leading env assignments and ``sudo`` from a command string."""
@@ -1677,14 +1412,10 @@ def _has_service_startup_markers(text: str) -> bool:
     )
 
 
-# Managed service helpers (ported from tool-adapter.ts:1560-1679)
+# Managed service helpers
 
 def build_managed_readiness_command(port: int, timeout: int = 30) -> str:
-    """Generate a bash script that polls ``localhost:port`` until responsive.
-
-    Tries ``nc -z`` first, then falls back to ``curl``.  Retries every
-    second up to *timeout* seconds.
-    """
+    """Build a localhost readiness poll using nc or curl, bounded by timeout."""
     return (
         f"for i in $(seq 1 {timeout}); do "
         f"if command -v nc >/dev/null 2>&1 && nc -z 127.0.0.1 {port} >/dev/null 2>&1; then exit 0; fi; "
@@ -1711,11 +1442,7 @@ def build_managed_smoke_command(port: int, paths: list[str]) -> str:
 
 
 def build_managed_teardown_command(pid: int | None = None) -> str:
-    """Generate a bash script to cleanly kill a process (group).
-
-    If *pid* is provided, kills that specific PID (group).  Otherwise
-    generates a generic no-op exit.
-    """
+    """Build a process-group cleanup command, or a no-op when no PID is supplied."""
     if pid is not None:
         return (
             f"kill -TERM -{pid} >/dev/null 2>&1 || "
@@ -1726,10 +1453,7 @@ def build_managed_teardown_command(pid: int | None = None) -> str:
 
 
 def should_auto_enable_managed_service_mode(command: str) -> bool:
-    """Heuristic: returns True if *command* looks like a long-running service.
-
-    Ported from tool-adapter.ts ``shouldAutoEnableManagedServiceMode``.
-    """
+    """Check whether the command appears to start a long-running service."""
     normalized = strip_shell_prefixes(command).lower()
     if not normalized or is_help_only_bash_command(normalized):
         return False
@@ -1763,7 +1487,7 @@ def _shell_quote(s: str) -> str:
     return "'" + s.replace("'", "'\\''") + "'"
 
 
-# Bash intent contract (ported from tool-adapter.ts:1838-1891)
+# Bash intent contract
 
 def apply_bash_intent_contract(
     command: str,
@@ -1776,19 +1500,7 @@ def apply_bash_intent_contract(
     suggestions: list[str] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Detect intent mismatch for help-intent bash commands.
-
-    If the command was a help invocation (``--help``, ``-h``) but the
-    output looks like a service startup (e.g. "listening on ...") rather
-    than help text, return a dict with:
-
-    - ``error_code``: ``"E_INTENT_MISMATCH"``
-    - ``message``: human-readable explanation
-    - ``suggestions``: recovery guidance
-    - ``metadata``: enriched metadata dict
-
-    Returns ``None`` if no mismatch is detected.
-    """
+    """Return E_INTENT_MISMATCH guidance when a help command starts a service, else None."""
     if not success:
         return None
     if not is_help_only_bash_command(command):

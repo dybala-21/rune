@@ -1,7 +1,4 @@
-"""Core type definitions for RUNE.
-
-Ported from src/core/types.ts - all shared types used across the codebase.
-"""
+"""Define shared agent, memory and execution types."""
 
 from __future__ import annotations
 
@@ -229,8 +226,7 @@ class AgentConfig:
     provider: str = "openai"
     temperature: float = 0.0
     max_tokens: int = 16_384
-    # When set, overrides the intent-scaled per-iteration token budget. Used
-    # by /goal for heavy tasks; None keeps the default intent scaling.
+    # Override the intent-scaled token budget; None retains the default.
     token_budget_override: int | None = None
     _overridden: bool = False  # True when --model or --provider CLI flags are used
 
@@ -254,10 +250,9 @@ class CompletionTrace:
     verification: dict[str, Any] | None = None
     artifact_receipts: list[dict[str, Any]] = field(default_factory=list)
     table_acceptance: dict[str, Any] | None = None
+    requirement_acceptance: dict[str, Any] | None = None
     completion_check: dict[str, str] | None = None
-    # Commands ran outside the declared workspace. Not a failure — temp dirs
-    # and worktrees are routine — but the workspace snapshot cannot roll back
-    # anything outside it, so the run should say where it worked.
+    # Report commands outside the workspace because its snapshot cannot roll back their effects.
     workspace_warning: str = ""
     # Figures absent from retrieved sources; derived or rounded values may still be valid.
     unsourced_numbers: list[str] = field(default_factory=list)

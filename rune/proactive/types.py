@@ -1,13 +1,10 @@
-"""Proactive suggestion type definitions.
-
-Types used by the proactive engine, engagement tracker, and pattern learner.
-"""
+"""Define proactive suggestions and engagement metrics."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Literal
+from datetime import UTC, datetime
+from typing import Any, Literal
 from uuid import uuid4
 
 SuggestionType = Literal["reminder", "optimization", "warning", "insight", "followup"]
@@ -25,13 +22,19 @@ class Suggestion:
     confidence: float = 0.5
     source: str = ""
     status: SuggestionStatus = "pending"
-    created_at: datetime = field(default_factory=datetime.now)
+    response_source: Literal["user"] | None = None
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     expires_at: datetime | None = None
-    # Commands that objectively confirm this suggestion's work (e.g. the tests
-    # for the change). When set, the bridge runs the action through a verified
-    # loop and only a passing check counts as success; empty means there is
-    # nothing to verify, so the action stays unverified rather than self-reported.
+    # A passing check confirms execution, not user approval.
     verification: list[str] = field(default_factory=list)
+    execution_status: str | None = None
+    execution_result: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.created_at.tzinfo is None:
+            self.created_at = self.created_at.replace(tzinfo=UTC)
+        if self.expires_at is not None and self.expires_at.tzinfo is None:
+            self.expires_at = self.expires_at.replace(tzinfo=UTC)
 
 
 @dataclass(slots=True)

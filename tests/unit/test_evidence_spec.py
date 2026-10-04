@@ -12,6 +12,25 @@ from rune.agent.evidence_spec import (
 )
 
 
+@pytest.fixture(autouse=True)
+def authorize_test_commands(monkeypatch):
+    # These fixtures test byte comparisons. Policy rejection is covered separately.
+    monkeypatch.setattr("rune.safety.verification.verification_blocker", lambda command, cwd: None)
+
+
+@pytest.mark.asyncio
+async def test_global_transform_with_equal_row_counts_is_not_sampled(tmp_path):
+    import sys
+
+    inp, expected = tmp_path / "input", tmp_path / "expected"
+    inp.write_text("x\n" * 1500)
+    expected.write_text("".join(f"{n}\n" for n in range(1, 1501)))
+    spec = VerificationSpec(str(inp), str(expected), None,
+                            f'''{sys.executable} -c 'import sys; print("\\n".join(str(n+1) for n,_ in enumerate(open(sys.argv[1]))))' {{INPUT}}''',
+                            "stdout", False)
+    assert (await run_spec(spec))[0] == "pass"
+
+
 def test_parse_spec_valid():
     spec = parse_spec(
         '{"input_path":"/app/in.csv","expected_path":"/app/exp.csv",'

@@ -1,7 +1,4 @@
-"""File capabilities for RUNE.
-
-Ported from src/capabilities/file.ts - read, write, edit, delete, list, search.
-"""
+"""Read, write, edit, delete, list and search workspace files."""
 
 from __future__ import annotations
 
@@ -26,6 +23,7 @@ class FileReadParams(BaseModel):
     offset: int | None = Field(default=None, description="1-based line number to start from")
     limit: int | None = Field(default=None, description="Number of lines to read")
     max_size: int = Field(default=DEFAULT_MAX_FILE_SIZE, alias="maxSize")
+    raw: bool = Field(default=False, description="Return unannotated full text for verbatim copying. Cannot be combined with offset or limit; file size limits still apply.")
 
 
 class FileWriteParams(BaseModel):
@@ -85,6 +83,8 @@ def _authorize_mutation(path: str) -> CapabilityResult | None:
 
 async def file_read(params: FileReadParams) -> CapabilityResult:
     """Read a file with optional line offset/limit."""
+    if params.raw and (params.offset is not None or params.limit is not None):
+        return CapabilityResult(success=False, error="Raw reads require the full file; omit offset and limit.")
     guardian = get_guardian()
     validation = guardian.validate_file_read_path(params.path)
     if not validation.allowed:
@@ -109,11 +109,15 @@ async def file_read(params: FileReadParams) -> CapabilityResult:
         )
 
     try:
-        text = file_path.read_text(encoding=params.encoding)
+        with file_path.open(encoding=params.encoding, newline="") as stream:
+            text = stream.read()
     except UnicodeDecodeError:
         return CapabilityResult(success=False, error=f"Binary or unreadable file: {params.path}")
 
     lines = text.splitlines(keepends=True)
+    if params.raw:
+        return CapabilityResult(success=True, output=text,
+                                metadata={"path": str(file_path), "lines": len(lines), "total_size": size, "raw": True})
 
     # Apply offset and limit
     offset = (params.offset or 1) - 1  # 1-based to 0-based
@@ -128,9 +132,7 @@ async def file_read(params: FileReadParams) -> CapabilityResult:
     for i, line in enumerate(lines):
         numbered += f"{start_num + i:6d}\t{line}"
 
-    # Tabular files carry a whole-file profile regardless of the window
-    # read: duplicate rows the model would silently double-count live
-    # outside whatever offset/limit it asked for.
+    # Profile the whole table so partial reads still reveal duplicates outside the requested window.
     from rune.capabilities.table_profile import profile_table
     table_evidence: dict = {}
     profile = profile_table(text, file_path.name, evidence=table_evidence)
@@ -148,11 +150,9 @@ async def file_read(params: FileReadParams) -> CapabilityResult:
 
 
 def _reject_test_overwrite(file_path: Path) -> str | None:
-    """Protect existing tests from being rewritten to accept a broken change.
+    """Protect existing tests; new tests remain editable while their recorded revision matches.
 
-    Tests created in this run can be corrected while their contents still
-    match the recorded revision. Set RUNE_PROTECT_TESTS=0 for tasks that
-    intentionally change existing tests.
+    RUNE_PROTECT_TESTS=0 allows tasks that intentionally modify existing tests.
     """
     from rune.agent.validation_guard import (
         _is_test_file,
@@ -299,10 +299,7 @@ async def file_edit(params: FileEditParams) -> CapabilityResult:
             new_content = content.replace(params.search, params.replace, 1)
             count = 1
     else:
-        # Fuzzy ladder: a near-miss search (whitespace/indent drift) is the
-        # most common weak-model edit failure; recover the UNIQUE-match cases
-        # instead of bouncing the model into a retry spiral. `all` implies
-        # multiple occurrences — fuzzy handles single-block edits only.
+        # Allow fuzzy recovery only for unique single-block edits, never replace-all operations.
         block = None if params.all else find_block(content, params.search)
         if block is None:
             failures = record_edit_failure(str(file_path))
@@ -370,7 +367,7 @@ async def file_edit(params: FileEditParams) -> CapabilityResult:
 
 async def file_delete(params: FileDeleteParams) -> CapabilityResult:
     """Delete a file or directory."""
-    # -- empty path guard (defense-in-depth) -----------------------------------
+    # empty path guard (defense-in-depth)
     if not params.path or not params.path.strip():
         return CapabilityResult(success=False, error="Empty file path")
 
@@ -379,7 +376,7 @@ async def file_delete(params: FileDeleteParams) -> CapabilityResult:
 
     file_path = Path(params.path).expanduser().resolve()
 
-    # -- hard safety net (defense-in-depth, independent of Guardian) -----------
+    # hard safety net (defense-in-depth, independent of Guardian)
     _home = os.environ.get("HOME", str(Path.home()))
     resolved_str = str(file_path)
     if resolved_str == "/" or resolved_str == _home:
@@ -501,6 +498,11 @@ async def file_search(params: FileSearchParams) -> CapabilityResult:
     import re
 
     dir_path = Path(params.path).expanduser().resolve()
+    guardian = get_guardian()
+    validate_read = guardian.read_path_validator()
+    validation = validate_read(str(dir_path))
+    if not validation.allowed:
+        return CapabilityResult(success=False, error=validation.reason)
     if not dir_path.is_dir():
         return CapabilityResult(success=False, error=f"Not a directory: {params.path}")
 
@@ -524,6 +526,8 @@ async def file_search(params: FileSearchParams) -> CapabilityResult:
         if len(results) >= params.max_results:
             break
         if not file_path.is_file():
+            continue
+        if not validate_read(str(file_path)).allowed:
             continue
         # Check max_depth
         try:
@@ -565,7 +569,7 @@ async def file_search(params: FileSearchParams) -> CapabilityResult:
 def register_file_capabilities(registry: CapabilityRegistry) -> None:
     """Register all file capabilities."""
     registry.register(CapabilityDefinition(
-        name="file_read", description="Read a file",
+        name="file_read", description="Read a text file. Set raw=true when the user wants its exact content; otherwise returns numbered lines and file metadata for analysis.",
         domain=Domain.FILE, risk_level=RiskLevel.LOW,
         group="read", parameters_model=FileReadParams, execute=file_read,
     ))

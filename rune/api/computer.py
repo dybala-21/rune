@@ -133,6 +133,7 @@ class Computers:
         control = entry.control
         entry.browser.acquire_control = lambda: self.acquire_browser(entry, control)
         entry.browser.bound_task = asyncio.current_task()
+        entry.browser.bound_control = control
         try:
             with control_scope(entry.control), desktop_scope(None, entry.control, lambda: self.wait_desktop(entry)):
                 async with browser_session(entry.browser):
@@ -140,6 +141,7 @@ class Computers:
         finally:
             entry.browser.acquire_control = None
             entry.browser.bound_task = None
+            entry.browser.bound_control = None
 
     async def acquire_browser(self, entry: Computer, control: RunControl) -> None:
         """Transfer input ownership only when a run actually uses the browser."""
@@ -548,6 +550,7 @@ def computer_router(computers: Computers, auth: object) -> APIRouter:
     @router.post("/action")
     async def action(req: ManualRequest) -> dict:
         from rune.capabilities.browser.capabilities import BrowserActParams, browser_act
+        from rune.capabilities.browser.session import manual_browser_input
 
         entry = computers.get(req.sessionId)
         async with entry.lock, entry.browser.operation(), browser_session(entry.browser):
@@ -560,11 +563,12 @@ def computer_router(computers: Computers, auth: object) -> APIRouter:
             entry.browser.needs_observation = False
             try:
                 params = BrowserActParams(action=req.action, selector=req.ref, value=req.value)
-                if entry.journal is not None:
-                    result = await entry.journal.execute("browser_act", {**params.model_dump(), "actor": "user"},
-                                                         lambda: browser_act(params))
-                else:
-                    result = await browser_act(params)
+                with manual_browser_input():
+                    if entry.journal is not None:
+                        result = await entry.journal.execute("browser_act", {**params.model_dump(), "actor": "user"},
+                                                             lambda: browser_act(params))
+                    else:
+                        result = await browser_act(params)
             finally:
                 entry.browser.needs_observation = True
             if not result.success:

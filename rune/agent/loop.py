@@ -1,7 +1,4 @@
-"""Agent execution, tool dispatch and completion checks.
-
-Coordinates streaming, run budgets, context rollover and recovery.
-"""
+"""Coordinate agent streaming, tool dispatch, budgets, completion and recovery."""
 
 from __future__ import annotations
 
@@ -9,6 +6,7 @@ import asyncio
 import contextlib
 import copy
 import hashlib
+import json
 import os
 import re
 import time
@@ -72,6 +70,7 @@ from rune.config.defaults import (
     TOKEN_BUDGET_PHASES,
     TRUNCATE_WINDOW_MAX,
 )
+from rune.safety.execution_environment import with_execution_environment
 from rune.types import (
     AgentConfig,
     AgentStatus,
@@ -87,17 +86,14 @@ _HAS_PYDANTIC_AI = True  # Always True - LiteLLMAgent replaces PydanticAI
 
 log = get_logger(__name__)
 
-# What one attached image costs the context. Roughly what the major providers
-# charge for a 1568px long-edge image, which is what preprocess_image targets.
+# Approximate context cost for one image resized by preprocess_image.
 IMAGE_TOKEN_ESTIMATE = 1_500
 
 T = TypeVar("T")
 
 
 def _auto_skill_enabled() -> bool:
-    """Whether skill-reuse is on (distil on verified completion, inject a
-    matching skill). Env ``RUNE_AUTO_SKILL`` overrides config ``skills.auto_skill``;
-    default off. See SkillsConfig."""
+    """Resolve opt-in skill reuse; RUNE_AUTO_SKILL overrides skills.auto_skill."""
     import os
 
     env = os.environ.get("RUNE_AUTO_SKILL", "").strip().lower()
@@ -114,8 +110,7 @@ def _auto_skill_enabled() -> bool:
 
 
 class _FastSkillRefiner:
-    """Distil a skill body via the FAST tier — guidance, not correctness, so the
-    cheapest tier fits; failures fall back to the step transcript."""
+    """Distil guidance with the fast model, falling back to the tool transcript on failure."""
 
     async def refine(self, prompt: str, max_tokens: int = 600) -> str:
         from rune.llm.client import get_llm_client
@@ -148,7 +143,7 @@ from rune.agent.message_utils import (
     validate_tool_pairs as _validate_tool_pairs,
 )
 
-# Token budget scaling by intent (#24)
+# Token budget scaling by intent
 
 _BUDGET_BY_INTENT: dict[str, int] = {
     "chat": 50_000,
@@ -181,9 +176,7 @@ def _tail_text(text: str, max_bytes: int) -> str:
     return data[-max_bytes:].decode("utf-8", errors="ignore")
 
 
-# Tools run concurrently, so results do not come back in call order and pairing
-# them by tool name attaches a result to the wrong call. One tool's start and end
-# callbacks share a task, so a context variable pairs them exactly.
+# Pair concurrent tool callbacks by task-local state; name or completion order is ambiguous.
 _CALL_ID: ContextVar[str] = ContextVar("rune_tool_call_id", default="")
 
 
@@ -271,15 +264,7 @@ _PROJECT_MARKERS = (
 
 
 def _repo_scale_workspace(cwd: str = ".") -> bool:
-    """Deterministic check: cwd is a code project tree of non-toy size.
-
-    Structural markers only (no NL matching): a project marker at the root
-    plus >200 files. NOT ".git"-only — best-of seeds attempts with a COPY of
-    the tree that has no .git dir, and the floor must hold there too. Used to
-    floor the tool-round budget for code work inside an existing repo: the
-    LLM classifier misses is_complex_coding often enough that repo-fix runs
-    otherwise land on the small round cap and get truncated mid-diagnosis.
-    """
+    """Recognize a project by its manifest and file count, including copies without .git."""
     try:
         if not any(
             os.path.exists(os.path.join(cwd, m)) for m in _PROJECT_MARKERS
@@ -301,12 +286,7 @@ def _repo_scale_workspace(cwd: str = ".") -> bool:
 
 
 def _cap_handoff_facts(msgs: list[Any]) -> str:
-    """Compact 'what was tried' facts from a cap-killed step's transcript.
-
-    The retry starts from the pristine seed (a contaminated-context retry
-    multiplies the per-step error rate ~7x, arXiv:2605.08563), so only
-    tool/target/outcome lines cross the boundary — never the trajectory.
-    """
+    """Carry tool/target/outcome facts into a fresh retry without its failed trajectory."""
     pending: list[str] = []
     consumed = 0
     lines: list[str] = []
@@ -340,12 +320,7 @@ def _compute_tool_rounds(
     repo_fix: bool = False,
     cap_retry: bool = False,
 ) -> int:
-    """Tool-round budget by task complexity and executor tier.
-
-    cap_retry: the run is retrying after a fast-lane cap death — browser-shaped
-    work (live web tasks average 7.3 actions, hard ones 11+, Mind2Web), so it
-    gets the complex budget.
-    """
+    """Set tool rounds by complexity and model tier; cap retries use the complex budget."""
     override = _env_int("RUNE_TOOL_ROUNDS")
     if override is not None:
         return override
@@ -360,12 +335,7 @@ def _compute_tool_rounds(
     provider, model_name = extract_provider_and_model(executor_model)
     tier = resolve_tier(provider, model_name)
 
-    # Code work inside a real repo gets the complex budget even when the
-    # classifier missed is_complex_coding — a large tree cannot be diagnosed
-    # AND fixed AND verified in 12 rounds. Repo fixes get more still: the
-    # cap has to leave room to localize inside a multi-thousand-line module,
-    # understand the mechanism, edit, install, and run the tests. Runs that
-    # die at the cap die mid-diagnosis and ship a half-formed guess.
+    # Give repository work enough rounds to diagnose, edit and verify despite classification misses.
     is_complex = getattr(classification, "is_complex_coding", False) or repo_fix or cap_retry
     # Per-turn tool-round budget. Token budget and max_iterations bound runaway.
     if repo_fix:
@@ -373,8 +343,7 @@ def _compute_tool_rounds(
     else:
         base = 24 if is_complex else 12
 
-    # Modest tier bonus. Larger bonuses burn tokens on weak models
-    # that keep retrying the same failing tool.
+    # Keep tier bonuses small to limit repeated failing calls.
     if tier < 50:
         tier_bonus = 2
     elif tier < 70:
@@ -387,26 +356,15 @@ def _compute_tool_rounds(
 
 
 def _compute_explore_budget(classification: Any, repo_fix: bool = False) -> int:
-    """Exploration-round budget for the adapter (0 = off).
-
-    Complex-coding (or repo-fix) tasks get one: that is where a weak model
-    can spend its whole round budget on read-only spelunking and end with no
-    edit at all — an empty patch. 8 rounds is
-    roughly a third of the complex-coding round budget. The adapter times the
-    escalation stages relative to the round cap (nudge early, forced edit only
-    near exhaustion) — see litellm_adapter. RUNE_EXPLORE_BUDGET overrides
-    per-process, including "0" to disable.
-    """
+    """Set read-only exploration rounds; RUNE_EXPLORE_BUDGET=0 disables the limit."""
     is_code = getattr(classification, "is_complex_coding", False) or repo_fix
-    # Repo fixes need the deeper diagnosis runway: forcing an edit after 8
-    # read-only rounds interrupts exactly the investigation that produces a
-    # correct patch (the adapter still nudges/forces near the round cap).
+    # Allow deeper repository diagnosis before exploration pressure forces an edit.
     if repo_fix:
         return 16
     return 8 if is_code else 0
 
 
-# Phase-adaptive observation windows (#12)
+# Phase-adaptive observation windows
 
 _PHASE_WINDOWS: dict[str, tuple[int, int]] = {
     # (full_window, truncate_window)
@@ -417,7 +375,7 @@ _PHASE_WINDOWS: dict[str, tuple[int, int]] = {
 }
 
 
-# Vision Cache (#28)
+# Vision Cache
 
 
 class VisionCache:
@@ -437,20 +395,17 @@ class VisionCache:
         return hashlib.sha256(data).hexdigest()[:16]
 
 
-# Wind-down state type (#14)
+# Wind-down state type
 
 WindDownPhase = Literal["none", "wrapping", "stopping", "final", "hard_stop"]
 
 
-# Stall State (ported from TS StallState) - unified, single source (#15)
+# Stall State - unified, single source
 
 
 @dataclass(slots=True)
 class StallState:
-    """Unified stall tracker - combines loop-level + tool-level tracking.
-
-    This is the single source of truth; tool_adapter.py imports from here.
-    """
+    """Share loop and tool stall state with the tool adapter."""
 
     # Loop-level (consecutive/cumulative progress)
     consecutive_no_progress: int = 0
@@ -463,7 +418,7 @@ class StallState:
     bash_stalled_reason: str = ""
     bash_stalled_intent: str = ""
     file_read_exhausted: bool = False
-    # Extended stall fields (#15)
+    # Extended stall fields
     intent_repeat_count: int = 0
     error_signature_counts: dict[str, int] = field(default_factory=dict)
     web_fetch_count: int = 0
@@ -553,12 +508,7 @@ class TokenBudget:
 
 
 def _structured_by_extension(ext: str) -> bool | None:
-    """Whether the extension settles code-or-prose: True, False, or unknown.
-
-    Only an unrecognised or missing extension is worth parsing the body for;
-    docs and data formats are already decided, and classifying them costs
-    milliseconds on writes that happen constantly.
-    """
+    """Classify code/prose by extension; None means the body still needs inspection."""
     if not ext:
         return None
     from rune.intelligence.ast_analyzer import is_code_extension
@@ -581,12 +531,7 @@ def _structured_by_extension(ext: str) -> bool | None:
 
 @dataclass(slots=True)
 class ExecutionRoots:
-    """Directories the run explicitly executed commands in.
-
-    Only an explicit ``cwd`` is recorded. A command without one runs in the
-    workspace by definition, so it cannot be misaligned and would only dilute
-    the signal.
-    """
+    """Track explicit command directories; omitted cwd already uses the workspace."""
 
     roots: list[str] = field(default_factory=list)
 
@@ -603,14 +548,7 @@ class ExecutionRoots:
 
 @dataclass(slots=True)
 class ServiceEvidence:
-    """Counts the managed-service lifecycle phases a run actually completed.
-
-    ``_execute_managed_service`` reports each phase in the tool result's
-    metadata; nothing read it, so the completion gate's three service
-    requirements judged a lifecycle no one had observed. Only a run that used
-    managed_service mode registers here — ordinary shell calls leave
-    ``observed`` False so the gate does not treat them as service tasks.
-    """
+    """Count managed-service phases from result metadata; ignore ordinary shell calls."""
 
     observed: bool = False
     starts: int = 0
@@ -626,9 +564,7 @@ class ServiceEvidence:
 
         self.observed = True
         self.starts += 1
-        # Readiness and smoke are both probes against the running service.
-        # Readiness must pass for the call to succeed at all, so a healthy run
-        # always has at least one; a service that never came up has none.
+        # Readiness and smoke checks count as probes; a service that never starts has none.
         for phase in ("readiness", "smoke"):
             stage = metadata.get(phase)
             if isinstance(stage, dict) and stage.get("success"):
@@ -646,10 +582,7 @@ class ServiceEvidence:
 
 
 class NativeAgentLoop(EventEmitter):
-    """Core agent execution loop using PydanticAI.
-
-    Replaces the TS NativeAgentLoop that used AI SDK's generateText().
-    """
+    """Run the agent with tools, evidence checks and bounded recovery."""
 
     def __init__(self, config: AgentConfig | None = None) -> None:
         super().__init__()
@@ -661,33 +594,29 @@ class NativeAgentLoop(EventEmitter):
         self._running = False
         self._workspace_root = ""
         self._cancel_event = asyncio.Event()
-        # Wind-down 5-stage state machine (#14)
+        # Wind-down 5-stage state machine
         self._wind_down_phase: WindDownPhase = "none"
         self._wind_down_write_forced: bool = False
-        # Step watchdog (#29)
+        # Step watchdog
         self._step_start_time: float = 0.0
         self._STEP_WARN_MS: int = 45_000
         self._STEP_ABORT_MS: int = 120_000
-        # Streaming activity (#30)
+        # Streaming activity
         self._last_activity: float = 0.0
-        # Vision cache (#28)
+        # Vision cache
         self._vision_cache = VisionCache()
-        # Execution nudges (#27) - counters
+        # Execution nudges - counters
         self._consecutive_reads_without_write: int = 0
         self._pending_verification_nudge: bool = False
-        # Skill-reuse (auto-skill, default off): tool trace for this run,
-        # captured only when the flag is on. Distilled into a skill on verified
-        # completion.
+        # Capture the tool trace only when skill generation is enabled.
         self._tool_trace: list[Any] = []
         self._auto_skill: bool = False
-        # Gated Skill Learning (T1-1): name+match-score of the skill injected
-        # into this run (if any), so its outcome can be logged at run end.
+        # Track the injected skill and match score for outcome logging.
         self._injected_skill: tuple[str, float] | None = None
-        # Replay-corpus capture (T1-1): pre-task git ref recorded at
-        # run start when capture_replay is on, snapshotted at run end if a skill
-        # is distilled. None when capture is off / cwd isn't a git repo.
+        self._loaded_skills: set[str] = set()
+        # Capture a pre-task Git ref only when replay capture is enabled in a repository.
         self._replay_capture: dict[str, str] | None = None
-        # Completion gate enhancements (#16) - tracked files + hard failures
+        # Completion gate enhancements - tracked files + hard failures
         self._files_written: set[str] = set()
         # Requirement-Adherence Gate (opt-in via RUNE_REQUIREMENT_GATE); None when off.
         self._requirement_gate_obj: RequirementGate | None = None
@@ -708,13 +637,12 @@ class NativeAgentLoop(EventEmitter):
         # Activity phase for adaptive observation windows
         self._activity_phase: str = "exploration"
         self._prev_activity_phase: str = "exploration"
-        # Output token scaling by intent (#H5)
+        # Output token scaling by intent
         self._max_output_tokens: int = 8_192
         # Per-run rollover bookkeeping
         self._rollover_phase_done: set[int] = set()
         self._session_id: str | None = None
-        # Cross-step tool failure persistence (#P4) — streak only, not blocked groups.
-        # Blocked groups are re-derived each step from the streak.
+        # Preserve failure streaks across steps; derive blocked groups from the current streak.
         self._persistent_fail_streak: dict[str, int] = {}
         self._recent_failed_tool_nudge: str = ""
         # Injected callbacks (set from CLI / controller)
@@ -722,13 +650,9 @@ class NativeAgentLoop(EventEmitter):
         self._ask_user_callback: AskUserCallback | None = None
         # Last classification result (for domain change detection across turns)
         self._last_goal_type: str = ""
-        # Whether this run's task is verified by execution (tests/commands). When
-        # true, execution verification owns correctness and the LLM requirement
-        # gate is skipped (redundant, and risks false-blocking on a snapshot).
+        # Execution checks own correctness for these tasks, so skip the redundant requirement judge.
         self._requires_execution: bool = False
-        # Whether this run produces substantive non-executable output that gets
-        # the depth scaffold and depth critic.
-        # Rehydration subsystem (initialized per run in _execute_loop)
+        # Track non-executable output for depth review; initialize rehydration state per run.
         self._rehydration_recorder: Any = None
         self._rehydration_trigger: Any = None
         self._gate_blocked_count: int = 0
@@ -775,6 +699,8 @@ class NativeAgentLoop(EventEmitter):
         self._files_read.clear()
         self._tool_trace = []
         self._auto_skill = _auto_skill_enabled()
+        self._loaded_skills.clear()
+        self._injected_skill = None
         self._hard_failure_signatures.clear()
         self._hard_failures.clear()
         self._verification = VerificationState()
@@ -793,7 +719,7 @@ class NativeAgentLoop(EventEmitter):
         self._rollover_phase_done = set()
         self._session_id = None
         self._cognitive_cache = None
-        # Reset cross-step failure state (#P4)
+        # Reset cross-step failure state
         self._persistent_fail_streak.clear()
         self._recent_failed_tool_nudge = ""
         # Rehydration
@@ -820,8 +746,7 @@ class NativeAgentLoop(EventEmitter):
                 "command cleared it. Fix or explicitly verify the failure before "
                 "finalizing.\n" + self._recent_failed_tool_nudge
             )
-        # 2. Evidence Gate: re-verify the produced artifact against the task's
-        #    own success criteria before allowing finalization (opt-in).
+        # Recheck the artifact against the task criteria when the evidence gate is enabled.
         _state, message = await self._evidence_verdict()
         if _state == "fail" and message:
             log.info("evidence_gate_block", step=self._step)
@@ -829,12 +754,7 @@ class NativeAgentLoop(EventEmitter):
         return None
 
     async def _evidence_verdict(self) -> tuple[str, str | None]:
-        """Return the Evidence Gate verdict: ``("pass"|"fail"|"skip", message)``.
-
-        ``"skip"`` when the gate is disabled or inconclusive. Never raises —
-        verification failure is treated as ``"skip"`` so it cannot turn a real
-        success into a false block.
-        """
+        """Return (pass/fail/skip, message); disabled or inconclusive checks skip."""
         if self._evidence_gate is None:
             return "skip", None
         try:
@@ -847,14 +767,7 @@ class NativeAgentLoop(EventEmitter):
             return "skip", None
 
     async def _auto_verify(self) -> tuple[str, str]:
-        """Run the project's check after edits, preferring correctness over lint.
-
-        Prefer the correctness test command (the repo's pytest/npm test) over the
-        fast lint/typecheck, since a logic error passes lint but fails the tests.
-        Falls back to the lint verifier when no test runner is evident. Returns
-        ``("pass"|"fail"|"skip", evidence)``; ``"skip"`` when neither is detected.
-        Never raises.
-        """
+        """Run tests after edits, falling back to lint; return (pass/fail/skip, evidence)."""
         from rune.agent.auto_verify import (
             detect_test_command,
             detect_verify_command,
@@ -870,14 +783,10 @@ class NativeAgentLoop(EventEmitter):
     async def _auto_verify_gate(
         self, messages: list[Any], blocked_count: int
     ) -> tuple[bool, list[Any], int]:
-        """Shared post-edit auto-verify gate for every code-producing completion
-        path. Returns ``(ok, messages, blocked_count)``:
+        """Return (ok, messages, blocked_count) after the shared post-edit check.
 
-        - ``ok=True``: pass / skip / disabled — the caller may finalize.
-        - ``ok=False``: the check failed; the problem is injected into
-          *messages* and *blocked_count* is incremented. The caller should
-          ``continue`` so the agent self-fixes, or finalize as
-          ``max_gate_blocked`` when the returned count hits the cap.
+        On failure, append evidence and increment blocked_count; callers retry or stop at the
+        block limit. Disabled or inconclusive checks allow completion.
         """
         if not _env_flag("RUNE_AUTO_VERIFY"):
             return True, messages, blocked_count
@@ -897,29 +806,23 @@ class NativeAgentLoop(EventEmitter):
         return True, messages, blocked_count
 
     def _gather_artifact(self) -> str:
-        """Bounded snapshot of the files written plus the final answer text, for
-        the requirement gate to check against the user's requirements. The
-        per-source cap is generous: judging subject adherence on a report needs
-        enough context to see what the document is dominantly about. A 2000-char
-        cut can leave only an intro that name-drops the requested subject while
-        the body is about something else, which reads as satisfied. The
-        requirement gate re-caps the total (``_MAX_ARTIFACT_CHARS``)."""
+        """Inspect saved bytes; binary office files need their native readers."""
+        from rune.capabilities.document_inspection import inspect_document
+
         parts: list[str] = []
         for fp in self.files_written[:20]:
             try:
-                with open(fp, encoding="utf-8", errors="replace") as fh:
-                    parts.append(f"=== file: {fp} ===\n{fh.read()[:8000]}")
-            except OSError:
-                continue
+                inspection = inspect_document(fp, 8000)
+                parts.append(f"=== file: {fp} ===\n" + json.dumps(inspection, ensure_ascii=False))
+            except Exception as exc:
+                log.debug("artifact_inspection_unavailable", path=fp, error=str(exc)[:200])
+                parts.append(f"=== file: {fp} ===\n[Content unavailable for review: {type(exc).__name__}.]")
         if self._last_answer_text.strip():
             parts.append(f"=== final answer ===\n{self._last_answer_text[:8000]}")
         return "\n\n".join(parts)
 
     def _gather_citation_text(self) -> str:
-        """Full text of written files plus the final answer, untruncated. Citations
-        in a report sit at the end (a ## Sources section), so the requirement
-        gate's 2000-char snapshot would drop them. The deterministic URL scan is
-        cheap, so the integrity gate reads full content."""
+        """Include full written files and the answer so trailing citations survive verification."""
         parts: list[str] = []
         for fp in self.files_written[:20]:
             try:
@@ -934,13 +837,10 @@ class NativeAgentLoop(EventEmitter):
     async def _requirement_gate(
         self, messages: list[Any], blocked_count: int
     ) -> tuple[bool, list[Any], int]:
-        """Requirement-adherence gate (opt-in, default off). Same contract as
-        :meth:`_auto_verify_gate`: checks the produced output against the user's
-        requirements and injects the unmet list on a miss; pass / skip / disabled
-        return ``ok=True``."""
+        """Check opt-in requirements using the same return contract as _auto_verify_gate."""
         if self._requirement_gate_obj is None:
             return True, messages, blocked_count
-        artifact = self._gather_artifact()
+        artifact = await asyncio.to_thread(self._gather_artifact)
         state, msg = await self._requirement_gate_obj.verdict(artifact)
         if state == "fail" and msg:
             log.info("requirement_gate_block", step=self._step)
@@ -954,18 +854,7 @@ class NativeAgentLoop(EventEmitter):
     def _output_integrity_gate(
         self, messages: list[Any], blocked_count: int
     ) -> tuple[bool, list[Any], int]:
-        """Deterministic citation-integrity check (model-free, on by default).
-
-        Two passes over what the run retrieved: URLs the answer cites but never
-        fetched, and quantities the answer asserts that appear in nothing it
-        found. The second is why a run can report "SanDisk +22%" from articles
-        saying 8% — the grounding requirement asks whether a search happened,
-        not whether the answer follows from it.
-
-        Numbers are recorded, never blocked: a figure can be legitimately
-        derived or rounded, and refusing a good answer costs more here than a
-        number carrying a caveat.
-        """
+        """Check cited URLs; record unsupported numbers without blocking."""
         if not output_integrity_enabled():
             return True, messages, blocked_count
         answer_text = self._gather_citation_text()
@@ -996,12 +885,7 @@ class NativeAgentLoop(EventEmitter):
     async def _citation_support_gate(
         self, messages: list[Any], blocked_count: int
     ) -> tuple[bool, list[Any], int]:
-        """Opt-in check at finalize: flag inline citations whose already-fetched page
-        doesn't back the claim. Bounded — a few of the least-covered citations are
-        verified in parallel over content we already have (no re-fetch), obvious
-        support is pre-filtered out, and snippet-only citations are skipped. Fires
-        once and only adds a soft note. An ambiguous verifier reply is treated as a
-        skip, never as a flag."""
+        """Check weakly supported citations once using fetched pages; inconclusive replies skip."""
         if not citation_support_enabled():
             return True, messages, blocked_count
         if self._citation_support_fired >= 1:  # bounded: one soft repair, then pass
@@ -1028,8 +912,7 @@ class NativeAgentLoop(EventEmitter):
                 return False  # flag it
             if "SUPPORTED" in text:
                 return True
-            # Anything else (garbled or manipulated reply): raise so the caller skips
-            # this citation rather than guessing.
+            # Skip ambiguous citation verdicts rather than guessing.
             raise ValueError("ambiguous verifier reply")
 
         try:
@@ -1051,10 +934,7 @@ class NativeAgentLoop(EventEmitter):
         return True, messages, blocked_count
 
     def _maybe_force_wind_down_write(self, messages: list[Any]) -> list[Any]:
-        """In the budget wind-down 'final' phase, inject a one-shot directive to
-        write the best-effort artifact now. The final phase only trims tools;
-        without this a task can keep reading/thinking until the budget hard-stops
-        and produce nothing. No-op if not in the final phase or already injected."""
+        """Request a best-effort artifact once when the budget enters its final phase."""
         if self._wind_down_phase != "final" or self._wind_down_write_forced:
             return messages
         self._wind_down_write_forced = True
@@ -1078,10 +958,7 @@ class NativeAgentLoop(EventEmitter):
     async def _finalize_gates(
         self, messages: list[Any], blocked_count: int
     ) -> tuple[bool, list[Any], int]:
-        """Run table, output, citation and test-claim checks before completion.
-
-        Execution tasks skip the final requirement gate.
-        """
+        """Check completion evidence; execution tasks skip the requirement judge."""
         if self._table_acceptance is not None:
             blocker = await self._table_acceptance.blocker()
             if blocker:
@@ -1110,6 +987,7 @@ class NativeAgentLoop(EventEmitter):
         return await self._requirement_gate(messages, blocked_count)
 
     @with_browser_session
+    @with_execution_environment
     @timed_run
     async def run(
         self,
@@ -1122,12 +1000,10 @@ class NativeAgentLoop(EventEmitter):
         extra_system_context: str | None = None,
         classification: ClassificationResult | None = None,
     ) -> CompletionTrace:
-        """Classify the goal, select tools and stream the agent to completion.
+        """Classify, select tools and stream the run, optionally resuming history or a checkpoint.
 
-        Resume from a checkpoint when *resume_session_id* is supplied, and
-        prepend *message_history* when continuing a conversation. A supplied
-        *classification* must describe this goal; it is reused only without
-        message history.
+        Reuse a supplied classification only without message history; continuation
+        classification must account for the previous task.
         """
         if self._running:
             raise RuntimeError("Agent loop is already running")
@@ -1143,9 +1019,7 @@ class NativeAgentLoop(EventEmitter):
                 self._verification.changed()
                 self._pending_verification_nudge = True
         self._replay_capture = None
-        # T1-1: record the pre-task git ref now (before the agent
-        # mutates the tree) so a distilled skill can later be A/B'd by replay.
-        # Gated by skills.capture_replay; best-effort, never blocks the run.
+        # Record the pre-task Git ref for optional offline skill replay.
         if self._auto_skill:
             try:
                 from rune.config import get_config
@@ -1196,11 +1070,7 @@ class NativeAgentLoop(EventEmitter):
 
             from rune.config.defaults import TOKEN_OPTIMIZATION_ENABLED
 
-            # Reuse a caller-supplied classification only for the single-turn
-            # case. With no prior turn, classify_goal(goal) here produces the same
-            # result (no previous-goal context to fold in), so reusing it is
-            # behaviourally identical and saves a redundant FAST round-trip.
-            # With history present we must re-classify to detect a domain change.
+            # Reuse classification only without history; recheck domains for continuations.
             if classification is None or message_history:
                 # Extract previous goal info from message_history for domain change
                 _prev_goal = ""
@@ -1281,7 +1151,7 @@ class NativeAgentLoop(EventEmitter):
             self._last_goal_type = classification.goal_type
             self._requires_execution = bool(getattr(classification, "requires_execution", False))
 
-            # Token budget scaling by intent (#24)
+            # Token budget scaling by intent
             intent_key = classification.goal_type
             # Map GoalType to budget intent names
             _goal_to_budget: dict[str, str] = {
@@ -1294,10 +1164,7 @@ class NativeAgentLoop(EventEmitter):
                 "full": "deep_research",
             }
             budget_intent = _goal_to_budget.get(intent_key, "research")
-            # Same floor the tool-round cap already applies: the classifier
-            # misses is_complex_coding often enough that code work in a real
-            # tree lands on a small budget and dies mid-verify. Rounds had this
-            # correction, the budget did not.
+            # Apply the repository-work floor to tokens as well as tool rounds.
             if budget_intent in ("code_modify", "quick_fix") and _repo_scale_workspace(
                 (context or {}).get("workspace_root") or "."
             ):
@@ -1307,7 +1174,7 @@ class NativeAgentLoop(EventEmitter):
             _budget_override = getattr(self._config, "token_budget_override", None)
             if _budget_override:
                 self._token_budget.total = int(_budget_override)
-            # Output token scaling by intent (#H5)
+            # Output token scaling by intent
             self._max_output_tokens = _MAX_OUTPUT_TOKENS_BY_INTENT.get(budget_intent, 8_192)
             log.info(
                 "token_budget_set",
@@ -1317,7 +1184,7 @@ class NativeAgentLoop(EventEmitter):
                 token_opt=TOKEN_OPTIMIZATION_ENABLED,
             )
 
-            # Scale max iterations based on budget (#6)
+            # Scale max iterations based on budget
             budget_max = _effective_max_steps(self._token_budget.total)
             if max_iterations < budget_max and not max_steps:
                 max_iterations = budget_max
@@ -1391,6 +1258,8 @@ class NativeAgentLoop(EventEmitter):
                 except Exception:  # observability must never break the run
                     trace.evidence_gate = None
             trace.verification = self._verification.snapshot()
+            if self._requirement_gate_obj is not None:
+                trace.requirement_acceptance = self._requirement_gate_obj.summary()
             if self._table_acceptance is not None:
                 blocker = await self._table_acceptance.blocker()
                 trace.table_acceptance = self._table_acceptance.snapshot()
@@ -1404,17 +1273,13 @@ class NativeAgentLoop(EventEmitter):
                 trace.completion_check = self._completion_check
             await self.emit("completed", trace)
 
-            # On a verified-successful run, distil the tool trace into a skill
-            # (flag-gated). maybe_generate_skill's quality gate requires reason
-            # completed/verified, so a failed run produces nothing.
+            # Generate skills only from eligible completion evidence when enabled.
             if self._auto_skill and self._tool_trace:
                 _distilled = await self._maybe_distill_skill(goal, trace)
-                # T1-1: capture this run as a replayable corpus task
-                # for the freshly distilled skill (gated; closes the loop).
+                # Capture a replay task for the new skill when enabled.
                 self._maybe_capture_replay(_distilled)
 
-            # T1-1: record whether an injected skill coincided with a verified
-            # run (observational baseline). Logging only — never affects the run.
+            # Log the injected skill's observed outcome without changing execution.
             self._log_skill_outcome(trace)
 
             return trace
@@ -1441,6 +1306,21 @@ class NativeAgentLoop(EventEmitter):
 
     def _select_tools(self, classification: ClassificationResult) -> list[str]:
         """Select tool subset based on goal classification."""
+        from rune.connectors.client import broker_available
+
+        tools = self._select_base_tools(classification)
+        kind = resolve_intent_contract(classification, classification.confidence).kind
+        if self._auto_skill and classification.goal_type != "chat" and kind != "calculation":
+            tools = list(dict.fromkeys([*tools, "skill_search", "skill_load"]))
+        if "document" in classification.intent_categories:
+            tools = list(dict.fromkeys([*tools, "file_write", "document_preview"]))
+        elif "document_read" in tools and kind != "calculation":
+            tools = list(dict.fromkeys([*tools, "document_preview"]))
+        if broker_available() and kind != "calculation":
+            return list(dict.fromkeys([*tools, "connector_list", "connector_request"]))
+        return [name for name in tools if not name.startswith("connector_")]
+
+    def _select_base_tools(self, classification: ClassificationResult) -> list[str]:
         from rune.config.defaults import TOOLS_CHAT, TOOLS_RESEARCH, TOOLS_WEB
 
         if resolve_intent_contract(classification, classification.confidence).kind == "calculation":
@@ -1488,12 +1368,9 @@ class NativeAgentLoop(EventEmitter):
         return disabled
 
     async def _maybe_distill_skill(self, goal: str, trace: Any) -> str | None:
-        """Distil this run's tool trace into a skill (best-effort).
-
-        Gated upstream by ``self._auto_skill``. ``maybe_generate_skill`` applies
-        the quality gate (success + evidence), so only good runs register a
-        skill. Never raises into the run.
-        """
+        """Distil an eligible tool trace when enabled; failures do not interrupt the run."""
+        if self._loaded_skills:
+            return None  # Reusing a procedure does not need another generated copy.
         try:
             from rune.agent.memory_bridge import maybe_generate_skill
 
@@ -1517,13 +1394,7 @@ class NativeAgentLoop(EventEmitter):
         return None
 
     def _maybe_capture_replay(self, skill_name: str | None) -> None:
-        """Snapshot the pre-task workspace for a distilled skill (T1-1 1b).
-
-        Closes the gated-learning loop: a skill distilled this run becomes a
-        replayable corpus task (pre-task git ref + project check) so it can be
-        A/B'd offline before being trusted. Best-effort; gated upstream by
-        capture_replay (self._replay_capture is None when off).
-        """
+        """Capture the pre-task tree and check for offline skill replay when enabled."""
         if not skill_name or self._replay_capture is None:
             return
         try:
@@ -1542,13 +1413,7 @@ class NativeAgentLoop(EventEmitter):
             log.debug("replay_capture_end_failed", error=str(exc)[:120])
 
     def _log_skill_outcome(self, trace: Any) -> None:
-        """Record an injected skill's run outcome (T1-1, observational).
-
-        Pure measurement: writes one ``arm="with"`` row tying the injected skill
-        to whether the run verified, building the base success rate the
-        evaluator compares a control arm against. Best-effort; never raises into
-        the run.
-        """
+        """Record the injected skill's observed outcome without affecting the run."""
         if self._injected_skill is None:
             return
         name, score = self._injected_skill
@@ -1572,27 +1437,16 @@ class NativeAgentLoop(EventEmitter):
             log.debug("skill_outcome_log_failed", error=str(exc)[:120])
 
     def _build_skill_context(self, goal: str, goal_category: str) -> str | None:
-        """Retrieve a matching learned skill to inject (flag-gated, best-effort)."""
-        if not self._auto_skill or goal_category not in ("code", "full"):
+        """Offer summaries so the model can choose skills at the step that needs them."""
+        if not self._auto_skill or goal_category == "chat":
             return None
         try:
-            from rune.skills.executor import build_skill_context_for_goal
+            from rune.safety.execution_environment import execution_workspace
+            from rune.skills.discovery import catalog
 
-            gated = False
-            try:
-                from rune.config import get_config
-
-                gated = bool(getattr(get_config().skills, "gated_learning", False))
-            except Exception:
-                gated = False
-            ctx = build_skill_context_for_goal(goal, gated=gated)
-            if ctx is None:
-                return None
-            # T1-1: remember which skill was injected so its outcome can be
-            # logged when the run finishes (observational arm).
-            self._injected_skill = (ctx.active_skill_name, 0.0)
-            return ctx.formatted_context
-        except Exception:
+            return catalog(goal, self._workspace_root or execution_workspace())
+        except Exception as exc:
+            log.debug("skill_context_unavailable", error=str(exc)[:120])
             return None
 
     async def _build_system_prompt(
@@ -1638,9 +1492,7 @@ class NativeAgentLoop(EventEmitter):
             try:
                 from rune.intelligence.repo_map import build_repo_map_sync
 
-                # Offload the os.walk + tree-sitter scan to a thread so it does
-                # not block the event loop (streaming, MCP, UI) before the first
-                # token. Behaviour and result are unchanged.
+                # Run the tree scan off-thread so it does not block streaming or the first token.
                 repo_map_text = await asyncio.to_thread(
                     build_repo_map_sync, workspace_root, max_tokens=2048
                 )
@@ -1672,7 +1524,8 @@ class NativeAgentLoop(EventEmitter):
             browser_state=(context or {}).get("browser_state"),
             has_mcp_services=bool(_mcp_servers),
             mcp_server_names=_mcp_servers,
-            skill_context=self._build_skill_context(goal, goal_category),
+            skill_context=(await asyncio.to_thread(self._build_skill_context, goal, goal_category)
+                           if self._auto_skill and goal_category != "chat" else None),
             # Mark the static/dynamic seam so caching can reuse the prefix.
             mark_cache_boundary=True,
         )
@@ -1687,11 +1540,7 @@ class NativeAgentLoop(EventEmitter):
         context: dict[str, Any] | None = None,
         message_history: list[dict[str, str]] | None = None,
     ) -> CompletionTrace:
-        """Stream model turns and tool calls within the run's budget.
-
-        Track execution evidence, evaluate completion and recover from
-        provider errors through retries, profile changes or compaction.
-        """
+        """Stream turns within budget, collect evidence and recover from provider errors."""
         trace = CompletionTrace()
         # Do not carry a previous run's mechanical verdict into this run.
         from rune.agent.litellm_adapter import consume_mech_check as _clear_mech
@@ -1748,11 +1597,7 @@ class NativeAgentLoop(EventEmitter):
             )
 
         def _tool_key(name: str, params: dict[str, Any]) -> str:
-            """Extract command-level key for behavior prediction.
-
-            "bash_execute" + {"command": "uv run ruff check ."} → "bash:ruff"
-            "file_write" + any → "file_write" (unchanged)
-            """
+            """Use the executable name for bash predictions and the tool name for other calls."""
             if name == "bash_execute":
                 from rune.utils.shell_command import command_name
 
@@ -1780,9 +1625,8 @@ class NativeAgentLoop(EventEmitter):
                         self._structured_writes += 1
                         self._verification.changed()
 
-            # Exclude best-of samples from telemetry and behavior prediction;
-            # discarded attempts should not influence later sessions.
-            _ephemeral = bool(os.environ.get("RUNE_IN_BEST_OF"))
+            # Exclude discarded best-of attempts from telemetry and future behavior predictions.
+            _ephemeral = bool((context or {}).get("ephemeral") or os.environ.get("RUNE_IN_BEST_OF"))
 
             # Record tool call to persistent log (with params for command extraction)
             if not _ephemeral:
@@ -1803,12 +1647,19 @@ class NativeAgentLoop(EventEmitter):
                 except Exception:
                     pass  # Tool logging must never break the agent loop
 
+            if cap_name == "skill_load" and result.success:
+                loaded = (result.metadata or {}).get("loaded_skill")
+                if loaded:
+                    self._loaded_skills.add(loaded)
+                    # A combined workflow cannot attribute its outcome to one skill.
+                    self._injected_skill = (loaded, 0.0) if len(self._loaded_skills) == 1 else None
+
             # Update evidence counters
             if cap_name == "desktop_act" and result.success and isinstance((result.metadata or {}).get("receipt"), dict):
                 self._artifact_receipts.append(result.metadata["receipt"])
             if cap_name == "table_verify" and result.success:
                 evidence.verifications += 1
-            elif cap_name in ("file_read", "document_read", "document_bundle_inspect", "table_requirements") and result.success:
+            elif cap_name in ("file_read", "document_read", "document_preview", "document_bundle_inspect", "table_requirements") and result.success:
                 evidence.file_reads += 1
                 evidence.reads += 1
                 self._consecutive_reads_without_write += 1
@@ -1889,6 +1740,12 @@ class NativeAgentLoop(EventEmitter):
             elif cap_name == "web_fetch":
                 evidence.web_fetches += int(result.success)
                 self._stall.web_fetch_count += 1
+            elif cap_name == "connector_request":
+                if _last_tool_params.get("method", "GET") == "GET":
+                    evidence.reads += int(result.success)
+                    evidence.web_fetches += int(result.success)
+                else:
+                    evidence.executions += int(result.success)
             elif cap_name == "browser_extract":
                 evidence.reads += int(result.success)
                 evidence.browser_reads += int(result.success)
@@ -1940,8 +1797,7 @@ class NativeAgentLoop(EventEmitter):
 
             await self.emit("tool_result", _tool_result_event_payload(cap_name, result))
 
-            # Capture the tool step for skill distillation (flag-gated;
-            # ephemeral best-of attempts never persist).
+            # Capture skill steps only for persistent, opted-in runs.
             if self._auto_skill and not _ephemeral:
                 try:
                     from rune.agent.memory_bridge import ToolTraceEntry
@@ -1969,9 +1825,7 @@ class NativeAgentLoop(EventEmitter):
         else:
             model = self._config.model
 
-        # Simple-query fast lane: high-confidence chat/web goals run on the
-        # provider's fast tier. Must come before advisor pairing, vision trim
-        # and tool-round scaling so they all see the lane model.
+        # Choose the fast model before advisor pairing, vision filtering and budget scaling.
         from rune.agent.fast_lane import FAST_LANE_UPSHIFT_BLOCKS, decide_fast_lane
 
         _primary_model = model
@@ -1991,8 +1845,7 @@ class NativeAgentLoop(EventEmitter):
                     confidence=classification.confidence,
                 )
             else:
-                # Primary already is the fast-tier model (light-model /
-                # ollama sessions); only the round cap and grounding change.
+                # Already on the fast model; only adjust rounds and grounding.
                 log.info(
                     "fast_lane_active_no_downshift",
                     model=model,
@@ -2000,9 +1853,7 @@ class NativeAgentLoop(EventEmitter):
                     confidence=classification.confidence,
                 )
 
-        # Drop vision-only tools for a text-only model, so it does not spend
-        # tokens on a screenshot it cannot read. Must run before the options
-        # capture `tools` — rebinding the list afterwards changes nothing.
+        # Remove vision tools before options capture the list for a text-only model.
         from rune.agent.model_traits import supports_vision
 
         if _desktop_mode:
@@ -2096,13 +1947,7 @@ class NativeAgentLoop(EventEmitter):
                 max_uses=_native_cfg.max_uses,
             )
 
-        # Scale tool rounds by complexity and executor capability.
-        # Structural repo-fix signal: code/execution/full-scope work inside a
-        # real project tree floors the round budget at the complex tier.
-        # "full" is included because it is also the classifier's FALLBACK
-        # type, so low-confidence repo-fix prompts land there and would
-        # otherwise get the small cap. Read-only types (chat/web/research)
-        # keep the small budget.
+        # Raise repository-work rounds, including full scope; keep read-only caps small.
         _repo_fix = (
             getattr(classification, "goal_type", "")
             in ("code_modify", "execution", "full")
@@ -2130,13 +1975,10 @@ class NativeAgentLoop(EventEmitter):
 
         messages: list[Any] = []
 
-        # Seed with conversation history from previous turns so the LLM
-        # has multi-turn context (fixes multi-turn follow-up like "정리해").
+        # Seed history so follow-up requests retain prior context.
         if message_history:
             if getattr(classification, "is_domain_change", False):
-                # Domain changed: strip tool results to prevent context bleed.
-                # Keep only user/assistant messages so the LLM has conversational
-                # context without being polluted by unrelated tool outputs.
+                # On domain changes, retain conversation text but drop unrelated tool results.
                 for msg in message_history:
                     role = msg.get("role", "")
                     if role == "tool":
@@ -2156,27 +1998,20 @@ class NativeAgentLoop(EventEmitter):
         # Workspace root for guard checks
         workspace_root = (context or {}).get("workspace_root", "") if context else ""
 
-        # Attachments ride on the goal's user message, seeded once here. The
-        # whole conversation is resent every step, so building this per step
-        # would charge the image to each one.
+        # Attach images once to the seeded goal message to avoid duplicating their context cost.
         _attachments = (context or {}).get("attachments") or []
         if _attachments:
             from rune.agent.attachments import build_user_content
             content, skipped = await build_user_content(
                 goal, _attachments, vision=supports_vision(model), workspace_root=self._workspace_root
             )
-            # Seed whatever came back. When nothing could be sent, the content
-            # is a plain string carrying the reasons; appending it is what tells
-            # the model a file was attached and why it went unread.
+            # Keep attachment failure details in the goal when no file content could be sent.
             if isinstance(content, list) or skipped:
                 messages.append({"role": "user", "content": content})
             if skipped:
                 log.info("attachments_skipped", reasons="; ".join(skipped))
 
-        # (advisor_service + native path detection happens earlier —
-        # see `AdvisorService.for_episode(model)` above, right after
-        # `build_tool_set()`. That site is required because the native
-        # advisor tool must be in the first LiteLLMAgent construction.)
+        # Register advisor tools before the first agent turn.
 
         import os as _os_for_freshness
 
@@ -2184,8 +2019,7 @@ class NativeAgentLoop(EventEmitter):
             "RUNE_VERIFY_FRESHNESS", ""
         ).strip().lower() in ("1", "true", "yes", "on")
 
-        # Require a passing check after code changes, even if classification missed them.
-        # RUNE_REQUIRE_TEST_PASS=0 disables this requirement.
+        # Require fresh checks after code changes unless RUNE_REQUIRE_TEST_PASS=0.
         _require_test_pass = _os_for_freshness.environ.get(
             "RUNE_REQUIRE_TEST_PASS", "1"
         ).strip().lower() not in ("0", "false", "no", "off")
@@ -2229,12 +2063,7 @@ class NativeAgentLoop(EventEmitter):
             )
 
         def _load_file_contents_for_architect() -> dict[str, str]:
-            """Read files_written from disk for architect-mode advisor.
-
-            Only fires when advisor mode is architect. Bounded to the
-            5 most recent files, 20KB per file. Read errors are skipped
-            so advisor calls never fail on I/O.
-            """
+            """Read up to five written files for the architect advisor, capped at 20 KB each."""
             if advisor_service.mode != "architect":
                 return {}
             contents: dict[str, str] = {}
@@ -2270,11 +2099,7 @@ class NativeAgentLoop(EventEmitter):
         _pending_advice: PendingAdvice | None = None
         _step_tool_calls: list[str] = []
 
-        # Cap→upshift restarts from a pristine copy of the seeded history: the
-        # retry keeps the conversation context but must never inherit the
-        # cut-off trajectory (see _cap_handoff_facts for why). Dict copies,
-        # not aliases — the adapter mutates message dicts in place. Snapshot
-        # only when the path can actually fire.
+        # Snapshot fresh retry history; copy dicts because the adapter mutates them in place.
         _cap_upshift_enabled = (
             _fast_lane_active and os.environ.get("RUNE_CAP_UPSHIFT", "1") != "0"
         )
@@ -2289,16 +2114,12 @@ class NativeAgentLoop(EventEmitter):
             self._step_start_time = time.monotonic()
             _step_tool_calls.clear()
 
-            # -- pre-flight checks ---
+            # pre-flight checks
             if self._cancel_event.is_set():
                 trace.reason = "cancelled"
                 break
 
-            # Fast-lane escape hatch: failover only fires on exceptions and
-            # only moves down the chain, so gate pressure is what restores
-            # full rigor. Checked here, not in one gate branch, so blocks
-            # from every gate path (_finalize_gates, _auto_verify_gate,
-            # Evidence Gate) count toward the upshift.
+            # Count all gate blocks toward a one-time exit from the fast lane.
             if _fast_lane_active and (
                 _gate_blocked_count >= FAST_LANE_UPSHIFT_BLOCKS or _cap_upshift_pending
             ):
@@ -2311,29 +2132,23 @@ class NativeAgentLoop(EventEmitter):
                     gate_blocked=_gate_blocked_count,
                 )
                 _cap_upshift_pending = False
-                # The restored model gets the full block budget and a clean
-                # no-progress window (the lane's empty steps raised both).
-                # Bounded: the upshift fires once, so a run absorbs at most
-                # the lane's ~3 blocks plus the normal 5.
+                # Reset block and stall budgets once when leaving the fast lane.
                 _gate_blocked_count = 0
                 self._gate_blocked_count = 0
                 _no_new_evidence_steps = 0
-                # Restore from the live failover profile, not the run-start
-                # snapshot — failover may have switched providers mid-lane.
+                # Restore the live failover profile; the provider may have changed.
                 _up_profile = failover.current_profile
                 if _up_profile.provider not in ("none", ""):
                     model = loop_model_string(_up_profile.provider, _up_profile.model)
                 else:
                     model = _primary_model
-                # Re-resolve the native advisor config for the restored
-                # model — the setup one was paired with the lane model.
+                # Re-resolve advisor settings for the restored model.
                 _native_cfg = resolve_native_config(
                     executor_model=model,
                     advisor_model_full=advisor_service.model_full,
                     max_uses=advisor_service.budget.max_calls,
                 )
-                # Rebuild even when the model is unchanged (light-model
-                # sessions) — the 3-round cap goes away with the rigor.
+                # Rebuild even for the same model to remove the fast-lane round cap.
                 _tool_rounds = _compute_tool_rounds(
                     classification,
                     model,
@@ -2373,8 +2188,7 @@ class NativeAgentLoop(EventEmitter):
                         log.info(
                             "advisor_compliance_ignored", reason=_verdict.reason, step=self._step
                         )
-                    # Merge verdict back into call_history so persistence
-                    # writes it to advisor_events (Plan B measurement).
+                    # Store the verdict in call_history for advisor-event persistence.
                     idx = _pending_advice.call_history_index
                     history = advisor_service.budget.call_history
                     if 0 <= idx < len(history):
@@ -2423,10 +2237,7 @@ class NativeAgentLoop(EventEmitter):
                     )
 
             if self._stall.is_stalled:
-                # Defer stall when prior tool evidence exists the LLM
-                # may still be formulating its answer after a successful
-                # tool call.  Other stall conditions (bash_stalled,
-                # file_read_exhausted, intent_repeat) are not deferred.
+                # Allow answer formulation after tool success; concrete tool stalls still apply.
                 prior_evidence = (
                     evidence.reads
                     + evidence.writes
@@ -2450,20 +2261,17 @@ class NativeAgentLoop(EventEmitter):
                     trace.reason = "stalled"
                     break
 
-            # A run that has written several structured code artifacts is
-            # complex coding whatever the classifier said at t=0. Greenfield
-            # work starts in an empty directory, so the structural floor above
-            # cannot see it; this is the same correction applied on evidence.
+            # Raise the budget for observed code work, including initially empty projects.
             self._maybe_upgrade_budget_for_code_work()
 
-            # Wind-down hard_stop check (#14)
+            # Wind-down hard_stop check
             self._update_wind_down_phase()
             if self._wind_down_phase == "hard_stop":
                 log.warning("wind_down_hard_stop", used=self._token_budget.used)
                 trace.reason = "token_budget_exhausted"
                 break
 
-            # Disable non-essential tools in "final" phase (#14)
+            # Disable non-essential tools in "final" phase
             if self._wind_down_phase == "final":
                 essential = {
                     "think",
@@ -2565,7 +2373,7 @@ class NativeAgentLoop(EventEmitter):
                         )
                     ),
                 ) as stream:
-                    # Inject persistent fail streak into this step (#P4)
+                    # Inject persistent fail streak into this step
                     if self._persistent_fail_streak:
                         stream.inject_failure_state(
                             self._persistent_fail_streak,
@@ -2581,19 +2389,18 @@ class NativeAgentLoop(EventEmitter):
                     self._last_activity = time.monotonic()
                     result = stream
 
-                # -- export fail streak for cross-step persistence (#P4) --
+                # export fail streak for cross-step persistence
                 try:
                     streak, _ = result.get_failure_state()
                     self._persistent_fail_streak.update(streak)
                 except Exception:
                     pass
 
-                # A step cut off at the tool-round cap never got a final LLM
-                # turn to disclose it; carry the fact to the trust surface.
+                # Expose tool-cap termination even when the model had no final turn to disclose it.
                 if getattr(result, "tool_budget_exhausted", False):
                     trace.tool_budget_exhausted = True
 
-                # -- update token budget from usage stats --
+                # update token budget from usage stats
                 try:
                     usage = result.usage()
                     request_tokens = (
@@ -2647,16 +2454,16 @@ class NativeAgentLoop(EventEmitter):
                     trace.final_step = self._step
                     break
 
-                # -- rollover / checkpoint handling --
+                # rollover / checkpoint handling
                 rollover_phase = self._token_budget.rollover_phase
                 if rollover_phase >= 1 and 1 not in self._rollover_phase_done:
-                    # Phase 1 (70%): Save structured checkpoint (#2a)
+                    # Phase 1 (70%): Save structured checkpoint
                     try:
                         ckpt = CheckpointManager()
                         session_id = self._session_id or str(uuid.uuid4())[:8]
                         self._session_id = session_id
 
-                        # Build structured checkpoint with evidence (#2a)
+                        # Build structured checkpoint with evidence
                         evidence_list = list(self._files_written) if self._files_written else []
                         stall_summary = {
                             "consecutive_no_progress": self._stall.consecutive_no_progress,
@@ -2682,7 +2489,7 @@ class NativeAgentLoop(EventEmitter):
                             goal=goal,
                             token_usage=self._token_budget.used,
                         )
-                        # Attach structured metadata as tool_results (#2a)
+                        # Attach structured metadata as tool_results
                         ckpt_data.tool_results = [
                             {"evidence": evidence_list},
                             {"changed_files": list(self._files_written)},
@@ -2695,22 +2502,18 @@ class NativeAgentLoop(EventEmitter):
                         log.warning("checkpoint_save_failed", error=str(exc)[:100])
                     self._rollover_phase_done.add(1)
 
-                # -- update message history for next iteration --
+                # update message history for next iteration
                 with contextlib.suppress(Exception):
                     messages = result.all_messages()
 
-                # Fast-lane cap death: the model was still calling tools when
-                # the round budget cut it off — the surest sign the answer is
-                # incomplete. Retry ONCE at full rigor from the pristine seed
-                # plus extracted facts, never the cut-off trajectory itself.
+                # Retry once at full rigor with seed history and facts, not the failed trajectory.
                 if (
                     _fast_lane_active
                     and _seed_messages is not None
                     and getattr(result, "tool_budget_exhausted", False)
                 ):
                     _cap_upshift_pending = True
-                    # The verdict belongs to the retry; it re-arms if the
-                    # full lane caps again.
+                    # Let the retry establish its own cap verdict.
                     trace.tool_budget_exhausted = False
                     handoff = _cap_handoff_facts(result.all_messages())
                     messages = [dict(m) if isinstance(m, dict) else m for m in _seed_messages]
@@ -2727,8 +2530,7 @@ class NativeAgentLoop(EventEmitter):
                     continue
 
                 if rollover_phase >= 2 and 2 not in self._rollover_phase_done:
-                    # Phase 2 (80%): Deterministic rollover - compact old messages
-                    # Use dynamic context cap to determine how aggressively to compact (#2b)
+                    # Compact old messages using the phase-specific context cap.
                     dynamic_cap = self._get_dynamic_context_cap()
                     keep_count = max(3, int(FULL_WINDOW_MAX * dynamic_cap / 0.70))
                     if messages and len(messages) > keep_count + 2:
@@ -2769,11 +2571,7 @@ class NativeAgentLoop(EventEmitter):
                         gate_input_snapshot = None
                     if gate_input_snapshot is not None:
                         rollover_gate_result = evaluate_completion_gate(gate_input_snapshot)
-                        # Only what the gate calls missing. "not done" also
-                        # catches the statuses it deliberately does not block
-                        # on (an unobserved cleanup, a command run in a temp
-                        # dir), and telling the agent to go finish those sends
-                        # it after work that was never required.
+                        # Nudge only requirements the gate explicitly marks missing.
                         _blocking = set(
                             rollover_gate_result.missing_requirement_ids
                         )
@@ -2799,7 +2597,7 @@ class NativeAgentLoop(EventEmitter):
                         )
                     messages = self._inject_system_message(messages, resume_msg)
 
-                    # Cognitive cache partial clear on rollover (#2c)
+                    # Cognitive cache partial clear on rollover
                     if cache and hasattr(cache, "clear_older_than"):
                         cache.clear_older_than(keep_count)
                     elif cache and hasattr(cache, "access_order") and hasattr(cache, "entries"):
@@ -2845,10 +2643,9 @@ class NativeAgentLoop(EventEmitter):
                         )
                     self._rollover_phase_done.add(3)
 
-                # Wind-down state machine is handled by _prepare_step (#14)
-                # (no more goal-text modification - nudges are system messages)
+                # Budget wind-down guidance is injected by _prepare_step.
 
-                # -- stall tracking --
+                # stall tracking
                 output_text = ""
                 try:
                     out = await result.get_output()
@@ -2862,7 +2659,7 @@ class NativeAgentLoop(EventEmitter):
                 else:
                     self._stall.mark_no_progress()
 
-                # -- Rehydration trigger (per-step, fail-safe) --
+                # Rehydration trigger (per-step, fail-safe)
                 if self._rehydration_trigger is not None:
                     try:
                         from rune.agent.rehydration import format_injection, rehydrate
@@ -2899,10 +2696,7 @@ class NativeAgentLoop(EventEmitter):
                     + evidence.browser_reads
                 )
 
-                # Progress detection: break if no new *actionable* evidence
-                # AND no new text for 3 consecutive steps.
-                # browser_reads are excluded because observe/find loops
-                # inflate the counter without producing useful output.
+                # Browser reads alone must not count as progress.
                 actionable_evidence = (
                     evidence.reads
                     + evidence.writes
@@ -2916,9 +2710,7 @@ class NativeAgentLoop(EventEmitter):
 
                 if new_evidence == 0 and not has_new_output:
                     _no_new_evidence_steps += 1
-                    # If prior steps already produced evidence (tool calls succeeded)
-                    # the LLM may just need more turns to
-                    # formulate its answer.  Allow extra patience.
+                    # Allow extra answer-formulation turns after successful tool work.
                     threshold = 5 if actionable_evidence > 0 else 3
                     if _no_new_evidence_steps >= threshold:
                         log.warning("no_progress_break", step=self._step, evidence=total_evidence)
@@ -2996,9 +2788,7 @@ class NativeAgentLoop(EventEmitter):
                             "Verification after code changes",
                             "No verification command has passed since the latest code change.",
                         )
-                        # Code changed but nothing verifies it yet. Don't take the
-                        # model's word — nudge it to get tests green; if it can't,
-                        # stop honestly (max_gate_blocked -> /escalate).
+                        # Require post-edit verification, stopping at the block limit if it fails.
                         self._unverified_completion_blocks += 1
                         log.info(
                             "require_test_pass_block",
@@ -3083,11 +2873,7 @@ class NativeAgentLoop(EventEmitter):
                     intent_contract, "requires_code_write_artifact", False
                 )
 
-                # If IntentContract says no tools needed and LLM answered
-                # without tools, it's a text-only response - mark as complete.
-                # No tools used + text answer = done. Don't loop for short answers
-                # regardless of tool_requirement — if the LLM chose to answer
-                # without tools, respect that decision.
+                # Accept a tool-free answer when the intent contract permits completion.
                 if total_evidence == 0 and output_text and output_text.strip():
                     blocker = await self._benchmark_completion_blocker()
                     if blocker:
@@ -3121,9 +2907,7 @@ class NativeAgentLoop(EventEmitter):
                     effective_output_exp = "text"
                     requires_grounding = False
 
-                # If this step produced text WITHOUT any tool calls, the LLM
-                # has finished its final answer.  Treat as complete to prevent
-                # re-generation loops.
+                # Finalize a text-only final turn to avoid regenerating the answer.
                 step_had_tool_calls = any(
                     isinstance(m, dict) and m.get("role") == "assistant" and m.get("tool_calls")
                     for m in (
@@ -3152,8 +2936,7 @@ class NativeAgentLoop(EventEmitter):
                     analysis_min_reads = 1
                 if intent_contract.grounding_requirement == "required":
                     min_web_searches = 1
-                    # Fast lane: a fresh search counts as grounding (R14
-                    # passes on search or fetch; R18 reads these minimums).
+                    # A fresh search satisfies fast-lane grounding.
                     min_web_fetches = 0 if _fast_lane_active else 1
 
                 gate_input = CompletionGateInput(
@@ -3205,8 +2988,7 @@ class NativeAgentLoop(EventEmitter):
                 if self._unsourced_numbers:
                     trace.unsourced_numbers = list(self._unsourced_numbers)
 
-                # Same check here — the fast path isn't the only way to finish, so
-                # the full gate must not wave through unverified code either.
+                # Require code verification on the full completion path too.
                 if _unverified_code():
                     self._record_completion_block(
                         "Verification after code changes",
@@ -3259,9 +3041,7 @@ class NativeAgentLoop(EventEmitter):
                                 trace.final_step = self._step
                                 break
                             continue
-                        # Behavior done != output correct. If the Evidence Gate
-                        # is active, re-verify before finalizing: a fail injects
-                        # evidence and continues; skip/off finalizes as before.
+                        # Recheck outcomes before completion; failed checks supply repair evidence.
                         _ev_state, _ev_msg = await self._evidence_verdict()
                         if _ev_state == "fail" and _ev_msg:
                             log.info("evidence_gate_block_on_verified", step=self._step)
@@ -3296,15 +3076,9 @@ class NativeAgentLoop(EventEmitter):
                             trace.evidence_score = 1.0
                             break
 
-                # If blocked, let the loop continue — but limit repeats
-                # to prevent infinite loops when requirements can't be met.
+                # Bound repeated gate blocks when requirements cannot be met.
                 if gate_result.outcome == "blocked":
-                    # Evidence Gate override: behavioral requirements are weaker
-                    # than a passing outcome check. If the produced artifact
-                    # actually satisfies the task's own success criteria, accept
-                    # completion even though some behavioral requirement is unmet
-                    # (e.g. "not enough reads"). A failing check instead injects
-                    # first-mismatch evidence and keeps the loop going.
+                    # A passing outcome check can override missing behavioral evidence.
                     _avok, messages, _gate_blocked_count = await self._auto_verify_gate(
                         messages, _gate_blocked_count
                     )
@@ -3336,8 +3110,7 @@ class NativeAgentLoop(EventEmitter):
                         count=_gate_blocked_count,
                         missing=gate_result.missing_requirement_ids,
                     )
-                    # Inject missing requirements so the agent knows
-                    # exactly what to do next instead of retrying blindly.
+                    # Include missing requirements so the next attempt has concrete guidance.
                     _blocking_ids = set(gate_result.missing_requirement_ids)
                     _missing = [
                         f"{r.id}: {r.failure_reason or r.description}"
@@ -3373,9 +3146,7 @@ class NativeAgentLoop(EventEmitter):
                             trace.final_step = self._step
                             break
                         if _adv_dec and _adv_dec.plan_steps:
-                            # Deferred: full reset only after compliance verdict.
-                            # Not while the lane is active — the decrement would
-                            # hold the count below the upshift threshold.
+                            # Do not decrement fast-lane blocks before they can trigger the upshift.
                             if not _fast_lane_active:
                                 _gate_blocked_count = max(0, _gate_blocked_count - 1)
                             _ev_total = (
@@ -3393,13 +3164,7 @@ class NativeAgentLoop(EventEmitter):
                                 advice_mode=advisor_service.mode,
                             )
                     if _gate_blocked_count >= 5:
-                        # Last chance before giving up: if the artifact now
-                        # actually satisfies the task's success criteria, accept
-                        # it. The correct artifact is often written on the final
-                        # iteration, after which no further finalize attempt
-                        # would re-run the Evidence Gate.
-                        # Auto-verify last: a fail at the block cap means broken
-                        # code, so give up rather than retry.
+                        # Recheck the last artifact; failed code checks still block completion.
                         _avok, _, _ = await self._auto_verify_gate(messages, _gate_blocked_count)
                         if not _avok:
                             trace.reason = self._max_gate_reason()
@@ -3417,10 +3182,7 @@ class NativeAgentLoop(EventEmitter):
                         trace.final_step = self._step
                         break
 
-                # "partial" with substantial output - treat as completed to
-                # prevent indefinite loops when only minor requirements remain.
-                # Exception: if code write was required but nothing was written,
-                # do NOT accept partial — force the agent to keep working.
+                # Allow substantial partial output unless required code was never written.
                 if (
                     gate_result.outcome == "partial"
                     and output_text
@@ -3620,8 +3382,7 @@ class NativeAgentLoop(EventEmitter):
                 error=str(exc)[:200],
             )
 
-        # Abstaining is its own outcome, not a completion. Checked here so
-        # every path that finishes a run reports it the same way.
+        # Report abstention consistently across completion paths.
         from rune.capabilities.blocked import consume_block
         if consume_block():
             trace.reason = "task_blocked"
@@ -3636,12 +3397,7 @@ class NativeAgentLoop(EventEmitter):
                 self._record_completion_block("Task outcome", blocker)
                 trace.reason = "max_gate_blocked"
 
-        # Neither is finishing on top of a failing check. The verdict is
-        # mechanical — the last test execution this run saw, whoever ran it —
-        # so a confident closing summary cannot overrule it. Measured case:
-        # the transcript showed "4 failed" and the run still exited as a
-        # success, which is exactly the false-done the verified path already
-        # refuses.
+        # A confident final answer cannot override the last failing mechanical check.
         from rune.agent.litellm_adapter import consume_mech_check
         _mech = consume_mech_check()
         trace.mech_check = _mech
@@ -3653,11 +3409,7 @@ class NativeAgentLoop(EventEmitter):
         return trace
 
     def _compute_pinned_steps(self, messages: list, full_window: int) -> set[int]:
-        """Find older steps that are referenced by recent steps (dependency pinning).
-
-        If step 10 reads a file that was written in step 3, step 3 is "pinned"
-        and kept at full detail to preserve context the model still depends on.
-        """
+        """Pin older steps whose file outputs are referenced by recent steps."""
         pinned: set[int] = set()
         recent_start = max(0, len(messages) - full_window)
 
@@ -3686,11 +3438,7 @@ class NativeAgentLoop(EventEmitter):
         return paths
 
     def _is_exploration_only(self, msg: Any, idx: int, messages: list[Any]) -> bool:
-        """Detect if a file_read was exploratory (never referenced later).
-
-        A file_read is exploratory if the content it returned was never used
-        in any subsequent tool call arguments.
-        """
+        """Check whether later tool arguments ever reference this file read."""
         # Only applies to tool results that look like file reads
         text = str(msg)
         if "file_read" not in text:
@@ -3709,19 +3457,8 @@ class NativeAgentLoop(EventEmitter):
         return True
 
     def _mask_observations(self, messages: list[Any]) -> list[Any]:
-        """3-tier observation masking for context efficiency.
-
-        Uses phase-adaptive windows (#12):
-        - Recent (last full_window): Keep full content
-        - Middle (next truncate_window): head+tail truncation
-        - Older: 1-line tool-specific summary
-
-        Pinned steps (dependency graph) are kept at full detail regardless
-        of their position. Exploration-only reads are forced to Tier 3.
-
-        Phases: exploration, implementation, verification, research
-        """
-        # Phase-adaptive windows (#12)
+        """Keep recent and pinned results, truncate middle ones and summarize older results."""
+        # Phase-adaptive windows
         phase = getattr(self, "_activity_phase", "exploration")
         full_window, truncate_window = _PHASE_WINDOWS.get(
             phase, (FULL_WINDOW_MAX, TRUNCATE_WINDOW_MAX)
@@ -3750,7 +3487,7 @@ class NativeAgentLoop(EventEmitter):
             if i in pinned:
                 result.append(msg)  # Pinned: keep full detail
             elif self._is_exploration_only(msg, i, messages):
-                # Context pollution prevention (#1c): exploratory reads -> Tier 3
+                # Context pollution prevention: exploratory reads -> Tier 3
                 result.append(self._summarize_message(msg))
             else:
                 result.append(self._truncate_message(msg))
@@ -3759,8 +3496,7 @@ class NativeAgentLoop(EventEmitter):
         for msg in messages[full_start:]:
             result.append(msg)
 
-        # Context pollution prevention (#1c): remove empty messages
-        # Preserve tool messages even if empty — removing them breaks assistant+tool pairs
+        # Preserve empty tool messages to keep call/result pairs intact.
         result = [m for m in result if not self._is_empty_message(m) or _msg_role(m) == "tool"]
 
         return result
@@ -3793,23 +3529,7 @@ class NativeAgentLoop(EventEmitter):
 
     @staticmethod
     def _summarize_message(msg: Any) -> Any:
-        """Compress a message to a 1-line tool-specific summary (#1a).
-
-        Handles 12 tool types with specific summary formats:
-        - file_read -> "Read {path} ({n} lines)"
-        - file_write -> "Wrote {path}"
-        - file_edit -> "Edited {path}"
-        - file_delete -> "Deleted {path}"
-        - file_search -> "Searched for '{query}' -- {n} matches"
-        - bash_execute -> "Ran `{cmd[:80]}` -> {exit_code}"
-        - web_search -> "Searched: '{query}' -- {n} results"
-        - web_fetch -> "Fetched {url[:60]} ({n} chars)"
-        - think -> "Thought about: {thought[:60]}"
-        - ask_user -> "Asked user: {question[:60]}"
-        - browser_navigate -> "Navigated to {url[:60]}"
-        - delegate -> "Delegated: {task[:60]}"
-        - Generic -> first 100 chars
-        """
+        """Summarize a tool result in one line, falling back to the first 100 characters."""
         try:
             if hasattr(msg, "parts"):
                 # PydanticAI message with parts
@@ -3895,12 +3615,7 @@ class NativeAgentLoop(EventEmitter):
 
     @staticmethod
     def _truncate_message(msg: Any, limit: int = 4000, text_limit: int = 500) -> Any:
-        """Truncate message content to head+tail (#1b).
-
-        For middle-tier messages, both tool result content and plain text
-        content are truncated if they exceed their respective limits.
-        Assistant text content is also truncated if >500 chars.
-        """
+        """Keep the head and tail of messages that exceed their content limits."""
         try:
             if hasattr(msg, "parts"):
                 from copy import deepcopy
@@ -3918,7 +3633,7 @@ class NativeAgentLoop(EventEmitter):
                                 f"{head}\n\n... [{len(content) - effective_limit} "
                                 f"chars truncated] ...\n\n{tail}"
                             )
-                    # Also truncate plain text parts (#1b)
+                    # Also truncate plain text parts
                     elif hasattr(part, "text") and isinstance(getattr(part, "text", None), str):
                         text_val = part.text
                         if len(text_val) > text_limit:
@@ -3933,7 +3648,7 @@ class NativeAgentLoop(EventEmitter):
             if isinstance(msg, dict) and isinstance(msg.get("content"), str):
                 content = msg["content"]
                 role = msg.get("role", "")
-                # Assistant text masking (#1b): truncate long assistant text
+                # Assistant text masking: truncate long assistant text
                 if role == "assistant" and len(content) > 500:
                     content = content[:300] + "\n... (truncated) ...\n" + content[-200:]
                     return {**msg, "content": content}
@@ -3968,15 +3683,10 @@ class NativeAgentLoop(EventEmitter):
         # Keep base tools + any recently used
         return [t for t in tools if t in base_tools or t == self._stall.last_tool_call]
 
-    # Vision cache integration (#3)
+    # Vision cache integration
 
     def _apply_vision_cache(self, messages: list[Any]) -> None:
-        """Replace duplicate image content in dict-based messages with cached text.
-
-        LiteLLM messages are plain dicts.  When a message contains an
-        ``image_url`` content part, check the vision cache and substitute
-        with text if a hit is found.
-        """
+        """Replace duplicate image parts with text from the vision cache."""
         for msg in messages:
             if not isinstance(msg, dict):
                 continue
@@ -4038,7 +3748,7 @@ class NativeAgentLoop(EventEmitter):
 
         return _View()
 
-    # Turn-atomic message compaction (#2a)
+    # Turn-atomic message compaction
 
     @staticmethod
     def _compact_messages_atomic(messages: list, keep_last: int) -> list:
@@ -4049,7 +3759,7 @@ class NativeAgentLoop(EventEmitter):
         kept = turns[-keep_last:]
         return [msg for turn in kept for msg in turn.messages]
 
-    # Dynamic context cap (#2b)
+    # Dynamic context cap
 
     # Token caps by activity phase
     _TOKEN_CAPS: dict[str, int] = {
@@ -4060,12 +3770,7 @@ class NativeAgentLoop(EventEmitter):
     }
 
     def _get_dynamic_context_cap(self) -> float:
-        """Return the rollover threshold based on current activity phase.
-
-        - research: 0.75 (more conservative, need context)
-        - implementation: 0.70 (standard)
-        - verification: 0.65 (can afford to forget more)
-        """
+        """Choose the context rollover threshold for the current activity phase."""
         phase = getattr(self, "_activity_phase", "exploration")
         if phase == "research":
             return 0.75
@@ -4081,15 +3786,7 @@ class NativeAgentLoop(EventEmitter):
         return max(40_000, min(80_000, proportional))
 
     def _trim_to_token_cap(self, messages: list) -> list:
-        """Trim messages to fit within the token cap for current phase.
-
-        Uses turn-atomic grouping so that assistant tool-call + tool result
-        pairs are never split. Pins the first message (original goal) and
-        keeps the most recent ``keep_recent`` messages, then fills the
-        remaining budget from newest to oldest turns.
-
-        Ported from trimMessagesToContextCapWithMeta() in loop.ts.
-        """
+        """Trim to the phase budget while keeping the goal and tool-call/result pairs together."""
         phase_cap = self._TOKEN_CAPS.get(self._activity_phase, 60_000)
         budget_cap = self._get_budget_proportional_cap()
         cap = min(phase_cap, budget_cap)
@@ -4105,8 +3802,7 @@ class NativeAgentLoop(EventEmitter):
         if len(turns) <= keep_recent_turns:
             return messages
 
-        # Split into tail/head by atomic turns so assistant tool_calls are never
-        # separated from their tool results.
+        # Split on whole turns so tool calls stay with their results.
         tail_turns = turns[-keep_recent_turns:]
         tail = [msg for turn in tail_turns for msg in turn.messages]
         tail_tokens = sum(self._estimate_tokens(m) for m in tail)
@@ -4181,14 +3877,7 @@ class NativeAgentLoop(EventEmitter):
 
     @staticmethod
     def _estimate_tokens(msg: Any) -> int:
-        """Rough token estimate: ~4 chars per token.
-
-        Multimodal content is a list of parts. Stringifying it would count the
-        image's base64 payload as text — a downscaled screenshot then scores
-        over 100k "tokens" and blows every cap, so the trimmer would drop the
-        image and the history around it on every step. Charge images a flat
-        rate instead; a 1568px image is ~1.5k tokens on the major providers.
-        """
+        """Estimate text at four characters per token and charge images a fixed cost."""
         if isinstance(msg, dict):
             content = msg.get("content", "")
             if isinstance(content, list):
@@ -4206,18 +3895,13 @@ class NativeAgentLoop(EventEmitter):
             text = str(msg)
         return len(text) // 4
 
-    # Wind-down 5-stage state machine (#14)
+    # Wind-down 5-stage state machine
 
     # Writes that mark a run as real code work rather than a one-off edit.
     _CODE_WORK_WRITE_THRESHOLD = 3
 
     def _maybe_upgrade_budget_for_code_work(self) -> None:
-        """Raise a small token budget once a run proves to be code work.
-
-        One-way and capped at the complex-coding budget, so it can only buy the
-        verify-and-fix loop room it was already going to need — never shrink a
-        budget a caller chose deliberately.
-        """
+        """Raise a small budget to the coding limit when execution proves it needs one."""
         if self._budget_upgraded_for_code:
             return
         if getattr(self._config, "token_budget_override", None):
@@ -4284,17 +3968,14 @@ class NativeAgentLoop(EventEmitter):
             case _:
                 return None
 
-    # Prepare step hook (#25)
+    # Prepare step hook
 
     def _prepare_step(
         self,
         messages: list[Any],
         workspace_root: str = "",
     ) -> list[Any]:
-        """Pre-step hook: mask observations, inject nudges, check guards.
-
-        Called before each agent iteration. Returns the prepared message list.
-        """
+        """Prepare messages by masking observations, injecting nudges and checking guards."""
         # 1. Observation masking (with phase-adaptive windows)
         messages = self._mask_observations(messages)
 
@@ -4328,31 +4009,22 @@ class NativeAgentLoop(EventEmitter):
         for n in nudges:
             messages = self._inject_system_message(messages, n)
 
-        # 7. Knowledge inventory at milestone steps (#5)
+        # 7. Knowledge inventory at milestone steps
         inventory = self._maybe_inject_knowledge_inventory()
         if inventory:
             messages = self._inject_system_message(messages, inventory)
 
-        # 8. Vision cache integration (#3): replace duplicate images with text
+        # 8. Vision cache integration: replace duplicate images with text
         self._apply_vision_cache(messages)
 
-        # 9. Token-based trimming (#H4): trim messages to fit within phase cap
+        # 9. Token-based trimming: trim messages to fit within phase cap
         messages = self._trim_to_token_cap(messages)
 
         return messages
 
     @staticmethod
     def _inject_system_message(messages: list[Any], text: str) -> list[Any]:
-        """Append a system-level nudge as a user message.
-
-        Previously used role="system", but litellm_adapter skips system messages
-        from history (to avoid duplicating the main system prompt). Using a user
-        message with <system-reminder> tags ensures the nudge actually reaches
-        the model while being recognized as system-level guidance.
-
-        Nudges include: wind-down budget warnings, stall guidance, workspace
-        warnings, knowledge inventory, failed-tool hints.
-        """
+        """Append a tagged user-message nudge; the adapter drops system messages from history."""
         messages = list(messages)  # shallow copy
         messages.append({
             "role": "user",
@@ -4360,7 +4032,7 @@ class NativeAgentLoop(EventEmitter):
         })
         return messages
 
-    # Cognitive cache knowledge inventory (#5)
+    # Cognitive cache knowledge inventory
 
     _INVENTORY_STEPS = {5, 15, 30, 50, 80}
 
@@ -4380,7 +4052,7 @@ class NativeAgentLoop(EventEmitter):
             f"{stats.get('hits', 0)} cache hits"
         )
 
-    # Stall guidance (#25)
+    # Stall guidance
 
     def _get_stall_guidance(self) -> str | None:
         """Generate guidance text when stall indicators are active."""
@@ -4430,7 +4102,7 @@ class NativeAgentLoop(EventEmitter):
             return None
         return "\n".join(parts)
 
-    # Execution nudges (#27)
+    # Execution nudges
 
     def _get_execution_nudges(self) -> list[str]:
         """Generate execution nudges based on tool-call patterns."""
@@ -4461,15 +4133,11 @@ class NativeAgentLoop(EventEmitter):
 
         return nudges
 
-    # Workspace guard (#26)
+    # Workspace guard
 
     @staticmethod
     def _check_workspace_scope(command: str, workspace_root: str) -> str | None:
-        """Check if a bash command writes outside the workspace root (#26).
-
-        Delegates to the full workspace_guard module for thorough path analysis.
-        Returns a warning message if a violation is detected, None otherwise.
-        """
+        """Return a warning for writes outside the workspace, or None if no violation is found."""
         if not command or not workspace_root:
             return None
 
@@ -4524,15 +4192,10 @@ class NativeAgentLoop(EventEmitter):
 
         return None
 
-    # Step watchdog / retry (#29)
+    # Step watchdog / retry
 
     async def _with_retry(self, fn: Callable[[], Awaitable[T]], max_retries: int = 3) -> T:
-        """Execute a callable returning an awaitable, with exponential backoff on rate limits.
-
-        Unlike the previous version that accepted a coroutine (which can only
-        be awaited once), this accepts a callable so the operation can actually
-        be retried on failure (#4b).
-        """
+        """Retry rate limits with backoff, creating a fresh awaitable for each attempt."""
         for attempt in range(max_retries + 1):
             try:
                 return await fn()
@@ -4548,9 +4211,9 @@ class NativeAgentLoop(EventEmitter):
                     continue
                 raise
 
-    # LLM intent classification Tier 2 fallback (#17)
+    # LLM intent classification Tier 2 fallback
 
-    # Fallback execution loop (no PydanticAI) (#Task1)
+    # Fallback execution loop (no PydanticAI)
 
     async def _execute_fallback_loop(
         self,
@@ -4560,21 +4223,11 @@ class NativeAgentLoop(EventEmitter):
         max_iterations: int,
         classification: ClassificationResult,
     ) -> CompletionTrace:
-        """Minimal agent loop when PydanticAI is not installed.
-
-        Attempts to:
-        1. Use the LLM client (LiteLLM) to generate a tool-calling plan
-        2. Execute tool calls through the capability registry
-        3. Track all steps in a CompletionTrace
-
-        Falls back to a structured diagnostic trace if no LLM backend is
-        available either.
-        """
+        """Fall back to LiteLLM, or report diagnostics if no backend is available."""
         from rune.capabilities.registry import get_capability_registry
 
         trace = CompletionTrace()
-        # Start the run with no mechanical verdict carried over from a
-        # previous run in this process (the REPL runs many).
+        # Clear mechanical verdicts carried over from earlier runs in this process.
         from rune.agent.litellm_adapter import consume_mech_check as _clear_mech
         _clear_mech()
         registry = get_capability_registry()
@@ -4699,7 +4352,7 @@ class NativeAgentLoop(EventEmitter):
         return trace
 
 
-# Factory: create_agent_loop (#Task2)
+# Factory: create_agent_loop
 
 
 def create_agent_loop(
@@ -4707,23 +4360,7 @@ def create_agent_loop(
     max_iterations: int | None = None,
     timeout_seconds: float | None = None,
 ) -> NativeAgentLoop:
-    """Create a configured :class:`NativeAgentLoop` for the given role.
-
-    Parameters
-    ----------
-    role:
-        One of ``researcher``, ``planner``, ``executor``, ``communicator``.
-        Determines default iteration/timeout limits and tool subset.
-    max_iterations:
-        Override the role's default ``max_iterations``.
-    timeout_seconds:
-        Override the role's default ``timeout_seconds``.
-
-    Returns
-    -------
-    NativeAgentLoop
-        A ready-to-use loop instance.  Call ``.run(goal)`` to execute.
-    """
+    """Create a role-configured loop with optional iteration and timeout overrides."""
     # Resolve role defaults
     try:
         from rune.agent.roles import get_role

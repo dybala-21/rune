@@ -1,7 +1,4 @@
-"""HTTP API and streaming transport for Rune sessions.
-
-Streams events over SSE and WebSocket, and execution results as NDJSON.
-"""
+"""Serve Rune sessions over HTTP, SSE, WebSocket and NDJSON."""
 
 import asyncio
 import contextlib
@@ -15,11 +12,13 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from rune.agent.timing import timed
-from rune.api.questions import PendingQuestion, question_payload
+from rune.agent.run_outcome import run_outcome
+from rune.api.approvals import approval_callback
+from rune.api.approvals import approval_granted as approval_granted
+from rune.api.questions import PendingQuestion
 from rune.api.trust import build_cancelled_trust
 from rune.api.trust import build_trust_payload as build_trust_payload
-from rune.capabilities.ask_user import AskUserParams, UserResponse, user_response
+from rune.capabilities.ask_user import user_response
 from rune.llm.pricing import usage_payload
 from rune.utils.fast_serde import json_decode, json_encode
 from rune.utils.logger import get_logger
@@ -28,16 +27,8 @@ log = get_logger(__name__)
 
 
 def join_steps(collected: list[str], step_starts: list[int]) -> str:
-    """Join collected deltas, separating each step's narration with a blank line.
-
-    Deltas stream token by token, so within a step they concatenate directly.
-    Across steps they must not: each step is a separate remark ("Opening the
-    page." / "Now searching.") and running them together produces one unreadable
-    paragraph. Steps that produced no text drop out.
-    """
-    # Force a 0 boundary: an empty step_starts, or one that begins past the
-    # first delta, would otherwise leave that text outside every window and
-    # return it as nothing.
+    """Join deltas within each step and separate nonempty steps with a blank line."""
+    # Always start at zero so leading deltas cannot fall outside every step.
     bounds = sorted({0, *step_starts, len(collected)})
     parts = []
     for begin, end in pairwise(bounds):
@@ -48,15 +39,7 @@ def join_steps(collected: list[str], step_starts: list[int]) -> str:
 
 
 class StreamJoiner:
-    """Incremental equivalent of :func:`join_steps` for a live stream.
-
-    ``join_steps`` re-joins everything collected so far on every delta: O(n) per
-    token, O(n^2) over an answer. Only the open step can grow and stripping is
-    prefix-stable, so the new text follows from the tail alone and the full
-    transcript is built only when asked for.
-
-    :attr:`text` is byte-identical to ``join_steps`` at every point.
-    """
+    """Match join_steps incrementally without rebuilding the transcript on every delta."""
 
     __slots__ = ("_closed", "_open_parts", "_seen_nonws", "_pending_ws")
 
@@ -76,23 +59,18 @@ class StreamJoiner:
         self._pending_ws = ""
 
     def append(self, delta: str) -> str:
-        """Add a delta and return only the text it made visible.
-
-        Costs O(len(delta) + held-back whitespace), not O(transcript).
-        """
+        """Return newly visible text in O(delta + held whitespace), not O(transcript)."""
         self._open_parts.append(delta)
 
         if not self._seen_nonws:
-            # Leading whitespace in a step is dropped, so nothing is visible
-            # until the first real character arrives.
+            # Suppress leading whitespace until the step has visible text.
             head = delta.lstrip()
             if not head:
                 return ""
             self._seen_nonws = True
             visible = head.rstrip()
             self._pending_ws = head[len(visible):]
-            # Steps are separated by a blank line, and the separator only
-            # exists once a later step actually has text.
+            # Insert a separator only when a later step produces visible text.
             return ("\n\n" + visible) if self._closed else visible
 
         candidate = self._pending_ws + delta
@@ -111,17 +89,7 @@ class StreamJoiner:
 
 
 def split_answer(collected: list[str], step_starts: list[int]) -> tuple[str, str]:
-    """(full transcript, user-facing answer) for a finished run.
-
-    The answer is the narration of the last step that produced any text. A
-    multi-pass run otherwise concatenates every pass's narration and the final
-    message shows duplicated summaries. Crucially, a trailing step with no text
-    of its own — a tool-only round, or a re-observe/verify gate that ends the
-    run silently — must not blank the answer or fall back to dumping the whole
-    (duplicated) transcript, so walk back to the last step that actually spoke.
-    Memory extraction still gets the full transcript. One helper so the rule
-    can't drift between the SSE, NDJSON, and interrupted-stream paths.
-    """
+    """Return the full transcript and last nonempty step as the user-facing answer."""
     # `full` feeds memory extraction, not the chat, so it stays a raw transcript.
     full = "".join(collected)
     for start in reversed(step_starts):
@@ -134,17 +102,8 @@ def split_answer(collected: list[str], step_starts: list[int]) -> tuple[str, str
 # How long an approval card stays actionable before the run gives up.
 _APPROVAL_TIMEOUT_MS = 120_000
 
-# Clients send the decision the UI offered — approve_once / approve_always /
-# deny (see ApprovalRequestModel). Plain "approve" is accepted for older
-# callers. Anything else, including an empty payload, denies.
+# Accept UI approval values and legacy approve; unknown or empty decisions deny.
 _APPROVE_DECISIONS = frozenset({"approve", "approve_once", "approve_always"})
-
-
-def approval_granted(result: dict[str, Any] | None) -> bool:
-    """Whether an approval response allows the operation to proceed."""
-    if not result:
-        return False
-    return str(result.get("decision", "")).strip().lower() in _APPROVE_DECISIONS
 
 
 # SSE Client Manager
@@ -248,12 +207,7 @@ class WsClientManager:
 
 
 def create_app() -> Any:
-    """Create and configure the FastAPI application.
-
-    Returns a FastAPI instance with all routes, middleware, and event
-    handlers configured.  All internal helpers are defined inside this
-    function so they share the same closure over application state.
-    """
+    """Create the FastAPI app with shared state, routes and event handlers."""
     try:
         from fastapi import (
             Depends,
@@ -353,9 +307,7 @@ def create_app() -> Any:
 
     # Middleware
 
-    # CORS - use restrictive policy from cors_policy module.
-    # Default (no RUNE_CORS_ORIGINS env): same-origin only.
-    # To allow specific origins: RUNE_CORS_ORIGINS=http://localhost:3000,https://app.example.com
+    # Default to same-origin; RUNE_CORS_ORIGINS explicitly permits additional origins.
     from rune.api.cors_policy import get_allowed_origins_from_env
 
     _cors_origins_env = get_allowed_origins_from_env()
@@ -396,6 +348,8 @@ def create_app() -> Any:
     # REST API routers
     from rune.api.handlers.mcp import router as mcp_router
     app.include_router(mcp_router, prefix="/api/v1")
+    from rune.api.handlers.proactive import router as proactive_router
+    app.include_router(proactive_router, prefix="/api/v1")
 
     # Request / Response models
 
@@ -431,8 +385,7 @@ def create_app() -> Any:
         text: str = ""
         request_id: str = Field(default="", alias="requestId", max_length=128)
         attachments: list[MessageAttachment] | None = None
-        # Conversation pin; without it the server-side sticky conversation
-        # keeps live-chat continuity.
+        # Without an explicit session, preserve the server's sticky conversation.
         session_id: str | None = Field(default=None, alias="sessionId")
 
         model_config = ConfigDict(populate_by_name=True)
@@ -517,11 +470,7 @@ def create_app() -> Any:
         resume_from: dict[str, Any] | None = None,
         resume_records: list[dict[str, Any]] | None = None,
     ) -> str:
-        """Run the agent and broadcast progress to SSE/WS clients.
-
-        session_id selects the conversation used for history. With no ID,
-        sticky reuses the default web conversation; headless callers leave it off.
-        """
+        """Run and broadcast progress; sticky mode reuses the default web conversation."""
         trace = None
         computer = None
         try:
@@ -552,8 +501,7 @@ def create_app() -> Any:
             _run_snapshots.start(run_id, conv_id or session_id or "", goal)
 
             workspace = await conv_wiring.get_workspace(conv_id or "")
-            # Use the user workspace rather than the daemon's launch directory.
-            # Leave pinned_cwd unset so @path can still override it.
+            # Use the user workspace while leaving @path free to override it.
             from rune.utils.paths import user_workspace
             turn_cwd = workspace or str(user_workspace())
             if resume_from is not None:
@@ -596,77 +544,28 @@ def create_app() -> Any:
             loop = NativeAgentLoop(config=agent_config) if agent_config else NativeAgentLoop()
             _active_loops[run_id] = loop
 
-            approval_lock = asyncio.Lock()
-
-            @timed("approval")
-            async def _request_approval(command: str, reason: str) -> bool:
-                approval_id = f"approval:{run_id}:{uuid4().hex}"
-                approval_future: asyncio.Future[dict[str, Any]] = (
-                    asyncio.get_running_loop().create_future()
-                )
-                _pending_approvals[approval_id] = approval_future
-                await _broadcast(
-                    "approval_request",
-                    {
-                        "id": approval_id,
-                        "command": command,
-                        # No risk level is supplied by this callback.
-                        "riskLevel": "",
-                        "reason": reason,
-                        "timeoutMs": _APPROVAL_TIMEOUT_MS,
-                        "expiresAt": time.time() * 1000 + _APPROVAL_TIMEOUT_MS,
-                        "runId": run_id,
-                    },
-                )
-                try:
-                    result = await asyncio.wait_for(
-                        approval_future, timeout=_APPROVAL_TIMEOUT_MS / 1000
-                    )
-                    return approval_granted(result)
-                except TimeoutError:
-                    return False
-                finally:
-                    _pending_approvals.pop(approval_id, None)
-                    await _broadcast("approval_closed", {"id": approval_id, "runId": run_id})
-
-            async def _web_approval_callback(command: str, reason: str) -> bool:
-                async with approval_lock:
-                    return await _request_approval(command, reason)
+            _web_approval_callback = approval_callback(
+                run_id, _pending_approvals, _broadcast, timeout_ms=_APPROVAL_TIMEOUT_MS,
+            )
 
             loop.set_approval_callback(_web_approval_callback)
 
-            @timed("question")
-            async def _web_ask_user_callback(
-                params: AskUserParams,
-            ) -> UserResponse:
-                from rune.agent.loop import current_tool_call_id
-
-                question_id = f"question:{run_id}:{uuid4().hex}"
-                pending = PendingQuestion(params)
-                _pending_questions[question_id] = pending
-                try:
-                    await _broadcast("question", {
-                        **question_payload(params, question_id, run_id, current_tool_call_id()),
-                        "expiresAt": time.time() * 1000 + 300_000,
-                    })
-                    return await asyncio.wait_for(pending.future, timeout=300.0)
-                except TimeoutError:
-                    raise TimeoutError("Question expired without a user response") from None
-                finally:
-                    _pending_questions.pop(question_id, None)
-                    if not pending.future.done():
-                        pending.future.cancel()
-                    await _broadcast("question_closed", {"id": question_id, "runId": run_id})
-
-            loop.set_ask_user_callback(_web_ask_user_callback)
+            from rune.api.questions import question_callback
+            loop.set_ask_user_callback(question_callback(run_id, _pending_questions, _broadcast))
 
             journal = ExecutionJournal(_run_store, run_id, agent_ctx.workspace_root,
                                        previous=resume_records if resume_from is not None else None,
                                        approval=_web_approval_callback)
             computer.journal = journal
+            from rune.safety.execution_environment import environment_scope, execution_config
+            run_environment = execution_config()
+            previous_environment = (resume_from or {}).get("execution", {}).get("environment")
+            if previous_environment is not None and previous_environment != run_environment.model_dump(mode="json"):
+                raise RecoveryBlocked("Execution environment settings changed before continuation could start.")
             _run_snapshots.record("run_context", {
                 "runId": run_id, "workspace": agent_ctx.workspace_root, "recoveryVersion": 1,
-                "execution": {"attachments": stored or attachments or []},
+                "execution": {"attachments": stored or attachments or [],
+                              "environment": run_environment.model_dump(mode="json")},
             })
 
             collected: list[str] = []
@@ -802,11 +701,18 @@ def create_app() -> Any:
                 run_context["recovery_written_files"] = recovery_written_files(resume_records or [])
             with journal_scope(journal):
                 async with _computers.bind(computer):
-                    trace = await loop.run(
-                        agent_ctx.goal, context=run_context,
-                        message_history=agent_ctx.messages if agent_ctx.messages else None,
-                        **continuation,
-                    )
+                    with environment_scope(agent_ctx.workspace_root, run_environment):
+                        if resume_from is not None:
+                            from rune.api.approval_recovery import resume_approval
+                            resumed = await resume_approval(resume_from, journal, _web_approval_callback, _broadcast)
+                            records = [*(resume_records or []), *resumed]
+                            continuation["extra_system_context"] = recovery_context(resume_from, records)
+                            run_context["recovery_written_files"] = recovery_written_files(records)
+                        trace = await loop.run(
+                            agent_ctx.goal, context=run_context,
+                            message_history=agent_ctx.messages if agent_ctx.messages else None,
+                            **continuation,
+                        )
                 journal.check()
             loop_finished = time.monotonic()
             full_text, answer = split_answer(collected, _step_starts)
@@ -838,7 +744,7 @@ def create_app() -> Any:
                 "agent_complete",
                 {
                     "runId": run_id,
-                    "success": trace.reason == "completed",
+                    "success": run_outcome(trace).success,
                     "answer": answer,
                     "durationMs": duration_ms,
                     "usage": usage_payload(trace),
@@ -857,7 +763,8 @@ def create_app() -> Any:
             log.error("agent_execution_error", run_id=run_id, error=str(exc))
             await _broadcast(
                 "agent_error",
-                {"runId": run_id, "error": f"Agent execution failed: {type(exc).__name__}"},
+                {"runId": run_id, "error": str(exc) if isinstance(exc, RecoveryBlocked)
+                 else f"Agent execution failed: {type(exc).__name__}"},
             )
             return f"error: {type(exc).__name__}"
         finally:
@@ -868,14 +775,11 @@ def create_app() -> Any:
     async def _ndjson_execution(
         goal: str, run_id: str, session_id: str | None = None
     ) -> AsyncGenerator[str]:
-        """Stream a run as NDJSON, sharing history only with an explicit session.
-
-        Save the answer before emitting completion. The finally block also
-        saves partial answers when a disconnect interrupts the stream.
-        """
+        """Stream NDJSON for an explicit session, saving complete or interrupted answers."""
         conv_manager: Any | None = None
         conv_id: str | None = None
         loop = None
+        computer = None
         run_task: asyncio.Task[Any] | None = None
         assistant_save_attempted = False
         collected: list[str] = []
@@ -946,38 +850,28 @@ def create_app() -> Any:
                 if data is not None:
                     await event_queue.put({**frame, "data": data})
 
-            # 2. NDJSON is unidirectional (server→client) - no way to receive
-            #    approval/question responses. Use auto-approve + autonomous mode.
-            async def _ndjson_approval_cb(command: str, risk_level: str) -> bool:
-                await _enqueue(
-                    {
-                        "event": "approval_request",
-                        "data": {
-                            "id": f"ndjson:{run_id}:{uuid4().hex}",
-                            "command": command,
-                            "riskLevel": risk_level,
-                            "runId": run_id,
-                            "autoApproved": True,
-                        },
-                    }
-                )
-                return True
+            async def _approval_event(event: str, data: dict[str, Any]) -> None:
+                await _enqueue({"event": event, "data": data})
+
+            _ndjson_approval_cb = approval_callback(
+                run_id, _pending_approvals, _approval_event, timeout_ms=_APPROVAL_TIMEOUT_MS,
+            )
 
             loop.set_approval_callback(_ndjson_approval_cb)
 
-            async def _ndjson_ask_user_cb(
-                params: AskUserParams,
-            ) -> UserResponse:
-                await _enqueue(
-                    {
-                        "event": "question",
-                        "data": {**question_payload(params, f"ndjson:{run_id}:{uuid4().hex}", run_id),
-                                 "autonomous": True},
-                    }
-                )
-                return user_response(params, "")
+            from rune.api.questions import question_callback
+            from rune.safety.execution_environment import environment_scope, execution_config
 
-            loop.set_ask_user_callback(_ndjson_ask_user_cb)
+            loop.set_ask_user_callback(question_callback(run_id, _pending_questions, _approval_event))
+            _run_recovery.workspace_available(run_id, agent_ctx.workspace_root, resuming=False)
+            computer = await _computers.claim(conv_id or session_id or run_id, run_id)
+            journal = ExecutionJournal(_run_store, run_id, agent_ctx.workspace_root, approval=_ndjson_approval_cb)
+            computer.journal = journal
+            run_environment = execution_config()
+            _run_snapshots.record("run_context", {
+                "runId": run_id, "workspace": agent_ctx.workspace_root, "recoveryVersion": 1,
+                "execution": {"environment": run_environment.model_dump(mode="json")},
+            })
 
             async def _on_step(step: int) -> None:
                 _step_starts.append(len(collected))
@@ -990,10 +884,7 @@ def create_app() -> Any:
                 )
 
             async def _on_text(delta: str) -> None:
-                # /ws is documented as sending the whole transcript, so the
-                # format stays. The joiner says cheaply whether this delta made
-                # anything visible; when it did not, skip the frame and the
-                # rebuild it would cost.
+                # Keep the /ws transcript format, but skip frames when no visible text changed.
                 collected.append(delta)
                 if not _ws_joiner.append(delta):
                     return
@@ -1039,17 +930,19 @@ def create_app() -> Any:
             loop.on("tool_result", _on_tool_result)
 
             _run_start_time = time.monotonic()
-            run_task = asyncio.create_task(
-                loop.run(
-                    agent_ctx.goal,
-                    # No attachments here: this endpoint takes text only.
-                    context={"workspace_root": agent_ctx.workspace_root,
-                             "original_goal": agent_ctx.original_goal or agent_ctx.goal},
-                    message_history=(
-                        agent_ctx.messages if agent_ctx.messages else None
-                    ),
-                )
-            )
+            async def execute_stream():
+                with journal_scope(journal), environment_scope(agent_ctx.workspace_root, run_environment):
+                    async with _computers.bind(computer):
+                        trace = await loop.run(
+                            agent_ctx.goal,
+                            context={"workspace_root": agent_ctx.workspace_root,
+                                     "original_goal": agent_ctx.original_goal or agent_ctx.goal},
+                            message_history=agent_ctx.messages if agent_ctx.messages else None,
+                        )
+                    journal.check()
+                    return trace
+
+            run_task = asyncio.create_task(execute_stream())
             _active_tasks[run_id] = run_task
             run_task.add_done_callback(lambda _: event_queue.put_nowait(None))
 
@@ -1097,7 +990,7 @@ def create_app() -> Any:
                         "event": "agent_aborted" if cancelled else "agent_complete",
                         "data": {
                             "runId": run_id,
-                            "success": not cancelled and getattr(trace, "reason", "") == "completed",
+                            "success": not cancelled and run_outcome(trace).success,
                             "answer": answer,
                             "durationMs": duration_ms,
                             "usage": usage_payload(trace),
@@ -1123,7 +1016,6 @@ def create_app() -> Any:
                 + "\n"
             )
         finally:
-            _run_snapshots.record("agent_interrupted", {"runId": run_id, "interruptionReason": "stream_disconnected"})
             if run_task is not None and not run_task.done():
                 run_task.cancel()
                 try:
@@ -1132,6 +1024,9 @@ def create_app() -> Any:
                     log.debug("ndjson_run_cancelled", run_id=run_id)
                 except Exception as exc:
                     log.warning("ndjson_cleanup_failed", run_id=run_id, error=str(exc))
+            _run_snapshots.record("agent_interrupted", {"runId": run_id, "interruptionReason": "stream_disconnected"})
+            if computer is not None:
+                _computers.finish(computer, run_id)
             _active_loops.pop(run_id, None)
             _finish_run(run_id)
             # A disconnect can skip the save before the completion event.
@@ -1146,9 +1041,7 @@ def create_app() -> Any:
                 )
 
     def _make_action_run_agent(session_id: str | None) -> Any:
-        """Closure for slash-command actions (e.g. /escalate) that need to run
-        a full agent turn on the live conversation with an optional per-run
-        model override — without mutating global config."""
+        """Run a slash-command turn with optional model overrides scoped to that run."""
 
         async def _run(goal: str, agent_config: Any = None) -> str:
             run_id, session, _ = await _admission.accept(goal, session_id, sticky=True)
@@ -1264,9 +1157,7 @@ def create_app() -> Any:
             task.add_done_callback(lambda _t, rid=child["runId"]: _finish_run(rid))
         return {"ok": True, "runId": child["runId"], "sessionId": child["sessionId"]}
 
-    # Embedded terminal WebSocket (/ws/terminal) — opt-in, token-gated.
-    # Protocol (terminado-style JSON arrays): client→ ["stdin", text] /
-    # ["set_size", rows, cols]; server→ ["stdout", text] / ["disconnect", 1].
+    # Terminal protocol: stdin/set_size requests and stdout/disconnect responses as JSON arrays.
 
     @app.websocket("/ws/terminal")
     async def terminal_endpoint(ws: WebSocket) -> None:
@@ -1284,16 +1175,13 @@ def create_app() -> Any:
         if not is_localhost_request(ws.client.host if ws.client else ""):
             await ws.close(code=4001, reason="Terminal is local-only")
             return
-        # Origin/CSRF check (browsers don't apply same-origin to WebSockets),
-        # mirroring /ws — defense-in-depth against a cross-site handshake on top
-        # of the single-use token.
+        # Check WebSocket origins as well as tokens to reject cross-site handshakes.
         server_port = ws.scope.get("server", (None, 0))[1] or 0
         headers = {k.decode(): v.decode() for k, v in ws.scope.get("headers", [])}
         if not is_trusted_local_bypass_request(headers, server_port):
             await ws.close(code=4001, reason="Cross-origin terminal handshake refused")
             return
-        # Short-lived, single-use token minted via the auth-gated terminal.token
-        # RPC. NOTE: same-origin renderer XSS can mint one — see terminal.py.
+        # Use a single-use terminal token; same-origin renderer XSS can still mint one.
         workspace = term.redeem_token(ws.query_params.get("token", ""))
         if workspace is None:
             await ws.close(code=4001, reason="Invalid or spent terminal token")
@@ -1349,29 +1237,27 @@ def create_app() -> Any:
 
     @app.websocket("/ws")
     async def websocket_endpoint(ws: WebSocket) -> None:
-        # Authenticate WebSocket connections using the same local auth
-        # guard as HTTP endpoints.  Non-localhost connections require a
-        # Bearer token via the ``token`` query parameter.
-        from rune.api.auth import verify_token
+        # Match HTTP authentication; query tokens remain for older clients.
+        from rune.api.auth import token_required, verify_token
         from rune.api.local_auth_guard import (
             is_localhost_request,
             is_trusted_local_bypass_request,
         )
 
         client_host = ws.client.host if ws.client else ""
-        is_local = is_localhost_request(client_host)
+        is_local = is_localhost_request(client_host) and not token_required()
+        scheme, _, bearer = ws.headers.get("authorization", "").partition(" ")
+        token = bearer if scheme.lower() == "bearer" else ws.query_params.get("token", "")
 
         if is_local:
             server_port = ws.scope.get("server", (None, 0))[1] or 0
             headers = {k.decode(): v.decode() for k, v in ws.scope.get("headers", [])}
             if not is_trusted_local_bypass_request(headers, server_port):
                 # Local but cross-origin - require token
-                token = ws.query_params.get("token", "")
                 if not verify_token(token):
                     await ws.close(code=4001, reason="Unauthorized")
                     return
         else:
-            token = ws.query_params.get("token", "")
             if not verify_token(token):
                 await ws.close(code=4001, reason="Unauthorized")
                 return
@@ -1523,8 +1409,7 @@ def create_app() -> Any:
 
     @app.post("/api/message", dependencies=[Depends(auth)])
     async def api_message(req: MessageRequest) -> dict[str, Any]:
-        # Slash commands run without a chat turn; __ACTION__ markers execute
-        # server-side and the result goes out as a command_result SSE event.
+        # Execute slash-command actions server-side and emit command_result without a chat turn.
         if req.text.startswith("/"):
             from rune.api import command_actions
             from rune.slash_commands import COMMANDS, parse_slash_command
@@ -1606,11 +1491,7 @@ def create_app() -> Any:
 
     @app.post("/api/voice/transcribe", dependencies=[Depends(auth)])
     async def api_voice_transcribe(request: Request) -> dict[str, Any]:
-        """Transcribe uploaded audio (base64 JSON body) to text.
-
-        Brings the CLI --voice capability to the app: the client records via
-        MediaRecorder and sends {audio: <base64>, mimeType}.
-        """
+        """Transcribe base64 audio uploaded with its MIME type."""
         import base64
 
         try:
@@ -1787,11 +1668,7 @@ def create_app() -> Any:
 
     @app.post("/api/v1/rpc", dependencies=[Depends(auth)])
     async def rpc_dispatch(req: _RpcRequest) -> dict[str, Any]:  # type: ignore[type-arg]
-        """Unified RPC endpoint for web UI.
-
-        Accepts ``{method, params}`` and dispatches to the appropriate
-        handler function, returning ``{success, data, error, timestamp}``.
-        """
+        """Dispatch {method, params} and return {success, data, error, timestamp}."""
         method = req.method
         params = req.params or {}
         ts = __import__("datetime").datetime.now(
@@ -1812,8 +1689,7 @@ def create_app() -> Any:
             }
 
         try:
-            # sessions — canonical conversation store, same id space as
-            # /sessions, /load and the live-chat sessionId.
+            # Use the same conversation IDs as session commands and live chat.
             if method == "sessions.list":
                 from rune.api import conversation_wiring
 
@@ -1869,8 +1745,7 @@ def create_app() -> Any:
                 params.get("sessionId", "")
                 return _ok({"events": [], "runs": []})
 
-            # workspace — a directory pinned per conversation; the agent runs
-            # there and the app's file/diff views read from it.
+            # Share the conversation workspace between agent execution and file/diff views.
             elif method == "workspace.get":
                 from rune.api import conversation_wiring
 
@@ -1900,17 +1775,12 @@ def create_app() -> Any:
                 return _ok({"paths": recents})
 
             elif method == "workspace.listdirs":
-                # Subdirectories under `dir` (default home), for the folder
-                # picker's type-ahead. Local single-user daemon: listing the
-                # user's own filesystem to choose a project folder is expected.
+                # List subdirectories for the local user's workspace picker.
                 raw = params.get("dir", "") or "~"
                 _skip_dirs = {"__pycache__", "node_modules", ".git"}
 
                 def _scan(raw_dir: str) -> tuple[str, str, list[str]]:
-                    # ALL filesystem work (is_dir/resolve/scandir) runs here,
-                    # off the event loop, so a hung mount (`/Volumes/stale-nfs`)
-                    # can't freeze the daemon. Early-break at the cap bounds a
-                    # 100k-entry dir.
+                    # Scan off-thread and stop at the cap to bound large directories.
                     base = Path(raw_dir).expanduser()
                     if not base.is_dir():
                         base = base.parent if base.parent.is_dir() else Path.home()
@@ -1922,9 +1792,7 @@ def create_app() -> Any:
                             if name.startswith(".") or name in _skip_dirs:
                                 continue
                             try:
-                                # Follow symlinks so symlinked project dirs
-                                # (~/dev, /tmp on macOS) still show — safe here
-                                # because we're off the event loop.
+                                # Follow symlinked project directories off-thread.
                                 if de.is_dir():
                                     names.append(name)
                             except OSError:
@@ -1956,9 +1824,7 @@ def create_app() -> Any:
                 return _ok({"diff": text})
 
             elif method == "escalation.status":
-                # Powers the trust card's "retry on a stronger model" ladder:
-                # is a stronger model configured, which one, and does using it
-                # send data off the machine (cloud) vs stay local.
+                # Show the escalation model and whether it sends data to the cloud.
                 from rune.config import get_config as _gc
 
                 _lcfg = _gc().llm
@@ -1972,10 +1838,7 @@ def create_app() -> Any:
                         _model = get_llm_client().resolve_model(
                             ModelTier.BEST, Provider(_prov),
                         )
-                # When unconfigured, suggest the strongest INSTALLED local model
-                # that clears the current model's tier — a single-jump local
-                # candidate the user can accept in one click (no auto-run, no
-                # multi-rung ladder; see escalation-ladder-research).
+                # Suggest a stronger installed local model for the user to select.
                 _suggestion = ""
                 if not _prov:
                     with suppress(Exception):
@@ -1991,18 +1854,14 @@ def create_app() -> Any:
                     "enabled": bool(_prov),
                     "provider": _prov,
                     "model": _model,
-                    # ollama is the only local provider; everything else leaves
-                    # the machine.
+                    # Only Ollama is a local provider here.
                     "isCloud": bool(_prov) and _prov != "ollama",
                     # Local single-jump candidate when nothing is configured.
                     "suggestion": _suggestion,
                 })
 
             elif method == "escalation.set":
-                # Accept a suggested (or user-chosen) escalation model for this
-                # session — the "click to use this local model" path. Sets the
-                # in-memory config that resolve/escalate read; the user can
-                # still change it in Settings.
+                # Set the session escalation model; Settings can still change it.
                 from rune.config import get_config as _gc
 
                 _prov = str(params.get("provider", "")).strip()
@@ -2049,9 +1908,7 @@ def create_app() -> Any:
                     except ValueError:
                         # e.g. embedded null byte in the path.
                         return ("forbidden", "Invalid path")
-                    # Jail: resolved target must sit inside the resolved
-                    # workspace (defeats .., absolute paths, and symlinks —
-                    # resolve() follows links before the prefix check).
+                    # Resolve symlinks before enforcing workspace containment.
                     if target != root and not str(target).startswith(
                         str(root) + os.sep
                     ):
@@ -2107,7 +1964,7 @@ def create_app() -> Any:
                 result = await delete_skill(params.get("name") or "")
                 return _ok(result)
 
-            # -- env --
+            # env
             elif method == "env.list":
                 from rune.api.handlers.env import list_env
                 result = await list_env(scope=params.get("scope"))
@@ -2166,6 +2023,11 @@ def create_app() -> Any:
                 result = await delete_cron_job(job_id)
                 return _ok(result)
 
+            elif method == "cron.reconcile":
+                from rune.api.handlers.cron import ReconcileRequest, reconcile_cron_job
+                job_id = params.pop("jobId", "")
+                return _ok(await reconcile_cron_job(job_id, ReconcileRequest(**params)))
+
             # health
             elif method == "health":
                 from rune.api.handlers.health import health
@@ -2179,8 +2041,7 @@ def create_app() -> Any:
                 return _ok(result)
 
             elif method == "channels.restart":
-                # Stop and start the adapter for real, so the Settings button
-                # reports what actually happened.
+                # Restart the adapter so Settings reports its actual state.
                 from rune.channels.registry import get_channel_registry
 
                 _cname = str(params.get("name", "")).strip()
@@ -2234,15 +2095,12 @@ def create_app() -> Any:
                         "aliases": c.aliases,
                     }
                     for c in COMMANDS.values()
-                    # Commands whose action only the TUI implements would answer
-                    # "not available here"; the palette should not offer them.
+                    # Hide commands whose actions are only available in the TUI.
                     if not c.hidden and c.name.lstrip("/") not in WEB_UNSUPPORTED_COMMANDS
                 ])
 
             elif method == "runs.active":
-                # Which runs are still going. A client whose event stream
-                # dropped mid-run has no other way to learn the run ended, and
-                # would sit on "running" until the page was reloaded.
+                # Expose active runs so clients can recover after losing their event stream.
                 return _ok({
                     "runIds": sorted(set(_active_loops) | set(_active_tasks)),
                 })
@@ -2251,9 +2109,7 @@ def create_app() -> Any:
                 from rune.llm.client import prime_ollama_installed
                 from rune.llm.models import selectable_models
 
-                # Fill the local-model cache off the loop first; known_models
-                # only reads it, so probing here would stall every other
-                # request (SSE heartbeats, a run's text_delta) on localhost.
+                # Warm the local-model cache off-thread before reading known_models.
                 await prime_ollama_installed()
                 providers: dict[str, list[str]] = {}
                 for prov, model in await selectable_models():
@@ -2270,8 +2126,7 @@ def create_app() -> Any:
                 _model = str(params.get("model", "")).strip()
                 if not _prov or not _model:
                     return _err("invalid", "provider and model required")
-                # An unknown provider would be written to config.yaml and then
-                # blow up Provider() on the next start, with the bad value on disk.
+                # Reject unknown providers before persisting a configuration that cannot load.
                 from rune.types import Provider as _Provider
                 try:
                     _Provider(_prov)

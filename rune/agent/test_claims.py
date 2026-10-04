@@ -29,10 +29,6 @@ _EXPLANATION_PROPERTIES = {
 }
 _REFERENCE_PROPERTIES = {key: value for key, value in _EXPLANATION_PROPERTIES.items() if key != "evidence_quote"}
 _REFERENCE_PROPERTIES["evidence_id"] = {"type": "string", "description": "Observation ID, not a test run ID."}
-_REFERENCE_PROPERTIES["evidence_lines"] = {
-    "type": "array", "items": {"type": "integer", "minimum": 1}, "minItems": 1, "maxItems": 4,
-    "description": "One to four consecutive line numbers in the cited observation.",
-}
 _RESULT_PROPERTIES = {
     "source_line": {"type": "integer"},
     "quote": {"type": "string", "description": "Short verbatim answer span containing this claim."},
@@ -66,7 +62,8 @@ For claims covering an input class or a direction of change, return an explanati
 supported (needs_correction=false). Briefly test the claimed scope against the code: unchanged results,
 boundaries and signs where relevant. A passing baseline refutes a claim that every original result was wrong.
 For other explanations, report only concrete contradictions or unobserved test-specific inputs/assertions.
-Cite answer and evidence lines, give a short reason, then set needs_correction. Do not demand new tests.
+Cite an answer line and an observation ID, give a short reason identifying the relevant code or result,
+then set needs_correction. Rune retrieves the complete bounded observation. Do not demand new tests.
 
 Test results: extract only explicit answer claims, unchanged, once per run/test/metric/value. The recorded
 runs are references, never claims to invent. Function outputs/exceptions are behavior, not test outcomes;
@@ -127,20 +124,27 @@ def referenced_explanations(issues: Any, observations: list[dict]) -> list[dict]
     known = {f"observation_{record['id']}": record for record in observations}
     resolved = []
     for issue in issues:
-        if not isinstance(issue, dict) or set(issue) != set(_REFERENCE_PROPERTIES):
+        if not isinstance(issue, dict) or set(issue) not in (
+            set(_REFERENCE_PROPERTIES), set(_REFERENCE_PROPERTIES) | {"evidence_lines"}
+        ):
             raise ValueError("Invalid explanation-review fields")
         reference = {key: value for key, value in issue.items() if key != "evidence_lines"}
         reference["evidence_quote"] = ""
         if issue["needs_correction"] is not False:
-            identity, numbers = issue["evidence_id"], issue["evidence_lines"]
-            if (not isinstance(identity, str) or identity not in known or not isinstance(numbers, list)
+            identity = issue["evidence_id"]
+            if not isinstance(identity, str) or identity not in known:
+                raise ValueError("The explanation cites an unrecorded observation")
+            lines = known[identity]["text"].splitlines()
+            numbers = issue.get("evidence_lines")
+            if numbers is not None and (not isinstance(numbers, list)
                     or not 1 <= len(numbers) <= 4 or any(type(n) is not int for n in numbers)
                     or numbers != list(range(numbers[0], numbers[0] + len(numbers)))
-                    or not 1 <= numbers[0] <= numbers[-1] <= len(known[identity]["text"].splitlines())):
+                    or not 1 <= numbers[0] <= numbers[-1] <= len(lines)):
                 raise ValueError("The explanation cites unrecorded evidence lines")
             reference["evidence_id"] = known[identity]["id"]
-            lines = known[identity]["text"].splitlines()
-            reference["evidence_quote"] = "\n".join(lines[n - 1] for n in numbers)
+            reference["evidence_quote"] = (
+                "\n".join(lines[n - 1] for n in numbers) if numbers is not None else known[identity]["text"]
+            )
         resolved.append(reference)
     return resolved
 
@@ -370,7 +374,7 @@ class TestClaimGate:
             self.attempts = 2
             return "The final answer contains no reviewable explanation."
         payload = json.dumps({"answer_lines": answer_lines, "recorded_runs": claim_runs(evidence),
-                              "code_observations": [{"id": f"observation_{record['id']}", "lines": dict(enumerate(record["text"].splitlines(), 1))}
+                              "code_observations": [{"id": f"observation_{record['id']}", "text": record["text"]}
                                                     for record in observations]}, ensure_ascii=False, separators=(",", ":"))
         if len(payload) > 40000:
             return "The test summary exceeds the bounded claim-review scope. Report only directly recorded checks."

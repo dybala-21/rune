@@ -1,10 +1,8 @@
-"""Unit tests for the Requirement-Adherence Gate (rune/agent/requirement_gate.py).
-
-The single LLM entry point ``_completion`` is monkeypatched so no network is
-needed and each branch (pass / fail / skip / fail-safe) is exercised directly.
-"""
+"""Exercise requirement verdicts with a mocked completion boundary."""
 
 from __future__ import annotations
+
+import pytest
 
 from rune.agent import requirement_gate as rg
 
@@ -47,13 +45,13 @@ async def test_extract_failsafe_on_llm_failure(monkeypatch):
 
 
 async def test_check_pass_when_no_unmet(monkeypatch):
-    _patch_completion(monkeypatch, ['{"unmet": []}'])
+    _patch_completion(monkeypatch, ['{"met": [0], "unmet": [], "unknown": []}'])
     state, msg = await rg.check_adherence(["r1"], "output")
     assert state == "pass" and msg is None
 
 
 async def test_check_fail_lists_unmet(monkeypatch):
-    _patch_completion(monkeypatch, ['{"unmet": ["exactly 2 bullets"]}'])
+    _patch_completion(monkeypatch, ['{"met": [], "unmet": [0], "unknown": []}'])
     state, msg = await rg.check_adherence(["exactly 2 bullets"], "output")
     assert state == "fail"
     assert "exactly 2 bullets" in msg
@@ -78,9 +76,9 @@ async def test_check_skip_on_empty_checklist(monkeypatch):
 
 
 async def test_gate_extracts_once_and_caches(monkeypatch):
-    monkeypatch.setattr(rg, "checker_capable", lambda: True)
+    monkeypatch.setattr(rg, "checker_available", lambda: True)
     calls = _patch_completion(
-        monkeypatch, ['["r1"]', '{"unmet": []}', '{"unmet": []}']
+        monkeypatch, ['["r1"]', '{"met": [0], "unmet": [], "unknown": []}', '{"met": [0], "unmet": [], "unknown": []}']
     )
     gate = rg.RequirementGate("a task")
     s1, _ = await gate.verdict("out1")
@@ -92,7 +90,7 @@ async def test_gate_extracts_once_and_caches(monkeypatch):
 
 async def test_gate_passes_when_no_checklist(monkeypatch):
     # Empty checklist -> nothing to block on; never calls the checker.
-    monkeypatch.setattr(rg, "checker_capable", lambda: True)
+    monkeypatch.setattr(rg, "checker_available", lambda: True)
     calls = _patch_completion(monkeypatch, ["[]"])
     gate = rg.RequirementGate("trivial")
     state, msg = await gate.verdict("anything")
@@ -100,23 +98,23 @@ async def test_gate_passes_when_no_checklist(monkeypatch):
     assert calls["n"] == 1  # only the extraction call
 
 
-async def test_gate_skips_when_weak_and_no_escalation(monkeypatch):
-    # Weak active checker AND no escalation judge configured -> skip (no judge).
-    monkeypatch.setattr(rg, "checker_capable", lambda: False)
+async def test_gate_skips_when_unavailable_and_no_escalation(monkeypatch):
+    # Unavailable checker and no configured fallback cannot produce a verdict.
+    monkeypatch.setattr(rg, "checker_available", lambda: False)
     monkeypatch.setattr(rg, "escalation_judge", lambda: None)
-    calls = _patch_completion(monkeypatch, ['["r1"]', '{"unmet": ["r1"]}'])
+    calls = _patch_completion(monkeypatch, ['["r1"]', '{"met": [], "unmet": [0], "unknown": []}'])
     gate = rg.RequirementGate("a task")
     state, msg = await gate.verdict("output")
     assert state == "skip" and msg is None
-    assert calls["n"] == 0  # never extracts: no capable judge to reach
+    assert calls["n"] == 0  # never extracts without a configured model
 
 
-async def test_gate_routes_to_escalation_when_checker_weak(monkeypatch):
-    # Weak active checker but an escalation judge is configured -> route to it.
+async def test_gate_routes_to_escalation_when_checker_unavailable(monkeypatch):
+    # Use the configured fallback when the active checker is unavailable.
     judge = ("anthropic", "claude-sonnet-4-5")
-    monkeypatch.setattr(rg, "checker_capable", lambda: False)
+    monkeypatch.setattr(rg, "checker_available", lambda: False)
     monkeypatch.setattr(rg, "escalation_judge", lambda: judge)
-    calls = _patch_completion(monkeypatch, ['["r1"]', '{"unmet": ["r1"]}'])
+    calls = _patch_completion(monkeypatch, ['["r1"]', '{"met": [], "unmet": [0], "unknown": []}'])
     gate = rg.RequirementGate("a task")
     state, msg = await gate.verdict("output")
     assert state == "fail" and "r1" in msg
@@ -125,13 +123,12 @@ async def test_gate_routes_to_escalation_when_checker_weak(monkeypatch):
 
 
 async def test_gate_escalates_when_active_check_call_fails(monkeypatch):
-    # Active checker is capable but its check CALL fails (None) -> do not silently
-    # pass; re-judge on the escalation judge (reusing the cached checklist).
+    # Retry a failed checker call with the escalation judge, reusing the checklist.
     judge = ("anthropic", "claude-sonnet-4-5")
-    monkeypatch.setattr(rg, "checker_capable", lambda: True)
+    monkeypatch.setattr(rg, "checker_available", lambda: True)
     monkeypatch.setattr(rg, "escalation_judge", lambda: judge)
     # extract ok (active), check fails (None), then check on escalation -> fail.
-    calls = _patch_completion(monkeypatch, ['["r1"]', None, '{"unmet": ["r1"]}'])
+    calls = _patch_completion(monkeypatch, ['["r1"]', None, '{"met": [], "unmet": [0], "unknown": []}'])
     gate = rg.RequirementGate("a task")
     state, msg = await gate.verdict("output")
     assert state == "fail" and "r1" in msg
@@ -140,10 +137,9 @@ async def test_gate_escalates_when_active_check_call_fails(monkeypatch):
 
 
 async def test_gate_skips_when_both_judges_fail(monkeypatch):
-    # Active check call fails and the escalation judge also fails -> skip, never
-    # a false block from an infra outage.
+    # If both judges fail, skip instead of inventing a failed requirement.
     judge = ("anthropic", "claude-sonnet-4-5")
-    monkeypatch.setattr(rg, "checker_capable", lambda: True)
+    monkeypatch.setattr(rg, "checker_available", lambda: True)
     monkeypatch.setattr(rg, "escalation_judge", lambda: judge)
     calls = _patch_completion(monkeypatch, ['["r1"]', None, None])
     gate = rg.RequirementGate("a task")
@@ -152,38 +148,82 @@ async def test_gate_skips_when_both_judges_fail(monkeypatch):
     assert calls["judges"] == [None, None, judge]
 
 
-def test_checker_capable_local_ollama_weak(monkeypatch):
+def test_checker_available_local_ollama(monkeypatch):
     import rune.config as cfgmod
     import rune.llm.client as clientmod
     monkeypatch.setattr(cfgmod, "get_config", lambda: type("C", (), {
         "llm": type("L", (), {"active_provider": "ollama", "default_provider": "ollama"})()})())
     monkeypatch.setattr(clientmod, "get_llm_client",
                         lambda: type("X", (), {"resolve_model": lambda self, t: "qwen2.5-coder:32b"})())
-    assert rg.checker_capable() is False
+    assert rg.checker_available() is True
 
 
-def test_checker_capable_ollama_cloud_strong(monkeypatch):
+def test_checker_available_ollama_cloud(monkeypatch):
     import rune.config as cfgmod
     import rune.llm.client as clientmod
     monkeypatch.setattr(cfgmod, "get_config", lambda: type("C", (), {
         "llm": type("L", (), {"active_provider": "ollama", "default_provider": "ollama"})()})())
     monkeypatch.setattr(clientmod, "get_llm_client",
                         lambda: type("X", (), {"resolve_model": lambda self, t: "qwen3-coder:480b-cloud"})())
-    assert rg.checker_capable() is True
+    assert rg.checker_available() is True
 
 
-def test_checker_capable_cloud_provider_strong(monkeypatch):
+def test_checker_available_cloud_provider(monkeypatch):
     import rune.config as cfgmod
     import rune.llm.client as clientmod
     monkeypatch.setattr(cfgmod, "get_config", lambda: type("C", (), {
         "llm": type("L", (), {"active_provider": "anthropic", "default_provider": "anthropic"})()})())
     monkeypatch.setattr(clientmod, "get_llm_client",
                         lambda: type("X", (), {"resolve_model": lambda self, t: "claude-sonnet-4-5"})())
-    assert rg.checker_capable() is True
+    assert rg.checker_available() is True
 
 
-async def test_checklist_capped(monkeypatch):
+async def test_oversized_checklist_is_inconclusive(monkeypatch):
     big = "[" + ",".join(f'"r{i}"' for i in range(50)) + "]"
     _patch_completion(monkeypatch, [big])
     items = await rg.extract_requirements("many")
-    assert len(items) == rg._MAX_CHECKLIST_ITEMS
+    assert items is None
+
+
+@pytest.mark.parametrize("reply", [
+    '{"unmet": []}',
+    '{"met": [0], "unmet": [], "unknown": []}',
+    '{"met": [0, 0], "unmet": [], "unknown": []}',
+    '{"met": [0, 2], "unmet": [], "unknown": []}',
+    '{"met": [false, true], "unmet": [], "unknown": []}',
+    '{"met": [0, 1], "unmet": [], "unknown": [1]}',
+])
+async def test_partial_or_invalid_review_never_passes(monkeypatch, reply):
+    _patch_completion(monkeypatch, [reply])
+    assert (await rg.check_adherence(["r1", "r2"], "output"))[0] == "skip"
+
+
+async def test_unknown_is_reported_without_another_judge_or_repeated_billing(monkeypatch):
+    monkeypatch.setattr(rg, "checker_available", lambda: True)
+    monkeypatch.setattr(rg, "escalation_judge", lambda: pytest.fail("Missing evidence is not a provider outage"))
+    calls = _patch_completion(monkeypatch, [
+        '["save file", "check layout"]',
+        '{"met": [0], "unmet": [], "unknown": [1]}',
+    ])
+    gate = rg.RequirementGate("save and check")
+    first = await gate.verdict("Saved file; layout not inspected")
+    assert first[0] == "skip" and "check layout" in first[1]
+    assert await gate.verdict("Saved file; layout not inspected") == first
+    assert calls["n"] == 2
+    assert gate.summary()["required"] and gate.summary()["status"] == "inconclusive"
+
+
+async def test_failed_calls_are_bounded_for_unchanged_evidence(monkeypatch):
+    monkeypatch.setattr(rg, "checker_available", lambda: True)
+    monkeypatch.setattr(rg, "escalation_judge", lambda: None)
+    calls = _patch_completion(monkeypatch, [None])
+    gate = rg.RequirementGate("task")
+    for _ in range(3):
+        assert await gate.verdict("output") == ("skip", None)
+    assert calls["n"] == 1 and gate.summary()["required"]
+
+
+async def test_requirement_review_does_not_hide_a_mismatch_behind_unknown(monkeypatch):
+    _patch_completion(monkeypatch, ['{"met": [], "unmet": [1], "unknown": [0]}'])
+    state, message = await rg.check_adherence(["layout", "preserve owner"], "Changed owner")
+    assert state == "fail" and "preserve owner" in message

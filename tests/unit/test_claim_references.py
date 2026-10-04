@@ -50,10 +50,12 @@ async def test_explanation_uses_literal_answer_and_observation(monkeypatch, stat
     client = AsyncMock()
     client.completion.return_value = {"choices": [{"message": {"content": json.dumps({
         "claims": [], "explanation_issues": [{"source_line": 3, "evidence_id": "observation_1",
-            "evidence_lines": [1], "reason": "Zero stays zero.", "needs_correction": True}],
+            "reason": "Zero stays zero.", "needs_correction": True}],
     })}}]}
     monkeypatch.setattr("rune.llm.client.get_llm_client", lambda: client)
     gate = ClaimGate(_observations=[{"id": 1, "text": "return value / 2"}])
     note = await gate.review(state, "Summary\n\nThe value **always decreases**.")
     assert "always decreases" in note and "Zero stays zero" in note
     client.completion.assert_awaited_once()
+    schema = client.completion.call_args.kwargs["response_format"]["json_schema"]["schema"]
+    assert "evidence_lines" not in schema["properties"]["explanation_issues"]["items"]["properties"]

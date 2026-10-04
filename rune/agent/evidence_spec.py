@@ -1,24 +1,4 @@
-"""Spec-driven verification for the Evidence Gate.
-
-Why this exists: letting the LLM emit a whole shell verification *script* proved
-unreliable — across runs it randomly produced a full-file check (slow → timeout),
-a first-rows-only check (Goodhart blind spot), or a proper multi-sample check.
-Prompting could not pin the script's shape (the same run-to-run variance that
-dominates this whole problem).
-
-Fix (separation of concerns): the LLM extracts only a small STRUCTURED SPEC
-(paths + run-command template + whether the transform is row-independent); the
-DETERMINISTIC CODE here does the sampling (first/mid/last disjoint slices),
-runs the artifact via a direct subprocess (Guardian-free trusted verifier), and
-byte-compares. This removes the LLM's freedom over the parts that caused
-timeouts and blind spots, while keeping the LLM only for semantic extraction it
-is good at.
-
-External-evidence basis (adversarial design review, 2026-06): a sample verifier
-must use MULTIPLE DISJOINT samples, not just first-N (sampling blind spot /
-Goodhart, measured 21.8–33% proxy-vs-hidden divergence on SWE-bench); and a
-timed-out check must be INCONCLUSIVE ("skip"), never read as pass.
-"""
+"""Extract verification specs with the model; sample, execute and compare them in code."""
 
 from __future__ import annotations
 
@@ -38,9 +18,7 @@ _DEFAULT_SAMPLE_ROWS = 100
 _LARGE_INPUT_THRESHOLD = 1000  # rows above which we sample instead of full-file
 _MAX_EVIDENCE_OUTPUT_CHARS = 4_000
 
-# A run-command template must contain the {INPUT} placeholder so the code can
-# substitute the (sampled or full) input copy. Artifact/expected paths are
-# substituted too when present.
+# Require {INPUT} for sample substitution; replace artifact and expected paths when present.
 _INPUT_PLACEHOLDER = "{INPUT}"
 
 _EXTRACT_SPEC_SYSTEM = (
@@ -102,7 +80,7 @@ def _coerce_spec(obj: dict[str, object]) -> VerificationSpec | None:
         compare = str(obj.get("compare") or "in_place").strip() or "in_place"
         if compare not in ("in_place", "stdout"):
             compare = "in_place"
-        row_independent = bool(obj.get("row_independent", False))
+        row_independent = obj.get("row_independent") is True
     except (AttributeError, TypeError):
         return None
     spec = VerificationSpec(
@@ -178,10 +156,16 @@ async def extract_spec(instruction: str) -> VerificationSpec | None:
     return spec
 
 
-# --- deterministic sampling + execution (code-controlled, no LLM freedom) ---
+# deterministic sampling + execution (code-controlled, no LLM freedom)
 
 
 def _read_lines(path: str) -> list[bytes] | None:
+    from rune.agent.isolation import enforce
+    from rune.safety.guardian import get_guardian
+
+    check = get_guardian().validate_file_read_path(path)
+    if not check.allowed or check.requires_approval or enforce(path):
+        return None
     try:
         with open(path, "rb") as f:
             return f.read().splitlines(keepends=True)
@@ -192,14 +176,7 @@ def _read_lines(path: str) -> list[bytes] | None:
 def build_disjoint_sample(
     input_lines: list[bytes], expected_lines: list[bytes], rows_per_slice: int
 ) -> tuple[bytes, bytes] | None:
-    """Splice first/middle/last row-slices from input and the SAME ranges of
-    expected, preserving order. Returns (input_sample, expected_sample) bytes,
-    or None when the two files have mismatched line counts (cannot align a
-    row-independent sample → caller should fall back to full-file).
-
-    A multi-disjoint sample (not first-rows-only) is what defeats the Goodhart
-    blind spot: an artifact wrong only in the middle/end is still caught.
-    """
+    """Pair first/middle/last row slices; return None if line counts cannot be aligned."""
     n = len(input_lines)
     if n != len(expected_lines) or n == 0:
         return None
@@ -221,18 +198,13 @@ def build_disjoint_sample(
 
 
 async def run_spec(spec: VerificationSpec, full_file: bool = False) -> tuple[str, str]:
-    """Run the artifact via the spec and byte-compare to expected.
+    """Run the spec and return (pass/fail/skip, evidence).
 
-    Returns ``(state, evidence)`` with state in ``"pass"|"fail"|"skip"``.
-    - ``full_file=False`` (default): verify on a multi-disjoint row sample when
-      the input is large AND row_independent; otherwise full file.
-    - ``full_file=True``: always verify on the entire input (final confirmation
-      before finalize).
-    Timeout / spawn error / unreadable inputs → ``"skip"`` (inconclusive, never
-    a false pass).
+    Sample large row-independent inputs unless full_file is set. Timeouts, spawn errors and
+    unreadable inputs are inconclusive.
     """
-    import asyncio
     import os
+    import shlex
     import tempfile
 
     input_lines = _read_lines(spec.input_path)
@@ -240,16 +212,10 @@ async def run_spec(spec: VerificationSpec, full_file: bool = False) -> tuple[str
     if input_lines is None or expected_lines is None:
         return "skip", ""
 
-    # Sample when the input is large and the transform looks row-aligned. We do
-    # NOT rely solely on the LLM's row_independent flag (it tends to answer
-    # False when unsure, which forces a slow full-file run that then times out).
-    # A 1:1 input/expected line count is itself strong evidence of a row-aligned
-    # transform; build_disjoint_sample only splices when counts match and
-    # returns None otherwise, so this stays safe.
-    line_counts_match = len(input_lines) == len(expected_lines)
+    # Equal row counts do not make sorting, ranking or totals independent.
     use_sample = (
         not full_file
-        and (spec.row_independent or line_counts_match)
+        and spec.row_independent
         and len(input_lines) > _LARGE_INPUT_THRESHOLD
     )
     if use_sample:
@@ -267,30 +233,20 @@ async def run_spec(spec: VerificationSpec, full_file: bool = False) -> tuple[str
     timeout_ms = env_int(_SPEC_TIMEOUT_MS_ENV, _DEFAULT_CHECK_TIMEOUT_MS)
     timeout_s = max(1.0, (timeout_ms or _DEFAULT_CHECK_TIMEOUT_MS) / 1000.0)
 
-    tmpdir = tempfile.mkdtemp(prefix="rune-evgate-")
+    from rune.safety.execution_environment import execution_workspace
+    from rune.safety.verification import run_check
+
+    cwd = execution_workspace()
+    tmpdir = tempfile.mkdtemp(prefix=".rune-check-", dir=cwd)
     work = os.path.join(tmpdir, "input_work")
     try:
         with open(work, "wb") as f:
             f.write(input_bytes)
-        command = spec.run_command.replace(_INPUT_PLACEHOLDER, work)
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "sh", "-c", command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-        except Exception as exc:  # pragma: no cover
-            log.warning("evidence_spec_spawn_error", error=str(exc)[:120])
-            return "skip", ""
-        try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
-        except TimeoutError:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
-            log.warning("evidence_spec_timeout", timeout_s=timeout_s, full_file=full_file)
-            return "skip", ""
+        command = spec.run_command.replace(_INPUT_PLACEHOLDER, shlex.quote(work))
+        result = await run_check(command, cwd, timeout_s)
+        if result.code is None:
+            return "skip", result.error
+        stdout = result.stdout
 
         if spec.compare == "stdout":
             produced = stdout or b""
@@ -301,10 +257,10 @@ async def run_spec(spec: VerificationSpec, full_file: bool = False) -> tuple[str
             except OSError:
                 return "skip", ""
 
-        if proc.returncode != 0:
+        if result.code != 0:
             head = (stdout or b"")[:_MAX_EVIDENCE_OUTPUT_CHARS].decode("utf-8", "replace")
-            log.info("evidence_spec_fail", code=proc.returncode, sampled=use_sample)
-            return "fail", f"run_command exited {proc.returncode}\n{head}".strip()
+            log.info("evidence_spec_fail", code=result.code, sampled=use_sample)
+            return "fail", f"run_command exited {result.code}\n{head}".strip()
 
         if produced == expected_bytes:
             log.info("evidence_spec_pass", sampled=use_sample, full_file=full_file)

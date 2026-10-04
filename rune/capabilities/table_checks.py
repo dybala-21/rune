@@ -21,7 +21,7 @@ class TableRequirementsParams(BaseModel):
 class TableVerifyParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
     contract_id: str = Field(pattern=r"^[0-9a-f]{64}$")
-    output_path: str = Field(min_length=1)
+    output_path: str = Field(min_length=1, description="Saved aggregate output, never the original source. Source preservation is checked automatically.")
     sheet: str | None = None
     header_row: int = Field(default=1, ge=1, le=100)
 

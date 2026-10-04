@@ -18,12 +18,10 @@ class _FakeClient:
 
 def _patch_client(monkeypatch, content: str):
     monkeypatch.setattr(eg, "get_llm_client", lambda: _FakeClient(content), raising=False)
-    # get_llm_client is imported lazily inside extract_success_check, so patch
-    # the source module too.
+    # Patch the source module too because extract_success_check imports lazily.
     import rune.llm.client as client_mod
     monkeypatch.setattr(client_mod, "get_llm_client", lambda: _FakeClient(content))
-    # These tests exercise the legacy LLM-script fallback path; force the
-    # preferred spec path OFF so the gate falls back to the script path.
+    # Disable spec extraction to exercise the generated-script fallback.
     import rune.agent.evidence_spec as spec_mod
 
     async def _no_spec(_instruction):
@@ -33,12 +31,7 @@ def _patch_client(monkeypatch, content: str):
 
 
 def _patch_registry(monkeypatch, result: CapabilityResult):
-    """Stub run_evidence_check from a CapabilityResult-shaped expectation.
-
-    The gate now runs checks via a direct subprocess (not the bash capability),
-    so we patch run_evidence_check itself: success → ("pass" path), failure →
-    surface output+error as the evidence text (mirrors run_evidence_check).
-    """
+    """Translate a CapabilityResult-shaped fixture into a run_evidence_check verdict."""
     state = "pass" if result.success else "fail"
     evidence = "" if result.success else ((result.output or "") + (
         "\n" + result.error if result.error else "")).strip()
@@ -57,17 +50,14 @@ def test_enabled_flag(monkeypatch):
 
 
 def test_extract_prompt_mandates_multi_disjoint_sampling():
-    # The check must verify large inputs on MULTIPLE DISJOINT samples (first +
-    # middle + last), not just the first rows — a first-rows-only check is a
-    # Goodhart blind spot an artifact can pass while failing elsewhere.
+    # Check first, middle and last slices so incorrect later rows cannot hide behind a prefix pass.
     assert "MULTIPLE DISJOINT SAMPLES" in eg._EXTRACT_SYSTEM
     assert "MIDDLE" in eg._EXTRACT_SYSTEM and "LAST" in eg._EXTRACT_SYSTEM
     assert "blind spot" in eg._EXTRACT_SYSTEM
 
 
 def test_default_check_timeout_is_short():
-    # Sample checks finish in seconds; the default must stay small so a slow
-    # check degrades to "skip" quickly rather than stalling finalize.
+    # Keep the timeout short enough that slow checks do not stall completion.
     assert eg._DEFAULT_CHECK_TIMEOUT_MS <= 30_000
 
 
@@ -167,8 +157,7 @@ async def test_exec_error_does_not_block(monkeypatch):
     async def _boom(script, cwd):
         raise RuntimeError("spawn gone")
 
-    # run_evidence_check itself swallows errors, but verify EvidenceGate also
-    # degrades gracefully if the runner ever raises.
+    # The gate must also skip safely if its normally guarded runner raises.
     monkeypatch.setattr(eg, "run_evidence_check", _boom)
     gate = eg.EvidenceGate("task", "/app")
     try:
@@ -178,7 +167,7 @@ async def test_exec_error_does_not_block(monkeypatch):
     assert result in (None, "raised")
 
 
-# --- real subprocess (no mock): the path that actually runs in benchmarks ---
+# real subprocess (no mock): the path that actually runs in benchmarks
 
 
 @pytest.mark.asyncio
@@ -197,23 +186,18 @@ async def test_real_subprocess_fail_captures_output(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_real_subprocess_rm_trap_not_blocked(tmp_path):
-    # Regression for the v8ev failure: a verifier that cleans up its mktemp dir
-    # with `trap 'rm -rf "$tmpdir"' EXIT` was blocked by Guardian when run via
-    # the bash capability. The direct-subprocess path must allow it.
+async def test_generated_verifier_does_not_bypass_command_policy(tmp_path):
     script = (
         'tmpdir=$(mktemp -d); trap \'rm -rf "$tmpdir"\' EXIT; '
         'echo ok > "$tmpdir/x"; cat "$tmpdir/x" >/dev/null; exit 0'
     )
     state, _out = await eg.run_evidence_check(script, str(tmp_path))
-    assert state == "pass"
+    assert state == "skip"
 
 
 @pytest.mark.asyncio
 async def test_real_subprocess_timeout_is_skip_not_pass(tmp_path, monkeypatch):
-    # Regression for the v8egr3 false positive: a slow check that exceeds the
-    # timeout must be "skip" (inconclusive), NOT "pass". Treating a timed-out
-    # 1M-row vim check as success finalized a wrong artifact.
+    # A timed-out check is inconclusive, never a pass.
     monkeypatch.setenv("RUNE_BENCH_EVIDENCE_GATE_TIMEOUT_MS", "1000")
     state, _out = await eg.run_evidence_check("sleep 5; exit 0", str(tmp_path))
     assert state == "skip"
@@ -221,8 +205,7 @@ async def test_real_subprocess_timeout_is_skip_not_pass(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_timeout_skip_does_not_override(tmp_path, monkeypatch):
-    # End-to-end: a timed-out check yields verdict "skip" with no block message,
-    # so it neither blocks nor (crucially) passes.
+    # Timeouts neither block completion nor count as verified.
     monkeypatch.setenv("RUNE_BENCH_EVIDENCE_GATE_TIMEOUT_MS", "1000")
     _patch_client(monkeypatch, "sleep 5; exit 0")
     gate = eg.EvidenceGate("t", str(tmp_path))
@@ -235,12 +218,7 @@ class TestCheckProcessLifecycle:
 
     @pytest.mark.asyncio
     async def test_verdict_returned_while_background_process_holds_stdout(self):
-        """Exit code decides, not pipe EOF.
-
-        A backgrounded server inherits stdout, so waiting for the pipe to close
-        made a finished check look like a timeout — every service check came
-        back "skip" no matter what the code did.
-        """
+        """Use process exit status even when a background child keeps stdout open."""
         import time
 
         from rune.agent.evidence_gate import run_evidence_check

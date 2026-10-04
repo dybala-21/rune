@@ -1,9 +1,4 @@
-"""Multi-turn conversation wiring on the API/web server paths.
-
-Regression tests for the defect where every web message ran stateless:
-POST /api/message and the execute endpoints never recorded turns nor passed
-message_history to the agent loop, so a turn-2 follow-up had no context.
-"""
+"""Check conversation continuity across API and web execution paths."""
 
 from __future__ import annotations
 
@@ -85,8 +80,7 @@ def _turn_rows(db_path) -> list[tuple[str, str]]:
 
 
 async def test_sticky_conversation_reused_before_first_save(isolated_wiring):
-    """A second fast message must reuse the in-flight sticky conversation even
-    though nothing has been persisted yet (start_conversation is in-memory)."""
+    """Reuse the in-flight sticky conversation before its first turn is persisted."""
     cw = isolated_wiring
     manager = cw.get_conv_manager()
     assert manager is not None
@@ -135,8 +129,7 @@ async def test_explicit_session_loads_persisted_turns(isolated_wiring, tmp_path)
 
 
 async def test_resolve_does_not_clobber_active_conversation(isolated_wiring):
-    """DB reload must not replace the in-memory object mid-run (a concurrent
-    run's freshly added turns live only there)."""
+    """Do not overwrite in-memory turns with a database reload during a run."""
     cw = isolated_wiring
     manager = cw.get_conv_manager()
 
@@ -388,16 +381,32 @@ def test_snapshot_restores_approval_with_its_original_deadline(client, monkeypat
     assert snapshot()["approval"] is None
 
 
-def test_ndjson_question_is_serializable_and_returns_a_typed_empty_response(question_flow):
+def test_ndjson_question_waits_for_a_real_user_response(question_flow):
+    from concurrent.futures import ThreadPoolExecutor
+
     client, _, answers = question_flow
-    response = client.post("/api/v1/agent/execute", json={"goal": "headless question", "stream": True})
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(client.post, "/api/v1/agent/execute", json={
+            "goal": "headless question", "stream": True, "session_id": "stream-question",
+        })
+
+        def pending():
+            run = client.get("/api/runs/snapshot", params={"sessionId": "stream-question"}).json()["run"]
+            return run and run["question"]
+
+        assert _wait_for(pending)
+        payload = pending()
+        assert not future.done() and answers == []
+        reply = client.post("/api/question", json={
+            "id": payload["id"], "answer": "시스템 확인", "selectedIndex": 1,
+        })
+        assert reply.status_code == 200
+        response = future.result(timeout=5)
     assert response.status_code == 200
     frames = [json.loads(line) for line in response.text.splitlines() if line.strip()]
     payload = next(frame["data"] for frame in frames if frame["event"] == "question")
-    assert payload["question"] == "headless question"
-    assert payload["autonomous"] is True
-    assert answers[0][1].success
-    assert "skipped" in answers[0][1].output
+    assert payload["question"] == "headless question" and not payload.get("autonomous")
+    assert answers[0][1].success and "시스템 확인" in answers[0][1].output
 
 
 def test_websocket_can_answer_a_web_question(question_flow):
@@ -632,9 +641,7 @@ def test_sessions_rpc_serves_canonical_store(client, tmp_path):
     assert r.json()["success"] is False
 
 
-# /agent/run handler: server-generated sessionId must record turn 1.
-# (The router is not mounted on create_app today, so this calls the handler
-# directly rather than going through the app.)
+# Call the unmounted handler directly to check first-turn persistence with a generated session ID.
 
 
 async def test_agent_run_generated_session_records_first_turn(
@@ -685,8 +692,7 @@ async def test_agent_run_generated_session_records_first_turn(
 
 
 async def test_tool_paths_anchor_to_workspace(tmp_path, monkeypatch):
-    """Relative file params and bash cwd resolve inside workspace_root, not
-    the daemon's process cwd."""
+    """Resolve tool paths inside workspace_root rather than the daemon working directory."""
     from rune.agent.tool_adapter import ToolAdapterOptions, build_tool_set
 
     ws = tmp_path / "anchored"
@@ -755,7 +761,6 @@ def test_listdirs_bad_path_falls_back(client, tmp_path):
     assert "entries" in body["data"]
 
 
-
 def test_build_trust_payload_verified():
     from types import SimpleNamespace
 
@@ -789,9 +794,7 @@ def test_build_trust_payload_budget_exhausted():
     from types import SimpleNamespace
 
     from rune.api.server import build_trust_payload
-    # A fast-lane run cut off at the tool-round cap completes "successfully"
-    # but may omit work that never ran — the payload must carry the fact so
-    # the UI can say "stopped at tool budget" instead of a clean Completed.
+    # Expose tool-cap termination so the UI cannot show unfinished work as completed.
     trace = SimpleNamespace(
         reason="completed", evidence_gate=None, tool_budget_exhausted=True,
     )

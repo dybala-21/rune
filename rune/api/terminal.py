@@ -1,28 +1,8 @@
-"""Embedded terminal: a PTY hosted in the daemon, streamed to xterm.js.
+"""Stream an opt-in POSIX PTY to the embedded terminal.
 
-Jupyter/terminado's architecture (server-side PTY over a socket to xterm.js),
-reimplemented on the stdlib so the Electron shell stays "dumb" — no node-pty,
-no native module, no new IPC surface in the renderer.
-
-Security posture (deliberately conservative — an interactive terminal is
-arbitrary code execution for whoever reaches the socket):
-
-- **Off by default, and that is the real boundary.** Enabled only when
-  ``RUNE_TERMINAL_ENABLED=1`` (or the config flag). Honest limitation: once
-  enabled, a script running *inside the renderer's own origin* (e.g. a
-  markdown-XSS in chat) shares the loopback origin that the auth guard trusts,
-  so it CAN call ``terminal.token`` and open a shell — enabling the terminal
-  makes a renderer compromise equivalent to a local shell. The per-open token
-  only stops *cross-site* pages (which fail the CSRF/origin bypass and cannot
-  mint). So: keep it off unless you need it; a truly un-forgeable gate would
-  require a native (main-process) confirmation dialog, which is future work.
-- Gating the *capability*, not keystrokes: per-command filtering of a live
-  shell has no real boundary (the user can spawn bash/python). Guardian keeps
-  gating what the *agent* runs; this is a separate, opt-in human capability.
-- The WebSocket handshake checks default-off, loopback, the single-use token,
-  and the request Origin (defense-in-depth against cross-site handshakes).
-
-POSIX only (stdlib ``pty``/``os``). Windows needs pywinpty — out of scope here.
+The handshake requires loopback, a valid Origin and a single-use token. This blocks cross-site
+access, not code running in the renderer's own origin: renderer compromise grants a local shell
+when the terminal is enabled. Guardian covers agent commands, not this interactive shell.
 """
 
 from __future__ import annotations
@@ -49,6 +29,10 @@ _MAX_TOKENS = 32
 
 def is_enabled() -> bool:
     """Whether the embedded terminal capability is turned on (default off)."""
+    from rune.cloud.boundary import hosted
+
+    if hosted():
+        return False
     if os.environ.get("RUNE_TERMINAL_ENABLED", "").strip() in ("1", "true", "yes"):
         return True
     try:
@@ -60,13 +44,11 @@ def is_enabled() -> bool:
 
 
 def mint_token(workspace: str) -> str:
-    """Mint a one-shot terminal token bound to *workspace*. Caller must have
-    already checked :func:`is_enabled`."""
+    """Mint a workspace-bound, single-use token after the caller checks is_enabled()."""
     import secrets
 
     if len(_tokens) >= _MAX_TOKENS:
-        # Prefer evicting a spent token; otherwise drop the oldest so repeated
-        # minting without connecting can't grow the map without bound.
+        # Evict spent tokens first, then the oldest, to bound unused token storage.
         spent = next((k for k, v in _tokens.items() if v.get("used")), None)
         _tokens.pop(spent if spent is not None else next(iter(_tokens)), None)
     token = secrets.token_urlsafe(24)
@@ -84,14 +66,9 @@ def redeem_token(token: str) -> str | None:
 
 
 class TerminalSession:
-    """One PTY-backed shell. Reads run on a thread and land on an asyncio queue
-    so the WebSocket handler can await them."""
+    """Read a PTY on a thread and stream its output through an asyncio queue."""
 
-    # Bound the output queue and apply real backpressure: when a flooding
-    # shell (`yes`, `cat bigfile`) fills it, stop draining the PTY so the
-    # kernel's PTY buffer fills and the shell's write() blocks — natural Unix
-    # flow control, no data loss and no unbounded memory growth. Resume once
-    # the consumer drains below the low-water mark.
+    # Pause PTY reads when the queue fills so kernel backpressure bounds memory without data loss.
     _MAX_QUEUE = 256
     _RESUME_AT = 64
 
@@ -132,9 +109,7 @@ class TerminalSession:
             self.close()
             return
         self.out_queue.put_nowait(data)
-        # If the consumer is behind, stop reading the PTY. The shell's next
-        # write() then blocks on the full PTY buffer — backpressure, not memory
-        # growth. notify_consumed() re-arms the reader once drained.
+        # Pause until notify_consumed re-arms the reader after the queue drains.
         if self.out_queue.qsize() >= self._MAX_QUEUE - 1 and not self._reader_paused:
             self._reader_paused = True
             if self._loop is not None and self._fd >= 0:
@@ -142,8 +117,7 @@ class TerminalSession:
                     self._loop.remove_reader(self._fd)
 
     def notify_consumed(self) -> None:
-        """Called by the WebSocket pump after draining a chunk; re-arms the PTY
-        reader once the backlog is low enough."""
+        """Resume PTY reads after the WebSocket pump drains enough queued output."""
         if (
             self._reader_paused
             and not self._closed
@@ -176,12 +150,7 @@ class TerminalSession:
                 self._loop.remove_reader(self._fd)
         if self._pid > 0:
             pid = self._pid
-            # SIGKILL the shell (can't be trapped, unlike SIGHUP). Killing the
-            # session-leader shell makes the kernel SIGHUP the foreground
-            # process group, so a pipeline like `yes | head` dies too. Then
-            # reap on a daemon thread: WNOHANG here would return before the
-            # just-killed child is dead and leave a zombie/leak (measured);
-            # a blocking waitpid off the event loop reaps without stalling it.
+            # Kill the shell, then reap off-thread to avoid zombies without blocking the event loop.
             with contextlib.suppress(ProcessLookupError, OSError):
                 os.kill(pid, signal.SIGKILL)
 
@@ -195,8 +164,7 @@ class TerminalSession:
             with contextlib.suppress(OSError):
                 os.close(self._fd)
             self._fd = -1
-        # Sentinel so the pump ends. The queue is bounded, but close() must
-        # never block or lose the sentinel — evict one chunk if full.
+        # Make room for the close sentinel without blocking on a full queue.
         try:
             self.out_queue.put_nowait(None)
         except asyncio.QueueFull:

@@ -1,8 +1,4 @@
-"""Skill registry for RUNE.
-
-Loads, stores, and searches skills from SKILL.md files and
-programmatic registration.
-"""
+"""Load, register and search file-backed and programmatic skills."""
 
 from __future__ import annotations
 
@@ -22,26 +18,16 @@ _registry: SkillRegistry | None = None
 # SKILL.md parser
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
-_KV_RE = re.compile(r"^(\w+)\s*:\s*(.+)$", re.MULTILINE)
 
 
 def _parse_skill_file(path: Path) -> Skill | None:
-    """Parse a SKILL.md file into a Skill object.
-
-    Expected format::
-
-        ---
-        name: my-skill
-        description: Does something useful
-        scope: user
-        author: someone
-        ---
-
-        Body content with instructions...
-    """
+    """Parse YAML frontmatter and Markdown instructions from SKILL.md."""
     try:
-        content = path.read_text(encoding="utf-8")
-    except OSError as exc:
+        with path.open(encoding="utf-8") as stream:
+            content = stream.read(128_001)
+        if len(content) > 128_000:
+            raise ValueError("Skill exceeds 128,000 characters")
+    except (OSError, UnicodeError, ValueError) as exc:
         log.warning("skill_read_error", path=str(path), error=str(exc))
         return None
 
@@ -50,13 +36,24 @@ def _parse_skill_file(path: Path) -> Skill | None:
 
     fm_match = _FRONTMATTER_RE.match(content)
     if fm_match:
-        frontmatter = fm_match.group(1)
-        for kv in _KV_RE.finditer(frontmatter):
-            metadata[kv.group(1)] = kv.group(2).strip()
+        from ruamel.yaml import YAML
+
+        try:
+            metadata = YAML(typ="safe").load(fm_match.group(1)) or {}
+            if not isinstance(metadata, dict):
+                raise ValueError("Skill frontmatter must be a mapping")
+            for key in ("name", "description", "scope", "author"):
+                if key in ("description", "author") and metadata.get(key) is None:
+                    metadata[key] = ""
+                if key in metadata and not isinstance(metadata[key], str):
+                    raise ValueError(f"Skill {key} must be text")
+        except Exception as exc:
+            log.warning("skill_metadata_invalid", path=str(path), error=str(exc)[:200])
+            return None
         body = content[fm_match.end():]
 
     name = metadata.pop("name", path.stem)
-    description = metadata.pop("description", "")
+    description = metadata.pop("description", "").strip()
     scope = metadata.pop("scope", "user")
     author = metadata.pop("author", "")
 
@@ -71,8 +68,6 @@ def _parse_skill_file(path: Path) -> Skill | None:
     )
 
 
-# SkillRegistry
-
 class SkillRegistry:
     """Registry for loading, storing, and searching skills."""
 
@@ -82,10 +77,7 @@ class SkillRegistry:
         self._skills: dict[str, Skill] = {}
 
     def load_skills(self, directory: str | Path) -> int:
-        """Load all SKILL.md files from *directory*.
-
-        Returns the number of skills loaded.
-        """
+        """Load skill files from a directory and return the count."""
         dir_path = Path(directory)
         if not dir_path.is_dir():
             log.warning("skill_dir_not_found", directory=str(dir_path))
@@ -133,13 +125,25 @@ class SkillRegistry:
         return match_skills(query, self.list())
 
 
-def get_skill_registry() -> SkillRegistry:
-    """Get or create the singleton SkillRegistry.
-
-    On first creation, loads skills from user (~/.rune/skills/)
-    and project (.rune/skills/) directories.
-    """
+def get_skill_registry(workspace: str | Path | None = None) -> SkillRegistry:
+    """Load run-specific skills, or reuse the settings registry when unscoped."""
     global _registry
+    if workspace is not None:
+        from rune.utils.paths import rune_home
+
+        scoped = SkillRegistry()
+        user_skills = rune_home() / "skills"
+        if user_skills.is_dir():
+            scoped.load_skills(user_skills)
+        # Programmatic user skills have no file to reload.
+        if _registry is not None:
+            for skill in _registry.list():
+                if not skill.file_path and skill.scope == "user" and scoped.get(skill.name) is None:
+                    scoped.register(skill)
+        project_skills = Path(workspace).resolve() / ".rune" / "skills"
+        if project_skills.is_dir():
+            scoped.load_skills(project_skills)
+        return scoped
     if _registry is None:
         _registry = SkillRegistry()
         # Auto-load from standard directories

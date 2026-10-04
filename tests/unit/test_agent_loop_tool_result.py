@@ -118,8 +118,7 @@ async def test_evidence_verdict_swallows_errors() -> None:
 
     loop = NativeAgentLoop()
     loop._evidence_gate = _Boom()
-    # An exception during verification must degrade to neutral "skip",
-    # never propagate and never block a real success.
+    # Verification errors must skip without raising or blocking completion.
     assert await loop._evidence_verdict() == ("skip", None)
 
 
@@ -145,13 +144,15 @@ class _FakeReqGate:
     async def verdict(self, artifact: str):
         return self._state, self._message
 
+    def summary(self):
+        return {"required": True, "status": self._state, "detail": self._message}
+
 
 @pytest.mark.asyncio
 async def test_finalize_skips_requirement_gate_for_execution_task(
     monkeypatch: MonkeyPatch,
 ) -> None:
-    # Execution-verified tasks: tests/commands are authoritative, so the LLM
-    # requirement gate is skipped even if it would have failed.
+    # Execution evidence owns correctness for these tasks; skip the redundant requirement judge.
     monkeypatch.delenv("RUNE_OUTPUT_INTEGRITY", raising=False)
     loop = NativeAgentLoop()
     loop._requirement_gate_obj = _FakeReqGate("fail", "should not block")
@@ -164,8 +165,7 @@ async def test_finalize_skips_requirement_gate_for_execution_task(
 async def test_finalize_runs_requirement_gate_for_non_execution_task(
     monkeypatch: MonkeyPatch,
 ) -> None:
-    # Non-executable output (report/analysis): the requirement gate runs and can
-    # block, since there is no execution check to fall back on.
+    # Non-executable output still needs requirement review.
     monkeypatch.delenv("RUNE_OUTPUT_INTEGRITY", raising=False)
     loop = NativeAgentLoop()
     loop._requirement_gate_obj = _FakeReqGate("fail", "[Requirement Gate] unmet: X")
@@ -259,14 +259,12 @@ async def test_run_delivers_only_unresolved_completion_diagnostics(monkeypatch, 
 
 
 def test_output_integrity_gate_bounded(monkeypatch: MonkeyPatch) -> None:
-    # After the per-run firing budget, the integrity gate passes through instead
-    # of consuming the whole gate-block budget.
+    # Stop firing integrity checks after their per-run budget is exhausted.
     monkeypatch.setenv("RUNE_OUTPUT_INTEGRITY", "1")
     loop = NativeAgentLoop()
     loop._output_integrity_fired = 2
     ok, _msgs, n = loop._output_integrity_gate([], 0)
     assert ok is True and n == 0
-
 
 
 def test_failed_tool_nudge_clears_after_successful_bash() -> None:

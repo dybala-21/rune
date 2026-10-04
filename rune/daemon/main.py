@@ -1,26 +1,4 @@
-"""Main daemon server process for RUNE.
-
-Ported from src/daemon/daemon.ts - background service that hosts the
-proactive engine, pattern learner, memory/conversation stores, and
-an agent loop for background tasks.  Communicates over a Unix domain
-socket.
-
-Startup order (matches TS):
- 1. Process lock acquisition
- 2. Memory store init
- 3. Conversation store init
- 4. Orphaned run cleanup
- 5. Reflexion learner init
- 6. Pattern learner init
- 7. Proactive engine start
- 7a. Heartbeat scheduler start (early - needed by proactive subsystems)
- 7b. Proactive subsystems (EngagementTracker, ConversationInitiator,
-     EnvironmentSensor, Heartbeat-to-Engine wiring)
- 8. MCP bridge init
- 9. Autonomous executor init
-10. Channel adapters start
-11. API server start (non-blocking)
-"""
+"""Host background agent, memory, proactive and channel services over a Unix socket."""
 
 from __future__ import annotations
 
@@ -55,16 +33,7 @@ _proactive_cache: tuple[float, bool] | None = None
 
 
 def _configured_proactive_enabled() -> bool:
-    """Read the proactive toggle from config.yaml.
-
-    The daemon keeps its own settings dict, so without this it hardcoded True
-    and the user's setting never reached the engine.
-
-    This reads the one key directly instead of going through ``load_config()``.
-    A reload rebuilds the shared config object from the file, which would throw
-    away in-memory-only session state — the model a ``/model`` or ``/escalate``
-    switch selected — every time any setting was saved.
-    """
+    """Read the proactive toggle without reloading session-only model settings."""
     global _proactive_cache
 
     try:
@@ -111,19 +80,14 @@ def _default_config() -> dict[str, Any]:
 # EngagementStore adapter (bridges MemoryStore to EngagementTracker)
 
 class _EngagementStoreAdapter:
-    """Thin adapter mapping ``MemoryStore`` methods to the
-    ``EngagementStore`` protocol expected by ``EngagementTracker``.
-
-    Mirrors the TS ``engagementStoreAdapter`` object created in daemon.ts
-    (lines 321-341).
-    """
+    """Adapt MemoryStore methods to the EngagementStore protocol."""
 
     __slots__ = ("_store",)
 
     def __init__(self, store: Any) -> None:
         self._store = store
 
-    # -- EngagementStore protocol methods -----------------------------------
+    # EngagementStore protocol methods
 
     def get_engagement_metrics(self, user_id: str) -> Any:
         from rune.proactive.engagement_tracker import _metrics_from_dict
@@ -169,13 +133,7 @@ def _config_to_dict(cfg: Any) -> dict[str, Any]:
 
 
 class RuneDaemon:
-    """Unix-domain-socket daemon that orchestrates background RUNE services.
-
-    Lifecycle:
-    1. ``start()`` - load env, acquire lock, initialise subsystems, open socket.
-    2. Handle incoming JSON commands (execute, status, stop, ...).
-    3. ``stop()`` - graceful shutdown of all subsystems.
-    """
+    """Manage background services and handle commands over a Unix socket."""
 
     def __init__(self, config: dict[str, Any] | None = None, install_signal_handlers: bool = True) -> None:
         self._config = config or _default_config()
@@ -196,8 +154,7 @@ class RuneDaemon:
         self._channel_registry: Any = None
         self._heartbeat_scheduler: Any = None
         self._heartbeat_task: asyncio.Task[None] | None = None
-        # T1-1 gated skill learning: guard so overlapping eval cycles don't stack
-        # (each cycle runs real agent loops and outlives a heartbeat tick).
+        # Prevent overlapping skill evaluations, which can outlast a heartbeat tick.
         self._skill_eval_running: bool = False
         self._api_server_task: asyncio.Task[None] | None = None
         self._executor_flush_task: asyncio.Task[None] | None = None
@@ -214,7 +171,7 @@ class RuneDaemon:
         # Process lock path
         self._lock_path: Path | None = None
 
-    # -- public API ---------------------------------------------------------
+    # public API
 
     async def start(self) -> None:
         """Initialise subsystems and start the Unix socket server."""
@@ -288,7 +245,7 @@ class RuneDaemon:
             async with self._server:
                 await self._server.serve_forever()
 
-    # -- process lock -------------------------------------------------------
+    # process lock
 
     async def _acquire_process_lock(self) -> None:
         """Acquire the daemon PID-based process lock."""
@@ -311,7 +268,7 @@ class RuneDaemon:
         except Exception as exc:
             log.warning("process_lock_release_failed", error=str(exc))
 
-    # -- subsystem init / shutdown ------------------------------------------
+    # subsystem init / shutdown
 
     def _load_env(self) -> None:
         """Load .rune/.env file if present."""
@@ -322,23 +279,7 @@ class RuneDaemon:
             log.debug("env_loader_not_available")
 
     async def _init_subsystems(self) -> None:
-        """Initialise all subsystems in the correct dependency order.
-
-        Order:
-        2. Memory store
-        3. Conversation store
-        4. Orphaned run cleanup
-        5. Reflexion learner
-        6. Pattern learner
-        7. Proactive engine
-        7a. Heartbeat scheduler
-        7b. Proactive subsystems (EngagementTracker, ConversationInitiator,
-            EnvironmentSensor, Heartbeat-to-Engine wiring)
-        8. MCP bridge
-        9. Autonomous executor
-        10. Channel adapters
-        11. API server
-        """
+        """Initialize daemon services in dependency order."""
 
         # 2. Memory store init
         try:
@@ -396,9 +337,7 @@ class RuneDaemon:
         except Exception as exc:
             log.warning("pattern_learner_init_failed", error=str(exc))
 
-        # 7. Proactive engine start. Built regardless of the toggle: the ticks
-        #    check it themselves, and this same wiring registers the cron
-        #    scheduler, which has nothing to do with proactivity.
+        # Initialize even when proactive suggestions are off because cron shares this wiring.
         try:
             from rune.proactive.engine import get_proactive_engine
             self._proactive_engine = get_proactive_engine()
@@ -410,13 +349,10 @@ class RuneDaemon:
         except Exception as exc:
             log.warning("proactive_engine_init_failed", error=str(exc))
 
-        # 7a. Heartbeat scheduler (moved early so proactive subsystems can
-        #     register cron tasks on it - matches TS where heartbeat.start()
-        #     happens inside the proactive-enabled block before subsystem wiring)
+        # Start the scheduler before proactive services register jobs.
         await self._start_heartbeat()
 
-        # 7b. Proactive subsystems (EngagementTracker, ConversationInitiator,
-        #     EnvironmentSensor, Heartbeat-to-Engine wiring)
+        # Connect optional proactive services.
         if self._proactive_engine is not None:
             await self._init_proactive_subsystems()
 
@@ -456,9 +392,7 @@ class RuneDaemon:
             self._api_server_task = None
             log.info("subsystem_shutdown", name="api_server")
 
-        # 10. Stop the gateway (cancels sender workers, unsubscribes) then the
-        # adapters. Gateway first, so no message is dispatched into an adapter
-        # that is mid-teardown.
+        # Stop gateway dispatch before shutting down channel adapters.
         try:
             from rune.daemon.gateway import get_gateway
             gw = get_gateway()
@@ -492,8 +426,7 @@ class RuneDaemon:
         # 8. Shutdown MCP bridge
         await self._shutdown_mcp_bridge()
 
-        # 7b. Stop proactive subsystems (reverse of init order)
-        # EnvironmentSensor
+        # Stop proactive services in reverse initialization order.
         if self._environment_sensor is not None:
             try:
                 await self._environment_sensor.stop()
@@ -561,14 +494,11 @@ class RuneDaemon:
 
         # 5. Reflexion learner - stateless singleton, no shutdown needed
 
-        # 3. Persist the vector index, then close the memory store. The index
-        #    lives on the manager, so closing only the store left it unwritten
-        #    and semantic memory empty on every launch.
+        # Persist the vector index before closing the memory store.
         try:
             from rune.memory import manager as _mm_mod
 
-            # Read the singleton rather than get_memory_manager(), which would
-            # construct one during shutdown just to save an empty index.
+            # Read the existing singleton; do not initialize memory during shutdown.
             _mm = _mm_mod._manager
             if _mm is not None:
                 _mm.persist_vectors()
@@ -584,13 +514,11 @@ class RuneDaemon:
             except Exception as exc:
                 log.warning("memory_store_shutdown_failed", error=str(exc))
 
-    # -- browser subsystem init/shutdown ------------------------------------
+    # browser subsystem init/shutdown
 
     async def _init_browser_subsystems(self) -> None:
         """Start the browser search pool; agent runs own their browser sessions."""
-        # The legacy relay has no authenticated pairing or tab selection.
-        # Do not expose it as a side effect of starting the daemon.
-        # Browser page pool (for browser-based search fallback)
+        # Leave the unauthenticated legacy relay disabled; start only the search page pool.
         try:
             from rune.capabilities.search.browser_page_pool import BrowserPagePool
             from rune.capabilities.web import build_search_provider, set_search_provider
@@ -627,14 +555,10 @@ class RuneDaemon:
                 log.warning("relay_server_shutdown_failed", error=str(exc))
             self._relay_server = None
 
-    # -- orphaned run cleanup -----------------------------------------------
+    # orphaned run cleanup
 
     async def _cleanup_orphaned_runs(self) -> None:
-        """Mark runs with status 'running' or 'queued' from a previous daemon
-        instance as 'interrupted'.
-
-        Matches TS: ``store.listRuns({status})`` then ``updateRunStatus('aborted')``.
-        """
+        """Mark unfinished runs from the previous daemon instance as interrupted."""
         if self._memory_store is None:
             return
 
@@ -677,19 +601,13 @@ class RuneDaemon:
                     error=str(exc),
                 )
 
-    # -- proactive subsystems -----------------------------------------------
+    # proactive subsystems
 
     async def _init_proactive_subsystems(self) -> None:
-        """Wire EngagementTracker, ConversationInitiator, EnvironmentSensor,
-        and the Heartbeat-to-Engine bridge.
-
-        Matches TS ``initializeProactive()`` (lines 318-392 of daemon.ts).
-        Each subsystem is optional - failures are logged as warnings but
-        do not prevent other subsystems from starting.
-        """
+        """Wire optional proactive services independently so one failure does not block the rest."""
         engine = self._proactive_engine
 
-        # --- EngagementTracker ---
+        # EngagementTracker
         try:
             from rune.proactive.engagement_tracker import EngagementTracker
 
@@ -713,14 +631,13 @@ class RuneDaemon:
         except Exception as exc:
             log.warning("engagement_tracker_init_failed", error=str(exc))
 
-        # --- ConversationInitiator ---
+        # ConversationInitiator
         try:
             from rune.proactive.conversation_initiator import ConversationInitiator
 
             self._conversation_initiator = ConversationInitiator()
 
-            # Wire heartbeat-driven conversation checks: register a cron task
-            # that evaluates whether to initiate a conversation every 5 minutes.
+            # Schedule conversation-initiation checks every five minutes.
             if self._heartbeat_scheduler is not None:
                 async def _conversation_check() -> None:
                     """Periodic check for conversation opportunities."""
@@ -761,7 +678,7 @@ class RuneDaemon:
         except Exception as exc:
             log.warning("conversation_initiator_init_failed", error=str(exc))
 
-        # --- EnvironmentSensor ---
+        # EnvironmentSensor
         try:
             from rune.proactive.sensor import EnvironmentSensor
 
@@ -790,10 +707,8 @@ class RuneDaemon:
         except Exception as exc:
             log.warning("environment_sensor_init_failed", error=str(exc))
 
-        # --- ProactiveAgentBridge (autonomous execution + learning feedback) ---
-        # Matches TS daemon.ts lines 299-306: initializeProactiveAgentBridge({...})
+        # Connect proactive execution and feedback.
         try:
-            from rune.agent.loop import NativeAgentLoop
             from rune.proactive.bridge import (
                 BridgeConfig,
                 initialize_proactive_bridge,
@@ -811,54 +726,13 @@ class RuneDaemon:
             async def _proactive_agent_factory(
                 goal: str, *, verification: list[str] | None = None
             ) -> dict[str, Any]:
-                """Agent factory for the proactive bridge.
+                from rune.agent.background import BackgroundTask, run_background
 
-                With verification commands, run the action through the verified
-                goal loop (scoped validation + completion gate + escalation) and
-                report ``verified`` from its objective verdict, so a proactive
-                code action counts as success only when its own check passes.
-                Without them, run a single attempt and leave ``verified`` unset,
-                so the bridge records it as unverified rather than a claimed win.
-                """
-                from rune.types import AgentConfig
-                timeout_s = bridge_config.timeout_ms / 1000
-
-                if verification:
-                    from rune.agent.goal_loop import GoalLoop, GoalLoopConfig, GoalSpec
-                    from rune.agent.goal_runtime import GoalRuntime
-                    from rune.agent.goal_validate import make_validate_fn
-                    runtime = GoalRuntime(
-                        loop=NativeAgentLoop(), channel="proactive",
-                    )
-                    gl = GoalLoop(
-                        GoalLoopConfig(max_iterations=3, adversarial_review=False),
-                        run_fn=runtime.run_fn,
-                        validate_fn=make_validate_fn(timeout_s=timeout_s),
-                        persist_fn=runtime.persist_fn,
-                        answer_of=runtime.answer_of,
-                    )
-                    res = await gl.run(GoalSpec(goal=goal, validation_commands=list(verification)))
-                    return {
-                        "success": res.success,
-                        "verified": res.success,  # objective: goal-loop validation verdict
-                        "output": res.final_answer,
-                        "error": None if res.success else res.stop_cause,
-                    }
-
-                cfg = AgentConfig(
-                    max_iterations=bridge_config.max_steps,
-                    timeout_seconds=timeout_s,
-                )
-                loop = NativeAgentLoop(config=cfg)
-                result = await asyncio.wait_for(loop.run(goal), timeout=timeout_s)
-                from rune.agent.verification_state import verified_outcome
-
-                return {
-                    "success": result.reason == "completed" and verified_outcome(result) is not False,
-                    "verified": verified_outcome(result) is True,
-                    "output": getattr(result, "answer", str(result)),
-                    "error": getattr(result, "error", None),
-                }
+                return await run_background(BackgroundTask(
+                    goal=goal, source="proactive", verification=list(verification or []),
+                    max_steps=bridge_config.max_steps,
+                    timeout_seconds=bridge_config.timeout_ms / 1000,
+                ))
 
             from rune.proactive.execution_store import ExecutionStore
             from rune.utils.paths import rune_data
@@ -876,16 +750,12 @@ class RuneDaemon:
         except Exception as exc:
             log.warning("proactive_agent_bridge_init_failed", error=str(exc))
 
-        # --- Heartbeat to Engine wiring ---
-        # Register a cron task on the heartbeat scheduler that triggers
-        # the proactive engine's evaluation pipeline each tick.
+        # Evaluate proactive context on scheduler ticks.
         if self._heartbeat_scheduler is not None:
             try:
                 async def _heartbeat_engine_tick() -> None:
                     """Heartbeat tick: trigger proactive evaluation."""
-                    # Checked per tick so the toggle applies without a
-                    # restart, and read from config rather than the startup
-                    # dict because the API may be a separate process.
+                    # Reload each tick to pick up toggle changes from other API processes.
                     if not _configured_proactive_enabled():
                         return
                     try:
@@ -896,13 +766,11 @@ class RuneDaemon:
                         awareness = await gatherer.gather()
                         ctx = asdict(awareness)
 
-                        # Enrich context with prediction engine data for
-                        # frustration detection and need inference.
+                        # Add prediction signals for frustration and inferred needs.
                         try:
                             from rune.proactive.prediction.engine import get_prediction_engine
                             pred = get_prediction_engine()
-                            # Use _recent_actions (recorded by agent loop
-                            # _on_tool_end with actual success/failure data).
+                            # Use actions recorded with their actual execution outcomes.
                             recent_actions = getattr(pred, '_recent_actions', [])
                             if recent_actions:
                                 ctx["recent_actions"] = recent_actions[-20:]
@@ -940,10 +808,7 @@ class RuneDaemon:
                     _heartbeat_engine_tick,
                 )
 
-                # --- Cron goal execution ---
-                # Check cron jobs every minute and execute any that match
-                # the current time.  Goal-based jobs run asynchronously
-                # so they don't block the heartbeat.
+                # Check scheduled goals each minute and execute them without blocking the heartbeat.
                 async def _cron_goal_tick() -> None:
                     try:
                         from datetime import datetime
@@ -965,10 +830,7 @@ class RuneDaemon:
                     _cron_goal_tick,
                 )
 
-                # --- Memory consolidation ---
-                # One-shot CLI runs defer this so the user does not wait for
-                # it, leaving a backlog for something long-lived to drain.
-                # Only the TUI did, so those runs never reached learned.md.
+                # Consolidate the backlog left by short-lived CLI runs.
                 async def _consolidation_tick() -> None:
                     try:
                         from rune.memory.consolidation import consolidate_recent
@@ -989,7 +851,7 @@ class RuneDaemon:
             except Exception as exc:
                 log.warning("heartbeat_engine_wiring_failed", error=str(exc))
 
-    # -- MCP bridge ---------------------------------------------------------
+    # MCP bridge
 
     async def _initialize_mcp_bridge(self) -> None:
         """Connect configured MCP servers and register their tools."""
@@ -1032,14 +894,7 @@ class RuneDaemon:
             log.warning("mcp_bridge_init_failed", error=str(exc))
 
     def _get_mcp_server_configs(self) -> list[dict[str, Any]]:
-        """Load MCP server configurations.
-
-        Reads ``~/.rune/mcp_servers.json`` first — the file the CLI, the TUI and
-        the web UI all write. The daemon only looked at a ``config.mcp`` key that
-        does not exist in the schema plus one env var, so it found nothing,
-        returned early, and never reached the loader: MCP silently did nothing
-        under ``rune web``.
-        """
+        """Load MCP server settings, starting with the shared ~/.rune/mcp_servers.json file."""
         servers: list[dict[str, Any]] = []
 
         try:
@@ -1094,7 +949,7 @@ class RuneDaemon:
             log.info("subsystem_shutdown", name="mcp_bridge")
         self._mcp_bridge = None
 
-    # -- autonomous executor ------------------------------------------------
+    # autonomous executor
 
     async def _persist_executor_state(self) -> None:
         """Persist autonomous executor state to disk."""
@@ -1116,7 +971,7 @@ class RuneDaemon:
         except asyncio.CancelledError:
             pass
 
-    # -- channel adapters ---------------------------------------------------
+    # channel adapters
 
     async def _start_channel_adapters(self) -> None:
         """Discover and start channel adapters from environment."""
@@ -1139,9 +994,7 @@ class RuneDaemon:
             else:
                 log.debug("channel_adapters_none_discovered")
 
-            # start() is what points each adapter's on_message at the gateway.
-            # start_all above opened the channels; without this, nothing was
-            # wired to them and every inbound message was dropped.
+            # Connect adapter message callbacks to the gateway after opening channels.
             try:
                 from rune.daemon.gateway import ChannelGateway, set_gateway
                 gw = ChannelGateway(self._channel_registry)
@@ -1154,7 +1007,7 @@ class RuneDaemon:
         except Exception as exc:
             log.warning("channel_adapters_init_failed", error=str(exc))
 
-    # -- heartbeat ----------------------------------------------------------
+    # heartbeat
 
     async def _start_heartbeat(self) -> None:
         """Start the heartbeat scheduler and a simple file-based heartbeat."""
@@ -1200,10 +1053,7 @@ class RuneDaemon:
             except Exception as exc:
                 log.debug("heartbeat_md_checker_failed", error=str(exc)[:200])
 
-            # T1-1: periodic gated-skill-learning evaluation. The tick is cheap
-            # and a no-op unless skills.gated_learning is on; the actual replay
-            # (real agent loops) is spawned detached so it never blocks the
-            # heartbeat, with a guard against overlapping runs.
+            # Schedule opt-in skill replay off the heartbeat path with overlap protection.
             try:
                 self._heartbeat_scheduler.add_task(
                     "skill_eval_cycle",
@@ -1221,11 +1071,7 @@ class RuneDaemon:
         self._heartbeat_task = asyncio.create_task(self._heartbeat_file_loop())
 
     async def _broadcast_notification(self, message: str) -> None:
-        """Send a notification to all connected channels (best-effort).
-
-        The gateway lives in a module singleton, not on this instance —
-        guarding on ``self._gateway`` silently dropped every alert.
-        """
+        """Deliver a notification through the gateway singleton, best-effort."""
         try:
             from rune.daemon.gateway import get_gateway
 
@@ -1236,11 +1082,7 @@ class RuneDaemon:
             log.debug("notification_broadcast_failed", error=str(exc)[:120])
 
     async def _skill_eval_tick(self) -> None:
-        """Heartbeat callback: kick off a gated-skill eval cycle (non-blocking).
-
-        Returns immediately. No-op unless skills.gated_learning is on; the heavy
-        replay runs in a detached task guarded against overlap.
-        """
+        """Start an opt-in skill evaluation task without blocking or overlapping prior work."""
         try:
             from rune.config import get_config
             if not getattr(get_config().skills, "gated_learning", False):
@@ -1307,7 +1149,7 @@ class RuneDaemon:
             with contextlib.suppress(OSError):
                 heartbeat_path.unlink(missing_ok=True)
 
-    # -- API server ---------------------------------------------------------
+    # API server
 
     async def _start_api_server(self) -> None:
         """Start the FastAPI-based API server in the background."""
@@ -1365,7 +1207,7 @@ class RuneDaemon:
         except Exception as exc:
             log.error("api_server_crashed", error=str(exc))
 
-    # -- client handling ----------------------------------------------------
+    # client handling
 
     async def _handle_client(
         self,
@@ -1448,18 +1290,12 @@ class RuneDaemon:
             return {"success": False, "error": "Missing goal"}
 
         try:
-            from rune.agent.llm_adapter import create_agent_model_for_goal
-            from rune.agent.loop import NativeAgentLoop
+            from rune.agent.background import BackgroundTask, run_background
 
-            await create_agent_model_for_goal(goal)
-            loop = NativeAgentLoop()
-            result = await loop.run(goal)
-
-            return {
-                "success": result.success if hasattr(result, "success") else True,
-                "answer": getattr(result, "answer", str(result)),
-                "iterations": getattr(result, "iterations", 0),
-            }
+            result = await run_background(BackgroundTask(
+                goal=goal, source="daemon", workspace=params.get("cwd") or "",
+            ))
+            return {**result, "answer": result["output"]}
         except Exception as exc:
             log.error("agent_execute_failed", error=str(exc))
             return {"success": False, "error": str(exc)}

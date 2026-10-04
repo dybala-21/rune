@@ -267,7 +267,28 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
       background: 'var(--bg-primary)',
     }}>
       <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
-        {/* Proactive toggle */}
+        {config && <div style={{ padding: '10px 14px', fontSize: 13 }}>
+          <label htmlFor="command-environment">Command environment</label>
+          <select id="command-environment" disabled={toggling || config.executionEnvironment?.managed}
+            value={config.executionEnvironment?.backend || 'local'}
+            onChange={async event => {
+              setToggling(true);
+              try {
+                await patchConfig({ executionEnvironment: { backend: event.target.value as 'local' | 'container' } });
+                setConfig(await fetchConfig());
+              } catch { toast.error("Couldn't change the command environment"); }
+              finally { setToggling(false); }
+            }} style={{ display: 'block', marginTop: 8, width: '100%' }}>
+            <option value="local">Local computer</option>
+            <option value="container">Isolated container</option>
+          </select>
+          {config.executionEnvironment?.backend === 'container' && <p style={{ color: 'var(--text-muted)', fontSize: 12 }}>
+            {config.executionEnvironment.managed
+              ? 'Commands run in your private server workspace. This setting is managed by the server operator.'
+              : `Uses ${config.executionEnvironment.image}. Docker and this image must already be installed. Browser and native apps stay local.`}
+            {!config.executionEnvironment.allowNetwork && ' Command network access is off.'}
+          </p>}
+        </div>}
         {config && (
           <div style={{ padding: '6px 14px', marginBottom: 4 }}>
             <button
@@ -326,7 +347,6 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
           </div>
         )}
 
-        {/* Advisor toggle */}
         {config && (
           <div style={{ padding: '6px 14px', marginBottom: 4 }}>
             <button
@@ -385,7 +405,6 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
           </div>
         )}
 
-        {/* Channels */}
         {channels.length > 0 && (
           <div style={{ marginBottom: 4 }}>
             <div style={{
@@ -451,7 +470,6 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
           </div>
         )}
 
-        {/* Divider */}
         {(config || channels.length > 0) && (
           <div style={{
             height: 1,
@@ -460,7 +478,6 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
           }} />
         )}
 
-        {/* Skills section */}
         <SettingsSection
           icon={
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
@@ -502,7 +519,6 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
           )}
         </SettingsSection>
 
-        {/* Automation section */}
         <SettingsSection
           icon={
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round">
@@ -521,7 +537,6 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
           />
         </SettingsSection>
 
-        {/* MCP Section */}
         <SettingsSection
           icon={
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -540,7 +555,6 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
           />
         </SettingsSection>
 
-        {/* Config Files (Markdown Editor) */}
         {onOpenMarkdownPanel && (
           <SettingsSection
             icon={
@@ -690,7 +704,6 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
           </div>
         )}
 
-        {/* Environment section */}
         <SettingsSection
           icon={
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">

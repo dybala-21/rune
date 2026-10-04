@@ -1,10 +1,12 @@
 import { ConversationLoader } from '../utils/conversationLoader';
 import { latestTurn, retryAttachments } from '../utils/retry';
 import { retryRequestId, updateDelivery } from '../utils/messageDelivery';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { restoreRunMessages, type RunSnapshot } from '../utils/runSnapshot';
 import { toast } from '../utils/toast';
 import { useSSE } from './useSSE';
+import { useProactiveSuggestions } from './useProactiveSuggestions';
+import { withProactive, withoutProactive } from '../utils/proactive';
 import * as api from '../api';
 import { computeActivitySummary } from '../utils/tooling';
 import { describeTrust } from '../utils/trust';
@@ -45,7 +47,6 @@ import type {
   OrchestrationState,
   OrchestrationTask,
   TrustInfo,
-  ProactiveSuggestion,
   SseEventType,
 } from '../types';
 
@@ -191,7 +192,7 @@ function loadPersistedLiveState(): LoadedLiveDraft {
     return {
       state: {
         version: 1,
-        messages: trimTail(Array.isArray(stateCandidate.messages) ? stateCandidate.messages as ChatMessage[] : [], MAX_MESSAGES),
+        messages: trimTail(withoutProactive(Array.isArray(stateCandidate.messages) ? stateCandidate.messages as ChatMessage[] : []), MAX_MESSAGES),
         toolCalls: trimTail(Array.isArray(stateCandidate.toolCalls) ? stateCandidate.toolCalls as ToolCall[] : [], MAX_TOOL_CALLS),
         thinkingBlocks: trimTail(Array.isArray(stateCandidate.thinkingBlocks) ? stateCandidate.thinkingBlocks as ThinkingBlock[] : [], MAX_THINKING_BLOCKS),
         tokenUsage: stateCandidate.tokenUsage ?? null,
@@ -234,7 +235,9 @@ function persistLiveState(state: PersistedLiveState): void {
 }
 
 export function useAgent() {
-  const { connected, addEventListener: sseOn, refresh } = useSSE();
+  const connection = useSSE();
+  const { connected, addEventListener: sseOn, refresh } = connection;
+  const suggestions = useProactiveSuggestions(connection);
   const initialStateRef = useRef<LoadedLiveDraft | null>(null);
   if (initialStateRef.current === null) {
     initialStateRef.current = loadPersistedLiveState();
@@ -289,8 +292,7 @@ export function useAgent() {
   const [orchestration, setOrchestration] = useState<OrchestrationState | null>(null);
   // tool_call 핸들러가 스텝 번호를 동기적으로 읽어야 하므로 state와 별도로 ref 유지
   const currentStepRef = useRef(0);
-  // Step numbers restart each run. Continue from the restored run counter
-  // so the timeline keeps calls from different turns apart.
+  // Continue the restored run counter so repeated step numbers stay separate across turns.
   const runSeqRef = useRef(
     initialState.state.toolCalls.reduce((max, tc) => Math.max(max, tc.run ?? 0), 0),
   );
@@ -419,8 +421,7 @@ export function useAgent() {
     refresh();
   }, [clearConversationState, refresh, cancelConversationLoad]);
 
-  // Debounce draft saves to avoid serializing the conversation on every token.
-  // Flush the pending save on unmount.
+  // Debounce draft serialization and flush the pending save on unmount.
   useEffect(() => {
     if (draftDecisionPending) return;
     pendingPersistRef.current = {
@@ -559,37 +560,6 @@ export function useAgent() {
       setTokenUsage(null);
       currentStepRef.current = 0;
       runSeqRef.current += 1;
-    }));
-
-    unsubs.push(sseOn('suggestion_created', (raw) => {
-      // Suggestions appear as cards; acting on them requires a user reply.
-      const d = raw as {
-        id?: string; type?: string; title?: string; description?: string;
-        confidence?: number; source?: string;
-      };
-      const conf = typeof d.confidence === 'number' ? d.confidence : 0.5;
-      const intensity: ProactiveSuggestion['intensity'] =
-        conf >= 0.8 ? 'intervene' : conf >= 0.6 ? 'suggest' : 'nudge';
-      const suggestionId = d.id || nextId();
-      setMessages(prev => {
-        // Heartbeats can repeat an open suggestion.
-        if (prev.some(m => m.suggestion?.id === suggestionId)) return prev;
-        return appendWithLimit(prev, {
-          id: nextId(),
-          role: 'system',
-          content: d.title || d.description || 'RUNE has a suggestion',
-          timestamp: Date.now(),
-          suggestion: {
-            id: suggestionId,
-            headline: d.title || '',
-            body: d.description || '',
-            actions: [],
-            confidence: conf,
-            intensity,
-            timestamp: Date.now(),
-          },
-        }, MAX_MESSAGES);
-      });
     }));
 
     unsubs.push(onOwnRun('usage_update', (raw) => {
@@ -999,8 +969,7 @@ export function useAgent() {
     void postToServer(lastUser.content, attachments.length ? attachments : undefined, requestId);
   }, [beginLiveSession, postToServer, pushSystem, cancelConversationLoad]);
 
-  // Client-side slash commands; everything else goes to the server and
-  // answers over the command_result SSE event.
+  // Handle local slash commands here; server commands reply through command_result events.
   const handleClientCommand = useCallback((text: string): boolean => {
     const [cmd, ...rest] = text.trim().split(/\s+/);
     const args = rest.join(' ');
@@ -1183,10 +1152,12 @@ export function useAgent() {
     }
   }, [pushSystemError]);
 
+  const visibleMessages = useMemo(() => withProactive(messages, suggestions), [messages, suggestions]);
+
   return {
     connected,
     state,
-    messages,
+    messages: visibleMessages,
     toolCalls,
     thinkingBlocks,
     tokenUsage,

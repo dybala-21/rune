@@ -10,8 +10,7 @@ def approval_cfg(monkeypatch):
     """Drive the gate through the real config object."""
     from rune.config.loader import get_config
 
-    # Writes are only gated when they can actually happen (same flag the
-    # executor checks), so the write tests need the path enabled.
+    # Enable network writes so approval tests reach the same gate as execution.
     monkeypatch.setenv("RUNE_HYBRID_API", "1")
     monkeypatch.delenv("RUNE_APPROVAL_MODE", raising=False)
     cfg = get_config().approval
@@ -167,11 +166,7 @@ def test_write_without_approval_channel_fails_closed(approval_cfg, fetch_executo
 
 
 def test_approval_decisions_from_the_ui_are_honored():
-    """The card offers approve_once/approve_always; both must mean yes.
-
-    Regression: the server compared against a plain "approve" that no client
-    ever sends, so every web-UI approval resolved as a denial.
-    """
+    """Both approve_once and approve_always must resolve as approval."""
     from rune.api.server import approval_granted
 
     assert approval_granted({"decision": "approve_once"}) is True
@@ -180,7 +175,6 @@ def test_approval_decisions_from_the_ui_are_honored():
     assert approval_granted({"decision": "deny"}) is False
     assert approval_granted({}) is False
     assert approval_granted(None) is False
-
 
 
 def test_write_gate_is_silent_when_writes_are_disabled(approval_cfg, monkeypatch):
@@ -203,7 +197,6 @@ def test_post_is_refused_rather_than_downgraded_to_get(monkeypatch):
     )))
     assert res.success is False
     assert "disabled" in (res.error or "")
-
 
 
 def test_approval_mode_resolution(monkeypatch):
@@ -271,3 +264,32 @@ def test_config_endpoint_reports_the_approval_mode(monkeypatch):
 
     monkeypatch.setenv("RUNE_APPROVAL_MODE", "standard")
     assert asyncio.run(get_config_endpoint()).approval_mode == "standard"
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_approval_timeout_or_cancellation_never_grants_access(cancel):
+    import asyncio
+
+    from rune.api.approvals import approval_callback
+
+    pending = {}
+    events = []
+    opened = asyncio.Event()
+
+    async def emit(event, data):
+        events.append(event)
+        if event == "approval_request":
+            opened.set()
+
+    callback = approval_callback("run", pending, emit, timeout_ms=20 if not cancel else 1000)
+    task = asyncio.create_task(callback("send", "Send report"))
+    await asyncio.wait_for(opened.wait(), timeout=1)
+    assert pending
+    if cancel:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        assert await task is False
+    assert not pending
+    assert events == ["approval_request", "approval_closed"]

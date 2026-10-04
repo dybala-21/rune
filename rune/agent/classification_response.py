@@ -24,8 +24,9 @@ _PROPERTIES = {
         "type": "boolean",
         "description": "True only for required code, script, shell or test execution. False for native app input, including calculations in Calculator, unless the user also requests code/tests to run.",
     },
-    "intent_categories": {"type": "array", "items": {"type": "string", "enum": ["email", "document", "table", "desktop", "calculation"]}},
-    "requires_desktop_input": {"type": "boolean"},
+    "intent_categories": {"type": "array", "items": {"type": "string", "enum": ["email", "document", "table", "desktop", "calculation"]},
+                          "description": "desktop requires native app features or unsaved app state. Creating or rereading Office/PDF files alone uses document/file tools, without desktop."},
+    "requires_desktop_input": {"type": "boolean", "description": "True only for input in a native app required by the request. Saving or checking a file through document tools is false."},
     "is_related_to_previous": {"type": "boolean"},
     "table_output": {
         "type": "string", "enum": ["none", "csv", "xlsx"],

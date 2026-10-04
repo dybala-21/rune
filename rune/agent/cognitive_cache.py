@@ -1,8 +1,4 @@
-"""Cognitive cache for the RUNE agent. Avoids redundant tool calls.
-
-Ported from src/agent/cognitive-cache.ts (696 lines). LRU cache with
-file generation tracking, bash mutation detection, and knowledge inventory.
-"""
+"""Cache tool results with LRU eviction and file-mutation invalidation."""
 
 from __future__ import annotations
 
@@ -23,12 +19,10 @@ log = get_logger(__name__)
 MAX_CACHE_ENTRIES = 50
 MAX_CACHEABLE_OUTPUT_CHARS = 100_000
 
-# Mirrors WebFetchParams.max_length (rune/capabilities/web.py); a unit test
-# guards against drift.
+# Must match WebFetchParams.max_length; a regression test checks this.
 WEB_FETCH_DEFAULT_MAX_LENGTH = 50_000
 
-# Cache-hit retry hints per capability. Every suggested parameter changes
-# that capability's cache key, so following the hint always escapes the hit.
+# Retry hints change the cache key so a repeated call can reach the tool.
 _CACHE_HIT_RETRY_HINTS = {
     "file_read": "a different offset/limit",
     "web_fetch": "a larger maxLength or a CSS selector",
@@ -111,11 +105,7 @@ class KnowledgeInventory:
 # SessionToolCache
 
 class SessionToolCache:
-    """LRU-based cognitive cache for tool results within an agent session.
-
-    Tracks file generations to detect stale cache entries after mutations.
-    Supports bash mutation detection for automatic invalidation.
-    """
+    """Cache session tool results and invalidate stale file generations."""
 
     def __init__(self, max_entries: int = MAX_CACHE_ENTRIES) -> None:
         self._max_entries = max_entries
@@ -126,7 +116,7 @@ class SessionToolCache:
         self._miss_count = 0
         self._tokens_saved = 0
 
-    # -- Properties ----------------------------------------------------------
+    # Properties
 
     @property
     def hit_count(self) -> int:
@@ -153,15 +143,16 @@ class SessionToolCache:
             "tokens_saved": self._tokens_saved,
         }
 
-    # -- Key generation ------------------------------------------------------
+    # Key generation
 
     def generate_key(self, cap_name: str, params: dict[str, Any]) -> str | None:
-        """Generate a cache key based on capability name and parameters.
-
-        Returns ``None`` if the capability is not cacheable.
-        """
+        """Build a cache key, or return None when the call must run directly."""
         match cap_name:
             case "file_read":
+                # Bypass cache annotations for raw reads, custom encoding or explicit size limits.
+                if (params.get("raw") or params.get("encoding", "utf-8") != "utf-8"
+                        or "maxSize" in params or "max_size" in params):
+                    return None
                 file_path = params.get("file_path") or params.get("path", "")
                 normalized = self._normalize_path(file_path)
                 gen = self._get_path_generation(normalized)
@@ -208,10 +199,7 @@ class SessionToolCache:
             case "web_fetch":
                 if str(params.get("method") or "GET").upper() != "GET":
                     return None
-                # Everything that changes the output is part of the key:
-                # selector-extracted content differs from the full page, and
-                # truncated fetches (fast lane, budget scaling) must not be
-                # served to full-length requests.
+                # Key by selector and length so partial fetches cannot satisfy full requests.
                 url = params.get("url", "")
                 selector = params.get("selector") or ""
                 h = hashlib.md5(
@@ -235,7 +223,7 @@ class SessionToolCache:
                 # Browser and other capabilities are not cached
                 return None
 
-    # -- Cache operations ----------------------------------------------------
+    # Cache operations
 
     def get(
         self, key: str, cap_name: str, params: dict[str, Any],
@@ -339,7 +327,7 @@ class SessionToolCache:
             **entry.meta,
         }
 
-    # -- Invalidation --------------------------------------------------------
+    # Invalidation
 
     def invalidate_web(self) -> None:
         """Discard page reads after an API write whose affected URLs are unknown."""
@@ -355,10 +343,7 @@ class SessionToolCache:
         self._invalidate_all_file_entries(normalized)
 
     def invalidate_from_bash(self, command: str, success: bool) -> None:
-        """Invalidate cache entries affected by a bash command.
-
-        Detects mutating commands and invalidates relevant file entries.
-        """
+        """Invalidate file entries affected by a mutating bash command."""
         if not success:
             return
 
@@ -366,8 +351,7 @@ class SessionToolCache:
         if not is_mutating:
             return
 
-        # Extract potential file paths from the command
-        # and invalidate all file-related entries conservatively
+        # Conservatively invalidate file entries for paths found in the command.
         keys_to_remove: list[str] = []
         for key, entry in self.entries.items():
             if self._is_entry_affected_by_mutation(entry, command):
@@ -383,7 +367,7 @@ class SessionToolCache:
                 removed=len(keys_to_remove),
             )
 
-    # -- Knowledge inventory -------------------------------------------------
+    # Knowledge inventory
 
     def build_knowledge_inventory(self) -> KnowledgeInventory:
         """Build a summary of knowledge gathered during this session."""
@@ -417,7 +401,7 @@ class SessionToolCache:
             hit_count=self._hit_count,
         )
 
-    # -- Partial clear / eviction --------------------------------------------
+    # Partial clear / eviction
 
     def partial_clear(self, max_entries: int | None = None) -> None:
         """Evict entries down to *max_entries* (default: half current size)."""
@@ -425,7 +409,7 @@ class SessionToolCache:
         while len(self.entries) > target:
             self._evict_oldest()
 
-    # -- Private helpers -----------------------------------------------------
+    # Private helpers
 
     def _normalize_path(self, path: str) -> str:
         """Normalize a file path for use as cache key component."""
@@ -614,10 +598,7 @@ class SessionToolCache:
 # Public helper
 
 def format_knowledge_inventory(inv: KnowledgeInventory) -> str | None:
-    """Format a knowledge inventory as a human-readable string.
-
-    Returns ``None`` if the inventory is empty.
-    """
+    """Format the knowledge inventory, or return None when empty."""
     parts: list[str] = []
 
     if inv.files_read:

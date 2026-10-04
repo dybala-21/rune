@@ -1,9 +1,4 @@
-"""Proactive suggestion engine for RUNE.
-
-Evaluates the current context and produces ranked, deduplicated suggestions
-through an 8-step pipeline.  Also provides full CRUD, persistence, and
-deduplication-cooldown for suggestions.
-"""
+"""Generate, rank, deduplicate and persist proactive suggestions."""
 
 from __future__ import annotations
 
@@ -35,15 +30,7 @@ _NEED_DESCRIPTIONS: dict[str, str] = {
 
 
 class ProactiveEngine:
-    """Generates proactive suggestions via an 8-step evaluation pipeline.
-
-    Also provides:
-    - In-memory suggestion storage with CRUD
-    - Persistence via MemoryStore's proactive_suggestions_state table
-    - Deduplication cooldown (5-min per title)
-    - Stats reporting
-    - Event emission for suggestion/intervention/decision listeners
-    """
+    """Manage suggestions, feedback, cooldowns and event listeners."""
 
     __slots__ = (
         "_config",
@@ -54,6 +41,8 @@ class ProactiveEngine:
         "_dismissed_keys",
         "_evaluation_count",
         "_listeners",
+        "_store",
+        "_store_version",
     )
 
     _DISMISS_COOLDOWN_SECS = 1800  # 30 min cooldown for dismissed suggestions
@@ -67,19 +56,13 @@ class ProactiveEngine:
         self._dismissed_keys: dict[str, datetime] = {}  # title_key -> dismissed_at
         self._evaluation_count: int = 0
         self._listeners: dict[str, list[Any]] = {}  # event_name -> [callbacks]
+        self._store: MemoryStore | None = None
+        self._store_version: tuple[int, int] | None = None
 
-    # Event emitter (ported from TS EventEmitter pattern)
+    # Event emitter
 
     def on(self, event: str, callback: Any) -> None:
-        """Register a listener for an event.
-
-        Events:
-        - ``suggestion``: emitted when new suggestions are produced
-        - ``intervention``: emitted when an intervention is triggered
-        - ``decision``: emitted when the engine makes a decision
-        - ``task_completed``: emitted when a task completes
-        - ``task_failed``: emitted when a task fails
-        """
+        """Register a listener for suggestion, intervention, decision or task events."""
         self._listeners.setdefault(event, []).append(callback)
 
     def off(self, event: str, callback: Any) -> None:
@@ -111,56 +94,37 @@ class ProactiveEngine:
     # Public API - Evaluation pipeline
 
     async def evaluate(self, context: dict[str, Any]) -> list[Suggestion]:
-        """Run the 8-step suggestion pipeline.
-
-        Steps:
-        1. Gather context
-        2. Check preconditions (quiet hours, suppression)
-        3. Generate candidates
-        4. Filter candidates (relevance, expiry)
-        5. Rank candidates (confidence, user preference)
-        6. Deduplicate
-        7. Limit output count
-        8. Record pipeline metadata
-        """
+        """Gather, filter, rank and deduplicate suggestions within configured limits."""
         self._evaluation_count += 1
 
-        # Step 1: Gather context
         enriched = await self._gather_context(context)
 
-        # Step 2: Preconditions
         if enriched.get("suppress", False):
             return []
 
-        # Step 3: Generate
         candidates = await self._generate_candidates(enriched)
 
-        # Step 4: Filter
         candidates = self._filter_candidates(candidates)
 
-        # Step 5: Rank
         candidates = self._rank_candidates(candidates)
 
-        # Step 6: Deduplicate
         candidates = self._deduplicate(candidates)
 
-        # Step 7: Limit
         max_suggestions = self._config.get("max_suggestions", 3)
         candidates = candidates[:max_suggestions]
 
-        # Step 8: Record (with eviction to bound memory) + store in _suggestions
         for s in candidates:
+            self._persist(s)
             self._seen_ids.add(s.id)
             self._suggestions[s.id] = s
         if len(self._seen_ids) > _MAX_SEEN_IDS:
-            # Evict oldest half - set iteration order is insertion order in CPython 3.7+
+            # Keep this cache bounded; durable state still prevents replay.
             to_remove = list(self._seen_ids)[: _MAX_SEEN_IDS // 2]
             for item in to_remove:
                 self._seen_ids.discard(item)
 
         log.debug("proactive_evaluated", count=len(candidates))
 
-        # Emit events for new suggestions
         if candidates:
             self._emit("suggestion", candidates)
             # Check for intervention-level suggestions (high confidence)
@@ -178,11 +142,7 @@ class ProactiveEngine:
     # Public API - Suggestion CRUD
 
     def add_suggestion(self, suggestion: Suggestion) -> None:
-        """Manually inject a suggestion into the engine.
-
-        Respects deduplication cooldown: if the same title was added within
-        the last 5 minutes the suggestion is silently dropped.
-        """
+        """Add a suggestion unless its title is still within the deduplication cooldown."""
         # Dedup cooldown check
         title_key = suggestion.title.lower().strip()
         now = datetime.now(UTC)
@@ -202,6 +162,7 @@ class ProactiveEngine:
                 return
 
         self._recent_suggestion_keys[title_key] = now
+        self._persist(suggestion)
         self._suggestions[suggestion.id] = suggestion
 
         # Prune stale cooldown entries (keep at most 200)
@@ -228,16 +189,13 @@ class ProactiveEngine:
         return self._suggestions.get(suggestion_id)
 
     def get_first_pending(self) -> Suggestion | None:
-        """Return the oldest unprocessed suggestion above min_confidence.
-
-        Returns ``None`` if no qualifying suggestion exists.
-        """
+        """Return the oldest eligible unprocessed suggestion, or None."""
         min_confidence = self._config.get("min_confidence", 0.2)
         now = datetime.now(UTC)
 
         # Iterate in insertion order (oldest first in CPython 3.7+)
         for s in self._suggestions.values():
-            if s.status != "pending":
+            if s.status != "pending" or s.execution_status is not None:
                 continue
             if s.confidence < min_confidence:
                 continue
@@ -248,94 +206,98 @@ class ProactiveEngine:
 
     def delete_suggestion(self, suggestion_id: str) -> None:
         """Remove a suggestion by ID."""
+        if self._store is not None:
+            from rune.proactive.state import expire
+            expire(self._store, suggestion_id)
         self._suggestions.pop(suggestion_id, None)
 
-    def handle_response(self, suggestion_id: str, accepted: bool) -> None:
-        """Process user feedback on a suggestion.
-
-        Updates the feedback dict and removes the suggestion from pending.
-        """
-        self._feedback[suggestion_id] = accepted
-
+    def handle_response(self, suggestion_id: str, accepted: bool) -> bool:
+        """Record an explicit response, once, without treating it as execution."""
         suggestion = self._suggestions.get(suggestion_id)
-        if suggestion is not None:
-            suggestion.status = "accepted" if accepted else "dismissed"
-            # Dismissed suggestions get a longer cooldown (30 min) to avoid nagging
-            if not accepted:
-                title_key = suggestion.title.lower().strip()
-                if title_key:
-                    self._dismissed_keys[title_key] = datetime.now(UTC)
-            # Remove from pending storage
-            del self._suggestions[suggestion_id]
+        desired = "accepted" if accepted else "dismissed"
+        if self._store is not None:
+            from rune.proactive.state import respond
+            suggestion = respond(self._store, suggestion_id, accepted)
+        elif suggestion is not None:
+            if suggestion.status not in ("pending", desired):
+                raise ValueError("This suggestion already has a different response")
+            if suggestion.expires_at and suggestion.expires_at <= datetime.now(UTC):
+                raise ValueError("This suggestion has expired")
+            suggestion.status = desired
+            suggestion.response_source = "user"
+        if suggestion is None:
+            return False
+        self._suggestions[suggestion_id] = suggestion
+        self._feedback[suggestion_id] = accepted
+        if not accepted:
+            self._dismissed_keys[suggestion.title.lower().strip()] = datetime.now(UTC)
 
         log.debug(
             "proactive_feedback",
             suggestion_id=suggestion_id,
             accepted=accepted,
         )
+        return True
+
+    def _persist(self, suggestion: Suggestion) -> None:
+        if self._store is not None:
+            from rune.proactive.state import save
+            save(self._store, suggestion)
+
+    def record_execution(self, suggestion_id: str, status: str, result: dict | None = None) -> None:
+        suggestion = self._suggestions.get(suggestion_id)
+        if suggestion is not None:
+            suggestion.execution_status = status
+            suggestion.execution_result = result or {}
+            self._persist(suggestion)
+
+    def list_suggestions(self) -> list[Suggestion]:
+        if self._store is not None and (
+            self._store.conn.pragma("data_version"), self._store.conn.total_changes()
+        ) != self._store_version:
+            self.load_persisted_suggestions(self._store)
+        return list(self._suggestions.values())
 
     # Public API - Persistence
 
     def load_persisted_suggestions(self, store: MemoryStore) -> int:
-        """Load suggestions from the store's proactive_suggestions_state table.
+        """Load persisted suggestions and return the count."""
+        from rune.proactive.state import restore
 
-        Returns the number of suggestions loaded.
-        """
-        rows = store.get_suggestion_state()  # returns list[dict]
+        self._store = store
+        self._store_version = (store.conn.pragma("data_version"), store.conn.total_changes())
+        rows = store.get_suggestion_state()
         loaded = 0
+        seen: set[str] = set()
         for row in rows:
-            sid = str(row.get("id", ""))
-            meta: dict[str, Any] = row.get("metadata", {})
-            if sid in self._suggestions:
+            try:
+                suggestion = restore(row)
+            except (TypeError, ValueError, KeyError) as exc:
+                log.warning("invalid_persisted_suggestion", row_id=row.get("id"), error=str(exc))
                 continue
-
-            suggestion = Suggestion(
-                id=meta.get("suggestion_id", sid),
-                type=meta.get("type", "insight"),
-                title=meta.get("title", ""),
-                description=meta.get("description", ""),
-                confidence=float(meta.get("confidence", 0.5)),
-                source=meta.get("source", "persisted"),
-                status=row.get("state", "pending"),
-            )
-
-            # Restore timestamps if present
-            if meta.get("created_at"):
-                with contextlib.suppress(ValueError, TypeError):
-                    suggestion.created_at = datetime.fromisoformat(meta["created_at"])
-            if meta.get("expires_at"):
-                with contextlib.suppress(ValueError, TypeError):
-                    suggestion.expires_at = datetime.fromisoformat(meta["expires_at"])
-
+            if suggestion.id in seen:
+                continue
+            seen.add(suggestion.id)
+            self._seen_ids.add(suggestion.id)
+            if suggestion.status == "expired":
+                self._suggestions.pop(suggestion.id, None)
+                continue
+            if suggestion.status in ("accepted", "dismissed") and suggestion.response_source == "user":
+                self._feedback[suggestion.id] = suggestion.status == "accepted"
+            loaded += suggestion.id not in self._suggestions
             self._suggestions[suggestion.id] = suggestion
-            loaded += 1
 
         if loaded:
             log.info("persisted_suggestions_loaded", count=loaded)
         return loaded
 
     def save_suggestions(self, store: MemoryStore) -> int:
-        """Persist current in-memory suggestions to the store.
-
-        Returns the number of suggestions saved.
-        """
+        """Persist current suggestions and return the count."""
         saved = 0
+        from rune.proactive.state import save
+
         for s in self._suggestions.values():
-            meta = {
-                "suggestion_id": s.id,
-                "type": s.type,
-                "title": s.title,
-                "description": s.description,
-                "confidence": s.confidence,
-                "source": s.source,
-                "created_at": s.created_at.isoformat() if s.created_at else None,
-                "expires_at": s.expires_at.isoformat() if s.expires_at else None,
-            }
-            store.save_suggestion_state(
-                suggestion_type=s.type,
-                state=s.status,
-                metadata=meta,
-            )
+            save(store, s)
             saved += 1
 
         if saved:
@@ -343,10 +305,7 @@ class ProactiveEngine:
         return saved
 
     def prune_expired_suggestions(self) -> int:
-        """Remove expired suggestions from in-memory storage.
-
-        Returns the number pruned.
-        """
+        """Remove expired suggestions and return the count."""
         now = datetime.now(UTC)
         expired_ids: list[str] = []
         for sid, s in self._suggestions.items():
@@ -354,8 +313,7 @@ class ProactiveEngine:
                 expired_ids.append(sid)
 
         for sid in expired_ids:
-            self._suggestions[sid].status = "expired"
-            del self._suggestions[sid]
+            self.delete_suggestion(sid)
 
         if expired_ids:
             log.debug("suggestions_pruned", count=len(expired_ids))
@@ -371,13 +329,15 @@ class ProactiveEngine:
             accepted_count / total_feedback if total_feedback > 0 else 0.0
         )
         pending_count = sum(
-            1 for s in self._suggestions.values() if s.status == "pending"
+            1 for s in self._suggestions.values()
+            if s.status == "pending" and s.execution_status is None
         )
         return {
             "evaluation_count": self._evaluation_count,
             "suggestion_count": len(self._suggestions),
             "acceptance_rate": acceptance_rate,
             "pending_count": pending_count,
+            "interaction_count": total_feedback,
         }
 
     # Backward-compatible API
@@ -400,16 +360,10 @@ class ProactiveEngine:
         self,
         context: dict[str, Any],
     ) -> list[Suggestion]:
-        """Generate suggestion candidates from the gathered context.
-
-        Sources:
-        1. Explicit hints from context dict
-        2. Task completion follow-ups
-        3. PredictionEngine (behavior, frustration, needs)
-        """
+        """Generate candidates from hints, completed tasks, predictions and context signals."""
         candidates: list[Suggestion] = []
 
-        # --- Source 1: Explicit hints ---
+        # Source 1: Explicit hints
         hints: list[dict[str, Any]] = context.get("hints", [])
         for hint in hints:
             candidates.append(
@@ -422,7 +376,7 @@ class ProactiveEngine:
                 )
             )
 
-        # --- Source 2: Task completion follow-up ---
+        # Source 2: Task completion follow-up
         last_action = context.get("last_action")
         if last_action and last_action.get("status") == "completed":
             candidates.append(
@@ -435,16 +389,14 @@ class ProactiveEngine:
                 )
             )
 
-        # --- Source 3: PredictionEngine (behavior + frustration + needs) ---
+        # Source 3: PredictionEngine (behavior + frustration + needs)
         try:
             from rune.proactive.prediction.engine import get_prediction_engine
 
             pred = get_prediction_engine()
             result = pred.predict(context)
 
-            # 3a: Command-level behavior predictions → suggestions
-            # Only surface bash commands (ruff, pytest, etc.) at 60%+ confidence.
-            # Generic tool names (file_read, web_search) are skipped — too obvious.
+            # Suggest concrete bash commands above the confidence floor, not generic tool names.
             for tool, prob in result.tool_predictions:
                 if prob >= 0.6 and tool.startswith("bash:"):
                     cmd_name = tool.split(":", 1)[1]
@@ -467,9 +419,7 @@ class ProactiveEngine:
             if result.frustration and result.frustration.level in ("moderate", "high"):
                 candidates.append(
                     Suggestion(
-                        # Stable id: this trigger fires every heartbeat while
-                        # the condition holds; a fresh uuid each time would
-                        # slip past every dedup layer and repeat the card.
+                        # Reuse a stable ID so heartbeats cannot duplicate the same card.
                         id=f"frustration-{result.frustration.level}",
                         type="warning",
                         title="Difficulty detected",
@@ -500,7 +450,7 @@ class ProactiveEngine:
             # Prediction failure must never break the pipeline
             log.debug("prediction_engine_skipped", error=str(exc)[:200])
 
-        # --- Source 4: Context-based triggers (git, idle, commitments) ---
+        # Source 4: Context-based triggers (git, idle, commitments)
         try:
             # 4a: Git dirty - uncommitted changes after idle
             git_status = context.get("git_status", "")
@@ -548,11 +498,7 @@ class ProactiveEngine:
                 for c in open_commits:
                     candidates.append(
                         Suggestion(
-                            # Stable id per commitment row: the suggestion is
-                            # regenerated every heartbeat, and dedup at every
-                            # layer (engine _seen_ids, SSE broadcast, the web
-                            # timeline) keys on the id. A fresh uuid each tick
-                            # would re-surface the same commitment every turn.
+                            # Deduplicate heartbeats and UI events by commitment ID.
                             id=f"commitment-{c['id']}",
                             type="followup",
                             title="Open commitment",
@@ -568,11 +514,7 @@ class ProactiveEngine:
         return candidates
 
     def _filter_candidates(self, candidates: list[Suggestion]) -> list[Suggestion]:
-        """Remove expired or low-confidence candidates.
-
-        Uses reflexion-learned threshold if available (higher than default
-        when users have been rejecting suggestions).
-        """
+        """Filter expiry and confidence using a stricter learned threshold when available."""
         now = datetime.now(UTC)
         min_confidence = self._config.get("min_confidence", 0.2)
 
@@ -595,13 +537,16 @@ class ProactiveEngine:
         return filtered
 
     def _rank_candidates(self, candidates: list[Suggestion]) -> list[Suggestion]:
-        """Rank candidates by confidence (desc), boosted by positive feedback history."""
-        acceptance_count = sum(1 for v in self._feedback.values() if v)
-        total_feedback = len(self._feedback)
-        global_boost = (acceptance_count / max(1, total_feedback)) * 0.1
+        """Use explicit feedback to adjust relevance, never execution authority."""
+        by_type: dict[str, list[bool]] = {}
+        for sid, accepted in self._feedback.items():
+            if previous := self._suggestions.get(sid):
+                by_type.setdefault(previous.type, []).append(accepted)
 
         def score(s: Suggestion) -> float:
-            return s.confidence + global_boost
+            feedback = by_type.get(s.type, [])
+            adjustment = (sum(feedback) / len(feedback) - .5) * .2 if len(feedback) >= 3 else 0
+            return s.confidence + adjustment
 
         return sorted(candidates, key=score, reverse=True)
 
@@ -611,7 +556,7 @@ class ProactiveEngine:
         result: list[Suggestion] = []
         for s in candidates:
             title_key = s.title.lower().strip()
-            if s.id in self._seen_ids:
+            if s.id in self._seen_ids or s.id in self._suggestions:
                 continue
             if title_key in seen_titles:
                 continue

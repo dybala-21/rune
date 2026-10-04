@@ -1,7 +1,4 @@
-"""Load and edit Rune environment files.
-
-Precedence: process environment, project .rune/.env, then user ~/.rune/.env.
-"""
+"""Load environment files with process > project > user precedence."""
 
 from __future__ import annotations
 
@@ -30,11 +27,7 @@ def env_int(name: str, default: int) -> int: ...
 @overload
 def env_int(name: str, default: None = ...) -> int | None: ...
 def env_int(name: str, default: int | None = None) -> int | None:
-    """Return ``name`` as a positive int, else ``default``.
-
-    Falls back to ``default`` when the variable is unset, non-numeric, or
-    not strictly positive. With no ``default`` the fallback is ``None``.
-    """
+    """Read a positive integer, falling back to default when unset or invalid."""
     raw = os.environ.get(name)
     if raw is None:
         return default
@@ -55,9 +48,7 @@ def env_float(name: str, default: float) -> float:
     except ValueError:
         return default
 
-# ============================================================================
 # Paths
-# ============================================================================
 
 PROJECT_ENV_PATH = Path.cwd() / ".rune" / ".env"
 
@@ -83,9 +74,7 @@ _SENSITIVE_FILE_MODE = 0o600
 EnvConfig = dict[str, str]
 
 
-# ============================================================================
 # Permission Hardening
-# ============================================================================
 
 
 def _harden_permissions(target_path: Path, mode: int) -> None:
@@ -102,10 +91,7 @@ def _ensure_sensitive_dir(dir_path: Path) -> None:
 
 
 def _write_sensitive_env_file(file_path: Path, content: str) -> None:
-    """Replace an env file atomically using an owner-only temporary file.
-
-    mkstemp creates the sibling file with mode 0600 before any secrets are written.
-    """
+    """Replace an env file atomically through a sibling created with mode 0600."""
     _ensure_sensitive_dir(file_path.parent)
 
     fd, tmp_name = tempfile.mkstemp(dir=str(file_path.parent), prefix=".env-", suffix=".tmp")
@@ -121,17 +107,11 @@ def _write_sensitive_env_file(file_path: Path, content: str) -> None:
         raise
 
 
-# ============================================================================
 # Parser
-# ============================================================================
 
 
 def _split_env_line(line: str) -> tuple[str, str] | None:
-    """Parse a key/value pair, accepting an export prefix and inline comments.
-
-    Quoted values end at the closing quote. In unquoted values, whitespace
-    followed by # starts a comment. Return None for other lines.
-    """
+    """Parse an optional export assignment, respecting quotes and inline comments."""
     trimmed = line.strip()
     if not trimmed or trimmed.startswith("#"):
         return None
@@ -149,8 +129,7 @@ def _split_env_line(line: str) -> tuple[str, str] | None:
 
     value = value.strip()
     if value[:1] == '"':
-        # Scan for the closing quote, honouring the backslash escapes the
-        # serializer writes, then unescape what is inside.
+        # Find the closing quote with serializer-compatible escaping, then decode the value.
         escapes = {"n": "\n", "r": "\r", "t": "\t"}
         out: list[str] = []
         i = 1
@@ -200,6 +179,9 @@ def _read_for_edit(file_path: Path) -> str:
 
 def _read_env_file(file_path: Path) -> EnvConfig:
     """Read and parse a .env file. Returns empty dict on failure."""
+    from rune.cloud.boundary import hosted
+    if hosted() and file_path == _project_env_path():
+        return {}
     try:
         content = file_path.read_text(encoding="utf-8")
         return _parse_env_file(content)
@@ -207,19 +189,11 @@ def _read_env_file(file_path: Path) -> EnvConfig:
         return {}
 
 
-# ============================================================================
 # Loader
-# ============================================================================
 
 
 def load_env() -> EnvConfig:
-    """Load and merge all .env files.
-
-    Priority: os.environ > project .env > user .env.
-    Values are only injected into ``os.environ`` when they are not already set.
-
-    Returns the merged config (project overrides user).
-    """
+    """Merge env files and fill unset process variables; project values override user values."""
     user_env = _read_env_file(_user_env_path())
     project_env = _read_env_file(_project_env_path())
 
@@ -232,16 +206,11 @@ def load_env() -> EnvConfig:
     return merged
 
 
-# ============================================================================
 # Getter
-# ============================================================================
 
 
 def get_env(key: str) -> str | None:
-    """Get an environment variable by key.
-
-    Checks os.environ first, then project .env, then user .env.
-    """
+    """Look up a variable in process, project and user environments, in that order."""
     val = os.environ.get(key)
     if val:
         return val
@@ -254,9 +223,7 @@ def get_env(key: str) -> str | None:
     return user_env.get(key)
 
 
-# ============================================================================
 # Writer
-# ============================================================================
 
 
 def _effective_scope(key: str, user: EnvConfig, project: EnvConfig) -> str | None:
@@ -273,13 +240,7 @@ def effective_env_scope(key: str) -> str | None:
 
 
 def set_env(key: str, value: str, scope: str = "user") -> None:
-    """Set an environment variable in a .env file and os.environ.
-
-    Args:
-        key: The variable name.
-        value: The variable value.
-        scope: ``"user"``, ``"project"``, or ``"effective"`` to replace the active file value.
-    """
+    """Set a file and process variable; effective scope updates the file supplying its value."""
     with _env_write_lock:
         if scope == "effective":
             user = _parse_env_file(_read_for_edit(_user_env_path()))
@@ -295,12 +256,7 @@ def set_env(key: str, value: str, scope: str = "user") -> None:
 
 
 def unset_env(key: str, scope: str = "user") -> None:
-    """Remove an environment variable from a .env file and os.environ.
-
-    Args:
-        key: The variable name to remove.
-        scope: ``"user"`` or ``"project"``.
-    """
+    """Remove a variable from the selected user/project file and process environment."""
     file_path = _user_env_path() if scope == "user" else _project_env_path()
 
     with _env_write_lock:
@@ -339,10 +295,7 @@ def _serialize_env(env: EnvConfig) -> str:
 
 
 def _apply_env_edits(content: str, updates: dict[str, str | None]) -> str:
-    """Apply key/value edits while preserving unrelated lines and comments.
-
-    A None value removes the key, including duplicate definitions.
-    """
+    """Edit keys without disturbing other lines; None removes all definitions of that key."""
     remaining = dict(updates)
     written: set[str] = set()
     out: list[str] = []
@@ -376,25 +329,18 @@ def _apply_env_edits(content: str, updates: dict[str, str | None]) -> str:
     return "\n".join(out) + "\n"
 
 
-# ============================================================================
 # List
-# ============================================================================
 
 
 def list_env() -> dict[str, EnvConfig]:
-    """List all environment variables from user and project .env files.
-
-    Returns a dict with keys ``"user"``, ``"project"``, and ``"merged"``.
-    """
+    """Return user, project and merged environment mappings."""
     user = _read_env_file(_user_env_path())
     project = _read_env_file(_project_env_path())
     merged = {**user, **project}
     return {"user": user, "project": project, "merged": merged}
 
 
-# ============================================================================
 # Paths Export
-# ============================================================================
 
 env_paths = {
     "user": USER_ENV_PATH,
@@ -408,17 +354,11 @@ def user_env_path() -> Path:
 
 
 def project_env_path() -> Path:
-    """Path to the project-level ``.env`` (``<cwd>/.rune/.env``).
-
-    Resolved on each call rather than at import, so it follows the working
-    directory instead of pinning whatever it was when the module loaded.
-    """
+    """Resolve the project .rune/.env against the current working directory on each call."""
     return _project_env_path()
 
 
-# ============================================================================
 # Masking
-# ============================================================================
 
 
 def is_secret_like_key(key: str) -> bool:
@@ -428,11 +368,7 @@ def is_secret_like_key(key: str) -> bool:
 
 
 def mask_value(key: str, value: str) -> str:
-    """Mask a value for safe logging if its key looks secret-like.
-
-    Shows the first 4 and last 4 characters with ``***`` in between for
-    values longer than 8 characters. Short values are replaced entirely.
-    """
+    """Mask secret values, retaining four characters at each end only when longer than eight."""
     if not is_secret_like_key(key):
         return value
     if len(value) <= 8:
@@ -440,8 +376,6 @@ def mask_value(key: str, value: str) -> str:
     return value[:4] + "***" + value[-4:]
 
 
-# ============================================================================
 # Auto-load on import
-# ============================================================================
 
 load_env()

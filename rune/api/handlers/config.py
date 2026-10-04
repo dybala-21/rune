@@ -3,7 +3,7 @@
 import asyncio
 import os
 import re
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -30,6 +30,7 @@ class ActiveModelInfo(BaseModel):
 
 
 class ConfigGetResponse(BaseModel):
+    execution_environment: dict[str, Any] = Field(default_factory=dict, alias="executionEnvironment")
     proactive_enabled: bool = Field(False, alias="proactiveEnabled")
     gateway_channels: list[str] = Field(default_factory=list, alias="gatewayChannels")
     max_concurrency: int = Field(3, alias="maxConcurrency")
@@ -50,7 +51,13 @@ class ConfigGetResponse(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class ExecutionEnvironmentPatch(BaseModel):
+    backend: Literal["local", "container"] | None = None
+    image: str | None = Field(None, min_length=1, max_length=256, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._/:@-]*$")
+
+
 class ConfigPatchRequest(BaseModel):
+    execution_environment: ExecutionEnvironmentPatch | None = Field(None, alias="executionEnvironment")
     proactive_enabled: bool | None = Field(None, alias="proactiveEnabled")
     active_model: dict[str, str] | None = Field(None, alias="activeModel")
     memory_tuning: dict[str, Any] | None = Field(None, alias="memoryTuning")
@@ -186,14 +193,19 @@ async def get_config_endpoint() -> ConfigGetResponse:
     cfg = _get_rune_config()
     effective = get_effective_model_selection()
     from rune.agent.decision_router import accelerator_status
+    from rune.cloud.boundary import hosted
+    from rune.safety.execution_environment import execution_config
     from rune.utils.env import effective_env_scope
 
+    environment = execution_config()
     decision_status = accelerator_status(effective) if cfg.llm.decision_routing.backend == "jev" else "disabled"
     model = loop_model_string(effective.provider.value, effective.model)
     control = await asyncio.to_thread(reasoning_control, model)
     options = control.efforts
     effort = cfg.llm.reasoning_efforts.get(reasoning_model_key(model))
     return ConfigGetResponse(
+        executionEnvironment={"backend": environment.backend, "image": environment.image,
+                              "allowNetwork": environment.allow_network, "managed": hosted()},
         proactiveEnabled=cfg.proactive.enabled,
         gatewayChannels=["api"],
         maxConcurrency=3,
@@ -221,8 +233,7 @@ async def get_config_endpoint() -> ConfigGetResponse:
         safetyTuning={
             "preset": None,
             "rolloutMode": cfg.safety.rollout_mode,
-            # The shell gate builds its own policy and never reads this, so
-            # reporting it as active would overstate what the setting does.
+            # The shell gate does not use this setting, so do not report it as active.
             "autoEnabled": False,
         },
     )
@@ -230,10 +241,7 @@ async def get_config_endpoint() -> ConfigGetResponse:
 
 @router.patch("", response_model=ConfigPatchResponse, dependencies=[Depends(auth)])
 async def patch_config(req: ConfigPatchRequest) -> ConfigPatchResponse:
-    """Update daemon configuration.
-
-    Only the provided fields are updated. Omitted fields remain unchanged.
-    """
+    """Update supplied configuration fields, leaving omitted fields unchanged."""
     cfg = _get_rune_config()
 
     # Validate all fields before applying changes from this request.
@@ -281,6 +289,11 @@ async def patch_config(req: ConfigPatchRequest) -> ConfigPatchResponse:
             raise HTTPException(status_code=400, detail="Add a TypeSafe API key before enabling Jev.")
 
     to_persist: dict[str, Any] = {}
+    environment = req.execution_environment.model_dump(exclude_none=True) if req.execution_environment else {}
+    from rune.cloud.boundary import hosted, sandbox
+    if hosted() and any(value != getattr(sandbox(), key) for key, value in environment.items()):
+        raise HTTPException(403, "Hosted execution settings are managed by the operator")
+    to_persist.update({f"safety.sandbox.{key}": value for key, value in environment.items()})
     if routing is not None:
         to_persist.update({f"llm.decisionRouting.{key}": value for key, value in
                            req.decision_routing.model_dump(by_alias=True, exclude_unset=True).items()})
@@ -299,7 +312,9 @@ async def patch_config(req: ConfigPatchRequest) -> ConfigPatchResponse:
         if save_config_values(to_persist) is None:
             raise HTTPException(status_code=500, detail="Could not save settings. No configuration changes were applied.")
 
-    updated = routing is not None
+    updated = routing is not None or bool(environment)
+    if environment:
+        cfg.safety.sandbox = cfg.safety.sandbox.model_copy(update=environment)
     if routing is not None:
         cfg.llm.decision_routing = routing
 

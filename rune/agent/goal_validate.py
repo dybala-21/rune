@@ -1,15 +1,7 @@
-"""Deterministic SPEC validation runner for the ``/goal`` loop.
-
-The outer loop runs the SPEC's validation commands itself and checks exit
-codes, rather than trusting the inner completion gate or the agent's
-self-report. Commands run sequentially and non-interactively with a
-per-command timeout; the first failure short-circuits. The shell exec is
-injected so this can be unit-tested without spawning processes.
-"""
+"""Run SPEC validation commands sequentially, stopping at the first failure."""
 
 from __future__ import annotations
 
-import asyncio
 import os
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -21,10 +13,7 @@ log = get_logger(__name__)
 # (command, cwd, timeout_s) -> (exit_code, combined_output)
 ExecFn = Callable[[str, str, float], Awaitable[tuple[int, str]]]
 
-# Filenames that mark a buildable project root (structural, not natural
-# language). crystallize may bake a "project named X" into the spec and the
-# agent then creates an X/ subdir (cargo new does exactly this), leaving the
-# manifest one level below the goal working directory.
+# Manifests identify project roots, including projects created below the goal directory.
 _MANIFESTS = frozenset({
     "Cargo.toml", "go.mod", "package.json", "pyproject.toml", "setup.py",
     "pom.xml", "build.gradle", "build.gradle.kts", "build.sbt",
@@ -38,15 +27,7 @@ _SCAN_EXCLUDE = {
 
 
 def _resolve_root(base: str) -> str:
-    """Deterministically locate the buildable project root.
-
-    The loop runs the SPEC validation commands at *base* (the goal working
-    directory). When *base* itself has no manifest, redirect to the single
-    shallowest subdirectory that has one. Ambiguous cases (none, or several
-    at the same shallowest depth = a monorepo) keep *base* - never guess a
-    wrong location (fail-closed: an honest failure beats validating the
-    wrong project). Model-independent; never escapes *base*.
-    """
+    """Use the single shallowest project root under base; keep base when ambiguous."""
     if not base:
         return base
     basep = Path(base)
@@ -86,20 +67,10 @@ def _resolve_root(base: str) -> str:
 
 
 async def _default_exec(command: str, cwd: str, timeout_s: float) -> tuple[int, str]:
-    proc = await asyncio.create_subprocess_shell(
-        command,
-        cwd=cwd or None,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        stdin=asyncio.subprocess.DEVNULL,  # non-interactive
-    )
-    try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s)
-    except TimeoutError:
-        proc.kill()
-        await proc.wait()
-        return 124, f"timeout after {timeout_s:.0f}s"
-    return proc.returncode or 0, (out or b"").decode("utf-8", "replace")
+    from rune.safety.verification import run_check
+
+    result = await run_check(command, cwd or os.getcwd(), timeout_s)
+    return (result.code if result.code is not None else 1), result.stdout.decode("utf-8", "replace") + result.error
 
 
 def make_validate_fn(
@@ -109,17 +80,10 @@ def make_validate_fn(
     exec_fn: ExecFn | None = None,
     auto_root: bool = True,
 ) -> Callable[[list[str]], Awaitable[tuple[bool, str]]]:
-    """Build a ``GoalLoop`` ``validate_fn``. Empty command list => pass.
-
-    With ``auto_root`` (default), when *cwd* has no build manifest but a
-    single subdirectory does, the commands run there - so an agent that
-    created a ``project/`` subfolder is not failed forever by
-    "could not find Cargo.toml" at the goal root.
-    """
+    """Build a validator with optional project-root detection; an empty command list passes."""
     run = exec_fn or _default_exec
 
-    # Freeze pre-existing test files at goal start: validation must judge the
-    # user's own checks, not agent-edited ones (see validation_guard).
+    # Snapshot existing tests so validation cannot rely on agent-weakened checks.
     from rune.agent.validation_guard import restoration_note, snapshot_tests
 
     test_snapshot = snapshot_tests(cwd or ".")

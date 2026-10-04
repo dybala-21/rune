@@ -59,13 +59,13 @@ def build_questions(state: dict) -> tuple[dict, dict[str, str]]:
             "chat": "Conversation or a general question, including direct arithmetic answers.",
             "web": "Online lookup or reading a URL, without interacting with webpage controls.",
             "research": "Read-only analysis of files, data, code or a project, including data sums and counts.",
-            "code_modify": "Create, save, or edit files or code.",
+            "code_modify": "Create, save, or edit files or code, including reading sources and verifying the resulting deliverable.",
             "execution": "Run commands, tests, builds, installs, or deployments.",
             "browser": "Interact with webpage controls, forms, seats, or bookings.",
-            "full": "Work spanning several of these categories or operating native apps.",
+            "full": "Operate native apps, or fulfill independent outcomes across categories. Reading, writing and verifying one deliverable belong to code_modify, not full.",
         }),
         "desktop": _choice("What native app access does the current request require?", {
-            "none": "No native app access. Creating files, Excel-compatible output, direct arithmetic, and webpage interaction alone do not require a native app.",
+            "none": "No native app access. Creating, saving or rereading DOCX/PDF/PPTX/XLSX files uses document/file tools. File formats, direct arithmetic, and webpage interaction alone do not require a native app.",
             "read": "Open or inspect a native app or its unsaved state, without editing or navigating inside it.",
             "input": "Edit, save, navigate, enter input, or calculate inside a native app. Honor an explicit request to use an app.",
         }),
@@ -86,10 +86,13 @@ def build_questions(state: dict) -> tuple[dict, dict[str, str]]:
             "csv": "Save or revise a CSV aggregation of existing source data.",
             "xlsx": "Save or revise an XLSX aggregation of existing source data.",
         }),
-        "calculation": _choice("Which COMPLETE literal numeric expression is the user asking to evaluate directly?", {
-            "data": "Compute an answer from supplied data/files, without a requested command/test run, native app interaction, or saved deliverable.",
-            "none": "No direct numeric arithmetic evaluation was requested. Use none for native app tasks, identifiers, dates, code-writing, or quoted examples not to evaluate.",
-            "unavailable": "A direct numeric expression must be evaluated, but its complete verbatim text is missing from the candidates.",
+        "calculation": _choice(
+            "First check exclusions: if the request includes a saved deliverable, requested code/test execution, "
+            "or native app interaction, choose none even if the final response also reports numbers. "
+            "Otherwise choose data for results derived from supplied data/files, or choose the complete literal expression to evaluate.", {
+            "data": "A numeric answer derived from supplied data or file contents, such as sums or counts. None of the exclusions applies.",
+            "none": "An exclusion applies, or no numeric answer is requested. Identifiers, dates and quoted examples not to evaluate also use none.",
+            "unavailable": "A literal numeric expression must be evaluated, but its complete verbatim text is missing from the candidates. File-derived values use data instead. None of the exclusions applies.",
             **{key: f"The complete requested expression is exactly: {value}" for key, value in expressions.items()},
         }),
     }

@@ -142,7 +142,120 @@ async def test_strict_read_approval_stays_reusable(dispatch, monkeypatch):
     assert execute.await_count == 2
 
 
+async def test_authenticated_connector_reads_each_need_their_own_approval(dispatch):
+    approve = AsyncMock(side_effect=[True, False])
+    fetch, execute, _ = dispatch("connector_request", approve)
+    params = {"connector": "mail", "origin": "https://mail.test", "path": "/inbox", "method": "GET"}
+    await fetch(**params)
+    assert "User declined" in await fetch(**params)
+    assert approve.await_count == 2
+    execute.assert_awaited_once()
+
+
+async def test_authenticated_connector_reads_fail_closed_without_a_channel(dispatch):
+    fetch, execute, _ = dispatch("connector_request")
+    assert "no approval channel" in (await fetch(connector="mail", origin="https://mail.test", path="/inbox")).lower()
+    execute.assert_not_awaited()
+
+
 async def test_headless_mcp_read_needs_no_approval(dispatch):
     read, execute, _ = dispatch("mcp.mail.list_messages")
     await read()
     execute.assert_awaited_once()
+
+
+async def test_direct_dispatch_cannot_bypass_or_reuse_an_approval(monkeypatch):
+    from rune.safety.approval_context import approval_granted
+
+    monkeypatch.setenv("RUNE_APPROVAL_MODE", "standard")
+    monkeypatch.setenv("RUNE_HYBRID_API", "1")
+    execute = AsyncMock(return_value=CapabilityResult(success=True))
+    registry = CapabilityRegistry()
+    registry.register(CapabilityDefinition(name="web_fetch", description="fetch", execute=execute))
+    params = {"url": "https://mail.test/send", "method": "POST", "body": "to=alice"}
+    with approval_granted():
+        denied = await registry.execute("web_fetch", params)
+    assert denied.metadata["requires_approval"]
+    execute.assert_not_awaited()
+
+    with approval_granted("web_fetch", params):
+        changed = await registry.execute("web_fetch", {**params, "body": "to=bob"})
+        assert not changed.success
+        assert (await registry.execute("web_fetch", params)).success
+        repeated = await registry.execute("web_fetch", params)
+        assert not repeated.success
+    execute.assert_awaited_once()
+
+
+async def test_parallel_calls_cannot_spend_the_same_grant_twice(monkeypatch):
+    from rune.safety.approval_context import approval_granted
+
+    monkeypatch.setenv("RUNE_APPROVAL_MODE", "standard")
+    registry = CapabilityRegistry()
+    execute = AsyncMock(return_value=CapabilityResult(success=True))
+    registry.register(CapabilityDefinition(name="mcp.mail.send", description="send", execute=execute))
+    params = {"recipient": "alice"}
+    with approval_granted("mcp.mail.send", params):
+        results = await asyncio.gather(*(registry.execute("mcp.mail.send", params) for _ in range(2)))
+    assert sum(result.success for result in results) == 1
+    execute.assert_awaited_once()
+
+
+async def test_grant_does_not_authorize_nested_capability_calls(monkeypatch):
+    from rune.safety.approval_context import approval_granted
+
+    monkeypatch.setenv("RUNE_APPROVAL_MODE", "standard")
+    registry = CapabilityRegistry()
+    execute = AsyncMock(return_value=CapabilityResult(success=True))
+    registry.register(CapabilityDefinition(name="mcp.mail.send", description="send", execute=execute))
+
+    async def outer(params):
+        return await registry.execute("mcp.mail.send", {"recipient": "bob"})
+
+    registry.register(CapabilityDefinition(name="mcp.calendar.create", description="create", execute=outer))
+    with approval_granted("mcp.calendar.create", {}):
+        result = await registry.execute("mcp.calendar.create", {})
+    assert not result.success
+    execute.assert_not_awaited()
+
+
+async def test_parameters_cannot_change_while_approval_is_pending(dispatch):
+    body = {"recipient": "alice"}
+
+    async def approve(*args):
+        body["recipient"] = "bob"
+        return True
+
+    fetch, execute, _ = dispatch("web_fetch", approve)
+    await fetch(url="https://mail.test/send", method="POST", body=body)
+    execute.assert_not_awaited()
+
+
+async def test_direct_dispatch_blocks_when_guardian_fails(monkeypatch):
+    monkeypatch.setattr("rune.safety.guardian.get_guardian", lambda: (_ for _ in ()).throw(RuntimeError("unavailable")))
+    execute = AsyncMock(return_value=CapabilityResult(success=True))
+    registry = CapabilityRegistry()
+    registry.register(CapabilityDefinition(name="file_write", description="write", execute=execute))
+    result = await registry.execute("file_write", {"path": "/tmp/report", "content": "report"})
+    assert result.metadata["action_status"] == "not_executed"
+    execute.assert_not_awaited()
+
+
+async def test_invalid_arguments_return_feedback_without_requesting_approval():
+    from pydantic import BaseModel
+
+    class Params(BaseModel):
+        recipient: str
+
+    execute = AsyncMock(return_value=CapabilityResult(success=True))
+    approve = AsyncMock(return_value=True)
+    finished = AsyncMock()
+    registry = CapabilityRegistry()
+    cap = CapabilityDefinition(name="mcp.mail.send", description="send", execute=execute, parameters_model=Params)
+    registry.register(cap)
+    wrapped = _build_typed_tool(cap_def=cap, reg=registry, cache=None, stall=None,
+                               opts=ToolAdapterOptions(approval_callback=approve, on_tool_end=finished))
+    assert "recipient: Field required" in await wrapped.function()
+    approve.assert_not_awaited()
+    execute.assert_not_awaited()
+    assert finished.call_args.args[1].metadata["action_status"] == "not_executed"

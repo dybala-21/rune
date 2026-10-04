@@ -13,6 +13,8 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const home = mkdtempSync(resolve(tmpdir(), 'rune-trust-contract-'));
 const gate = last_verdict => ({ has_check: true, last_verdict, verdict_counts: { pass: 1 }, last_evidence: 'check output' });
 const cases = [
+  { name: 'missing document evidence overrides passing mechanical checks', trace: { mech_check: 'pass', requirement_acceptance: { required: true, status: 'inconclusive', requirements: ['check page layout'], detail: 'Page layout was not inspected.', method: 'model_review' } }, title: 'Verification inconclusive', tone: 'warning', ok: false, card: true },
+  { name: 'a model review alone is not a mechanical verification', trace: { requirement_acceptance: { required: true, status: 'pass', requirements: ['two bullets'], method: 'model_review' } }, title: 'Completed', tone: 'neutral', ok: true, card: false },
   { name: 'native connection loss preserves its cause without model escalation', trace: { reason: 'desktop_blocked', completion_check: { name: 'Desktop outcome', detail: 'Rune Computer disconnected. Reconnect the selected apps before continuing.' } }, title: 'Desktop task stopped', tone: 'warning', ok: false, card: true },
   { name: 'table differences override passing command checks', trace: { mech_check: 'pass', table_acceptance: { required: true, status: 'fail', contracts: [], results: [], unverified: [] } }, title: 'Checks failed', tone: 'warning', ok: false, card: true },
   { name: 'web lookup completed without a checker', trace: {}, title: 'Completed', tone: 'neutral', ok: true, card: false },

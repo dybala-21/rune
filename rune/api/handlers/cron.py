@@ -1,8 +1,4 @@
-"""Cron handler - GET /cron, POST /cron, DELETE /cron/{id}, PATCH /cron/{id}.
-
-Ported from src/api/handlers/cron.ts - CRUD API for scheduled
-cron jobs backed by the MemoryStore (SQLite).
-"""
+"""Manage scheduled jobs through the MemoryStore-backed API."""
 
 from __future__ import annotations
 
@@ -13,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from rune.api.auth import TokenAuthDependency
 from rune.memory.store import get_memory_store
+from rune.proactive.routine import RoutinePolicy
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -29,6 +26,10 @@ class CronJobInfo(BaseModel):
     name: str
     schedule: str
     command: str
+    goal: str = ""
+    notify_channel: str = Field("", alias="notifyChannel")
+    policy: RoutinePolicy = Field(default_factory=RoutinePolicy)
+    recent_runs: list[dict[str, Any]] = Field(default_factory=list, alias="recentRuns")
     enabled: bool = True
     created_at: str = Field(alias="createdAt")
     last_run_at: str | None = Field(None, alias="lastRunAt")
@@ -49,9 +50,12 @@ class CronListResponse(BaseModel):
 class CronCreateRequest(BaseModel):
     name: str
     schedule: str
-    command: str
+    command: str = ""
+    goal: str = ""
+    notify_channel: str = Field("", alias="notifyChannel")
+    policy: RoutinePolicy = Field(default_factory=RoutinePolicy)
     enabled: bool = True
-    max_runs: int | None = Field(None, alias="maxRuns")
+    max_runs: int | None = Field(None, alias="maxRuns", ge=1)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -64,8 +68,11 @@ class CronUpdateRequest(BaseModel):
     name: str | None = None
     schedule: str | None = None
     command: str | None = None
+    goal: str | None = None
+    notify_channel: str | None = Field(None, alias="notifyChannel")
+    policy: RoutinePolicy | None = None
     enabled: bool | None = None
-    max_runs: int | None = Field(None, alias="maxRuns")
+    max_runs: int | None = Field(None, alias="maxRuns", ge=1)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -83,15 +90,34 @@ class CronToggleResponse(BaseModel):
     enabled: bool
 
 
+class ReconcileRequest(BaseModel):
+    operation_id: str = Field(alias="operationId")
+    note: str = Field(min_length=1, max_length=2000)
+
+
 # Helpers
 
 
 def _job_dict_to_info(j: dict[str, Any]) -> CronJobInfo:
+    from rune.capabilities.cron import _row_to_cronjob
+    from rune.proactive.execution_store import ExecutionStore
+    from rune.utils.paths import rune_data
+
+    job = _row_to_cronjob(j)
+    records = ExecutionStore(rune_data() / "routine-executions.db")
+    try:
+        runs = records.recent(f"cron:{job.id}:")
+    finally:
+        records.close()
     return CronJobInfo(
         id=j["id"],
         name=j["name"],
         schedule=j["schedule"],
-        command=j["command"],
+        command=job.command,
+        goal=job.goal,
+        notifyChannel=job.notify_channel,
+        policy=job.policy,
+        recentRuns=runs,
         enabled=j.get("enabled", True),
         createdAt=j.get("created_at", ""),
         lastRunAt=j.get("last_run_at"),
@@ -101,13 +127,10 @@ def _job_dict_to_info(j: dict[str, Any]) -> CronJobInfo:
 
 
 def _validate_cron_schedule(schedule: str) -> None:
-    """Validate that a cron schedule has 5 fields."""
-    parts = schedule.strip().split()
-    if len(parts) != 5:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid cron schedule: expected 5 fields, got {len(parts)}",
-        )
+    from rune.capabilities.cron import _validate_cron_expr
+    error = _validate_cron_expr(schedule)
+    if error:
+        raise HTTPException(status_code=400, detail=error)
 
 
 # Routes
@@ -124,25 +147,22 @@ async def list_cron_jobs() -> CronListResponse:
 
 @router.post("", response_model=CronCreateResponse, dependencies=[Depends(auth)])
 async def create_cron_job(req: CronCreateRequest) -> CronCreateResponse:
-    """Create a new cron job.
-
-    The ``schedule`` field should be a valid cron expression
-    (5 fields: minute hour day-of-month month day-of-week).
-    """
+    """Create a job with a five-field cron schedule."""
     if not req.name.strip():
         raise HTTPException(status_code=400, detail="Name is required")
     if not req.schedule.strip():
         raise HTTPException(status_code=400, detail="Schedule is required")
-    if not req.command.strip():
-        raise HTTPException(status_code=400, detail="Command is required")
+    if bool(req.command.strip()) == bool(req.goal.strip()):
+        raise HTTPException(status_code=400, detail="Provide one goal or shell command")
 
     _validate_cron_schedule(req.schedule)
 
+    from rune.capabilities.cron import _pack_command
     store = get_memory_store()
     job_id = store.create_cron_job(
         name=req.name.strip(),
         schedule=req.schedule.strip(),
-        command=req.command.strip(),
+        command=_pack_command(req.command.strip(), req.goal.strip(), req.notify_channel.strip(), "", req.policy.bind_workspace()),
         enabled=req.enabled,
         max_runs=req.max_runs,
     )
@@ -178,16 +198,25 @@ async def update_cron_job(job_id: str, req: CronUpdateRequest) -> CronUpdateResp
     if req.schedule is not None:
         _validate_cron_schedule(req.schedule)
 
+    from rune.capabilities.cron import _pack_command, _row_to_cronjob
+    current = _row_to_cronjob(existing)
+
     kwargs: dict[str, Any] = {}
     if req.name is not None:
         kwargs["name"] = req.name.strip()
     if req.schedule is not None:
         kwargs["schedule"] = req.schedule.strip()
-    if req.command is not None:
-        kwargs["command"] = req.command.strip()
+    if any(value is not None for value in (req.command, req.goal, req.policy, req.notify_channel)):
+        command = req.command.strip() if req.command is not None else current.command
+        goal = req.goal.strip() if req.goal is not None else current.goal
+        if bool(command) == bool(goal):
+            raise HTTPException(status_code=400, detail="Provide one goal or shell command")
+        channel = current.notify_channel if req.notify_channel is None else req.notify_channel.strip()
+        kwargs["command"] = _pack_command(command, goal, channel,
+                                           current.description, req.policy.bind_workspace() if req.policy else current.policy)
     if req.enabled is not None:
         kwargs["enabled"] = req.enabled
-    if req.max_runs is not None:
+    if "max_runs" in req.model_fields_set:
         kwargs["max_runs"] = req.max_runs
 
     if kwargs:
@@ -211,6 +240,30 @@ async def toggle_cron_job(job_id: str) -> CronToggleResponse:
 
     log.info("cron_job_toggled", job_id=job_id, enabled=new_state)
     return CronToggleResponse(id=job_id, enabled=new_state)
+
+
+@router.post("/{job_id}/reconcile", dependencies=[Depends(auth)])
+async def reconcile_cron_job(job_id: str, req: ReconcileRequest) -> dict[str, bool]:
+    from rune.proactive.execution_store import ExecutionStore
+    from rune.utils.paths import rune_data
+
+    job = get_memory_store().get_cron_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if job["enabled"]:
+        raise HTTPException(status_code=409, detail="Pause the task before reviewing its interrupted run")
+    if not req.note.strip():
+        raise HTTPException(status_code=400, detail="Describe the external effects you checked")
+    records = ExecutionStore(rune_data() / "routine-executions.db")
+    try:
+        reconciled = records.reconcile(f"cron:{job_id}", req.operation_id, req.note.strip())
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    finally:
+        records.close()
+    if not reconciled:
+        raise HTTPException(status_code=409, detail="This run is no longer awaiting review")
+    return {"reconciled": True}
 
 
 @router.delete("/{job_id}", response_model=CronDeleteResponse, dependencies=[Depends(auth)])

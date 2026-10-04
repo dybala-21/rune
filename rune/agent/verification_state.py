@@ -43,10 +43,9 @@ class VerificationState:
         self.last_write = self.sequence
 
     def observe_command(self, command: str, success: bool, output: str, cwd: str = "") -> bool:
-        """Record recognized checks and return True if any passed.
+        """Record checks; a passing subset cannot clear a failed suite.
 
-        A passing subset cannot clear a failed full suite. A missing pytest
-        runner can be superseded by the same checks in a working environment.
+        The same checks in a working environment can supersede a missing pytest runner.
         """
         self.sequence += 1
         invocations = check_commands(command, cwd)
@@ -204,11 +203,7 @@ class VerificationState:
 
 
 def verified_outcome(result: Any) -> bool | None:
-    """Return the verification outcome, or None when evidence is absent.
-
-    Explicit failures take precedence. Code changes require a fresh check;
-    other traces can use the evidence gate or mechanical check result.
-    """
+    """Resolve verification from evidence; failures win and code changes require fresh checks."""
     def get(name: str, default: Any = None) -> Any:
         return result.get(name, default) if isinstance(result, dict) else getattr(
             result, name, default
@@ -221,13 +216,16 @@ def verified_outcome(result: Any) -> bool | None:
         return False
     verification = get("verification") or {}
     table = get("table_acceptance") or {}
+    requirements = get("requirement_acceptance") or {}
     gate = get("evidence_gate") or {}
     verdict = gate.get("last_verdict")
     mech = get("mech_check", "")
-    if verdict == "fail" or mech == "fail" or verification.get("status") == "fail":
+    if "fail" in (verdict, mech, verification.get("status"), requirements.get("status")):
         return False
     if table.get("required") and table.get("status") != "pass":
         return False if table.get("status") == "fail" else None
+    if requirements.get("required") and requirements.get("status") != "pass":
+        return None
     if verification.get("status") == "inconclusive":
         return False if verification.get("required") else None
     if verification.get("required") or verification.get("status") == "fail":

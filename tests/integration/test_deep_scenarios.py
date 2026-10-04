@@ -1186,7 +1186,12 @@ class TestProactiveFullCycle:
         """Feedback should affect ranking of future suggestions."""
         engine = ProactiveEngine({"min_confidence": 0.2})
 
-        # Record positive feedback
+        for suggestion_id in ("s1", "s2", "s3"):
+            engine.add_suggestion(Suggestion(
+                id=suggestion_id, type="task", title=suggestion_id,
+                description="test", confidence=0.7,
+            ))
+
         engine.record_feedback("s1", True)
         engine.record_feedback("s2", True)
         engine.record_feedback("s3", False)

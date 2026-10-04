@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from rune.agent.agent_context import AgentContext, PostProcessInput
+from rune.agent.run_outcome import run_outcome
 from rune.api.run_store import RunStore
 from rune.utils.logger import get_logger
 
@@ -38,8 +39,7 @@ class RunMaintenance:
                     stage TEXT NOT NULL DEFAULT 'pending'
                 )
             """)
-            # Keep interrupted jobs for inspection: some rule updates may
-            # already have been applied.
+            # Retain interrupted jobs; some rule updates may already have applied.
             self._interrupted = [row[0] for row in db.execute(
                 "SELECT run_id FROM web_run_maintenance WHERE stage = 'learning'")]
             interrupted = db.execute(
@@ -59,7 +59,7 @@ class RunMaintenance:
                 goal=context.goal, original_goal=context.original_goal,
                 conversation_id=context.conversation_id,
             ),
-            success=trace.reason == "completed", answer=full_text,
+            success=run_outcome(trace).success, answer=full_text,
             duration_ms=duration_ms, reason=trace.reason,
             verification=getattr(trace, "verification", None),
             mech_check=getattr(trace, "mech_check", ""),
