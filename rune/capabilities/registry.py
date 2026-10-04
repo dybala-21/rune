@@ -92,7 +92,8 @@ class CapabilityRegistry:
                 validated = cap.parameters_model.model_validate(params)
                 normalized = validated.model_dump(mode="json", by_alias=True)
             else:
-                validated, normalized = params, params
+                from copy import deepcopy
+                validated, normalized = deepcopy(params), deepcopy(params)
         except ValidationError as exc:
             details = "; ".join(
                 f"{'.'.join(map(str, error['loc']))}: {error['msg']}"
@@ -106,12 +107,61 @@ class CapabilityRegistry:
         try:
             from rune.agent.execution_journal import active_journal
             from rune.agent.run_control import dispatch_scope
+            from rune.safety.approval_context import (
+                approval_granted,
+                approval_required,
+                approval_revisions,
+                consume_approval,
+            )
+            from rune.safety.resource_locks import capability_access
+            from rune.safety.tool_policy import (
+                _network_approval_request,
+                _validate_with_guardian,
+                approval_mode,
+                is_mcp_write_operation,
+            )
+
+            guard = _validate_with_guardian(name, normalized)
+            if guard.blocked:
+                return CapabilityResult(success=False, error=guard.reason,
+                                        metadata={"action_status": "not_executed"})
+            approved = consume_approval(name, normalized)
+            revisions = approval_revisions() if approved else {}
+            bypass = approval_mode() == "bypass"
+            network = _network_approval_request(name, normalized)
+            # Shell risk is assessed per command by Guardian and the executor.
+            pinned = any(fnmatch(name, pattern) for pattern in self._require_approval_patterns)
+            needs_approval = (guard.requires_approval or pinned or network is not None
+                              or is_mcp_write_operation(name)
+                              or name != "bash_execute" and self.requires_approval(name))
+            if needs_approval and not (approved or bypass):
+                reason = guard.reason or (network.reason if network else f"{name} requires approval")
+                return CapabilityResult(success=False, error=reason, metadata={
+                    "action_status": "not_executed", "requires_approval": True, "reason": reason,
+                })
+
             journal = active_journal()
-            async with dispatch_scope():
-                if journal is not None:
-                    return await journal.execute(name, normalized, lambda: cap.execute(validated))
+            async def invoke():
+                from rune.agent.execution_journal import RecoveryBlocked
+                from rune.safety.approval_request import check_revisions
+                try:
+                    check_revisions(revisions)
+                except RecoveryBlocked as exc:
+                    return CapabilityResult(success=False, error=str(exc), metadata={"action_status": "not_executed"})
                 return await cap.execute(validated)
+
+            async with dispatch_scope():
+                # Nested capability calls must obtain their own scoped approval.
+                with (approval_granted() if approved or bypass else approval_required()), capability_access(name, normalized):
+                    if journal is not None:
+                        return await journal.execute(name, normalized, invoke)
+                    return await invoke()
         except Exception as exc:
+            from rune.safety.resource_locks import ResourceBusy
+            if isinstance(exc, ResourceBusy):
+                return CapabilityResult(success=False, error=str(exc), metadata={
+                    "action_status": "not_executed", "resource_busy": True,
+                })
             return CapabilityResult(
                 success=False, error=f"Capability '{name}' failed: {exc}"
             )
@@ -132,13 +182,15 @@ def get_capability_registry() -> CapabilityRegistry:
 
 
 def _apply_disabled_capabilities(registry: CapabilityRegistry) -> None:
-    """Drop capabilities named in ``RUNE_DISABLED_CAPABILITIES``.
-
-    Comma-separated exact names or ``prefix*`` patterns (e.g.
-    ``browser_*,web_*``). Lets headless contexts — benches, CI, servers —
-    run the agent without side-effecting tools like the browser.
-    """
+    """Apply comma-separated exact names or prefix* patterns from RUNE_DISABLED_CAPABILITIES."""
     import os
+
+    from rune.cloud.boundary import check_tool, hosted
+
+    if hosted():
+        for name in registry.list_names():
+            if check_tool(name, {}):
+                registry._capabilities.pop(name, None)
 
     raw = os.environ.get("RUNE_DISABLED_CAPABILITIES", "").strip()
     if not raw:
@@ -163,6 +215,7 @@ def _register_all_capabilities(registry: CapabilityRegistry) -> None:
     from rune.capabilities.blocked import register_blocked_capability
     from rune.capabilities.browser import register_browser_capabilities
     from rune.capabilities.code_intelligence import register_code_intelligence_capabilities
+    from rune.capabilities.connector import register_connector_capabilities
     from rune.capabilities.credential import register_credential_capabilities
     from rune.capabilities.cron import register_cron_capabilities
     from rune.capabilities.delegate import register_delegate_capabilities
@@ -187,6 +240,7 @@ def _register_all_capabilities(registry: CapabilityRegistry) -> None:
     register_bash_capabilities(registry)
     register_think_capabilities(registry)
     register_web_capabilities(registry)
+    register_connector_capabilities(registry)
     register_project_capabilities(registry)
     register_code_intelligence_capabilities(registry)
     register_memory_capabilities(registry)

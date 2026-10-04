@@ -1,13 +1,11 @@
-"""Read and write office documents (xlsx, pptx, docx, pdf, csv, html).
-
-Renders structured blocks/sheets into files and extracts text back out, using
-pure-python libraries. No code execution or network.
-"""
+"""Read and write office files locally without running code or accessing the network."""
 
 from __future__ import annotations
 
+import asyncio
 import csv as _csv
 import html as _html
+import json
 import os
 from pathlib import Path
 from typing import Literal
@@ -276,9 +274,7 @@ async def document_create(params: DocumentCreateParams) -> CapabilityResult:
     if not validation.allowed:
         return CapabilityResult(success=False, error=validation.reason)
 
-    # Confine to an isolated worker's workspace, same as file_write/edit/delete
-    # (no-op unless RUNE_ISOLATION_ROOT is set). Without this, document_create is a
-    # second way an isolated best-of attempt could write outside its tempdir.
+    # Apply the same isolated-worker write boundary as file capabilities.
     iso_err = _enforce_isolation(params.path)
     if iso_err:
         return CapabilityResult(success=False, error=iso_err)
@@ -322,7 +318,7 @@ async def document_create(params: DocumentCreateParams) -> CapabilityResult:
 class DocumentReadParams(BaseModel):
     path: str = Field(description="Path to the document to read")
     max_chars: int = Field(
-        default=20_000,
+        default=20_000, ge=1, le=100_000,
         description="Cap on extracted text returned (longer content is truncated)",
     )
 
@@ -418,34 +414,46 @@ async def document_read(params: DocumentReadParams) -> CapabilityResult:
             success=False,
             error=f"Unsupported document type '.{ext}'. Supported: {sorted(_READERS)}",
         )
-    reader, mod = reader_entry
+    _, mod = reader_entry
 
     try:
-        text = reader(file_path)
+        from rune.capabilities.document_inspection import inspect_document
+
+        inspection = await asyncio.to_thread(inspect_document, file_path, params.max_chars)
+        text = inspection["text"]
     except ImportError:
         return _missing_dep_error(ext, mod)
     except Exception as exc:
         log.debug("document_read_failed", ext=ext, error=str(exc))
         return CapabilityResult(success=False, error=f"Failed to read {ext}: {exc}")
 
-    from rune.capabilities.table_profile import profile_table
-    table_evidence: dict = {}
-    profile = profile_table(text, file_path.name, evidence=table_evidence)
-    truncated = len(text) > params.max_chars
-    if truncated:
-        text = text[: params.max_chars] + f"\n... [truncated, {len(text)} total chars]"
+    table_evidence = inspection.get("table_profile") or {}
+    truncated = inspection["truncated"]
+    profile = inspection.get("table_profile_text") or ""
+    text += "\n[Saved-file inspection]\n" + json.dumps({
+        "facts": inspection["facts"], "warnings": inspection["warnings"],
+        "truncated": truncated, "visual_verified": False,
+    }, ensure_ascii=False)
     if profile:
         text += "\n" + profile
     return CapabilityResult(
         success=True,
         output=text,
         metadata={"path": str(file_path), "format": ext, "truncated": truncated,
+                  "inspection": {k: v for k, v in inspection.items() if k != "text"},
                   **({"table_profile": table_evidence} if table_evidence else {})},
     )
 
 
 def register_document_capability(registry: CapabilityRegistry) -> None:
-    """Register the document_create and document_read capabilities."""
+    """Register document creation, reading and preview tools."""
+    from rune.capabilities.document_preview import DocumentPreviewParams, document_preview
+
+    registry.register(CapabilityDefinition(
+        name="document_preview", description="Render one saved PDF/Word/PowerPoint/Excel page as an image for layout inspection. Returns measured rendered page count. Uses installed headless renderers in the task execution environment; no desktop interaction. Does not itself certify visual quality.",
+        domain=Domain.FILE, risk_level=RiskLevel.LOW, group="file",
+        parameters_model=DocumentPreviewParams, execute=document_preview,
+    ))
     registry.register(CapabilityDefinition(
         name="document_create",
         description=(
@@ -464,7 +472,8 @@ def register_document_capability(registry: CapabilityRegistry) -> None:
         description=(
             "Extract text and tables from an existing document "
             "(xlsx, docx, pptx, pdf, csv, html, txt, md). Use this to read or "
-            "summarize spreadsheets, slide decks, Word, and PDF files."
+            "verify saved content. Reports measured page/slide counts and formula limitations; "
+            "visual layout needs a rendered inspection."
         ),
         domain=Domain.FILE,
         risk_level=RiskLevel.LOW,

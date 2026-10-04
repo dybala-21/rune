@@ -25,8 +25,7 @@ class RunStore:
 
         path = (self._path or conversations_db_path()).resolve()
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Only the API owner may declare old executions interrupted. A second
-        # server sharing this home must not invalidate the first one's work.
+        # Only the API owner may interrupt old runs; another server may still be executing them.
         lock = FileLock(str(path) + ".runs.lock", timeout=0, mode=0o600)
         lock.acquire()
         db = None
@@ -166,8 +165,8 @@ class RunStore:
                 if updated.rowcount != 1:
                     raise ValueError("Interaction is no longer pending")
             elif event in {"question_closed", "approval_closed"}:
-                self.db.execute("UPDATE web_run_interactions SET status = 'closed' WHERE id = ? AND status = 'pending'",
-                                (data["id"],))
+                self.db.execute("UPDATE web_run_interactions SET status = ? WHERE id = ? AND status = 'pending'",
+                                ("suspended" if data.get("suspended") else "closed", data["id"]))
             if status in {"completed", "failed", "cancelled", "interrupted"}:
                 self.db.execute("UPDATE web_run_interactions SET status = ? WHERE run_id = ? AND status = 'pending'",
                                 (status, run["runId"]))

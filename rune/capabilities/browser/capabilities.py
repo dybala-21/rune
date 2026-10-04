@@ -1,8 +1,4 @@
-"""Browser capabilities for RUNE (Playwright-based).
-
-Observe, act, find, extract, screenshot capabilities plus registration.
-Navigation and run-owned resources live in ``core`` and ``session``.
-"""
+"""Expose browser observation and actions; core and session manage navigation and ownership."""
 
 from __future__ import annotations
 
@@ -57,7 +53,7 @@ class BrowserObserveParams(BaseModel):
 
 
 class BrowserActParams(BaseModel):
-    action: Literal["click", "type", "scroll", "select", "check", "uncheck"] = Field(description="Click, fill, scroll, select, or set a checkbox state")
+    action: Literal["click", "type", "scroll", "select", "check", "uncheck"] = Field(description="Use type to fill text/number inputs; select is only for native <select> dropdowns. Click, scroll, or set checkbox state with check/uncheck.")
     selector: str = Field(description="Element ref from the current observation, or a CSS selector matching exactly one element")
     value: str = Field(default="", description="Value for type/select actions")
     repeat: bool = Field(default=False, description="True only for an intentional repeated input requested by the user. Do not repeat a successful action to verify it; its response already contains the resulting page.")
@@ -147,9 +143,7 @@ async def browser_observe(params: BrowserObserveParams) -> CapabilityResult:
         if overlay_warning:
             header += overlay_warning
 
-        # Surface data APIs captured since the model last saw a report — the
-        # schedule/booking XHRs fire on interaction, and replaying them beats
-        # clicking on (hybrid API agents: arXiv:2410.16464).
+        # Expose newly captured data APIs as an alternative to further UI interaction.
         from rune.capabilities.browser.network import get_network_monitor, hybrid_api_enabled
         _new_apis = get_network_monitor().unreported_interesting_count()
         if hybrid_api_enabled() and _new_apis > 0:
@@ -235,6 +229,11 @@ async def browser_act(params: BrowserActParams) -> CapabilityResult:
         before_url = page.url
         before_snapshot = await _accessibility_snapshot(page)
         before_state = await _control_state(target) if target is not None else {}
+        if action == "select" and before_state.get("tag") != "select":
+            return CapabilityResult(success=False, error=(
+                "select requires a native <select> dropdown. Use type for text or number inputs, "
+                "or inspect the page for a custom dropdown. No action was dispatched."
+            ), metadata={"action_status": "not_executed"})
         from rune.agent.run_control import current_control
         control = current_control()
         key = (control.run_id if control else None, action, element_ref(params.selector) or params.selector, params.value)
@@ -336,11 +335,14 @@ async def browser_act(params: BrowserActParams) -> CapabilityResult:
 
 async def _control_state(target: Any) -> dict[str, Any]:
     try:
-        return await target.evaluate("""el => ({
+        return await target.evaluate("""element => {
+            const el = element.localName === 'label' && element.control ? element.control : element;
+            return {
+            tag: el.localName,
             connected: el.isConnected, checked: el.checked, value: el.value,
             selected: el.selectedIndex, expanded: el.getAttribute('aria-expanded'),
             pressed: el.getAttribute('aria-pressed'), disabled: el.disabled
-        })""")
+        }}""")
     except Exception as exc:
         log.debug("browser_control_state_unavailable", error=str(exc))
         return {}

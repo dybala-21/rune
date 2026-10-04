@@ -1,21 +1,4 @@
-"""Gated Skill Learning — paired replay runner (T1-1).
-
-Generates the *control arm* a gated promotion needs: re-runs reproducible past
-tasks twice — once with the candidate skill injected, once without — in
-isolated workspaces, and judges each arm by a *deterministic check* (not the
-agent's self-report). The paired outcomes are logged so the evaluator can
-promote a skill only when it measurably raises the verified rate.
-
-Structure mirrors the evaluator: a testable orchestration core
-(:class:`PairedReplayRunner`) behind two seams —
-
-* :class:`TaskRunner`  — executes one arm and returns whether it verified.
-* :class:`ReplayCorpus` — yields reproducible tasks for a skill.
-
-:class:`AgentLoopTaskRunner` is the real adapter (isolated workspace + agent
-loop + check); tests drive the core with fakes so the heavy I/O path is not on
-the critical test path.
-"""
+"""Compare skill-on/off runs in copied workspaces using deterministic checks."""
 
 from __future__ import annotations
 
@@ -91,12 +74,7 @@ class StoreReplayCorpus:
 
 
 class PairedReplayRunner:
-    """Orchestrates paired replay and logs ``offline_paired`` outcomes.
-
-    For each task: run the *without* arm and the *with* arm, then write two
-    ``skill_evals`` rows sharing a ``pair_id``. Returns the McNemar counts
-    (``b`` = with✓/without✗, ``c`` = with✗/without✓, ``n`` = pairs).
-    """
+    """Log paired skill outcomes and return McNemar counts (with-only, without-only, pairs)."""
 
     def __init__(
         self, store: object, runner: TaskRunner,
@@ -114,8 +92,7 @@ class PairedReplayRunner:
         for i, task in enumerate(tasks[: self._cfg.max_pairs]):
             pair_id = f"{skill_name}:{i}"
             try:
-                # Control arm first, then treatment — order is irrelevant to the
-                # paired analysis but keeps logs readable.
+                # Run control before treatment for consistent logs.
                 without_v = await self._runner.run_arm(
                     task, inject_skill=False,
                     skill_body=skill_body, skill_description=skill_description,
@@ -163,11 +140,7 @@ async def evaluate_skill_via_replay(
     cfg: EvalConfig | None = None,
     replay_cfg: ReplayConfig | None = None,
 ) -> EvalReport | None:
-    """Full pipeline: replay -> evaluate -> transition.
-
-    Returns the :class:`EvalReport`, or ``None`` if there is no replay corpus
-    for the skill (nothing to measure → caller leaves it untouched).
-    """
+    """Replay, evaluate and transition a skill; return None when no replay corpus exists."""
     from rune.skills.evaluation import SkillEvaluator
 
     corpus = corpus or StoreReplayCorpus(store)
@@ -187,17 +160,7 @@ async def evaluate_skill_via_replay(
 # Real adapter
 
 class AgentLoopTaskRunner:
-    """Runs a replay arm in an isolated copy of the task's workspace.
-
-    Isolation: copies ``workspace_ref`` to a tempdir and ``chdir``s into it
-    (the agent loop reads ``os.getcwd()``); runs sequentially because chdir is
-    process-global. The skill is injected into the *with* arm via
-    ``run(extra_system_context=...)`` — auto_skill stays off so the registry's
-    matcher cannot confound the comparison. ``verified`` comes from the task's
-    deterministic ``check_cmd`` (exit 0), never the agent's self-report.
-
-    Subprocess-level isolation (concurrent arms) is a hardening follow-up.
-    """
+    """Replay in a copied workspace without inheriting execution approval."""
 
     def __init__(self, *, role: str = "executor",
                  max_iterations: int | None = None,
@@ -207,8 +170,7 @@ class AgentLoopTaskRunner:
                  timeout_seconds: float | None = None) -> None:
         self._role = role
         self._max_iterations = max_iterations
-        # Optional explicit provider/model — the design allows a cheap/local
-        # model for eval since the verdict comes from a deterministic check.
+        # Allow a separate evaluation model; deterministic checks decide the outcome.
         self._provider = provider
         self._model = model
         self._temperature = temperature
@@ -219,17 +181,19 @@ class AgentLoopTaskRunner:
         skill_body: str, skill_description: str,
     ) -> bool:
         work = self._materialize(task.workspace_ref)
-        prev_cwd = os.getcwd()
+        if work is None:
+            log.warning("replay_workspace_unavailable")
+            return False
+        from rune.agent.isolation import isolation_scope
+        from rune.safety.approval_context import approval_required
+
         try:
-            if work:
-                os.chdir(work)
-            await self._run_agent(task.goal, inject_skill, skill_body,
-                                  skill_description)
-            return await self._check(task.check_cmd, work or prev_cwd)
+            with approval_required(), isolation_scope(work):
+                ran = await self._run_agent(task.goal, inject_skill, skill_body,
+                                            skill_description, work)
+                return ran and await self._check(task.check_cmd, work)
         finally:
-            os.chdir(prev_cwd)
-            if work:
-                shutil.rmtree(work, ignore_errors=True)
+            shutil.rmtree(work, ignore_errors=True)
 
     @staticmethod
     def _materialize(workspace_ref: str) -> str | None:
@@ -243,8 +207,8 @@ class AgentLoopTaskRunner:
 
     async def _run_agent(
         self, goal: str, inject_skill: bool, skill_body: str,
-        skill_description: str,
-    ) -> None:
+        skill_description: str, workspace: str,
+    ) -> bool:
         from rune.agent.loop import create_agent_loop
 
         if self._provider or self._model:
@@ -266,54 +230,37 @@ class AgentLoopTaskRunner:
             )
         # Keep the comparison clean: registry-driven skill injection off.
         loop._auto_skill = False
-        # Replay runs non-interactively in an isolated copy, so "ask"-level
-        # actions are auto-approved. The Guardian still hard-denies critical
-        # patterns (rm -rf, etc.) regardless of this callback.
+        # A copied workspace does not isolate the host or authorize external actions.
         async def _approve(_cmd: str, _reason: str) -> bool:
-            return True
-        try:
-            loop.set_approval_callback(_approve)
-        except Exception:
-            pass
+            return False
+        loop.set_approval_callback(_approve)
         extra = None
         if inject_skill:
             extra = (
                 f"## Reusable skill: {skill_description}\n{skill_body}"
             )
-        # Isolate this throwaway run from the user's real telemetry: the loop
-        # skips tool-call logging / behavior prediction when RUNE_IN_BEST_OF is
-        # set (same recursion-guard the best-of-K sampler uses).
-        _prev_env = os.environ.get("RUNE_IN_BEST_OF")
-        os.environ["RUNE_IN_BEST_OF"] = "1"
         try:
-            coro = loop.run(goal, extra_system_context=extra)
-            if self._timeout_seconds:
-                await asyncio.wait_for(coro, timeout=self._timeout_seconds)
-            else:
-                await coro
-        except (TimeoutError, Exception) as exc:
+            trace = await asyncio.wait_for(
+                loop.run(goal, extra_system_context=extra,
+                         context={"workspace_root": workspace, "ephemeral": True}),
+                timeout=self._timeout_seconds or 120,
+            )
+            from rune.agent.run_outcome import run_outcome
+            return run_outcome(trace).success
+        except Exception as exc:
             log.debug("replay_arm_run_failed", error=str(exc)[:120])
-        finally:
-            if _prev_env is None:
-                os.environ.pop("RUNE_IN_BEST_OF", None)
-            else:
-                os.environ["RUNE_IN_BEST_OF"] = _prev_env
+            return False
 
     @staticmethod
     async def _check(check_cmd: str, cwd: str) -> bool:
         if not check_cmd:
-            # No deterministic check → cannot trust the outcome; count as fail
-            # (fail-closed) so an uncheckable task never inflates a skill's lift.
+            # Count missing checks as failure to avoid inflating measured skill gains.
             log.debug("replay_no_check_cmd")
             return False
         try:
-            proc = await asyncio.create_subprocess_shell(
-                check_cmd, cwd=cwd,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            rc = await proc.wait()
-            return rc == 0
+            from rune.agent.goal_validate import _default_exec
+            code, _ = await _default_exec(check_cmd, cwd, 60)
+            return code == 0
         except Exception as exc:
             log.debug("replay_check_failed", error=str(exc)[:120])
             return False

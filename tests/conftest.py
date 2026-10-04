@@ -14,7 +14,8 @@ def pytest_addoption(parser):
     group.addoption("--live-provider", help="Provider for this E2E run")
     group.addoption("--live-model", help="Model ID for this E2E run")
     group.addoption("--live-report-dir", help="Directory for workflow results")
-    group.addoption("--decision-backend", choices=("connected", "jev"), help="Override task routing for this test run")
+    group.addoption("--decision-backend", choices=("connected", "jev", "paired"), help="Override task routing, or compare both backends in alternating order")
+    group.addoption("--live-repeat", type=int, default=1, help="Independent trials per live scenario (1-10)")
 
 
 @pytest.fixture

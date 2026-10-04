@@ -54,6 +54,56 @@ def recovery(tmp_path):
     runs.close()
 
 
+async def test_another_run_cannot_overwrite_a_file_read_before_a_concurrent_edit(recovery, tmp_path):
+    store, _, _ = recovery
+    journal = ExecutionJournal(store, "first", str(tmp_path))
+    path = tmp_path / "report.txt"
+    path.write_text("old")
+
+    async def read():
+        return CapabilityResult(success=True, output=path.read_text())
+
+    await journal.execute("file_read", {"path": str(path)}, read)
+    path.write_text("other run's change")
+    write = AsyncMock(return_value=CapabilityResult(success=True))
+    result = await journal.execute("file_write", {"path": str(path), "content": "new"}, write)
+    assert result.metadata["revision_conflict"] and result.metadata["action_status"] == "not_executed"
+    write.assert_not_awaited()
+    await journal.execute("file_read", {"path": str(path)}, read)
+    assert (await journal.execute("file_write", {"path": str(path), "content": "new"}, write)).success
+
+
+async def test_pending_action_identity_is_not_replaced_by_an_earlier_identical_action(recovery, tmp_path):
+    from rune.agent.execution_journal import continuation_action
+    from rune.safety.approval_context import approval_granted
+
+    store, runs, _ = recovery
+    invoke = AsyncMock(return_value=CapabilityResult(success=True, output="sent"))
+    await ExecutionJournal(store, "first", str(tmp_path)).execute("send_mail", {"draft": "same"}, invoke)
+    runs.start("second", "session", "send next copy")
+    journal = ExecutionJournal(store, "second", str(tmp_path), previous=store.attempts("first"))
+    with continuation_action("pending-second-send"), approval_granted():
+        result = await journal.execute("send_mail", {"draft": "same"}, invoke)
+        assert result.success and not result.metadata.get("replayed")
+        journal.previous.extend(store.attempts("second"))
+        assert (await journal.execute("send_mail", {"draft": "same"}, invoke)).metadata["replayed"]
+    assert invoke.await_count == 2
+
+
+def test_recovery_prompt_does_not_duplicate_full_approval_payloads():
+    from rune.agent.execution_journal import recovery_context
+
+    body = "large document " * 100_000
+    run = {"runId": "original", "interactions": [{
+        "kind": "approval", "status": "interrupted",
+        "request": {"command": "file_write", "action": {"params": {"content": body}}},
+    }]}
+    context = recovery_context(run, [])
+    assert "file_write" in context and "large document" not in context
+    assert len(context) < 2000
+    assert run["interactions"][0]["request"]["action"]["params"]["content"] == body
+
+
 @pytest.mark.parametrize("boundary", ["before_write", "after_write", "after_receipt"])
 async def test_process_death_does_not_repeat_a_file_effect(tmp_path, boundary):
     script = r'''
@@ -424,6 +474,7 @@ async def test_adapter_returns_recorded_receipt_without_reusing_an_approval(reco
     from rune.agent.tool_adapter import ToolAdapterOptions, _build_typed_tool
     from rune.capabilities.registry import CapabilityRegistry
     from rune.capabilities.types import CapabilityDefinition
+    from rune.safety.approval_context import approval_granted
 
     store, runs, service = recovery
     calls, observed = [], []
@@ -442,7 +493,8 @@ async def test_adapter_returns_recorded_receipt_without_reusing_an_approval(reco
     registry = CapabilityRegistry()
     registry.register(cap)
     with journal_scope(ExecutionJournal(store, "first", str(tmp_path))):
-        await registry.execute(cap.name, {"target": "invoice-1"})
+        with approval_granted(cap.name, {"target": "invoice-1"}):
+            assert (await registry.execute(cap.name, {"target": "invoice-1"})).success
     runs.interrupt_active("server_shutdown")
     child, _, records = service.begin("first")
     wrapped = _build_typed_tool(cap_def=cap, opts=ToolAdapterOptions(
@@ -506,8 +558,7 @@ def test_api_resume_restores_accepted_question_and_creates_one_continuation(tmp_
             async def ask(params):
                 prompts.append(params.question)
                 response = await self.ask(params)
-                # The HTTP acknowledgement is durable, but the capability
-                # has not returned when this first process shuts down.
+                # Persist the HTTP acknowledgement before exit, without recording a tool result.
                 if not resumed:
                     await asyncio.Event().wait()
                 return response

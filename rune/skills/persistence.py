@@ -1,14 +1,4 @@
-"""Disk persistence for gated skill learning (T1-1).
-
-Distillation registers a skill in-memory, but the daemon that evaluates it runs
-in a *separate process*, so a candidate must be on disk for the daemon to see
-it. This writes/updates SKILL.md using FLAT frontmatter keys — the format the
-registry parser (`rune.skills.registry._parse_skill_file`) reads — so a
-persisted ``state:`` round-trips back into ``skill.metadata["state"]``.
-
-Only scalar metadata is written to frontmatter (lists/dicts are skipped); the
-lifecycle ``state`` is the field that must survive a restart.
-"""
+"""Persist skill instructions, prerequisites and lifecycle state across restarts."""
 
 from __future__ import annotations
 
@@ -20,46 +10,35 @@ from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
 
-# Frontmatter keys the registry treats specially (not part of free metadata).
-_RESERVED = ("name", "description", "scope", "author")
-
-
 def _skill_dir(skill: Skill) -> Path:
+    from rune.safety.execution_environment import execution_workspace
     from rune.utils.paths import rune_home
-    base = (Path.cwd() / ".rune" / "skills" if skill.scope == "project"
+    base = (Path(execution_workspace()) / ".rune" / "skills" if skill.scope == "project"
             else rune_home() / "skills")
     target = (base / skill.name).resolve()
-    # A name reaches this from SKILL.md frontmatter, so never let it climb out
-    # of the skills tree.
+    # Reject frontmatter names that could escape the skills directory.
     if not target.is_relative_to(base.resolve()):
         raise ValueError(f"skill name escapes the skills directory: {skill.name!r}")
     return target
 
 
 def _render(skill: Skill) -> str:
-    """Render a SKILL.md with flat frontmatter the registry can parse."""
-    lines = ["---", f"name: {skill.name}",
-             f"description: {skill.description}", f"scope: {skill.scope}"]
-    if skill.author:
-        lines.append(f"author: {skill.author}")
-    # State first among metadata so it is easy to eyeball.
-    lines.append(f"{STATE_KEY}: {get_state(skill)}")
-    for k, v in skill.metadata.items():
-        if k in (*_RESERVED, STATE_KEY):
-            continue
-        if isinstance(v, (str, int, float, bool)):  # scalars only — flat format
-            lines.append(f"{k}: {v}")
-    lines.append("---")
-    body = skill.body if skill.body.endswith("\n") else skill.body + "\n"
-    return "\n".join(lines) + "\n" + body
+    """Preserve structured metadata when a skill's lifecycle changes."""
+    import io
+
+    from ruamel.yaml import YAML
+
+    metadata = {**skill.metadata, "name": skill.name, "description": skill.description,
+                "scope": skill.scope, "author": skill.author, STATE_KEY: get_state(skill)}
+    yaml = YAML(typ="safe")
+    yaml.default_flow_style = False
+    stream = io.StringIO()
+    yaml.dump(metadata, stream)
+    return "---\n" + stream.getvalue() + "---\n" + skill.body.rstrip() + "\n"
 
 
 def write_skill_to_disk(skill: Skill) -> str | None:
-    """Write *skill* to its scope dir as SKILL.md. Returns the path or None.
-
-    Records the path on ``skill.file_path`` so later state updates rewrite the
-    same file. Best-effort; never raises.
-    """
+    """Save SKILL.md and record its path; return None on failure without raising."""
     from rune.skills.validator import validate_name
 
     check = validate_name(skill.name)
@@ -81,11 +60,7 @@ def write_skill_to_disk(skill: Skill) -> str | None:
 
 
 def persist_skill_state(skill: Skill) -> bool:
-    """Rewrite a skill's on-disk SKILL.md to reflect its current state.
-
-    No-op (returns False) for in-memory skills with no ``file_path``. The body
-    and other frontmatter are preserved via :func:`write_skill_to_disk`.
-    """
+    """Update the existing skill file, preserving its body; return False for in-memory skills."""
     if not skill.file_path:
         return False
     try:

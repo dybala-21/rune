@@ -34,6 +34,9 @@ def _validate_browser_url(url: str) -> str | None:
     return None
 
 async def _get_browser(profile: str | None = None) -> tuple[Any, Any]:
+    from rune.cloud.boundary import hosted
+    if hosted() and profile == "visible":
+        profile = "managed"
     session = current_session()
     async with session.init_lock:
         if profile is not None and profile not in {"managed", "visible"}:
@@ -166,7 +169,7 @@ async def browser_navigate(params: BrowserNavigateParams) -> CapabilityResult:
     try:
         _, page = await _get_browser("managed")
 
-        # Attach CDP network monitor to capture XHR/fetch API calls (#P2)
+        # Attach CDP network monitor to capture XHR/fetch API calls
         from rune.capabilities.browser.network import get_network_monitor
         monitor = get_network_monitor()
         await monitor.attach(page)
@@ -183,11 +186,7 @@ async def browser_navigate(params: BrowserNavigateParams) -> CapabilityResult:
         title = await page.title()
         url = page.url
 
-        # Note the data APIs this page used, without telling the model to
-        # abandon what it is doing: a paired A/B measured the directive
-        # version steering runs off a browsing path that converges and into
-        # API exploration that does not (0/3 vs 2/3). State the option, let
-        # the model choose. Gated with the rest of the hybrid path.
+        # Offer captured APIs without steering the model away from an already progressing UI task.
         from rune.capabilities.browser.network import (
             format_api_recipe,
             hybrid_api_enabled,
@@ -202,9 +201,7 @@ async def browser_navigate(params: BrowserNavigateParams) -> CapabilityResult:
             api_section = "\n".join(api_lines)
             monitor.mark_reported()
 
-        # The refs are already extracted, so hand them over: an observe round
-        # that only re-reads what navigate just computed costs a model
-        # round-trip and buys nothing.
+        # Return extracted refs now to avoid a redundant observation round.
         element_section = format_interactive_elements(elements)
 
         location = f"Already open: {url}" if skipped else f"Navigated to: {url}"

@@ -1,11 +1,4 @@
-"""Multi-channel message gateway for RUNE.
-
-Ported from src/daemon/gateway.ts - routes incoming messages from all
-channels to the agent, maintains per-sender queuing for sequential
-processing, delivers responses back to the originating channel, and
-integrates with the ProactiveEngine for suggestion routing and
-approval/ask-user pipelines.
-"""
+"""Route channel messages, notifications, questions and approvals to the agent."""
 
 from __future__ import annotations
 
@@ -20,6 +13,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import uuid4
 
+from rune.agent.run_outcome import run_outcome
 from rune.api.event_logger import append_event
 from rune.channels.registry import ChannelRegistry
 from rune.channels.types import (
@@ -48,6 +42,7 @@ class GatewayNotification:
     body: str
     priority: NotificationPriority = "medium"
     source: str = ""
+    channel: str = ""
 
 
 @dataclass(slots=True)
@@ -97,7 +92,7 @@ class _SenderQueue:
     worker: asyncio.Task[None] | None = None
 
 
-# Default routing rules (ported from TS DEFAULT_ROUTING)
+# Default routing rules
 
 _REALTIME_CHANNELS = [
     "slack",
@@ -130,14 +125,7 @@ _APPROVAL_TIMEOUT = 60.0  # 1 minute
 
 
 class ChannelGateway:
-    """Routes messages between channels and the agent scheduler.
-
-    Ensures that messages from the same sender are processed sequentially
-    while different senders are handled concurrently.  Also subscribes to
-    the ProactiveEngine so that suggestions are routed to channels, and
-    provides ask_user / approval pipelines for agent-initiated user
-    interaction.
-    """
+    """Serialize each sender's messages while routing channels and proactive notifications."""
 
     __slots__ = (
         "_registry",
@@ -151,8 +139,6 @@ class ChannelGateway:
         "_pending_approvals",
         "_listeners",
         "_delivery_manager",
-        # Set in __init__ but missing here, so with __slots__ the constructor
-        # raised AttributeError — the gateway could not be built at all.
         "_conv_manager",
     )
 
@@ -175,10 +161,7 @@ class ChannelGateway:
         self._pending_approvals: dict[str, _PendingApproval] = {}
         self._listeners: dict[str, list[Callable[..., Any]]] = {}
         self._delivery_manager = ChannelDeliveryManager()
-        # One conversation manager for the gateway's lifetime. Built per message
-        # before, which leaked a sqlite connection each time (the store holds an
-        # open connection with no close) and gave concurrent same-conversation
-        # messages separate in-memory copies that overwrote each other on save.
+        # Reuse one manager to avoid leaked connections and competing in-memory conversations.
         self._conv_manager: Any = None
 
     # Event emitter (lightweight, ported from TS EventEmitter pattern)
@@ -285,12 +268,7 @@ class ChannelGateway:
     # Proactive engine integration
 
     def _subscribe_to_proactive(self) -> None:
-        """Subscribe to ProactiveEngine suggestion events and route them.
-
-        Ported from TS ``subscribeToProactive``.  Listens for ``suggestion``
-        events on the engine and delivers them to the appropriate channel
-        via ``route_notification``.
-        """
+        """Forward proactive suggestion events through notification routing."""
         try:
             from rune.proactive.engine import get_proactive_engine
             from rune.proactive.types import Suggestion
@@ -350,13 +328,7 @@ class ChannelGateway:
         suggestion_id: str,
         response: Literal["accept", "dismiss", "defer", "annoyed"],
     ) -> None:
-        """Forward a channel suggestion response to the ProactiveEngine.
-
-        Called when a channel adapter receives user feedback on a proactive
-        suggestion (e.g. inline keyboard button press, action row click).
-
-        Ported from TS ``handleSuggestionResponse``.
-        """
+        """Pass channel feedback to the proactive engine."""
         try:
             from rune.proactive.engine import get_proactive_engine
 
@@ -376,18 +348,13 @@ class ChannelGateway:
             )
 
     async def route_notification(self, notification: GatewayNotification) -> None:
-        """Route a notification to the appropriate channel(s) based on priority.
-
-        Ported from TS ``routeNotification``.  Looks up the routing rule for
-        the notification priority and tries each preferred channel in order
-        until delivery succeeds.  If no channel delivers, emits a local
-        ``notification`` event (for TUI fallback).
-        """
+        """Try preferred channels by priority, then emit a local notification if none delivers."""
         rule = next(
             (r for r in self._routing if r.priority == notification.priority),
             None,
         )
-        if rule is None or not rule.channels:
+        channels = [notification.channel] if notification.channel else (rule.channels if rule else [])
+        if not channels:
             log.debug(
                 "gateway_no_route_for_priority",
                 priority=notification.priority,
@@ -398,7 +365,7 @@ class ChannelGateway:
 
         delivered = False
 
-        for channel_name in rule.channels:
+        for channel_name in channels:
             adapter = self._registry.get(channel_name)
             if adapter is None:
                 continue
@@ -435,13 +402,7 @@ class ChannelGateway:
     # Orchestrator event relay
 
     def wire_orchestrator(self, orchestrator: Any) -> None:
-        """Subscribe to orchestrator events and route them as notifications.
-
-        Call this when an :class:`Orchestrator` instance is created in the
-        daemon so that multi-agent progress is visible on external channels
-        (Slack, Discord, Telegram, etc.) via the existing notification
-        routing infrastructure.
-        """
+        """Forward orchestrator events through notification routing."""
 
         async def _on_plan(plan: Any) -> None:
             tc = len(plan.tasks) if hasattr(plan, "tasks") else 0
@@ -483,16 +444,7 @@ class ChannelGateway:
         options: list[str] | None = None,
         timeout: float = _ASK_USER_TIMEOUT,
     ) -> str:
-        """Send a question to the user via a channel and await the response.
-
-        Ported from the TS ``onAskUser`` handler.  The gateway sends the
-        question prompt to the channel and registers a pending future.
-        When the user's next message arrives on the same session, it is
-        consumed by ``_resolve_pending_question`` and resolves the future
-        instead of being routed to the agent.
-
-        Raises ``TimeoutError`` if no answer is received within *timeout*.
-        """
+        """Ask through a channel and consume its next reply; raise TimeoutError if unanswered."""
         adapter = self._registry.get(channel_name)
         if adapter is None:
             raise RuntimeError(f"Channel adapter not available: {channel_name}")
@@ -541,11 +493,7 @@ class ChannelGateway:
             raise TimeoutError("ask_user timed out waiting for channel response") from None
 
     def _resolve_pending_question(self, session_key: str, text: str) -> bool:
-        """Attempt to resolve a pending ask_user question with user text.
-
-        Returns ``True`` if the message was consumed (i.e. a question was
-        pending and the answer was delivered), ``False`` otherwise.
-        """
+        """Return True when user text resolves a pending question."""
         pending = self._pending_questions.get(session_key)
         if pending is None:
             return False
@@ -587,14 +535,7 @@ class ChannelGateway:
         suggestions: list[str] | None = None,
         timeout: float = _APPROVAL_TIMEOUT,
     ) -> ApprovalResponse:
-        """Request user approval for a risky command via the channel.
-
-        Ported from TS ``requestApprovalViaText`` + ``onApprovalRequired``.
-        Tries the adapter's native ``send_approval`` first; falls back to
-        a text-based numbered-choice prompt.
-
-        Returns an ``ApprovalResponse`` with the user's decision.
-        """
+        """Request approval through the native channel UI, falling back to numbered text choices."""
         adapter = self._registry.get(channel_name)
         if adapter is None:
             return ApprovalResponse(decision="deny", approved=False, timed_out=False)
@@ -603,8 +544,7 @@ class ChannelGateway:
         try:
             approval_id = f"approval:{session_key}:{int(time.monotonic() * 1000)}"
             await adapter.send_approval(recipient_id, command, approval_id)
-            # Native approval - we still need to wait for the response via
-            # the pending approval pipeline below
+            # Native approval still resolves through the pending-response pipeline.
         except NotImplementedError:
             pass  # Fall through to text prompt
 
@@ -646,10 +586,7 @@ class ChannelGateway:
             return ApprovalResponse(decision="deny", approved=False, timed_out=True)
 
     def _resolve_pending_approval(self, session_key: str, text: str) -> bool:
-        """Attempt to resolve a pending approval with user input.
-
-        Returns ``True`` if the message was consumed.
-        """
+        """Return True when user input resolves a pending approval."""
         pending = self._pending_approvals.get(session_key)
         if pending is None:
             return False
@@ -668,8 +605,7 @@ class ChannelGateway:
 
         parsed = _parse_approval_response(answer)
         if parsed is None:
-            # User sent something we can't interpret - don't consume, let
-            # them try again
+            # Leave unrecognized replies unconsumed so the user can try again.
             log.debug("gateway_approval_parse_failed", input=answer[:80])
             return True  # Still consumed - don't route to agent
 
@@ -701,10 +637,7 @@ class ChannelGateway:
     async def send_to_channel(
         self, channel_name: str, recipient_id: str, content: str
     ) -> None:
-        """Send a message directly to a specific channel.
-
-        Ported from TS ``sendToChannel``.
-        """
+        """Send a message directly to a channel."""
         adapter = self._registry.get(channel_name)
         if adapter is None:
             raise RuntimeError(f"Channel not available: {channel_name}")
@@ -810,17 +743,7 @@ class ChannelGateway:
             self._sender_queues.pop(sender_key, None)
 
     async def _execute_for_message(self, message: IncomingMessage) -> str:
-        """Execute the agent for an incoming message and return the response text.
-
-        Enriched pipeline (ported from gateway.ts):
-        1. Check if message is proactive suggestion feedback
-        2. Download attachments (if any)
-        3. Resolve conversation context
-        4. Build memory context
-        5. Run agent with context injection
-        6. Post-process (memory, episode)
-        7. Truncate response per channel max length
-        """
+        """Run the message with attachments and memory, then format the reply."""
         sender_key = f"{message.channel_id}:{message.sender_id}"
         conv_id = message.metadata.get("conversation_id", sender_key)
         run_id = f"{int(time.time() * 1000)}-{uuid4().hex[:6]}"
@@ -859,7 +782,7 @@ class ChannelGateway:
             _log_event(conv_id, "agent_start", {"goal": text}, run_id=run_id)
             start_time = time.monotonic()
 
-            # 2. Download attachments to temp files (ported from gateway.ts lines 539-584)
+            # 2. Download attachments to temp files
             attachment_paths: list[str] = []
             if message.attachments:
                 # Resolve adapter for file_id downloads (e.g. Telegram)
@@ -892,9 +815,7 @@ class ChannelGateway:
                     log.debug("gateway_conv_load_failed", error=str(exc)[:100])
                     conv_manager = None
 
-            # Record the user turn before history is loaded. prepare_agent_context
-            # drops this latest user turn from the loaded history (the goal is
-            # passed to the loop separately).
+            # Save this turn; history omits it because the goal is passed separately.
             if conv_manager is not None:
                 with contextlib.suppress(Exception):
                     conv_manager.add_turn(conv_id, "user", text)
@@ -958,9 +879,7 @@ class ChannelGateway:
 
             loop.set_ask_user_callback(_gw_ask_user_cb)
 
-            # Collect streamed text - only keep the LAST step's text to avoid
-            # concatenating intermediate commentary ("검색하겠습니다") with the
-            # final answer, which causes response duplication.
+            # Keep the last step's text so the reply does not repeat intermediate narration.
             collected: list[str] = []
             _prev_steps_text: list[str] = []
 
@@ -992,8 +911,7 @@ class ChannelGateway:
                 message_history=agent_ctx.messages if agent_ctx.messages else None,
             )
 
-            # Prefer last step's text to avoid repeating intermediate
-            # commentary ("검색하겠습니다") in the final message.
+            # Use the final step's text instead of repeating earlier narration.
             last_text = "".join(collected)
             if last_text.strip():
                 response = last_text
@@ -1010,17 +928,13 @@ class ChannelGateway:
 
             duration_ms = int((time.monotonic() - start_time) * 1000)
 
-            # Persist the assistant turn so the next message has context. Use the
-            # loop's final answer, not the channel response (which may carry a
-            # learned-rules note), so history stays clean.
+            # Persist the final answer without channel-specific notes for the next turn.
             if conv_manager is not None:
                 with contextlib.suppress(Exception):
                     assistant_answer = resolve_assistant_answer(
                         getattr(loop, "_last_answer_text", ""), response)
                     if not assistant_answer:
-                        # Record a placeholder rather than leaving a dangling
-                        # user turn — an unanswered question in history makes
-                        # the next turn re-run it.
+                        # Save a placeholder so the next turn does not repeat this work.
                         assistant_answer = (
                             "(the run ended without a textual answer: "
                             f"{trace.reason or 'unknown'})"
@@ -1041,7 +955,7 @@ class ChannelGateway:
                     mech_check=getattr(trace, "mech_check", ""),
                     evidence_gate=getattr(trace, "evidence_gate", None),
                     context=agent_ctx,
-                    success=trace.reason == "completed",
+                    success=run_outcome(trace).success,
                     answer=response,
                     duration_ms=duration_ms,
                 ))
@@ -1061,7 +975,7 @@ class ChannelGateway:
             _log_event(
                 conv_id,
                 "agent_complete",
-                {"success": trace.reason == "completed", "answer_length": len(response), "duration_ms": duration_ms},
+                {"success": run_outcome(trace).success, "answer_length": len(response), "duration_ms": duration_ms},
                 run_id=run_id,
             )
 
@@ -1074,11 +988,7 @@ class ChannelGateway:
             return "An error occurred while processing your request. Please try again."
 
     async def _get_conv_manager(self) -> Any:
-        """Lazily build one conversation manager for the gateway's lifetime.
-
-        Returns None if the store cannot be opened, in which case the agent
-        still runs but without multi-turn channel memory.
-        """
+        """Reuse a conversation manager, or continue without memory if the store cannot open."""
         if self._conv_manager is not None:
             return self._conv_manager
         try:
@@ -1097,20 +1007,24 @@ class ChannelGateway:
     async def _handle_proactive_feedback(self, text: str) -> str:
         """Handle approve:/deny: prefix messages for proactive suggestions."""
         try:
+            from rune.memory.store import get_memory_store
             from rune.proactive.engine import get_proactive_engine
             engine = get_proactive_engine()
+            engine.load_persisted_suggestions(get_memory_store())
 
             if text.startswith("approve:"):
                 suggestion_id = text[len("approve:"):].strip()
-                engine.handle_response(suggestion_id, accepted=True)
-                return "Suggestion approved."
+                if engine.handle_response(suggestion_id, accepted=True):
+                    return "Suggestion approved and queued."
+                return "Suggestion not found."
             elif text.startswith("deny:"):
                 suggestion_id = text[len("deny:"):].strip()
-                engine.handle_response(suggestion_id, accepted=False)
-                return "Suggestion dismissed."
+                if engine.handle_response(suggestion_id, accepted=False):
+                    return "Suggestion dismissed."
+                return "Suggestion not found."
         except Exception as exc:
             log.warning("proactive_feedback_error", error=str(exc))
-        return "Feedback recorded."
+        return "The response could not be recorded. Refresh the suggestion and try again."
 
     async def _send_response(
         self,
@@ -1121,12 +1035,7 @@ class ChannelGateway:
         reply_to: str | None = None,
         channel_name: str = "",
     ) -> None:
-        """Send a response back through the originating channel.
-
-        When *channel_name* is provided the message is routed directly to that
-        adapter.  Only when the primary adapter fails (or is not specified) does
-        the method fall back to trying the remaining adapters.
-        """
+        """Reply on the originating channel, trying other adapters if it is absent or fails."""
         outgoing = OutgoingMessage(
             text=response,
             reply_to=reply_to,
@@ -1218,10 +1127,7 @@ def _build_approval_prompt(
     suggestions: list[str] | None,
     timeout_secs: int,
 ) -> str:
-    """Build a text prompt for the approval fallback path.
-
-    Ported from TS ``buildApprovalPrompt``.
-    """
+    """Build the text fallback for an approval request."""
     cmd_display = command if len(command) <= 220 else f"{command[:220]}..."
     lines: list[str] = [
         "Approval Required",
@@ -1251,10 +1157,7 @@ def _build_approval_prompt(
 
 
 def _parse_approval_response(text: str) -> ApprovalResponse | None:
-    """Parse a user's text reply into an ``ApprovalResponse``.
-
-    Ported from TS ``parseApprovalResponse``.
-    """
+    """Parse a text reply into an ApprovalResponse."""
     trimmed = text.strip()
     normalized = trimmed.lower()
 
@@ -1329,17 +1232,7 @@ async def _download_attachments(
     metadata: dict[str, Any],
     adapter: Any = None,
 ) -> list[str]:
-    """Download message attachments to temporary files.
-
-    Ported from gateway.ts lines 539-584.  Supports three strategies:
-
-    1. **API/base64** - ``metadata["raw_attachments"]`` contains base64 data
-    2. **URL-based** - attachment ``url`` field is fetched via HTTP
-    3. **File ID** - uses ``adapter.download_file(file_id)`` if available
-       (e.g. Telegram adapter)
-
-    Returns a list of local file paths.
-    """
+    """Save base64, URL or adapter-downloaded attachments and return their local paths."""
     import base64
 
     paths: list[str] = []

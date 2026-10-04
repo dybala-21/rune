@@ -1,12 +1,4 @@
-"""Bash capability for RUNE.
-
-Ported from src/capabilities/bash.ts - subprocess execution with
-Guardian validation, sandbox support, and managed service mode.
-
-Managed-service mode implements a full lifecycle:
-  spawn -> readiness probe -> smoke verification -> teardown
-mirroring the TS ``executeManagedService`` implementation.
-"""
+"""Execute guarded shell commands and manage service readiness, checks and teardown."""
 
 from __future__ import annotations
 
@@ -142,10 +134,7 @@ def _is_process_alive(pid: int) -> bool:
 
 
 def _cleanup_managed_processes() -> None:
-    """Terminate **all** tracked managed processes (best-effort).
-
-    Called at interpreter exit and can also be invoked explicitly.
-    """
+    """Terminate tracked managed processes at exit or on explicit cleanup, best-effort."""
     for sid, mp in list(_managed_processes.items()):
         log.info("cleanup_managed_process", service_id=sid, pid=mp.pid)
         _kill_process_group(mp.pid, signal.SIGTERM)
@@ -238,7 +227,8 @@ async def _execute_oneshot(params: BashParams) -> CapabilityResult:
     from rune.capabilities.command_output import capture_output, stop_capture
 
     cwd = params.cwd or os.getcwd()
-    env = {**os.environ, **(params.env or {})}
+    from rune.safety.process_env import child_environment
+    env = child_environment(params.env)
     timeout_sec = params.timeout / 1000.0
     proc = None
     capture = None
@@ -328,14 +318,12 @@ async def _run_probe(
 
 
 async def _execute_managed_service(params: BashParams) -> CapabilityResult:
-    """Spawn a background service and run the readiness/smoke/teardown lifecycle.
-
-    Closely follows the TS ``executeManagedService`` implementation.
-    """
+    """Spawn a service, check readiness, run smoke checks and tear it down."""
     _ensure_cleanup_handler()
 
     cwd = params.cwd or os.getcwd()
-    env = {**os.environ, **(params.env or {})}
+    from rune.safety.process_env import child_environment
+    env = child_environment(params.env)
     service_id = uuid.uuid4().hex[:12]
 
     # Phase 1 - spawn
@@ -649,20 +637,13 @@ async def managed_service_stop(params: ServiceStopParams) -> CapabilityResult:
 # Main entry point
 
 
-# _evaluate_mode has branches for these only; anything else falls through to
-# the strict branch, which is not what "auto" is meant to mean.
+# Only these modes have explicit policy branches; unknown values would otherwise act strict.
 _POLICY_MODES = ("legacy", "shadow", "balanced", "strict")
 _DEFAULT_POLICY_MODE = "balanced"
 
 
 def _configured_deny_by_default() -> tuple[bool, list[str]]:
-    """The allowlist policy from config, or the shipped default.
-
-    ``safety.denyByDefault`` never reached this gate: the schema had flat
-    fields the config file does not use, and the executable list here was
-    hardcoded, so editing the allowlist changed nothing. An empty configured
-    list keeps the shipped default rather than locking the shell to nothing.
-    """
+    """Resolve the configured allowlist; an empty list retains the shipped default."""
     try:
         from rune.config import get_config
 
@@ -678,12 +659,7 @@ def _configured_deny_by_default() -> tuple[bool, list[str]]:
 
 
 def _configured_rollout_mode() -> str:
-    """The execution policy mode from config, or the shipped default.
-
-    This was hardcoded, so safety.rolloutMode never reached the shell gate. An
-    unrecognised value falls back rather than silently landing on strict, where
-    every non-allowlisted executable is refused.
-    """
+    """Resolve the execution policy mode, falling back to the default for unknown values."""
     try:
         from rune.config import get_config
 
@@ -694,8 +670,7 @@ def _configured_rollout_mode() -> str:
 
     if mode in _POLICY_MODES:
         return mode
-    # "auto" is the schema default and means "let RUNE choose"; the policy
-    # engine has no branch for it, so it resolves to the shipped default.
+    # Resolve auto to the shipped default because the policy engine has no auto branch.
     if mode and mode != "auto":
         log.warning(
             "rollout_mode_unsupported", mode=mode, using=_DEFAULT_POLICY_MODE
@@ -704,6 +679,17 @@ def _configured_rollout_mode() -> str:
 
 
 async def bash_execute(params: BashParams) -> CapabilityResult:
+    from rune.safety.resource_locks import ResourceBusy, command_access
+
+    try:
+        with command_access(params.command, params.cwd or str(Path.cwd())):
+            return await _bash_execute(params)
+    except ResourceBusy as exc:
+        return CapabilityResult(success=False, error=str(exc),
+                                metadata={"action_status": "not_executed", "resource_busy": True})
+
+
+async def _bash_execute(params: BashParams) -> CapabilityResult:
     """Execute a shell command with safety validation."""
     if blocked := blocked_benchmark_vcs_history_command(params.command):
         return CapabilityResult(
@@ -744,8 +730,7 @@ async def bash_execute(params: BashParams) -> CapabilityResult:
         )
 
     if decision.decision == "ask" and not was_approved():
-        # Approved calls arrive with the caller's gate already satisfied, so
-        # asking again here just refused what the user had said yes to.
+        # Honor the caller's existing approval instead of prompting twice.
         return CapabilityResult(
             success=False,
             error=f"Command requires approval: {decision.reason}",
@@ -753,11 +738,16 @@ async def bash_execute(params: BashParams) -> CapabilityResult:
                       "action_status": "not_executed"},
         )
 
+    from rune.safety.execution_environment import execution_config
+    sandbox = execution_config()
+    if sandbox.backend == "container":
+        from rune.safety.container_exec import execute_container
+        return await execute_container(params, sandbox)
+
     if params.mode == "managed_service":
         return await _execute_managed_service(params)
 
-    # A shell command reaches files without passing the file capabilities,
-    # so nothing else here can make it undoable. Clone first, then run.
+    # Snapshot before shell execution because it can bypass tracked file operations.
     from rune.safety import workspace_snapshot as _snap
     _took = None
     if not _snap.looks_read_only(params.command):

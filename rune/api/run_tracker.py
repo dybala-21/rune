@@ -1,8 +1,4 @@
-"""Track agent execution runs.
-
-Ported from src/api/run-tracker.ts - in-memory tracking with optional
-persistence. Manages RunState lifecycle: queued -> running -> completed/failed/aborted.
-"""
+"""Track queued, running and finished agent runs with optional persistence."""
 
 from __future__ import annotations
 
@@ -29,6 +25,7 @@ class RunResult:
     success: bool
     answer: str
     usage: TokenUsage | None = None
+    outcome: dict[str, Any] | None = None
 
 
 @dataclass
@@ -64,6 +61,8 @@ class RunState:
                 "success": self.result.success,
                 "answer": self.result.answer,
             }
+            if self.result.outcome is not None:
+                d["result"]["outcome"] = self.result.outcome
             if self.result.usage:
                 d["result"]["usage"] = {
                     "input": self.result.usage.input,
@@ -81,11 +80,7 @@ COMPLETED_TTL_SEC = 10 * 60  # 10 minutes
 
 
 class RunTracker:
-    """In-memory tracker for agent execution runs.
-
-    Manages active and recently-completed runs. Provides state transition
-    methods and query capabilities.
-    """
+    """Manage active and recently finished runs and their state transitions."""
 
     def __init__(self) -> None:
         self._active: dict[str, RunState] = {}

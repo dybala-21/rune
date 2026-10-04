@@ -1,9 +1,4 @@
-"""Memory bridge for RUNE - connects agent to memory subsystem.
-
-Ported from src/agent/memory-bridge.ts (1106 lines) - builds agent memory
-context from 8 layers, saves results, extracts artifacts, detects languages
-and tools, and manages auto-skill generation.
-"""
+"""Build agent memory context, save outcomes and extract reusable skills."""
 
 from __future__ import annotations
 
@@ -34,9 +29,7 @@ PATH_PATTERN = re.compile(
 PROJECT_MEMORY_MAX_LINES = 200
 PROJECT_MEMORY_MAX_CHARS = 3000
 
-# Auto-skill refinement limits
-# Set by callers that are about to exit, so the episode's consolidation is
-# left for the next run's catch-up instead of holding the process open.
+# Short-lived callers defer consolidation to the next run instead of delaying process exit.
 defer_consolidation = False
 
 _REFINEMENT_MAX_TOKENS = 600
@@ -49,12 +42,7 @@ _REFINEMENT_MIN_STEPS = 1
 
 @runtime_checkable
 class LLMRefiner(Protocol):
-    """Protocol for pluggable LLM-based skill refinement.
-
-    Implementations should call an LLM and return the generated text.
-    If no LLM is available, callers fall back to the pattern-extracted
-    version of the skill steps.
-    """
+    """Refine skill text with an LLM; callers retain extracted steps when unavailable."""
 
     async def refine(self, prompt: str, max_tokens: int = 600) -> str:
         """Send *prompt* to an LLM and return the refined text."""
@@ -92,10 +80,7 @@ class ExecutionBlueprint:
 
 
 def format_relative_time(timestamp: str | float | datetime) -> str:
-    """Format a timestamp as Korean relative time.
-
-    Examples: "방금", "3분 전", "2시간 전", "1일 전", "3개월 전"
-    """
+    """Format a timestamp as Korean relative time."""
     if isinstance(timestamp, (int, float)):
         ts = datetime.fromtimestamp(timestamp, tz=UTC)
     elif isinstance(timestamp, str):
@@ -138,11 +123,7 @@ def extract_intent_from_goal(
     goal: str,
     hint: str | None = None,
 ) -> Intent:
-    """Extract a structured Intent from a natural language goal.
-
-    Uses keyword matching for fast extraction. The optional *hint*
-    (e.g. from goal classifier) biases the result.
-    """
+    """Extract an intent using keywords and an optional classifier hint."""
     goal_lower = goal.lower()
 
     # Domain detection
@@ -227,18 +208,7 @@ async def build_agent_memory_context(
     memory_manager: Any,
     options: dict[str, Any] | None = None,
 ) -> AgentMemoryContext:
-    """Build the full agent memory context from 8 layers.
-
-    Layers:
-    1. Preferences - durable user facts from working memory
-    2. User Profile - identity information
-    3. Project Context - project-specific memory
-    4. Relevant Past Work - semantically similar episodes
-    5. Recent Commands - command history
-    6. Safety Rules - learned safety constraints
-    7. Reflexion Lessons - past mistakes and learnings
-    8. Temporal Context - session digests, time-awareness
-    """
+    """Combine user, project, episode, command, safety, lesson and temporal memory."""
     ctx = AgentMemoryContext()
     parts: list[str] = []
 
@@ -445,11 +415,7 @@ def _select_crisp_signal(
     failure_reason: str,
     evidence_gate: dict[str, Any] | None,
 ) -> str:
-    """Pick the crisp learning signal: Evidence Gate "fail" evidence, else a
-    crisp loop reason. Returns "" if neither applies.
-
-    Quality Gate issues are excluded: they reflect process, not correctness.
-    """
+    """Choose failed artifact evidence or a loop-failure reason; exclude process-only issues."""
     from rune.memory.rule_learner import is_crisp_loop_reason
 
     if evidence_gate is not None and evidence_gate.get("last_verdict") == "fail":
@@ -466,17 +432,7 @@ def rule_eval_allowed(
     mech_check: str, evidence_gate: dict | None,
     verification: dict | None = None,
 ) -> bool:
-    """Whether this outcome may be counted against the rules.
-
-    A success only counts when it is backed by the strongest evidence its
-    kind of task can have. For code-shaped domains that means an executed
-    check: a run that produced a confident answer and ran nothing has proven
-    nothing, and rules promoted on such runs are rules promoted on prose.
-    Non-code domains have no executable oracle, so completion remains their
-    best available signal — demanding more would starve their rules the way
-    the keyword gate starved everything. Failures always count; they carry
-    their own evidence.
-    """
+    """Require executed checks for code success; non-code completion and failures can count."""
     if not success:
         return True
     if verification and verification.get("required"):
@@ -497,23 +453,14 @@ async def save_agent_result_to_memory(
     classification_hint: str | None = None,
     *, wait_for_consolidation: bool = False,
 ) -> list[str]:
-    """Save an agent execution result to episodic memory.
-
-    Creates an Episode with task summary, intent, result text, and files.
-    Structured extraction (commitments, lessons, entities) is handled by
-    background consolidation via LLM - no regex patterns.
-
-    Returns the list of rule keys newly learned during this save (for
-    surfacing "just learned X" to the user); empty when nothing was learned.
-    """
+    """Save an episode and return newly learned rule keys; consolidation runs separately."""
     learned_keys: list[str] = []
     try:
         result_text = ""
         success = False
         lessons = ""
         duration_ms = 0.0
-        # Crisp-learning signal, distinct from result_text (the answer prose):
-        # the loop-end reason and the Evidence Gate verdict summary.
+        # Keep mechanical failure evidence separate from answer prose.
         failure_reason = ""
         evidence_gate: dict[str, Any] | None = None
 
@@ -525,8 +472,7 @@ async def save_agent_result_to_memory(
             _eg = getattr(result, "evidence_gate", None)
             evidence_gate = _eg if isinstance(_eg, dict) else None
         elif isinstance(result, dict):
-            # Prefer the answer output for the episode record; the loop-end
-            # reason is captured separately for crisp learning below.
+            # Save answer text in the episode and loop-end reasons in the learning signal.
             result_text = str(result.get("output", result.get("reason", "")))
             success = result.get("success", False)
             duration_ms = result.get("duration_ms", 0.0) or 0.0
@@ -545,8 +491,7 @@ async def save_agent_result_to_memory(
         # Extract intent
         intent = extract_intent_from_goal(goal, classification_hint)
 
-        # Files the agent actually wrote, reported by its file tools — the
-        # authoritative list, so we never guess paths out of free text.
+        # Use paths reported by file tools rather than inferring them from prose.
         import json as _json
 
         files = list(result.get("changed_files") or []) if isinstance(result, dict) else []
@@ -568,10 +513,7 @@ async def save_agent_result_to_memory(
             if lesson_parts:
                 lessons = "Success: " + "; ".join(lesson_parts)
 
-        # Utility: +1 (golden), -1 (warning).
-        # Simple rule: trust the agent's completion status.
-        # Edge cases (Guardian refusal counted as success) are acceptable —
-        # they're +1 among many +1s and don't skew the pattern.
+        # Use completion status for episode utility; rule learning checks evidence separately.
         _utility = 1 if success else -1
 
         episode = Episode(
@@ -623,10 +565,7 @@ async def save_agent_result_to_memory(
             pass  # Pattern tracking must never block episode saving
 
         domain = classification_hint
-        # Settle outcomes waiting on the user's verdict: this run's opening
-        # message is the first reaction any earlier weak-evidence "success"
-        # ever gets. Runs at save time, after the answer is out, so the
-        # user is never waiting on it.
+        # Use the next user response to settle uncertain outcomes after delivery.
         try:
             from rune.memory.pending_outcomes import resolve_pendings
 
@@ -660,8 +599,7 @@ async def save_agent_result_to_memory(
                     isinstance(_verification, dict) and _verification.get("status") == "pass"
                 )
                 if success and not _executed_evidence and deferred_truth_enabled():
-                    # Admitted without an executed check — only non-code
-                    # domains get here. The user's next message settles it.
+                    # Non-code completion without a check waits for the user's next response.
                     record_pending(
                         domain, goal,
                         error_message=result_text[:300], relevant_keys=_keys,
@@ -672,13 +610,10 @@ async def save_agent_result_to_memory(
                         error_message=result_text[:300], relevant_keys=_keys,
                     )
         except Exception as exc:
-            # Rule feedback must never block episode saving — but a feedback
-            # loop that fails silently is how ten runs evaluated nothing
-            # without anyone knowing.
+            # Log feedback failures without interrupting episode saving.
             log.debug("rule_outcome_update_failed", error=str(exc)[:120])
 
-        # Rule Learner (conservative path): repeated-failure learning triggers
-        # only on a failed loop and needs the same pattern to recur.
+        # Repeated-failure learning requires a failed run and a recurring pattern.
         if not success:
             try:
                 from rune.memory.rule_learner import learn_from_failures
@@ -688,10 +623,7 @@ async def save_agent_result_to_memory(
             except Exception:
                 pass  # Rule learning must never block episode saving
 
-        # Crisp single-failure learning: on unless RUNE_CRISP_LEARNING=0.
-        # Signal chosen by _select_crisp_signal. On by default because a
-        # wrongly-learned rule has two ways back out: outcome demotion,
-        # and the user's-verdict hold in pending_outcomes.
+        # Single-failure learning is enabled by default; later outcomes can demote incorrect rules.
         if os.environ.get("RUNE_CRISP_LEARNING", "1") != "0":
             try:
                 from rune.memory.rule_learner import learn_from_crisp_failure
@@ -727,14 +659,7 @@ async def save_agent_result_to_memory(
         except Exception:
             pass  # Daily log failure must never block episode saving
 
-        # Trigger background consolidation (LLM-based extraction).
-        #
-        # In a process that stays up — the REPL, the TUI, the daemon — this
-        # finishes while the user reads the answer. A one-shot CLI run has
-        # nowhere to put it: the model call takes about a second and the
-        # process is trying to exit, so the user waits for work whose result
-        # they will never see in this session. There it is left for the next
-        # run, which sweeps up anything unconsolidated on the way in.
+        # Consolidate in long-lived processes; one-shot callers defer it to the next run.
         if not defer_consolidation:
             try:
                 import asyncio
@@ -767,10 +692,7 @@ async def save_agent_result_to_memory(
 def extract_artifacts_from_history(
     history: list[dict[str, Any]],
 ) -> ExecutionBlueprint:
-    """Extract an execution blueprint from a tool call history.
-
-    Scans through the history for file operations, commands, and errors.
-    """
+    """Extract file operations, commands and errors from the tool history."""
     blueprint = ExecutionBlueprint()
 
     for entry in history:
@@ -930,10 +852,7 @@ def detect_languages_from_files(file_paths: list[str]) -> list[str]:
 
 
 def detect_tools(text: str) -> dict[str, str]:
-    """Detect development tools mentioned in text.
-
-    Returns a mapping of tool name to a sample match.
-    """
+    """Map development tool names found in text to sample matches."""
     found: dict[str, str] = {}
     for tool_name, pattern in _TOOL_PATTERNS.items():
         match = pattern.search(text)
@@ -946,11 +865,7 @@ def detect_tools(text: str) -> dict[str, str]:
 
 
 def compute_auto_skill_quality_score(result: Any) -> float:
-    """Compute a quality score (0.0-1.0) for an agent result.
-
-    Higher scores indicate the result is a good candidate for
-    auto-skill extraction.
-    """
+    """Score a result from 0 to 1 for suitability as a reusable skill."""
     from rune.agent.verification_state import verified_outcome
 
     if verified_outcome(result) is False:
@@ -1022,11 +937,7 @@ class ToolTraceEntry:
 
 
 def _parameterise_value(value: Any) -> Any:
-    """Replace concrete values with template placeholders where appropriate.
-
-    Strings that look like file paths, URLs, or long free-text get replaced
-    with a ``{{placeholder}}`` so the skill template stays reusable.
-    """
+    """Replace paths, URLs and long text with reusable template placeholders."""
     if not isinstance(value, str):
         return value
     # Detect file paths
@@ -1096,14 +1007,7 @@ def extract_skill_template(
     *,
     intent: Intent | None = None,
 ) -> dict[str, Any] | None:
-    """Extract a reusable skill template from a sequence of tool calls.
-
-    Uses pattern matching on the tool sequence (no LLM call) so the
-    operation is fast and fully local.
-
-    Returns a skill definition dict with ``steps`` (list of tool-call
-    templates) or ``None`` if the trace is too short / not generalisable.
-    """
+    """Extract a local tool-call template, or None if the trace is too short or specific."""
     # Filter to successful calls only
     successful = [t for t in trace if t.success]
     if len(successful) < 1:
@@ -1176,17 +1080,12 @@ def _parse_refined_steps(
     raw: str,
     original_steps: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Parse LLM-refined steps back into structured dicts.
-
-    Falls back to *original_steps* if parsing fails or the result is
-    degenerate (too few / too many steps).
-    """
+    """Parse refined steps, retaining originals when parsing or step-count checks fail."""
     lines = [ln.strip() for ln in raw.strip().splitlines() if ln.strip()]
     parsed: list[dict[str, Any]] = []
 
     for line in lines:
-        # Expected format: "1. tool=file_read params=file_path={{file_path}}"
-        # or variants like "1. tool=file_read  params=file_path={{file_path}}, command=ls"
+        # Expected form: 1. tool=file_read params=file_path={{file_path}}
         tool_match = re.search(r"tool\s*=\s*(\w+)", line)
         if not tool_match:
             continue
@@ -1222,8 +1121,7 @@ async def refine_skill_steps(
     pattern: str,
     refiner: LLMRefiner | None,
 ) -> list[dict[str, Any]]:
-    """Refine auto-extracted skill steps via an LLM, falling back to
-    the original steps when no refiner is available or on error."""
+    """Refine skill steps with an LLM, retaining originals when unavailable or unsuccessful."""
     if refiner is None:
         return steps
 
@@ -1246,12 +1144,7 @@ _STRATEGIC_BODY_MAX_TOKENS = 700
 
 
 def _build_strategic_skill_prompt(goal: str, steps: list[dict[str, Any]], pattern: str) -> str:
-    """Prompt to distil a tool trace into a reusable, generalised procedure.
-
-    The pattern-extracted body is a verbatim transcript of one run; an agent
-    gains nothing from it. This asks for the strategy (why each step),
-    generalised away from the run's specific values.
-    """
+    """Build a prompt for reusable guidance from a concrete tool trace."""
     tool_seq = " -> ".join(s.get("tool", "?") for s in steps)
     return (
         "Distil a REUSABLE procedure from one successful agent run so a future "
@@ -1279,11 +1172,7 @@ async def _synthesize_strategic_body(
     pattern: str,
     refiner: LLMRefiner | None,
 ) -> str | None:
-    """Generalised strategy body, or None to fall back to the step template.
-
-    Only runs when a refiner is wired (auto-skill path). The executable ``steps``
-    stay in metadata for the replay evaluator; this replaces only the injected body.
-    """
+    """Synthesize the injected skill body; keep executable steps for replay unchanged."""
     if refiner is None or not steps:
         return None
     try:
@@ -1312,11 +1201,7 @@ def _skill_gate_blocks() -> bool:
 
 
 async def _scan_distilled_skill(skill: Any) -> list[str]:
-    """Security findings for an auto-distilled skill, or an empty list.
-
-    Uses the same detector the (unregistered) skill security hook was built
-    around, so the checks live in one place.
-    """
+    """Return security findings for a generated skill, or an empty list."""
     try:
         from dataclasses import replace
 
@@ -1329,8 +1214,7 @@ async def _scan_distilled_skill(skill: Any) -> list[str]:
         config = DEFAULT_SKILL_SECURITY_GATE_CONFIG
         gate_cfg = getattr(getattr(get_config(), "hooks", None), "skill_gate", None)
         if gate_cfg is not None:
-            # hooks.skillGate was settable and read by nothing; it now drives
-            # this scan, field for field.
+            # Apply the configured skill security checks before persistence.
             config = replace(
                 config,
                 mode=gate_cfg.mode,
@@ -1368,22 +1252,7 @@ async def maybe_generate_skill(
     trace: list[ToolTraceEntry] | None = None,
     refiner: LLMRefiner | None = None,
 ) -> dict[str, Any] | None:
-    """Attempt to generate a reusable skill from a successful execution.
-
-    Not wired into any execution path: it auto-registers skills, which is
-    unverified. Kept for future opt-in use.
-
-    When a ``trace`` (list of :class:`ToolTraceEntry`) is provided the
-    function uses local pattern matching to extract a generalised skill
-    template and registers it in the :class:`SkillRegistry`.
-
-    An optional *refiner* (:class:`LLMRefiner`) is used to improve the
-    auto-extracted steps via an LLM call.  When ``None`` or when the LLM
-    call fails, the pattern-extracted steps are kept as-is.
-
-    Returns a skill definition dict or ``None`` if the result is not
-    suitable for skill extraction.
-    """
+    """Generate and register a quality-gated skill, or return None when unsuitable."""
     quality = compute_auto_skill_quality_score(result)
     if quality < 0.6:
         log.debug("skill_generation_skipped", quality=quality)
@@ -1393,13 +1262,13 @@ async def maybe_generate_skill(
     if skill_name is None:
         return None
 
-    # --- Skill template extraction via pattern matching ---
+    # Skill template extraction via pattern matching
     template: dict[str, Any] | None = None
     if trace:
         template = extract_skill_template(goal, trace, intent=intent)
 
     if template is not None:
-        # --- LLM refinement of steps (optional) ---
+        # LLM refinement of steps (optional)
         refined_steps = await refine_skill_steps(
             goal,
             template["steps"],
@@ -1408,8 +1277,7 @@ async def maybe_generate_skill(
         )
         template["steps"] = refined_steps
 
-        # Prefer an LLM-distilled reusable procedure; fall back to the step
-        # transcript when no refiner is wired or synthesis fails.
+        # Use synthesized guidance when available, otherwise retain the step transcript.
         strategic_body = await _synthesize_strategic_body(
             goal,
             template["steps"],
@@ -1435,11 +1303,7 @@ async def maybe_generate_skill(
             scope="user",
             author="auto",
             metadata={
-                # Gated Skill Learning (T1-1): a freshly distilled skill is a
-                # CANDIDATE, not yet proven to help. With gating off (default)
-                # injection is unchanged, so this tag is behaviour-neutral; with
-                # gating on, a CANDIDATE is withheld until the evaluator promotes
-                # it to ACTIVE.
+                # Evaluate generated procedures before reusing them in live work.
                 "state": SkillState.CANDIDATE,
                 "source": "auto_distill",
                 "quality_score": quality,
@@ -1463,9 +1327,7 @@ async def maybe_generate_skill(
                 pattern=template["pattern"],
                 steps=len(template["steps"]),
             )
-            # Persist so a future session can reuse it (the registry loads
-            # SKILL.md on startup); in-memory-only would die with this process.
-            # Default-off config means normal runs write nothing.
+            # Persist opted-in skills so the registry can reload them in later sessions.
             try:
                 from rune.config import get_config
 
@@ -1473,8 +1335,7 @@ async def maybe_generate_skill(
                 if getattr(skills_cfg, "gated_learning", False) or getattr(
                     skills_cfg, "auto_skill", False
                 ):
-                    # Scan before writing: a skill body is injected into a
-                    # later run's prompt, and nothing else checks it.
+                    # Scan before saving; skill text enters later prompts.
                     findings = await _scan_distilled_skill(skill)
                     blocking = findings and _skill_gate_blocks()
                     if findings:
@@ -1515,10 +1376,7 @@ async def maybe_generate_skill(
 
 
 def generate_skill_name(goal: str) -> str | None:
-    """Generate a snake_case skill name from a goal description.
-
-    Returns ``None`` if the goal is too vague for a meaningful name.
-    """
+    """Generate a kebab-case skill name, or None when the goal is too vague."""
     from rune.skills.validator import MAX_NAME_LENGTH
 
     # Remove common stop words and articles
@@ -1588,8 +1446,7 @@ def generate_skill_name(goal: str) -> str | None:
     if len(words) < 2:
         return None
 
-    # Take first 4 significant words. Kebab-case matches the convention every
-    # shipped skill uses and keeps the name inside validate_name's rules.
+    # Use up to four significant words in the kebab-case format required by validate_name.
     name_parts = words[:4]
     name = "-".join(name_parts)
 

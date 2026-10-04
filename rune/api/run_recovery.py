@@ -92,6 +92,14 @@ class RunRecovery:
         if not workspace or not Path(workspace).is_dir():
             raise RecoveryBlocked("The original workspace is unavailable.")
         self.workspace_available(run_id, workspace, resuming=True)
+        from rune.api.approval_recovery import pending_action
+        from rune.safety.approval_request import check_revisions
+        from rune.safety.execution_environment import execution_config
+        environment = run.get("execution", {}).get("environment")
+        if environment is not None and environment != execution_config().model_dump(mode="json"):
+            raise RecoveryBlocked("Execution environment settings changed. Restore the original settings before resuming.")
+        if action := pending_action(run):
+            check_revisions(action.get("revisions", {}))
         records = self.records(run)
         child_id = uuid4().hex[:16]
         self.runs.start(child_id, run["sessionId"], run["goal"], parent_id=run_id)

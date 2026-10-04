@@ -1,22 +1,4 @@
-"""Evidence Gate — deterministic output-correctness verification.
-
-RUNE's Completion Gate (``completion_gate.py``) verifies *behavioral* evidence
-(did the agent read/write/execute?) but not *outcome* evidence (is the produced
-artifact actually correct?). That gap let benchmark attempts finalize with a
-byte-wrong or rule-violating artifact (see the v8 ``large-scale-text-editing``
-canaries: a macro that ran but used a banned construct, or transformed to the
-wrong bytes, still scored "verified").
-
-This module fills that gap for benchmark runs. It does NOT hardcode any
-task-specific rule (that would violate the no-pattern-matching principle).
-Instead it asks the model to translate the task's own success criteria into a
-single self-contained shell check, runs that check before finalization, and
-blocks completion (returning first-mismatch evidence) when it fails.
-
-Off by default; enabled via ``RUNE_BENCH_EVIDENCE_GATE``. Conservative by
-construction: if a check cannot be produced or cannot run, it does NOT block
-(never converts a real success into a false failure).
-"""
+"""Check artifact outcomes before completion when RUNE_BENCH_EVIDENCE_GATE is enabled."""
 
 from __future__ import annotations
 
@@ -29,10 +11,7 @@ log = get_logger(__name__)
 
 _EVIDENCE_GATE_ENV = "RUNE_BENCH_EVIDENCE_GATE"
 _EVIDENCE_GATE_TIMEOUT_MS_ENV = "RUNE_BENCH_EVIDENCE_GATE_TIMEOUT_MS"
-# Sample-based checks should finish in seconds; a short default keeps a slow or
-# accidentally full-file check from stalling finalize. On timeout the verdict is
-# "skip" (inconclusive), never "pass", so a too-short timeout cannot fabricate a
-# completion — it only forgoes the gate's help for that attempt.
+# Bound finalization latency; a timeout is inconclusive, never a passing check.
 _DEFAULT_CHECK_TIMEOUT_MS = 30_000
 _MAX_EVIDENCE_OUTPUT_CHARS = 4_000
 
@@ -98,18 +77,12 @@ def _strip_fences(text: str) -> str:
 
 
 async def extract_success_check(instruction: str) -> str | None:
-    """Ask the model for a shell script that verifies the task's success criteria.
-
-    Returns the script body, or ``None`` when no mechanical check is possible
-    (the model answers NO_CHECK, the call fails, or the output is empty). A
-    ``None`` result means "do not block" — the gate stays conservative.
-    """
+    """Generate a shell check, or return None when no mechanical check can be produced."""
     try:
         from rune.llm.client import get_llm_client
         from rune.types import ModelTier
 
-        # Use the best tier (not the active task model) so the check is at
-        # least as reliable as the model that produced the artifact.
+        # Use the best tier to generate the artifact check.
         client = get_llm_client()
         response = await client.completion(
             messages=[
@@ -143,113 +116,15 @@ async def extract_success_check(instruction: str) -> str | None:
 
 
 async def run_evidence_check(script: str, cwd: str) -> tuple[str, str]:
-    """Run the verification script in a direct subprocess.
-
-    Returns ``(state, evidence_text)`` where ``state`` is:
-    - ``"pass"``  — script exited 0 (artifact satisfied the check).
-    - ``"fail"``  — script exited non-zero (artifact violated the check);
-      ``evidence_text`` carries the first-mismatch output.
-    - ``"skip"``  — the check could not be run to completion (spawn error or
-      TIMEOUT). This is INCONCLUSIVE: it must neither block (don't punish a real
-      success we couldn't verify) NOR pass (a slow/timed-out check must NOT be
-      read as success — that previously produced false-positive completions
-      where a wrong artifact's 1M-row vim check timed out and was treated as
-      "pass", finalizing a failing artifact).
-
-    The script runs as a direct subprocess, NOT through the bash capability /
-    Guardian. The Evidence Gate is a trusted internal verifier that runs a check
-    WE generated to re-verify the agent's artifact; Guardian exists to gate the
-    *agent's* actions, and applying it here wrongly blocks safe verifier idioms
-    (e.g. `trap 'rm -rf "$tmpdir"' EXIT` on a mktemp dir was blocked as
-    "recursive deletion with absolute path", failing the whole check).
-    """
-    import asyncio
+    """Check in the run's environment; missing verdicts remain inconclusive."""
+    from rune.safety.verification import run_check
 
     timeout_ms = env_int(_EVIDENCE_GATE_TIMEOUT_MS_ENV, _DEFAULT_CHECK_TIMEOUT_MS)
-    timeout_s = max(1.0, timeout_ms / 1000.0)
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "sh",
-            "-c",
-            script,
-            cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            # Own process group, so cleanup below can reach what the script
-            # spawned. A check for a service starts a server in the background;
-            # killing only the shell leaves that server holding its port, and
-            # every later candidate then dies on EADDRINUSE regardless of
-            # whether its code was right. Measured: a service project scored
-            # correct-pass 0/5 that way, with a leaked server still running
-            # after the run.
-            start_new_session=True,
-        )
-    except Exception as exc:  # pragma: no cover - spawn failure
-        log.warning("evidence_gate_spawn_error", error=str(exc)[:120])
-        return "skip", ""
-
-    import os
-    import signal
-
-    # No group lookup at all: start_new_session makes the shell the session
-    # leader, so its group id IS its pid, alive or dead. Resolving it with
-    # getpgid had a race — a check that finishes instantly ("echo; exit 0")
-    # can exit before the lookup runs, the lookup raises, and the fallback
-    # kills only the dead shell while the server it backgrounded keeps the
-    # port.
-    _pgid: int | None = proc.pid
-
-    def _kill_group() -> None:
-        """Kill the check and anything it started."""
-        if _pgid is not None:
-            try:
-                os.killpg(_pgid, signal.SIGKILL)
-                return
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
-
-    # Watch for the SHELL's exit code directly. Neither communicate() nor
-    # wait() can be used here: both also wait for the stdout pipe to
-    # disconnect, and a backgrounded server inherits that pipe, so a check that
-    # had already finished and produced a verdict would burn the full timeout
-    # and come back "skip" — which is how service checks became inconclusive by
-    # construction. returncode is set from the child signal alone.
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout_s
-    try:
-        while proc.returncode is None:
-            if loop.time() >= deadline:
-                _kill_group()
-                log.warning("evidence_gate_timeout", timeout_s=timeout_s)
-                return "skip", ""  # inconclusive → neither block nor pass
-            await asyncio.sleep(0.05)
-    except Exception as exc:  # pragma: no cover
-        _kill_group()
-        log.warning("evidence_gate_run_error", error=str(exc)[:120])
-        return "skip", ""
-
-    # The verdict is in; reap anything still running so it releases the pipe,
-    # then drain what the check printed.
-    _kill_group()
-    stdout = b""
-    if proc.stdout is not None:
-        try:
-            stdout = await asyncio.wait_for(proc.stdout.read(), timeout=5.0)
-        except (TimeoutError, Exception):  # pragma: no cover - drain best-effort
-            stdout = b""
-
-    output = (stdout.decode("utf-8", errors="replace") if stdout else "")[
-        :_MAX_EVIDENCE_OUTPUT_CHARS
-    ]
-    if proc.returncode == 0:
-        log.info("evidence_gate_pass")
-        return "pass", output
-    log.info("evidence_gate_fail", code=proc.returncode, evidence_len=len(output))
-    return "fail", output.strip()
+    result = await run_check(script, cwd, max(1.0, timeout_ms / 1000.0))
+    output = (result.stdout.decode("utf-8", "replace") + result.error)[:_MAX_EVIDENCE_OUTPUT_CHARS]
+    if result.code is None:
+        return "skip", output
+    return ("pass" if result.code == 0 else "fail"), output
 
 
 def build_block_message(evidence: str) -> str:
@@ -262,11 +137,7 @@ def build_block_message(evidence: str) -> str:
 
 
 class EvidenceGate:
-    """Stateful helper: extract the check once, then verify on demand.
-
-    The extraction is cached for the run (the task instruction does not change),
-    so finalization attempts after the first only pay the cheap bash re-run.
-    """
+    """Extract a check once per run and re-execute it on completion attempts."""
 
     __slots__ = (
         "_instruction",
@@ -286,8 +157,7 @@ class EvidenceGate:
     def __init__(self, instruction: str, cwd: str) -> None:
         self._instruction = instruction
         self._cwd = cwd
-        # Freeze pre-existing test files: the gate must never judge against
-        # checks the agent rewrote mid-run (see validation_guard).
+        # Snapshot existing tests so later agent edits cannot weaken verification.
         from rune.agent.validation_guard import snapshot_tests
 
         self._test_snapshot = snapshot_tests(cwd)
@@ -295,33 +165,17 @@ class EvidenceGate:
         self._guard_note = ""
         self._script: str | None = None
         self._extracted = False
-        # Spec-driven path (preferred): code controls sampling/run/compare; the
-        # LLM only supplies the structured spec. Falls back to the legacy script
-        # path when no valid spec can be extracted.
+        # Prefer a structured spec; fall back to a generated script if extraction fails.
         self._spec: object | None = None
         self._spec_extracted = False
-        # Observability: structlog is NOT captured in benchmark containers, so
-        # the gate records its own decision history for surfacing via the
-        # CompletionTrace (which IS persisted to completion_trace.json).
+        # Persist decisions in CompletionTrace when benchmark logs are unavailable.
         self.verdict_counts: dict[str, int] = {"pass": 0, "fail": 0, "skip": 0}
         self.last_verdict: str = ""
         self.last_evidence: str = ""
 
     async def verdict(self) -> tuple[str, str | None]:
-        """Run the artifact's success check and return a three-state verdict.
-
-        Returns ``(state, message)`` where ``state`` is:
-        - ``"pass"``: a real check ran and the artifact satisfied it. Callers may
-          treat this as positive outcome evidence that can OVERRIDE a
-          completion-gate "blocked" verdict (behavioral signals are weaker than
-          a passing outcome check).
-        - ``"fail"``: a real check ran and the artifact failed it; ``message`` is
-          a finalize-blocking nudge with first-mismatch evidence.
-        - ``"skip"``: no mechanical check could be produced/run; the gate is
-          neutral and must NOT influence the decision either way.
-        """
-        # Any verification below must run against the user's own checks, not
-        # agent-edited ones — restore tampered test files first and disclose.
+        """Return (pass/fail/skip, message); only a failed check blocks completion."""
+        # Restore modified original tests before verification and disclose the restoration.
         from rune.agent.validation_guard import restoration_note, restore_tests
 
         report = restore_tests(self._test_snapshot)
@@ -347,14 +201,12 @@ class EvidenceGate:
         if state == "pass":
             return self._record("pass", None, "")
         if state == "skip":
-            # Inconclusive (timeout / spawn error): stay neutral. Do NOT treat a
-            # timed-out check as a pass — that finalized wrong artifacts before.
+            # A timeout or spawn error provides no evidence of success.
             return self._record("skip", None, "")
         return self._record("fail", build_block_message(evidence), evidence)
 
     async def _verdict_from_spec(self) -> tuple[str, str | None]:
-        """Spec path: multi-disjoint sample check, then a full-file final
-        confirmation before accepting a pass (defeats the sampling blind spot)."""
+        """Recheck the full file; an inconclusive result retains the sample pass."""
         from rune.agent.evidence_spec import VerificationSpec, run_spec
 
         spec = self._spec
@@ -364,9 +216,7 @@ class EvidenceGate:
             return self._record("fail", build_block_message(evidence), evidence)
         if state == "skip":
             return self._record("skip", None, "")
-        # Sample passed — confirm on the FULL file before accepting. If the
-        # full check is inconclusive (e.g. times out on huge input), accept the
-        # sample pass rather than discarding a likely-correct artifact.
+        # Confirm against the full file; an inconclusive result retains the sample pass.
         full_state, full_evidence = await run_spec(spec, full_file=True)
         if full_state == "fail":
             return self._record("fail", build_block_message(full_evidence), full_evidence)
@@ -398,11 +248,7 @@ class EvidenceGate:
         }
 
     async def check(self) -> str | None:
-        """Return a block message if the artifact fails its check, else ``None``.
-
-        Thin wrapper over :meth:`verdict` for callers that only care about the
-        blocking decision (``"fail"`` → message, ``"pass"``/``"skip"`` → None).
-        """
+        """Return the failure message, or None for a pass or inconclusive check."""
         _state, message = await self.verdict()
         return message
 

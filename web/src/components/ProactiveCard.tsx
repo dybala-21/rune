@@ -1,11 +1,7 @@
-/**
- * ProactiveCard — displays a proactive suggestion from RUNE.
- *
- * Conversational style — no buttons. The user responds naturally
- * in the chat input, and the agent interprets the response.
- */
-
+import { useState } from 'react';
+import { respondToSuggestion } from '../api';
 import type { ProactiveSuggestion } from '../types';
+import { proactiveStatus } from '../utils/proactive';
 import { SparkIcon } from './icons';
 
 interface ProactiveCardProps {
@@ -13,23 +9,30 @@ interface ProactiveCardProps {
 }
 
 export function ProactiveCard({ suggestion }: ProactiveCardProps) {
-  const isNudge = suggestion.intensity === 'nudge';
+  const [acknowledged, setAcknowledged] = useState<string>();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string>();
+  const state = suggestion.state;
+  // Keep a just-accepted response while an earlier feed request finishes.
+  const response = proactiveStatus(state && acknowledged && ['pending', 'unconfirmed'].includes(state.response)
+    ? { ...state, response: acknowledged } : state);
+  const output = state?.result.output || state?.result.error || '';
   const isIntervene = suggestion.intensity === 'intervene';
   const accentColor = isIntervene ? '#61AFEF' : '#56B6C2';
   const timeAgo = formatTimeAgo(suggestion.timestamp);
 
-  if (isNudge) {
-    return (
-      <div className="slide-up" style={{
-        padding: '6px 12px',
-        fontSize: 13,
-        color: 'var(--text-muted)',
-        fontStyle: 'italic',
-        opacity: 0.7,
-      }}>
-        rune: {suggestion.body}
-      </div>
-    );
+  async function respond(value: 'accept' | 'dismiss') {
+    if (busy || response) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      await respondToSuggestion(suggestion.id, value);
+      setAcknowledged(value === 'accept' ? 'accepted' : 'dismissed');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not record your response');
+    } finally {
+      setBusy(false);
+    }
   }
 
   return (
@@ -45,7 +48,6 @@ export function ProactiveCard({ suggestion }: ProactiveCardProps) {
         flexDirection: 'column',
         gap: 8,
       }}>
-        {/* Header */}
         <div style={{
           display: 'flex',
           alignItems: 'center',
@@ -69,14 +71,22 @@ export function ProactiveCard({ suggestion }: ProactiveCardProps) {
             {timeAgo}
           </span>
         </div>
+        {suggestion.headline && <strong style={{ fontSize: 14 }}>{suggestion.headline}</strong>}
 
-        {/* Body */}
         <div style={{
           fontSize: 14,
           lineHeight: 1.6,
           color: 'var(--text-primary)',
         }}>
           {suggestion.body}
+        </div>
+        <div role="status" style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+          {response || <div style={{ display: 'flex', gap: 8 }}>
+            <button disabled={busy} onClick={() => void respond('accept')}>Run once</button>
+            <button disabled={busy} onClick={() => void respond('dismiss')}>Dismiss</button>
+          </div>}
+          {error && <p role="alert">{error}</p>}
+          {output && <p style={{ whiteSpace: 'pre-wrap', color: 'var(--text-primary)' }}>{output}</p>}
         </div>
       </div>
     </div>

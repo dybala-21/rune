@@ -1,11 +1,8 @@
-"""Authentication for the RUNE API.
-
-Ported from src/api/auth.ts - token generation, verification,
-persistent storage, and FastAPI middleware dependency.
-"""
+"""Generate, persist and validate API bearer tokens."""
 
 import contextlib
 import json
+import os
 import secrets
 import time
 from typing import Any
@@ -52,15 +49,7 @@ def _save_tokens(tokens: dict[str, dict[str, Any]]) -> None:
 # Public API
 
 def generate_token(*, label: str = "", expires_seconds: int | None = None) -> str:
-    """Generate a new API token and store it.
-
-    Args:
-        label: Optional human-readable label for the token.
-        expires_seconds: Optional TTL. ``None`` means the token never expires.
-
-    Returns:
-        The generated token string.
-    """
+    """Create and store a token; expires_seconds=None leaves it valid indefinitely."""
     raw = secrets.token_urlsafe(_TOKEN_BYTE_LENGTH)
     token = f"{_TOKEN_PREFIX}{raw}"
 
@@ -126,17 +115,14 @@ def list_tokens() -> list[dict[str, Any]]:
 
 # FastAPI dependency
 
+def token_required() -> bool:
+    from rune.cloud.boundary import hosted
+
+    return hosted() or os.environ.get("RUNE_REQUIRE_TOKEN") == "1"
+
+
 class TokenAuthDependency:
-    """FastAPI dependency that validates Bearer tokens.
-
-    Usage::
-
-        auth = TokenAuthDependency()
-
-        @app.get("/protected", dependencies=[Depends(auth)])
-        async def protected():
-            ...
-    """
+    """Validate bearer tokens as a FastAPI dependency."""
 
     async def __call__(self, request: Request) -> None:
         from fastapi import HTTPException
@@ -148,13 +134,10 @@ class TokenAuthDependency:
 
         auth_header: str = request.headers.get("authorization", "")
 
-        # Localhost auth bypass - only allowed when the request passes the
-        # local auth guard's CSRF checks (origin/referer/sec-fetch-site).
-        # This blocks malicious cross-origin browser requests while still
-        # allowing CLI/curl and same-origin web UI requests from localhost.
+        # Allow localhost bypass only after origin, referer and sec-fetch-site checks pass.
         if not auth_header:
             host = request.client.host if request.client else ""
-            if is_localhost_request(host):
+            if not token_required() and is_localhost_request(host):
                 # Extract port from the Host header or server scope
                 server_port = request.scope.get("server", (None, 0))[1] or 0
                 headers = {k.decode(): v.decode() for k, v in request.scope.get("headers", [])}

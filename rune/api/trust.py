@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from rune.agent.escalation import can_escalate, honest_failure_note, run_was_verifiable
-from rune.agent.verification_state import verified_outcome
+from rune.agent.run_outcome import run_outcome
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -21,64 +21,20 @@ def build_cancelled_trust(trace: Any = None, *, artifact_receipts: list[dict[str
     return out
 
 
-def _verification_status(trace: Any) -> str:
-    verification = getattr(trace, "verification", None) or {}
-    gate = getattr(trace, "evidence_gate", None) or {}
-    mech = getattr(trace, "mech_check", "")
-    table = getattr(trace, "table_acceptance", None) or {}
-    if "fail" in (verification.get("status"), gate.get("last_verdict"), mech):
-        return "failed"
-    if table.get("required") and table.get("status") != "pass":
-        return {"fail": "failed", "unverified": "not_checked"}.get(table.get("status"), "inconclusive")
-    if verification.get("status") == "inconclusive":
-        return "inconclusive"
-
-    # Inspect check evidence without treating an interrupted run as a failed check.
-    outcome = verified_outcome({
-        "verification": verification,
-        "evidence_gate": gate,
-        "mech_check": mech,
-        "tests_passed_after_edit": getattr(trace, "tests_passed_after_edit", None),
-        "table_acceptance": table,
-    })
-    if outcome is True:
-        return "passed"
-    if outcome is False:
-        return "not_checked"  # A required fresh check is still missing.
-    if gate.get("has_check") or mech == "skip":
-        return "inconclusive"
-    return "not_checked"
-
-
 def build_trust_payload(trace: Any) -> dict[str, Any]:
-    reason = getattr(trace, "reason", "") or ""
-    capped = bool(getattr(trace, "tool_budget_exhausted", False))
-    if reason == "cancelled":
-        completion = "cancelled"
-    elif reason == "error" or reason.startswith("error:"):
-        completion = "failed"
-    elif reason in ("completed", "verified") and not capped:
-        completion = "completed"
-    else:
-        completion = "incomplete" if reason or capped else "unknown"
-
-    verification = getattr(trace, "verification", None)
-    status = _verification_status(trace)
+    outcome = run_outcome(trace)
+    reason = outcome.reason
     out: dict[str, Any] = {
-        "completionStatus": completion,
-        "verificationStatus": status,
-        "verificationRequired": bool((verification or {}).get("required"))
-        or getattr(trace, "tests_passed_after_edit", None) is False
-        or bool((getattr(trace, "table_acceptance", None) or {}).get("required")),
-        "verified": completion == "completed" and status == "passed",
+        **outcome.payload(),
         "reason": reason,
-        "budgetExhausted": capped,
+        "budgetExhausted": bool(getattr(trace, "tool_budget_exhausted", False)),
         "testsPassedAfterEdit": getattr(trace, "tests_passed_after_edit", None),
-        "verification": verification,
+        "verification": getattr(trace, "verification", None),
         "completionCheck": getattr(trace, "completion_check", None)
         if reason in ("completed_gate_warnings", "max_gate_blocked", "desktop_blocked") else None,
         "artifactReceipts": getattr(trace, "artifact_receipts", []),
         "tableAcceptance": getattr(trace, "table_acceptance", None),
+        "requirementAcceptance": getattr(trace, "requirement_acceptance", None),
         "workspaceWarning": getattr(trace, "workspace_warning", "") or "",
         "unsourcedNumbers": list(getattr(trace, "unsourced_numbers", None) or []),
         "canEscalate": can_escalate(reason),

@@ -3,11 +3,43 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
+from uuid import uuid4
 
 from rune.capabilities.ask_user import AskUserParams, UserResponse, user_response
+
+
+def question_callback(run_id: str, pending: dict[str, PendingQuestion], emit, *, timeout: float = 300):
+    from rune.agent.timing import timed
+
+    lock = asyncio.Lock()
+
+    @timed("question")
+    async def ask(params: AskUserParams) -> UserResponse:
+        from rune.agent.loop import current_tool_call_id
+
+        async with lock:
+            question_id = f"question:{run_id}:{uuid4().hex}"
+            question = PendingQuestion(params)
+            pending[question_id] = question
+            try:
+                await emit("question", {
+                    **question_payload(params, question_id, run_id, current_tool_call_id()),
+                    "expiresAt": time.time() * 1000 + timeout * 1000,
+                })
+                return await asyncio.wait_for(question.future, timeout=timeout)
+            except TimeoutError:
+                raise TimeoutError("Question expired without a user response") from None
+            finally:
+                pending.pop(question_id, None)
+                if not question.future.done():
+                    question.future.cancel()
+                await emit("question_closed", {"id": question_id, "runId": run_id})
+
+    return ask
 
 
 def question_payload(params: AskUserParams, question_id: str, run_id: str, call_id: str = "") -> dict[str, Any]:

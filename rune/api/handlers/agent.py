@@ -1,8 +1,4 @@
-"""Agent handler - POST /agent/run, GET /agent/status, POST /agent/cancel.
-
-Ported from src/api/handlers/agent.ts - non-blocking agent execution.
-Returns a runId immediately; execution proceeds in the background.
-"""
+"""Submit, inspect and cancel background agent runs."""
 
 from __future__ import annotations
 
@@ -14,8 +10,11 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
+from rune.agent.run_control import RunControl, control_scope
+from rune.agent.run_outcome import run_outcome
 from rune.api.auth import TokenAuthDependency
 from rune.api.run_tracker import RunResult, RunTracker
+from rune.safety.approval_context import approval_required
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -58,6 +57,8 @@ class AgentStatusResponse(BaseModel):
     status: str
     answer: str | None = None
     error: str | None = None
+    success: bool | None = None
+    outcome: dict[str, Any] | None = None
     elapsed_ms: int | None = Field(None, alias="elapsedMs")
 
     model_config = ConfigDict(populate_by_name=True)
@@ -73,11 +74,7 @@ class AgentCancelResponse(BaseModel):
 
 @router.post("/run", response_model=AgentRunResponse, dependencies=[Depends(auth)])
 async def agent_run(req: AgentRunRequest) -> AgentRunResponse:
-    """Submit an agent execution request.
-
-    The agent runs asynchronously in the background. Poll
-    ``GET /agent/status?runId=...`` or subscribe to SSE for progress.
-    """
+    """Start a background run; poll its status or subscribe to SSE for progress."""
     tracker = get_tracker()
 
     if tracker.get_active_count() >= MAX_CONCURRENT_API_RUNS:
@@ -91,11 +88,8 @@ async def agent_run(req: AgentRunRequest) -> AgentRunResponse:
 
     tracker.create(run_id, client_id="api", session_id=session_id, goal=req.goal)
 
-    # Launch background execution. Pass the resolved session_id (which may be
-    # server-generated): deriving it again from req inside _execute_agent would
-    # drop the generated id, so the first turn of a new session would never be
-    # recorded and the sessionId returned to the client would start empty.
-    task = asyncio.create_task(_execute_agent(tracker, run_id, req, session_id))
+    # Pass the resolved session ID so the first turn is saved under the ID returned to the client.
+    task = asyncio.create_task(_execute_agent(tracker, run_id, req, session_id), name=f"api-run:{run_id}")
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
@@ -124,6 +118,8 @@ async def agent_status(run_id: str = "") -> AgentStatusResponse:
         status=run.status,
         answer=run.result.answer if run.result else None,
         error=run.error,
+        success=run.result.success if run.result else None,
+        outcome=run.result.outcome if run.result else None,
         elapsedMs=elapsed_ms,
     )
 
@@ -142,7 +138,11 @@ async def agent_cancel(run_id: str = "") -> AgentCancelResponse:
             detail=f"Run not found or already completed: {run_id}",
         )
 
-    return AgentCancelResponse(run_id=run_id, cancelled=True)
+    for task in _background_tasks:
+        if task.get_name() == f"api-run:{run_id}":
+            task.cancel()
+
+    return AgentCancelResponse(runId=run_id, cancelled=True)
 
 
 # Background execution
@@ -153,6 +153,7 @@ async def _execute_agent(
 ) -> None:
     """Execute the agent in the background, updating the tracker."""
     tracker.mark_running(run_id)
+    control = RunControl(run_id)
     try:
         from rune.agent.agent_context import (
             PostProcessInput,
@@ -206,10 +207,11 @@ async def _execute_agent(
 
         loop = NativeAgentLoop()
 
-        # 2. API runs are non-interactive - auto-approve, autonomous ask_user
-        async def _api_approval_cb(command: str, risk_level: str) -> bool:
-            log.info("api_auto_approve", run_id=run_id, command=command[:100])
-            return True
+        blocked: list[str] = []
+
+        async def _api_approval_cb(command: str, reason: str) -> bool:
+            blocked.append(command)
+            return False
 
         loop.set_approval_callback(_api_approval_cb)
 
@@ -236,15 +238,20 @@ async def _execute_agent(
         if agent_ctx.workspace_root:
             context_dict["workspace_root"] = agent_ctx.workspace_root
 
-        trace = await loop.run(
-            agent_ctx.goal,
-            context=context_dict if context_dict else None,
-            message_history=agent_ctx.messages if agent_ctx.messages else None,
-        )
-        # Prefer the loop's final answer over collected stream text so the
-        # assistant turn is recorded reliably; a missing turn makes the next
-        # request re-run already-answered tasks. Keep the reason fallback so the
-        # API response is never empty.
+        with control_scope(control), approval_required():
+            trace = await loop.run(
+                agent_ctx.goal,
+                context=context_dict if context_dict else None,
+                message_history=agent_ctx.messages if agent_ctx.messages else None,
+            )
+        outcome = run_outcome(trace)
+        needs_approval = bool(blocked) and not outcome.verified
+        success = outcome.success and not needs_approval
+        result_outcome = outcome.payload()
+        if needs_approval:
+            result_outcome.update(completionStatus="incomplete", reason="approval_required",
+                                  blockedTools=sorted(set(blocked)))
+        # Prefer the loop's final answer; retain a nonempty fallback so the next turn has context.
         answer = resolve_assistant_answer(
             getattr(loop, "_last_answer_text", ""), "".join(collected),
         ) or (trace.reason or "completed")
@@ -269,7 +276,7 @@ async def _execute_agent(
                 mech_check=getattr(trace, "mech_check", ""),
                 evidence_gate=getattr(trace, "evidence_gate", None),
                 context=agent_ctx,
-                success=trace.reason == "completed",
+                success=success,
                 answer=answer,
             ))
         except Exception as exc:
@@ -278,8 +285,9 @@ async def _execute_agent(
         tracker.mark_completed(
             run_id,
             RunResult(
-                success=trace.reason == "completed",
+                success=success,
                 answer=answer,
+                outcome=result_outcome,
             ),
         )
     except asyncio.CancelledError:
@@ -287,3 +295,5 @@ async def _execute_agent(
     except Exception as exc:
         tracker.mark_failed(run_id, str(exc))
         log.error("agent_run_failed", run_id=run_id, error=str(exc))
+    finally:
+        control.stop()

@@ -83,6 +83,25 @@ async def test_same_url_actions_dispatch_once_and_report_control_state(screen):
     assert await screen.evaluate("window.saves") == 1
 
 
+async def test_wrong_select_target_can_be_corrected_without_unlocking_uncertain_actions(screen):
+    await screen.set_content('<label>City<input id="city"></label><button id="save" onclick="window.saves++">Save</button><script>window.saves=0</script>')
+    ref = await reference(screen, "City")
+    invalid = await browser_act(BrowserActParams(action="select", selector=ref, value="Gunsan"))
+    assert not invalid.success and invalid.metadata["action_status"] == "not_executed"
+    assert not current_session().uncertain_action
+    assert await screen.locator("#city").input_value() == ""
+    assert (await browser_act(BrowserActParams(action="type", selector=ref, value="Gunsan"))).success
+    assert (await browser_act(BrowserActParams(action="click", selector=await reference(screen, "Save")))).success
+    assert await screen.evaluate("window.saves") == 1
+
+
+async def test_native_select_and_its_associated_label_remain_supported(screen):
+    await screen.set_content('<label id="label" for="city">City</label><select id="city"><option>Busan</option><option>Gunsan</option></select>')
+    for selector, value in (("#city", "Gunsan"), ("#label", "Busan")):
+        assert (await browser_act(BrowserActParams(action="select", selector=selector, value=value))).success
+        assert await screen.locator("#city").input_value() == value
+
+
 async def test_displayed_brackets_preserve_reference_identity(screen):
     ref = await reference(screen, "Save")
     result = await browser_act(BrowserActParams(action="click", selector=f"[{ref}]"))

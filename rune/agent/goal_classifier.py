@@ -98,7 +98,10 @@ research: read-only analysis of files, data or code; code_modify: create, save o
 execution: command-line execution, tests, builds, installs or deployments;
 browser: required interaction with webpage controls (forms, seats, bookings),
 not merely reading information from a page, including one already open;
-full: native app work or work spanning several categories. Native app requests
+full: native app work or independent outcomes spanning several categories.
+Reading sources, editing a deliverable and checking it are phases of code_modify,
+not independent outcomes. Set requires_execution when those checks need tests/commands.
+Native app requests
 must use full; desktop is an intent flag, never a goal_type.
 Using browser_observe/find/extract to READ a page is still web, not browser.
 For example, reading the first product's price on an open page is web;
@@ -117,7 +120,10 @@ blank templates and software that processes tables are not table deliverables.
 desktop: use native app state or features, including open/unsaved documents,
 windows, menus and app settings. Honor an explicit request to use a native app.
 Webpage interaction, including localhost, uses browser tools without desktop.
-Files, code, arithmetic and Excel-compatible output alone do not require an app;
+Creating, saving, or rereading DOCX/PDF/PPTX/XLSX files uses document/file tools.
+Reopening a saved file to verify its content is a file read unless the user asks
+to open it in a native app. A file format never implies a native-app requirement.
+Files, code, arithmetic and Office-compatible output alone do not require an app;
 prefer direct answers, search, APIs or file tools when they satisfy the request.
 requires_desktop_input: true only for input within a native app (editing, saving,
 navigating, calculating); false for opening, inspecting or explaining its screen.
@@ -142,10 +148,7 @@ async def classify_tier2(
     previous_goal_type: str = "",
     browser_state: dict | None = None,
 ) -> ClassificationResult:
-    """Classify the requested outcome and execution surface.
-
-    When the previous goal and its type are provided, also detect domain changes.
-    """
+    """Classify outcome and surface; compare domains when prior goal and type are supplied."""
     has_previous = bool(previous_goal and previous_goal_type)
     from rune.agent.decision_router import classify_request
     from rune.utils.logger import get_logger
@@ -198,10 +201,7 @@ async def classify_goal(
     previous_goal_type: str = "",
     browser_state: dict | None = None,
 ) -> ClassificationResult:
-    """Classify a request and its relationship to the previous task.
-
-    Continuation checks require both the previous goal and its type.
-    """
+    """Classify the request; continuation checks require the previous goal and type."""
     return await classify_tier2(
         goal,
         previous_goal=previous_goal,

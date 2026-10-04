@@ -1,11 +1,4 @@
-"""Run a wave of isolated subagents in parallel, then merge their changes.
-
-Each worker runs in its own worktree as a subprocess (separate process = its own
-cwd, so they really run concurrently), all branching from the same base; the
-change-sets are merged atomically afterwards. cmd_builder is injectable so the
-whole pipeline is testable with a fake worker (no LLM). Dependency-aware
-scheduling across waves is in wave_orchestrator.py.
-"""
+"""Run a worker wave in separate worktree processes, then merge accepted changes atomically."""
 
 from __future__ import annotations
 
@@ -24,8 +17,7 @@ from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
 
-# Tail lines of a worker's captured stdout/stderr to surface (I8 observability —
-# never DEVNULL a worker's logs; a silent worker failure is undiagnosable).
+# Include captured log tails so worker failures remain diagnosable.
 _LOG_TAIL_LINES = 40
 
 
@@ -37,8 +29,7 @@ class WorkerSpec:
     model: str | None = None
     max_iterations: int | None = None
     context: dict | None = None
-    # Tier-1 deterministic acceptance (None -> conservative default: must change
-    # at least one file). docs/design/worktree-subagent-verification.md §4-A.
+    # Default acceptance requires at least one changed file.
     acceptance: Acceptance | None = None
 
 
@@ -55,18 +46,14 @@ class WorkerOutcome:
 
 @dataclass(slots=True)
 class Escalation:
-    """Stronger-model target for the escalation ladder (I7, step 2). The caller
-    resolves ModelTier.BEST -> a concrete model before passing this in (the
-    worker subprocess takes a literal model string, not a tier)."""
+    """An escalation target resolved to a concrete provider and model."""
     provider: str | None = None
     model: str | None = None
 
 
 def resolve_escalation(provider: str | None = None,
                        model: str | None = None) -> Escalation | None:
-    """Build an Escalation from config, resolving ModelTier.BEST when *model* is
-    unset (worker_proc takes a literal model, never a tier). Returns None when no
-    escalation provider is configured (ladder then ends at the feedback retry)."""
+    """Resolve the configured escalation model, or None when no provider is configured."""
     if not provider:
         return None
     if model:
@@ -99,9 +86,7 @@ async def run_isolated_worker(
     timeout_seconds: float = 600.0,
     cmd_builder=_default_cmd,
 ) -> tuple[WorkerOutcome, IsolatedWorkspace]:
-    """Create an isolated workspace, run the worker subprocess in it, collect
-    its change-set. Caller merges + cleans up (so changesets can be merged as a
-    group). Returns (outcome, workspace)."""
+    """Return a worker outcome and worktree; the caller owns merging and cleanup."""
     ws = await worktree.create(repo, spec.worker_id, isolation=isolation)
     outcome = WorkerOutcome(worker_id=spec.worker_id)
     tmpdir = tempfile.mkdtemp(prefix="rune-wspec-")
@@ -118,8 +103,7 @@ async def run_isolated_worker(
         env = {**os.environ,
                "RUNE_ISOLATION_ROOT": ws.path, "RUNE_WORKER": "1"}
         cmd = cmd_builder(spec_path, result_path, ws)
-        # I8: capture worker stdout+stderr to a per-worker log (not DEVNULL) so a
-        # silent failure is diagnosable. Surfaced as log_tail below.
+        # Capture worker output in a per-worker log and expose its tail on failure.
         log_path = os.path.join(tmpdir, "worker.log")
         try:
             with open(log_path, "wb") as log_fh:
@@ -132,8 +116,10 @@ async def run_isolated_worker(
             log.warning("isolated_worker_timeout", worker=spec.worker_id)
             try:
                 proc.kill()
-            except Exception:
-                pass
+                await proc.wait()
+            except ProcessLookupError:
+                log.debug("isolated_worker_already_exited", worker=spec.worker_id)
+            outcome.result = {"ok": False, "execution_unknown": True, "error": "worker timed out"}
             outcome.acceptance_reason = "worker timed out"
             outcome.log_tail = _read_tail(log_path)
             return outcome, ws  # failed worker → empty changeset, discarded
@@ -152,17 +138,14 @@ async def run_isolated_worker(
             except Exception:
                 pass
 
-        # The worker crashed mid-run (no/failed result) → discard its partial
-        # worktree; never merge half-written state.
+        # Discard a crashed worker's partial changes instead of merging them.
         if not outcome.result.get("ok"):
             outcome.acceptance_reason = (
                 "worker errored: " + str(outcome.result.get("error", ""))[:120]
                 if outcome.result else "worker produced no result")
             return outcome, ws
 
-        # I6: the worker CLAIMS done — verify deterministically against its own
-        # change-set (do NOT trust the self-reported ok). Collect first, then
-        # gate; reject => discard the change-set so it is not merged.
+        # Verify the collected changes independently of the worker's success claim.
         changeset = worktree.collect(ws, spec.worker_id)
         verdict = evaluate_local(
             spec.acceptance,
@@ -191,7 +174,7 @@ def _read_tail(path: str, lines: int = _LOG_TAIL_LINES) -> str:
         return ""
 
 
-# --- escalation ladder (I7) --------------------------------------------------
+# escalation ladder (I7)
 
 _RETRY_DIRECTIVE = (
     "\n\n[RUNE-ESCALATION step {step}] Your PREVIOUS attempt was REJECTED: "
@@ -202,14 +185,10 @@ _RETRY_DIRECTIVE = (
 
 def _escalate_spec(spec: WorkerSpec, outcome: WorkerOutcome, step: int,
                    escalation: Escalation | None) -> WorkerSpec | None:
-    """Build the next attempt's spec, or None if the ladder is exhausted.
-
-    Step 1 = feedback-conditioned retry on the SAME model (recovers *recoverable*
-    no-ops — model capable but lazy/confused). Step >=2 = escalate to a stronger
-    model (the categorically-different rung; capability failures need this). NOT
-    blind best-of-N: the goal always carries the concrete rejection reason.
-    """
+    """Retry with rejection feedback, then a stronger model; return None when exhausted."""
     from dataclasses import replace
+    if outcome.result.get("blocked_tools") or outcome.result.get("execution_unknown"):
+        return None
     reason = outcome.acceptance_reason or "no acceptable output"
     goal = spec.goal + _RETRY_DIRECTIVE.format(step=step, reason=reason)
     if step == 1:
@@ -224,9 +203,7 @@ async def _run_worker_with_escalation(
     repo: str, spec: WorkerSpec, *, isolation: str, timeout_seconds: float,
     cmd_builder, max_escalation_steps: int, escalation: Escalation | None,
 ) -> tuple[WorkerOutcome, IsolatedWorkspace, list[IsolatedWorkspace]]:
-    """Run a worker; on rejection, walk the escalation ladder against the SAME
-    pre-wave base (no merge happens until after the ladder). Returns the winning
-    (outcome, workspace) plus the rejected attempts' workspaces to clean up."""
+    """Retry from the same base and return the winner plus rejected worktrees for cleanup."""
     outcome, ws = await run_isolated_worker(
         repo, spec, isolation=isolation, timeout_seconds=timeout_seconds,
         cmd_builder=cmd_builder)
@@ -257,14 +234,10 @@ async def run_wave_and_merge(
     max_escalation_steps: int = 0,
     escalation: Escalation | None = None,
 ) -> ParallelMergeResult:
-    """Run independent workers in parallel (same base) and merge atomically.
+    """Run, verify and merge an isolated worker wave.
 
-    - Escalation (I7): if *max_escalation_steps* > 0, a Tier-1-rejected worker is
-      retried against the same pre-wave base — feedback directive, then a stronger
-      *escalation* model — before the merge. Bounded, fail-closed, not best-of-N.
-    - Tier-2 acceptance (I6): *post_merge_check* runs as a deterministic shell
-      check on the MERGED tree (compile/test); non-pass rolls back (I4). Callers
-      apply it to the final wave only (intermediate trees may not build).
+    Rejected workers may retry with feedback and then a stronger model. A supplied post-merge
+    check must pass or the merge is rolled back.
     """
     results = await asyncio.gather(*[
         _run_worker_with_escalation(
@@ -290,8 +263,7 @@ async def run_wave_and_merge(
 
     try:
         merged = merge_changesets(repo, changesets, policy=policy)
-        # Tier-2 deterministic gate: verify the *merged* tree (compile/test).
-        # fail-closed — anything but a clean pass rolls the merge back (I4).
+        # Roll back the merged tree unless the post-merge check passes.
         if merged.ok and post_merge_check:
             from rune.agent.evidence_gate import run_evidence_check
             from rune.agent.merge import rollback

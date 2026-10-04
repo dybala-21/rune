@@ -78,7 +78,9 @@ export function describeTrust(trust: TrustInfo): TrustPresentation {
   if (required && verification !== 'passed') {
     return {
       ...base, title: verification === 'inconclusive' ? 'Verification inconclusive' : 'Verification required',
-      note: trust.tableAcceptance?.unverified.length
+      note: trust.requirementAcceptance?.required && trust.requirementAcceptance.status !== 'pass'
+        ? 'The result was delivered, but some requested conditions could not be confirmed.'
+        : trust.tableAcceptance?.unverified.length
         ? 'Some requested data conditions could not be checked. See the details below.'
         : 'The latest changes still need a passing check.', tone: 'warning', glyph: '⚠', ok: false,
     };
@@ -113,7 +115,7 @@ export function checkEvidence(trust: TrustInfo): string {
     && trust.completionCheck?.detail) {
     return `${trust.completionCheck.name}\n${trust.completionCheck.detail}`;
   }
-  return trust.evidenceGate?.lastEvidence?.trim() || '';
+  return trust.requirementAcceptance?.detail?.trim() || trust.evidenceGate?.lastEvidence?.trim() || '';
 }
 
 export function trustColors(tone: TrustPresentation['tone']): { accent: string; background: string } {

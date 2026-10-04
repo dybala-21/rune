@@ -16,8 +16,7 @@ export interface TokenUsage {
   };
 }
 
-/** The one list of subscribable SSE events — useSSE iterates it, the type
-    derives from it, so a new event can't be typed without being wired. */
+/** Share event names between useSSE subscriptions and the event type. */
 export const SSE_EVENT_TYPES = [
   'connected',
   'run_snapshot',
@@ -58,14 +57,19 @@ export interface AgentStartData {
   requestId?: string;
   fileChanges?: FileChange[];
   goal: string;
-  /** Conversation that started the run — lets the originating tab skip the
-      "Goal:" echo line while other surfaces still show it. */
+  /** Identifies the originating conversation so its tab can skip the goal echo. */
   sessionId?: string | null;
-  /** Run id echoed by /api/message, so the originating tab recognises its own
-      run even when several turns share a session. */
+  /** Matches /api/message to its run when several turns share a session. */
   runId?: string;
 }
 export interface TrustInfo {
+  requirementAcceptance?: {
+    required: boolean;
+    status: 'pass' | 'fail' | 'inconclusive' | 'not_checked';
+    requirements: string[];
+    detail?: string | null;
+    method: 'model_review';
+  } | null;
   tableAcceptance?: TableAcceptanceInfo | null;
   verified: boolean;
   reason: string;
@@ -79,8 +83,7 @@ export interface TrustInfo {
     status: 'pass' | 'fail' | 'unverified' | 'inconclusive';
     command?: string;
   } | null;
-  /** A step hit the tool-round cap and was cut off without a final LLM turn —
-      the answer may silently omit work that never ran. */
+  /** A tool-round cap interrupted the step before its final answer. */
   budgetExhausted?: boolean;
   /** Test freshness after code changes; this does not establish task coverage. */
   testsPassedAfterEdit?: boolean | null;
@@ -277,6 +280,21 @@ export interface ProactiveSuggestion {
   confidence: number;
   intensity: 'nudge' | 'suggest' | 'intervene';
   timestamp: number;
+  state?: ProactiveStatus;
+}
+
+export interface ProactiveStatus {
+  response: string;
+  executionStatus: string | null;
+  result: { output?: string; error?: string };
+}
+
+export interface ProactiveFeedItem extends ProactiveStatus {
+  id: string;
+  title: string;
+  description: string;
+  confidence: number;
+  createdAt: string;
 }
 
 /** 도구 호출 (UI 표시용) */
@@ -302,12 +320,9 @@ export interface ToolCall {
   timestamp: number;
   completedAt?: number;
   durationMs?: number;
-  /** step_start 기준으로 이 호출이 속한 에이전트 스텝 번호 (진행 타임라인 그룹핑용) */
+  /** step_start 이벤트의 스텝 번호로 타임라인을 묶는다. */
   step?: number;
-  /**
-   * 이 호출이 속한 실행의 순번. 서버 스텝 번호는 실행마다 1부터 다시 시작하므로,
-   * 이것이 없으면 이전 턴의 step 1과 새 턴의 step 1이 한 그룹으로 붙는다.
-   */
+  /** 실행마다 초기화되는 스텝 번호를 턴 사이에서 구분한다. */
   run?: number;
 }
 

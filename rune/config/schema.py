@@ -76,8 +76,7 @@ class LLMConfig(BaseModel):
     decision_routing: DecisionRoutingConfig = Field(
         default_factory=DecisionRoutingConfig, alias="decisionRouting",
     )
-    # Simple-query fast lane: high-confidence chat/web goals run on the
-    # provider's fast tier (docs/design/simple-query-fast-path.md).
+    # Use the fast tier for high-confidence chat and web requests.
     route_simple_queries: bool = Field(default=True, alias="routeSimpleQueries")
     simple_query_tier: str = Field(
         default="fast", pattern="^(best|coding|fast)$", alias="simpleQueryTier"
@@ -112,20 +111,19 @@ class ApprovalConfig(BaseModel):
     auto_approve_medium: bool = False
     timeout_seconds: int = 300
     session_cache_max: int = 200
-    # Require approval regardless of risk score, unless mode is bypass.
-    # Names accept globs; dots, underscores, and hyphens are equivalent.
+    # Always ask unless bypassed; tool-name globs treat dots, underscores and hyphens alike.
     require_explicit_for: list[str] = Field(
         default_factory=list, alias="requireExplicitFor"
     )
-    # RUNE_APPROVAL_MODE overrides this value for a run.
-    # bypass: skip approvals; standard: gate risky commands and external writes;
-    # strict: also gate network reads and browser interactions.
+    # RUNE_APPROVAL_MODE overrides this: bypass skips, standard gates writes, strict adds reads.
     mode: str = "standard"
 
 
 # Safety Configuration
 
 class SandboxConfig(BaseModel):
+    backend: Literal["local", "container"] = "local"
+    image: str = "python:3.13-slim"
     enabled: bool = True
     allow_network: bool = False
     writable_paths: list[str] = Field(default_factory=list)
@@ -153,8 +151,7 @@ class SafetyConfig(BaseModel):
         default_factory=DenyByDefaultConfig, alias="denyByDefault"
     )
 
-    # Read by the shell gate (rune/capabilities/bash.py). "auto" means the
-    # shipped default; the other values map to execution-policy branches.
+    # The shell gate maps auto to its default and other modes to explicit policy branches.
     rollout_mode: str = Field(
         default="auto", alias="rolloutMode"
     )  # auto | shadow | balanced | strict | legacy
@@ -272,8 +269,7 @@ class SearchConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     provider: str = "auto"  # brave | duckduckgo | browser | auto
-    # Caps concurrent browser pages when search falls back to the browser
-    # (rune/daemon/main.py builds the page pool from this).
+    # Limit browser pages used by search fallback.
     max_concurrent: int = Field(default=3, alias="maxConcurrent")
     native_budget: int = 5
 
@@ -315,19 +311,14 @@ class GoalLoopConfig(BaseModel):
     adversarial_review: bool = True  # run the allow/block gate before accepting
     ssc_interval: int = 0  # self-critique every N iterations (0 = off, opt-in)
     inner_token_budget: int = 1_000_000  # per-iteration NativeAgentLoop budget
-    # When stuck (stagnation/max_iterations/budget), run one final attempt on the
-    # escalation profile before giving up. Opt-in: that attempt goes to the cloud
-    # escalation model, so default off to preserve local-only operation.
+    # Opt in to one final escalation attempt when stuck; the chosen model may be remote.
     escalate_on_stuck: bool = False
 
 
 # Root Configuration
 
 class SkillsConfig(BaseModel):
-    """Opt-in learning from completed or verified runs and reuse in later tasks.
-
-    ``auto_skill`` controls both generation and reuse of learned skills.
-    """
+    """Configure opt-in skill generation, evaluation and reuse across tasks."""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -340,8 +331,7 @@ class SkillsConfig(BaseModel):
     eval_prob_threshold: float = Field(default=0.95, alias="evalProbThreshold")
     eval_min_samples_paired: int = Field(default=12, alias="evalMinSamplesPaired")
     eval_min_samples_online: int = Field(default=40, alias="evalMinSamplesOnline")
-    # Capture reproducible tasks (workspace snapshot + check) for offline paired
-    # replay. Default off — snapshotting has storage cost.
+    # Opt in to workspace snapshots and checks for offline replay; snapshots consume disk space.
     capture_replay: bool = Field(default=False, alias="captureReplay")
     eval_max_pairs: int = Field(default=20, alias="evalMaxPairs")
 

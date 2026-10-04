@@ -1,7 +1,4 @@
-"""Capability type definitions for RUNE.
-
-Ported from src/capabilities/ - base interfaces for all tools.
-"""
+"""Define tool capabilities and policy profiles."""
 
 from __future__ import annotations
 
@@ -31,14 +28,14 @@ class CapabilityDefinition:
 TOOL_GROUPS: dict[str, list[str]] = {
     "read": ["file_read", "file_list", "file_search", "code_analyze",
              "code_find_def", "code_find_refs", "code_impact", "project_map", "document_read", "document_bundle_inspect",
-             "table_requirements", "table_verify"],
+             "table_requirements", "table_verify", "document_preview", "skill_search", "skill_load"],
     "write": ["file_write", "file_edit", "file_delete", "credential_save",
               "skill_create", "skill_promote", "memory_tune", "document_create", "document_bundle", "document_bundle_update"],
     "runtime": ["bash_execute"],
     "browser": ["browser_navigate", "browser_observe", "browser_act",
                  "browser_batch", "browser_extract", "browser_find",
                  "browser_workflow", "browser_screenshot", "browser_profile"],
-    "web": ["web_search", "web_fetch", "service_connect", "service_status",
+    "web": ["web_search", "web_fetch", "connector_list", "connector_request", "service_connect", "service_status",
             "service_list", "service_disconnect", "service_reconnect"],
     "schedule": ["cron_create", "cron_list", "cron_delete", "cron_update"],
     "safe": ["think", "ask_user", "memory_search", "memory_save",
@@ -48,10 +45,7 @@ TOOL_GROUPS: dict[str, list[str]] = {
 }
 
 
-# Policy Profiles
-# Ported from src/capabilities/types.ts - DEFAULT_PROFILES mapping.
-# Each profile controls which tool groups are enabled, bash/file-write
-# permissions, and the maximum risk level that can run without approval.
+# Profiles set tool groups, write permissions and the risk threshold for approval.
 
 POLICY_PROFILES: dict[str, dict[str, Any]] = {
     "safe": {
@@ -99,13 +93,7 @@ POLICY_PROFILES: dict[str, dict[str, Any]] = {
 
 
 def get_allowed_tools(profile_name: str) -> list[str]:
-    """Resolve a policy profile to a flat list of individual tool names.
-
-    Expands the ``allowed_groups`` of the named profile through
-    :data:`TOOL_GROUPS` and returns a deduplicated, sorted list.
-
-    Raises ``KeyError`` if *profile_name* is not a known profile.
-    """
+    """Expand profile groups to sorted unique tool names; unknown profiles raise KeyError."""
     profile = POLICY_PROFILES[profile_name]
     tools: list[str] = []
     seen: set[str] = set()
@@ -118,12 +106,7 @@ def get_allowed_tools(profile_name: str) -> list[str]:
 
 
 def resolve_policy_profile(profile_name: str) -> dict[str, Any]:
-    """Return the full profile dict with ``allowed_tools`` pre-resolved.
-
-    The returned dict is a **copy** so callers can mutate it freely.
-
-    Raises ``KeyError`` if *profile_name* is not a known profile.
-    """
+    """Copy a profile with resolved allowed_tools; unknown profiles raise KeyError."""
     profile = POLICY_PROFILES[profile_name]
     resolved = dict(profile)
     resolved["allowed_tools"] = get_allowed_tools(profile_name)

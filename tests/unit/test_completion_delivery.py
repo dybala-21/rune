@@ -331,3 +331,41 @@ async def test_maintenance_usage_survives_completion_and_reload(tmp_path, monkey
         release.set()
         await service.close(grace_seconds=0)
         runs.close()
+
+
+@pytest.mark.parametrize("decision,granted", [("approve_once", True), ("deny", False)])
+def test_ndjson_waits_for_an_explicit_approval(client, monkeypatch, decision, granted):
+    import rune.agent.loop as loop_module
+
+    decisions = []
+
+    class ApprovalLoop(FakeLoop):
+        def set_approval_callback(self, cb):
+            self.approve = cb
+
+        async def run(self, *args, **kwargs):
+            decisions.append(await self.approve("send report", "Send the prepared report"))
+            return await super().run(*args, **kwargs)
+
+    monkeypatch.setattr(loop_module, "NativeAgentLoop", ApprovalLoop)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        response = pool.submit(client.post, "/api/v1/agent/execute", json={
+            "goal": "report", "session_id": "stream-approval", "stream": True,
+        })
+
+        def snapshot():
+            return client.get("/api/runs/snapshot", params={"sessionId": "stream-approval"}).json()["run"]
+
+        assert _wait_for(lambda: (snapshot() or {}).get("approval"))
+        assert not decisions
+        assert not response.done()
+        run = snapshot()
+        assert run["status"] == "waiting_approval"
+        assert not run["approval"].get("autoApproved")
+        assert client.post("/api/approval", json={
+            "id": run["approval"]["id"], "decision": decision, "responseId": "stream-response",
+        }).status_code == 200
+        frames = [json.loads(line) for line in response.result(timeout=5).text.splitlines() if line.strip()]
+    assert decisions == [granted]
+    assert any(frame["event"] == "approval_closed" for frame in frames)
+    assert snapshot()["approval"] is None

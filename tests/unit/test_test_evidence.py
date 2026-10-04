@@ -435,7 +435,7 @@ async def test_explanation_contradiction_uses_existing_review_and_observed_code(
     assert await gate.review(state, "The result was always smaller.", messages) == note
     assert client.completion.await_count == 1
     payload = json.loads(client.completion.call_args.kwargs["messages"][-1]["content"])
-    assert "sum(values)" in payload["code_observations"][0]["lines"]["3"]
+    assert "sum(values)" in payload["code_observations"][0]["text"]
     issue["evidence_quote"] = "Invented code"
     with pytest.raises(ValueError, match="did not identify"):
         check_explanations("The result was always smaller.", [issue], code_observations(messages))
@@ -515,11 +515,11 @@ async def test_correction_keeps_tool_evidence_after_transcript_compaction(monkey
     await gate.review(state, "Corrected explanation.", [{"role": "tool", "content": "Earlier observations summarized"}])
     second = json.loads(client.completion.call_args.kwargs["messages"][-1]["content"])["code_observations"]
     assert second[0] == first[0] and len(second) == 2
-    assert "average([-2, 2])" in json.dumps(second[1]["lines"])
+    assert "average([-2, 2])" in second[1]["text"]
     for i in range(30):
         gate.observe("file_edit", {"path": "stats.py", "replace": "x" * 10000}, CapabilityResult(success=False, error=f"failed revision {i}"))
     assert len(gate._observations) == 6 and sum(len(r["text"]) for r in gate._observations) <= 10800
-    assert gate._observations[0]["text"].splitlines() == list(first[0]["lines"].values())
+    assert gate._observations[0]["text"] == first[0]["text"]
     assert "failed revision 29" in gate._observations[-1]["text"]
 
 

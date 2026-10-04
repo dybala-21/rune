@@ -97,6 +97,28 @@ async def test_missing_table_checks_select_recovery_tools_and_release_repairs(of
     assert await state.blocker() is None
 
 
+@pytest.mark.parametrize("alias", [False, True])
+async def test_source_is_rejected_as_output_without_poisoning_valid_checks(office, alias):
+    source, output, _ = office
+    state = TableAcceptance(REQUEST, required=True)
+    contract = (await state.requirements(str(source), None)).metadata["tableContract"]
+    target = source
+    if alias:
+        target = source.with_name("source-alias.csv")
+        target.symlink_to(source)
+    rejected = await state.verify(contract["id"], str(target), None, 1)
+    assert not rejected.success and not state.results
+    assert await state.blocker()
+    assert (await state.verify(contract["id"], str(output), None, 1)).success
+    assert await state.blocker() is None
+    assert not (await state.verify(contract["id"], str(target), None, 1)).success
+    assert await state.blocker() is None
+    assert state.snapshot()["status"] == "pass"
+    source.write_text(SOURCE.replace("10.005", "100.005"))
+    assert await state.blocker()
+    assert state.snapshot()["status"] != "pass"
+
+
 async def test_table_write_requests_verification_without_waiting_for_final_answer(office):
     from rune.types import CapabilityResult
 

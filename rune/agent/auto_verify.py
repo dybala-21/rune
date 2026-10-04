@@ -1,15 +1,9 @@
-"""Detect and run project verification after code edits.
-
-The agent loop enables automatic checks through ``RUNE_AUTO_VERIFY``.
-Commands run as internal subprocesses, outside the bash capability's
-Guardian validation.
-"""
+"""Detect project checks and run them in the task's execution environment."""
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import os
+import shlex
 import sys
 
 from rune.utils.logger import get_logger
@@ -27,12 +21,7 @@ _EVIDENCE_TAIL_CHARS = 400
 
 
 def detect_test_command(cwd: str) -> list[str] | None:
-    """Choose a test command for *cwd*, or None if no runner is detected.
-
-    ``RUNE_AUTO_VERIFY_CMD`` takes precedence over detected pytest or npm
-    tests. Best-of-K selection uses this instead of the lint/typecheck
-    command returned by :func:`detect_verify_command`.
-    """
+    """Choose the override or detected test runner; return None if neither exists."""
     override = os.environ.get("RUNE_AUTO_VERIFY_CMD", "").strip()
     if override:
         import shlex
@@ -48,8 +37,10 @@ def detect_test_command(cwd: str) -> list[str] | None:
         for e in entries
     )
     if has_pytests:
-        # Use the current environment's interpreter; "python" may not be on PATH.
-        return [sys.executable, "-m", "pytest", "-q"]
+        from rune.safety.execution_environment import execution_config
+
+        python = "python" if execution_config().backend == "container" else sys.executable
+        return [python, "-m", "pytest", "-q"]
 
     # Node: a non-placeholder "test" script in package.json -> npm test.
     pkg = os.path.join(cwd, "package.json")
@@ -66,11 +57,7 @@ def detect_test_command(cwd: str) -> list[str] | None:
 
 
 def detect_verify_command(cwd: str) -> list[str] | None:
-    """Choose a verification command from the override or project markers.
-
-    ``RUNE_AUTO_VERIFY_CMD`` takes precedence. Return None when neither
-    an override nor a supported project marker is present.
-    """
+    """Choose the override or a project check; return None if neither exists."""
     override = os.environ.get("RUNE_AUTO_VERIFY_CMD", "").strip()
     if override:
         import shlex
@@ -84,37 +71,18 @@ def detect_verify_command(cwd: str) -> list[str] | None:
 async def run_verify(
     cmd: list[str], cwd: str, timeout: float = _DEFAULT_TIMEOUT_S
 ) -> tuple[str, str]:
-    """Run *cmd* in *cwd*. Returns ``(state, evidence)`` where state is:
-
-    - ``"pass"`` — exit 0 (no problems).
-    - ``"fail"`` — non-zero exit; ``evidence`` is the tail of the output.
-    - ``"skip"`` — could not run (spawn error / timeout); inconclusive, never
-      treated as failure.
-    """
+    """Return (pass/fail/skip, evidence); timeouts and spawn errors are inconclusive."""
     from rune.agent.execution_journal import active_journal, record_check
     if active_journal() is not None:
         return await record_check({"command": cmd, "cwd": cwd}, lambda: run_verify(cmd, cwd, timeout))
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=cwd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-    except Exception as exc:
-        log.debug("auto_verify_spawn_failed", error=str(exc)[:120])
-        return "skip", ""
+    from rune.safety.verification import run_check
 
-    try:
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except TimeoutError:
-        log.debug("auto_verify_timeout", timeout_s=timeout)
-        with contextlib.suppress(Exception):
-            proc.kill()
-        return "skip", ""
-
-    text = (out or b"").decode("utf-8", "replace")
-    if proc.returncode == 0:
+    result = await run_check(shlex.join(cmd), cwd, timeout)
+    text = result.stdout.decode("utf-8", "replace") + result.error
+    if result.code is None or result.code in (126, 127):
+        log.debug("auto_verify_inconclusive", detail=text[-_EVIDENCE_TAIL_CHARS:])
+        return "skip", text[-_EVIDENCE_TAIL_CHARS:]
+    if result.code == 0:
         # Keep the summary line so callers can report how many tests passed.
         lines = [ln for ln in text.strip().splitlines() if ln.strip()]
         return "pass", (lines[-1].strip() if lines else "")
@@ -122,10 +90,7 @@ async def run_verify(
 
 
 def passed_test_count(summary: str) -> int | None:
-    """Parse the passing-test count from a runner summary line.
-
-    "3 passed in 0.01s" -> 3, "1 passed, 2 warnings" -> 1, else None.
-    """
+    """Parse the passing-test count from a runner summary, or return None."""
     import re
     m = re.search(r"(\d+)\s+passed", summary)
     return int(m.group(1)) if m else None
@@ -152,11 +117,7 @@ _ASSERTED_SUMMARY_PATTERNS: tuple[str, ...] = (
 
 
 def assertions_ran(summary: str) -> bool | None:
-    """Read whether tests ran from the runner's summary.
-
-    True means tests ran, False means the suite was empty, and None means
-    the summary was not recognized.
-    """
+    """Return whether tests ran, or None if the summary is unrecognized."""
     import re
 
     text = (summary or "").strip()

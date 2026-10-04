@@ -25,10 +25,7 @@ class TestDetectTestCommand:
         assert cmd is not None and "pytest" in cmd
 
     def test_pytest_uses_running_interpreter_not_bare_python(self, tmp_path):
-        # Regression: a bare "python" fails to spawn on python3-only machines, so
-        # run_verify returns "skip" and the verifier falls back to the Evidence
-        # Gate. The command must use sys.executable (the interpreter RUNE runs
-        # under, which has pytest).
+        # Use Rune's interpreter so python3-only installations do not skip verification.
         import os
         import sys
 
@@ -82,7 +79,8 @@ async def test_run_verify_pass(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_run_verify_fail_carries_evidence(tmp_path):
+async def test_run_verify_fail_carries_evidence(tmp_path, monkeypatch):
+    monkeypatch.setattr("rune.safety.verification.verification_blocker", lambda *_: None)
     state, ev = await run_verify(["sh", "-c", "echo problem here; exit 1"], str(tmp_path))
     assert state == "fail"
     assert "problem here" in ev
@@ -92,3 +90,21 @@ async def test_run_verify_fail_carries_evidence(tmp_path):
 async def test_run_verify_skip_on_spawn_error(tmp_path):
     state, _ = await run_verify(["this_cmd_does_not_exist_xyz"], str(tmp_path))
     assert state == "skip"
+
+
+async def test_auto_verify_preserves_backend_and_cannot_bypass_command_policy(tmp_path, monkeypatch):
+    from rune.config.schema import SandboxConfig
+    from rune.safety.execution_environment import environment_scope, execution_config
+    from rune.safety.verification import CheckResult
+
+    async def check(command, cwd, timeout):
+        assert execution_config().backend == "container"
+        assert command == "python -m pytest -q"
+        return CheckResult(error="Check requires approval")
+
+    monkeypatch.setattr("rune.safety.verification.run_check", check)
+    (tmp_path / "tests").mkdir()
+    with environment_scope(str(tmp_path), SandboxConfig(backend="container")):
+        cmd = detect_test_command(str(tmp_path))
+        state, detail = await run_verify(cmd, str(tmp_path))
+    assert state == "skip" and "requires approval" in detail

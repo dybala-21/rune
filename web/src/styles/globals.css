@@ -1,5 +1,5 @@
 :root {
-  /* ── Color Palette — RUNE "glacier on basalt" ── */
+  /* Color Palette — RUNE "glacier on basalt" */
   --bg-primary: #0E1116;
   --bg-secondary: #14181F;
   --bg-tertiary: #1B2029;
@@ -21,28 +21,28 @@
   --danger-subtle: rgba(190, 128, 116, 0.14);
   --code-bg: #0B0D12;
 
-  /* ── Typography ── */
+  /* Typography */
   --font-sans: "Avenir Next", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: 'JetBrains Mono', 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
 
-  /* ── Radius ── */
+  /* Radius */
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 16px;
   --radius-xl: 20px;
 
-  /* ── Shadows ── */
+  /* Shadows */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.25);
   --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.35);
   --shadow-glow: 0 8px 24px rgba(0, 0, 0, 0.35);
 
-  /* ── Wolf mascot — brow-rune state colors ── */
+  /* Wolf mascot — brow-rune state colors */
   --rune-idle: #42D0F2;
   --rune-working: #F0A24E;
   --rune-passed: #7FCF9A;
 
-  /* ── Tool category colors ── */
+  /* Tool category colors */
   --tool-file: #60a5fa;
   --tool-bash: #c084fc;
   --tool-web: #34d399;
@@ -55,7 +55,7 @@
   --tool-default: #a1a1aa;
 }
 
-/* ── Reset ── */
+/* Reset */
 *,
 *::before,
 *::after {
@@ -94,7 +94,7 @@ body {
   box-shadow: 0 0 0 3px var(--accent-subtle), var(--shadow-lg);
 }
 
-/* ── Scrollbar ── */
+/* Scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
   height: 6px;
@@ -119,7 +119,7 @@ body {
   background: var(--text-muted);
 }
 
-/* ── Code ── */
+/* Code */
 pre, code {
   font-family: var(--font-mono);
   font-size: 13px;
@@ -149,7 +149,7 @@ pre code {
   border-radius: 0;
 }
 
-/* ── Buttons ── */
+/* Buttons */
 button {
   font-family: var(--font-sans);
   font-size: 13px;
@@ -172,7 +172,7 @@ button:not(:disabled):active {
   transform: scale(0.98);
 }
 
-/* ── Links ── */
+/* Links */
 a {
   color: var(--accent);
   text-decoration: none;
@@ -184,7 +184,7 @@ a:hover {
   text-decoration: underline;
 }
 
-/* ── Inputs ── */
+/* Inputs */
 input, textarea {
   font-family: var(--font-sans);
   font-size: 15px;
@@ -213,7 +213,7 @@ textarea {
   line-height: 1.6;
 }
 
-/* ── Focus ring ── */
+/* Focus ring */
 [role="button"]:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
@@ -228,7 +228,7 @@ a:focus-visible,
   border-radius: var(--radius-sm);
 }
 
-/* ── Animations ── */
+/* Animations */
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }
@@ -309,7 +309,7 @@ a:focus-visible,
   overflow: hidden;
 }
 
-/* ── Shimmer text ── */
+/* Shimmer text */
 .shimmer-text {
   background: linear-gradient(
     90deg,
@@ -324,7 +324,7 @@ a:focus-visible,
   background-clip: text;
 }
 
-/* ── Streaming cursor ── */
+/* Streaming cursor */
 .streaming-cursor::after {
   content: '\2502';
   animation: typingCursor 0.8s ease-in-out infinite;
@@ -333,14 +333,14 @@ a:focus-visible,
   margin-left: 1px;
 }
 
-/* ── Glass effect ── */
+/* Glass effect */
 .glass {
   background: rgba(20, 24, 31, 0.8);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
 }
 
-/* ── Loading spinner ── */
+/* Loading spinner */
 .spinner {
   width: 14px;
   height: 14px;
@@ -351,7 +351,7 @@ a:focus-visible,
   flex-shrink: 0;
 }
 
-/* ── Copy button ── */
+/* Copy button */
 .code-block-wrapper {
   position: relative;
 }
@@ -383,7 +383,7 @@ a:focus-visible,
   color: var(--text-secondary);
 }
 
-/* ── Status dot ── */
+/* Status dot */
 .status-dot {
   width: 8px;
   height: 8px;
@@ -400,7 +400,7 @@ a:focus-visible,
   animation: dotPulse 1.5s ease-in-out infinite;
 }
 
-/* ── Selection ── */
+/* Selection */
 ::selection {
   background: rgba(110, 169, 196, 0.28);
   color: var(--text-primary);
@@ -428,7 +428,7 @@ a:focus-visible,
   100% { background-position: 200px 0; }
 }
 
-/* ── Reduced motion ── */
+/* Reduced motion */
 /* Honors OS "reduce motion": state still changes, it just doesn't animate. */
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -473,7 +473,7 @@ a:focus-visible,
   .chat-workbench-grid { transition: none; }
 }
 
-/* ---- Syntax highlighting (dependency-free tokenizer) ---- */
+/* Syntax highlighting (dependency-free tokenizer) */
 :root {
   --syntax-comment: #6A717C;
   --syntax-string:  #8FB99A;
@@ -505,7 +505,7 @@ a:focus-visible,
 .tok-boolean  { color: var(--syntax-boolean); }
 .tok-function { color: var(--syntax-function); }
 
-/* ---- Toasts ---- */
+/* Toasts */
 .toaster {
   position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
   z-index: 1000; display: flex; flex-direction: column; gap: 8px;
@@ -531,7 +531,7 @@ a:focus-visible,
 }
 @media (prefers-reduced-motion: reduce) { .toast { animation: none; } }
 
-/* ---- Light theme ---- */
+/* Light theme */
 :root { color-scheme: dark; }
 :root[data-theme="light"] {
   color-scheme: light;
@@ -582,7 +582,7 @@ a:focus-visible,
 }
 .theme-toggle:hover { background: var(--bg-hover); color: var(--text-primary); }
 
-/* ---- Message actions (regenerate / edit) ---- */
+/* Message actions (regenerate / edit) */
 .msg-action-btn {
   background: transparent; border: 1px solid var(--border);
   color: var(--text-muted); border-radius: var(--radius-sm);
@@ -598,7 +598,7 @@ a:focus-visible,
 .msg-edit-btn { opacity: 0; transition: opacity 0.12s; }
 .msg-hover:hover .msg-edit-btn { opacity: 1; }
 
-/* ---- Markdown tables & blockquotes ---- */
+/* Markdown tables & blockquotes */
 .md-table-scroll { overflow-x: auto; margin: 12px 0; }
 .md-table {
   border-collapse: collapse; width: auto; min-width: 50%;
@@ -625,7 +625,7 @@ a:focus-visible,
 }
 .md-quote > div { margin: 2px 0; }
 
-/* ---- Markdown typography (readability) ---- */
+/* Markdown typography (readability) */
 .md-p { margin: 8px 0; line-height: 1.7; }
 .md-p:first-child { margin-top: 0; }
 .md-p:last-child { margin-bottom: 0; }
@@ -645,4 +645,13 @@ ol.md-list { list-style: decimal; }
 .md-list li.md-task > input[type="checkbox"] {
   margin-right: 8px; vertical-align: middle; accent-color: var(--accent);
   pointer-events: none;
+}
+@media (max-width: 720px) {
+  .routine-layout { flex-direction: column; }
+  .routine-layout > .routine-list {
+    width: 100% !important;
+    max-height: 140px;
+    border-bottom: 1px solid var(--border);
+    border-right: 0 !important;
+  }
 }

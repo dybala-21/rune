@@ -1,24 +1,17 @@
-"""Operator safety settings that were parsed and then dropped on the floor.
-
-Both settings existed in config.yaml with real values and had no path to the
-code that would honour them: the shell gate built its allowlist from a
-hardcoded constant, and approval.requireExplicitFor had no consumer at all.
-"""
+"""Check that configured execution and approval policies reach their enforcement gates."""
 
 from __future__ import annotations
 
 import pytest
 
-from rune.agent.tool_adapter import (
+from rune.capabilities.bash import _configured_deny_by_default
+from rune.safety.execution_policy import DEFAULT_ALLOWED_EXECUTABLES
+from rune.safety.tool_policy import (
     _requires_explicit_approval,
     _validate_with_guardian,
 )
-from rune.capabilities.bash import _configured_deny_by_default
-from rune.safety.execution_policy import DEFAULT_ALLOWED_EXECUTABLES
 
-# ---------------------------------------------------------------------------
-# safety.denyByDefault — the schema had flat fields config.yaml never uses
-# ---------------------------------------------------------------------------
+# Configured execution policy
 
 def test_config_allowlist_reaches_the_shell_gate(monkeypatch):
     from rune.config import get_config
@@ -71,9 +64,7 @@ def test_unreadable_config_falls_back_instead_of_raising(monkeypatch):
     assert allowed == list(DEFAULT_ALLOWED_EXECUTABLES)
 
 
-# ---------------------------------------------------------------------------
-# approval.requireExplicitFor — zero consumers before this
-# ---------------------------------------------------------------------------
+# Explicit tool approval
 
 @pytest.fixture
 def _require(monkeypatch):
@@ -129,11 +120,7 @@ def test_empty_list_prompts_for_nothing(monkeypatch):
     assert _requires_explicit_approval("file_delete") is False
 
 
-# ---------------------------------------------------------------------------
-# A capability can refuse and ask to be asked. The execution policy's allowlist
-# does exactly that, and before this the verdict was a dead end: Guardian never
-# sees it, so no prompt was raised anywhere and the metadata was read by nobody.
-# ---------------------------------------------------------------------------
+# Capability-level approval requests
 
 from rune.agent.tool_adapter import _capability_asked_for_approval
 from rune.capabilities.types import CapabilityResult
@@ -170,11 +157,7 @@ def test_missing_metadata_is_handled():
         assert _capability_asked_for_approval(result) is False
 
 
-# ---------------------------------------------------------------------------
-# End-to-end: strict mode refuses a non-allowlisted executable. That refusal
-# must become a prompt where there is someone to ask, and a fail-closed stop
-# with a readable reason where there is not (cron, proactive, scheduled runs).
-# ---------------------------------------------------------------------------
+# Strict-mode refusals require a prompt or a clear stop when no user channel exists.
 
 @pytest.fixture
 def work_dir():
@@ -252,11 +235,7 @@ async def test_allowlisted_executable_never_prompts(strict_gate, work_dir):
     assert asked == []
 
 
-# ---------------------------------------------------------------------------
-# The allowlist decides what strict mode runs without asking. Its shape is a
-# security decision, so pin the principle: inspection and workspace-scoped
-# writes pass; anything irreversible or outbound must still be a question.
-# ---------------------------------------------------------------------------
+# Inspection and workspace writes may pass; irreversible or outbound actions still need approval.
 
 def _verdict(command, allowed):
     from rune.safety.execution_policy import (
@@ -279,9 +258,7 @@ def _verdict(command, allowed):
     ).decision
 
 
-# The shape an allowlist should have, not whatever this machine's config.yaml
-# happens to hold: reading the developer's own settings made these pass locally
-# and fail on a runner that has no ~/.rune/config.yaml.
+# Use default policy fixtures so developer settings cannot change CI results.
 RECOMMENDED_ALLOWLIST = [
     # inspection — changes nothing, so there is nothing to undo
     "ls", "cat", "head", "tail", "grep", "rg", "find", "which", "env",

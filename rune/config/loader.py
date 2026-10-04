@@ -1,8 +1,4 @@
-"""Configuration loader for RUNE.
-
-Ported from src/config/loader.ts - YAML loading with env var substitution,
-mtime caching, deep merge, and fallback to defaults.
-"""
+"""Load and cache YAML configuration with environment substitution and defaults."""
 
 from __future__ import annotations
 
@@ -45,18 +41,16 @@ def _deep_substitute(obj: Any) -> Any:
 
 
 def _load_dotenv() -> None:
-    """Load .env files from ~/.rune/.env and .rune/.env (project-level).
-
-    Mimics the TS loadEnv() - existing env vars take priority.
-    """
+    """Load user and project .env files without replacing existing process variables."""
     dotenv_paths = [
         rune_home() / ".env",          # user-level
         Path.cwd() / ".rune" / ".env", # project-level (higher priority)
     ]
+    from rune.cloud.boundary import hosted
+    if hosted():
+        dotenv_paths = dotenv_paths[:1]
 
-    # One parser for both readers. The separate one here read a trailing
-    # comment as part of the value, named a variable "export FOO", and turned
-    # any prose line containing "=" into one.
+    # Share the env parser so export syntax, comments and quoting behave consistently.
     from rune.utils.env import _split_env_line
 
     for dotenv_path in dotenv_paths:
@@ -77,10 +71,11 @@ def _load_dotenv() -> None:
 
 def _find_config_file() -> Path | None:
     """Locate the RUNE config file (project-level then user-level)."""
+    from rune.cloud.boundary import hosted
     # Project-level: .rune/config.yaml
     for name in ("config.yaml", "config.yml"):
         project_cfg = Path.cwd() / ".rune" / name
-        if project_cfg.is_file():
+        if not hosted() and project_cfg.is_file():
             return project_cfg
 
     # User-level: ~/.rune/config.yaml
@@ -106,14 +101,13 @@ def _resolve_api_keys(data: dict[str, Any]) -> dict[str, Any]:
     if data.get("gemini_api_key"):
         os.environ.setdefault("GEMINI_API_KEY", data["gemini_api_key"])
 
-    # Google Cloud / Vertex AI:
-    #   config > env > .rune/google-credentials.json (project)
-    #         > ~/.rune/google-credentials.json (user)
+    # Google credentials: config > environment > project file > user file.
     if "google_credentials_file" not in data or data["google_credentials_file"] is None:
         data["google_credentials_file"] = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
     if data.get("google_credentials_file") is None:
         project_creds = Path.cwd() / ".rune" / "google-credentials.json"
-        if project_creds.is_file():
+        from rune.cloud.boundary import hosted
+        if not hosted() and project_creds.is_file():
             data["google_credentials_file"] = str(project_creds)
     if data.get("google_credentials_file") is None:
         default_creds = rune_home() / "google-credentials.json"
@@ -147,12 +141,7 @@ def _resolve_api_keys(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _unknown_keys(raw: Any, model: type[BaseModel], path: str = "") -> list[str]:
-    """Config-file keys the schema does not declare, as dotted paths.
-
-    Pydantic drops unrecognised keys without a word, so a typo or a setting from
-    an older layout looks like it applied and silently does nothing. Surfacing
-    them turns that into something the user can see and fix.
-    """
+    """Return unknown configuration keys as dotted paths so ignored settings can be reported."""
     if not isinstance(raw, dict):
         return []
 
@@ -176,14 +165,7 @@ def _unknown_keys(raw: Any, model: type[BaseModel], path: str = "") -> list[str]
 def _validate_salvaging_valid_sections(
     raw: dict[str, Any], cfg_path: Path
 ) -> RuneConfig:
-    """Validate the config, dropping only the sections that fail.
-
-    Pydantic rejects the whole document on one bad value, and the caller's
-    fallback then replaced *every* setting with a default — so a typo in one
-    block silently cost the user their model, their toggles, everything, with
-    only a log line to say so. Retry without the offending top-level sections
-    instead, so the rest of the file still applies.
-    """
+    """Validate configuration, dropping only invalid top-level sections."""
     from pydantic import ValidationError
 
     try:
@@ -208,11 +190,7 @@ def _validate_salvaging_valid_sections(
 
 
 def load_config(force: bool = False) -> RuneConfig:
-    """Load configuration from YAML file with env var substitution.
-
-    Uses mtime caching to avoid re-parsing unchanged files.
-    Falls back to defaults on any error.
-    """
+    """Load YAML with environment substitution, mtime caching and fallback defaults."""
     global _config, _config_mtime
 
     # Auto-load .env files (like TS loadEnv())
@@ -248,8 +226,7 @@ def load_config(force: bool = False) -> RuneConfig:
         log.info("config_loaded", path=str(cfg_path))
 
         ignored = _unknown_keys(raw, RuneConfig)
-        # Once per file version. The list does not change between reloads, and
-        # repeating it on every load buries the warnings that do.
+        # Report unknown keys once per file version to avoid burying other warnings.
         global _warned_ignored_for
         if ignored and _warned_ignored_for != (str(cfg_path), current_mtime):
             _warned_ignored_for = (str(cfg_path), current_mtime)

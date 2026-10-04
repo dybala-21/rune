@@ -1,8 +1,4 @@
-"""Guardian - real-time safety validation for RUNE.
-
-Ported 1:1 from src/safety/guardian.ts - risk scoring, path validation,
-dangerous bash pattern detection, dual-pass analysis (original + normalized).
-"""
+"""Validate shell commands and file paths against risk and approval policies."""
 
 from __future__ import annotations
 
@@ -32,7 +28,7 @@ class ValidationResult:
     requires_approval: bool = False
 
 
-# Dangerous Bash Patterns (Guardian-level, ported 1:1)
+# Dangerous Bash Patterns
 
 @dataclass(slots=True, frozen=True)
 class _DangerRule:
@@ -130,17 +126,13 @@ PROTECTED_PATHS = [
     "/private/etc", "/private/var",
 ]
 
-# Paths that must never be targets of write/delete operations.
-# Checked both as exact match AND as ancestor (i.e. deleting "/" is blocked
-# because it is a parent of every protected path).
+# Protect these paths and their ancestors from writes and deletions.
 _CRITICAL_ROOT_PATHS = [
     "/",
     "~",  # expanded at runtime
 ]
 
-# Minimum path depth for write/delete operations.
-# Depth 1 = "/Users", "/tmp", etc.  Depth 2 = "/Users/foo".
-# Anything with fewer parts than this is too close to the filesystem root.
+# Reject writes too close to the filesystem root.
 _MIN_WRITABLE_DEPTH = 3
 
 CONFIG_APPROVAL_PATHS = [
@@ -156,18 +148,15 @@ READ_BLOCKED_PATHS = [
 
 
 def _is_rune_secret_file(path: str) -> bool:
-    """Whether *path* is RUNE's own credential store.
-
-    ``~/.rune/.env`` holds live provider keys and was readable by any bash
-    command, unlike every equivalent file above. Backups rotate their names
-    (``.env.bak.<timestamp>``), so this matches the whole family rather than
-    a fixed list. Deliberately scoped to RUNE's home: a project's own ``.env``
-    is the developer's to read, and ``.env.example`` carries no secret.
-    """
+    """Match Rune's credential file and backups, excluding project .env and .env.example files."""
     try:
+        from rune.cloud.store import cloud_home
+        from rune.connectors.store import broker_home
         from rune.utils.paths import rune_home
 
-        candidate = Path(path)
+        candidate = Path(path).resolve()
+        if any(candidate.is_relative_to(root.resolve()) for root in (broker_home(), cloud_home())):
+            return True
         return (
             candidate.name.startswith(".env")
             and candidate.parent.resolve() == rune_home().resolve()
@@ -215,12 +204,7 @@ def _milder(a: ValidationResult, b: ValidationResult) -> bool:
 
 
 def _raised(base: ValidationResult, level: RiskLevel) -> ValidationResult:
-    """Raise the risk level without relaxing the existing decision.
-
-    Preserve the approval requirement; a critical risk also blocks execution.
-    Lower or equal levels leave the base result unchanged. The final check
-    guards these constraints if the result construction changes later.
-    """
+    """Raise risk without relaxing approval or blocks; critical risk always blocks."""
     if risk_to_number(level) <= risk_to_number(base.risk_level):
         return base
     out = ValidationResult(
@@ -253,11 +237,7 @@ class Guardian:
         return p.replace("~", self._home, 1) if p.startswith("~") else p
 
     def validate(self, command: str, _context: str | None = None, *, cwd: str | None = None) -> ValidationResult:
-        """Check command risks and explicit writes against the file policy.
-
-        Parsed deletions and write targets can strengthen an existing verdict;
-        they never override a block or an approval requirement.
-        """
+        """Check commands and write targets without weakening an existing safety verdict."""
         base = self._validate_patterns(command, _context)
         from rune.safety.shell_ast import worst_deletion
 
@@ -300,11 +280,7 @@ class Guardian:
 
     def _validate_patterns(self, command: str,
                            _context: str | None = None) -> ValidationResult:
-        """Validate a bash command for safety risks.
-
-        Uses dual-pass analysis: original command + normalized (decoded) command.
-        The higher risk wins.
-        """
+        """Check original and normalized commands, keeping the higher risk."""
         normalized = normalize_command(command)
         analysis = analyze_command(command)
         normalized_analysis = (
@@ -377,14 +353,7 @@ class Guardian:
                             )
                     break  # one match per rule is enough
 
-        # A rule match reports what that rule saw, which is not the same as
-        # what the command is worth. Returning it here ended the assessment
-        # before the score and the protected paths were consulted, and the
-        # rule that most often won was the mildest one in the list: append
-        # `| head -3` to anything and "File read via bash" (low) decided the
-        # verdict. `rm -rf build` went from denied to allowed that way, and
-        # so did `sudo rm -rf /var`. Only critical is worth short-circuiting
-        # — nothing below can outrank it.
+        # Only critical risk can short-circuit; weaker matches must not bypass stricter checks.
         if worst_result is not None and worst_result.risk_level == "critical":
             return worst_result
 
@@ -489,9 +458,7 @@ class Guardian:
             # Restrict file permissions (owner read/write only)
             audit_file.chmod(0o600)
         except OSError as exc:
-            # An audit line that cannot be written must not stop the check it
-            # was recording, but it must not vanish either — a silent audit
-            # is indistinguishable from one that had nothing to say.
+            # Log audit failures without interrupting the safety check.
             log.debug("guardian_audit_write_failed", error=str(exc))
 
     def is_command_safe(self, command: str) -> bool:
@@ -504,18 +471,8 @@ class Guardian:
         return analyze_command(command)
 
     def validate_file_path(self, file_path: str) -> ValidationResult:
-        """Validate a write path against protected paths.
-
-        Checks:
-        1. Empty / blank path → reject
-        2. Critical root paths (``/``, ``~``) → reject
-        3. Minimum depth check (must be ≥ _MIN_WRITABLE_DEPTH parts)
-        4. Protected-path containment - both directions:
-           a. requested path IS or is INSIDE a protected path → reject
-           b. requested path is a PARENT of a protected path → reject
-        5. Config-file approval gate
-        """
-        # -- empty path guard --------------------------------------------------
+        """Reject shallow or protected paths and require approval for configuration writes."""
+        # empty path guard
         if not file_path or not file_path.strip():
             return ValidationResult(
                 allowed=False,
@@ -533,13 +490,19 @@ class Guardian:
             if p.exists():
                 real_path = str(p.resolve(strict=True))
         except OSError as exc:
-            # The unresolved path is checked instead, which is the stricter
-            # of the two readings — a symlink that cannot be followed is not
-            # a reason to stop looking at where it was pointed.
+            # Check the unresolved path when resolution fails rather than skipping protection.
             log.debug("guardian_symlink_unresolvable", path=normalized,
                       error=str(exc))
 
-        # -- critical root paths -----------------------------------------------
+        from rune.cloud.store import cloud_home
+        from rune.connectors.store import broker_home
+        target = Path(real_path)
+        if any(target.is_relative_to(root.resolve()) or root.resolve().is_relative_to(target)
+               for root in (broker_home(), cloud_home())):
+            return ValidationResult(allowed=False, risk_level="critical",
+                                    reason="Broker and hosting state may only be changed by their management commands")
+
+        # critical root paths
         for crp in _CRITICAL_ROOT_PATHS:
             expanded_crp = self._expand(crp)
             norm_crp = str(Path(expanded_crp).resolve())
@@ -576,8 +539,7 @@ class Guardian:
                     reason=f"Protected path: {pp}",
                 )
 
-            # (b) requested path is a PARENT of a protected path
-            #     e.g. deleting "/usr" when "/usr/bin" is protected
+            # Reject ancestors of protected paths, such as /usr when /usr/bin is protected.
             if (
                 norm_pp.startswith(normalized + "/")
                 or norm_pp.startswith(real_path + "/")
@@ -603,18 +565,10 @@ class Guardian:
         return ValidationResult(allowed=True, risk_level="safe")
 
     def _command_reads_rune_secret(self, command: str, parsed: Any = None) -> bool:
-        """Whether *command* names RUNE's credential store in any spelling.
+        """Resolve shell arguments to detect access to Rune's credential store.
 
-        Substring matching is what protects ``~/.ssh``, and it works there only
-        because the directory name survives every rewrite. A single file inside
-        a directory that must stay readable needs the argument resolved
-        instead, so ``.rune/../.rune/.env``, ``.rune/./.env`` and ``.en''v``
-        all land on the same file.
-
-        Known limit: a path assembled at runtime (a variable, a substitution)
-        is not visible here. This raises the floor on an agent reading its own
-        keys; it is not a boundary against a caller who already controls the
-        shell.
+        Runtime-built paths, including variables and substitutions, are not visible here; this
+        is not a security boundary against a caller who controls the shell.
         """
         try:
             if parsed is None:
@@ -659,45 +613,38 @@ class Guardian:
 
     def validate_file_read_path(self, file_path: str) -> ValidationResult:
         """Validate a read path against blocked paths."""
-        expanded = file_path.replace("~", self._home, 1) if file_path.startswith("~") else file_path
-        normalized = str(Path(expanded).resolve())
+        return self.read_path_validator()(file_path)
 
-        real_path = normalized
-        try:
-            p = Path(normalized)
-            if p.exists():
-                real_path = str(p.resolve(strict=True))
-        except OSError as exc:
-            # The unresolved path is checked instead, which is the stricter
-            # of the two readings — a symlink that cannot be followed is not
-            # a reason to stop looking at where it was pointed.
-            log.debug("guardian_symlink_unresolvable", path=normalized,
-                      error=str(exc))
+    def read_path_validator(self):
+        """Resolve policy roots once when scanning many files; resolve each target afresh."""
+        from rune.cloud.boundary import hosted, workspace_root
+        from rune.cloud.store import cloud_home
+        from rune.connectors.store import broker_home
+        from rune.utils.paths import rune_home
 
-        if _is_rune_secret_file(real_path) or _is_rune_secret_file(normalized):
-            return ValidationResult(
-                allowed=False,
-                risk_level="high",
-                reason="Reading RUNE's credential store is not permitted",
-            )
+        private = rune_home().resolve()
+        roots = tuple(Path(self._expand(path)).resolve() for path in READ_BLOCKED_PATHS)
+        roots += (broker_home().resolve(), cloud_home().resolve())
+        workspace = workspace_root() if hosted() else None
+        boundary = Path(workspace).resolve() if workspace else None
+        hosted_mode = hosted()
 
-        for bp in READ_BLOCKED_PATHS:
-            expanded_bp = self._expand(bp)
-            norm_bp = str(Path(expanded_bp).resolve())
+        def validate(file_path: str) -> ValidationResult:
+            expanded = file_path.replace("~", self._home, 1) if file_path.startswith("~") else file_path
+            try:
+                target = Path(expanded).resolve()
+            except (OSError, ValueError):
+                return ValidationResult(allowed=False, risk_level="high", reason="Cannot resolve file read path")
+            if hosted_mode and (boundary is None or not target.is_relative_to(boundary)):
+                return ValidationResult(allowed=False, risk_level="high", reason="Hosted file access is restricted to the owner's workspace")
+            if target.name.startswith(".env") and target.parent == private:
+                return ValidationResult(allowed=False, risk_level="high", reason="Reading RUNE's credential store is not permitted")
+            for root in roots:
+                if target.is_relative_to(root):
+                    return ValidationResult(allowed=False, risk_level="high", reason=f"Reading sensitive path blocked: {root}")
+            return ValidationResult(allowed=True, risk_level="safe")
 
-            if (
-                normalized == norm_bp
-                or normalized.startswith(norm_bp + "/")
-                or real_path == norm_bp
-                or real_path.startswith(norm_bp + "/")
-            ):
-                return ValidationResult(
-                    allowed=False,
-                    risk_level="high",
-                    reason=f"Reading sensitive path blocked: {bp}",
-                )
-
-        return ValidationResult(allowed=True, risk_level="safe")
+        return validate
 
 
 # Module-level singleton

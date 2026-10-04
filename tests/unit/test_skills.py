@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from rune.skills.executor import (
     SkillExecutionContext,
@@ -17,6 +20,59 @@ from rune.skills.executor import (
 from rune.skills.matcher import _compute_similarity, _tokenize, match_skills
 from rune.skills.registry import SkillRegistry, _parse_skill_file
 from rune.skills.types import Skill, SkillMatch
+
+
+async def test_run_skills_follow_workspace_without_changing_process_directory(tmp_path, monkeypatch):
+    from rune.skills import registry as module
+
+    home = tmp_path / "home"
+    launch = tmp_path / "server"
+    launch.mkdir()
+    monkeypatch.setenv("RUNE_HOME", str(home))
+    monkeypatch.chdir(launch)
+    monkeypatch.setattr(module, "_registry", None)
+
+    def write(directory, name, body):
+        path = directory / name / "SKILL.md"
+        path.parent.mkdir(parents=True)
+        path.write_text(f"---\nname: {name}\ndescription: Review a document\n---\n{body}")
+
+    write(home / "skills", "shared", "User procedure")
+    write(launch / ".rune" / "skills", "server-only", "Do not leak")
+    module.get_skill_registry()  # Warm the settings registry in the launch directory.
+    roots = [tmp_path / "one", tmp_path / "two"]
+    for root in roots:
+        write(root / ".rune" / "skills", "shared", root.name)
+        write(root / ".rune" / "skills", root.name, root.name)
+
+    async def load(root):
+        registry = await asyncio.to_thread(module.get_skill_registry, root)
+        assert {s.name for s in registry.list()} == {"shared", root.name}
+        assert registry.get("shared").body == root.name
+
+    await asyncio.gather(*(load(root) for root in roots))
+    assert Path.cwd() == launch
+    assert module.get_skill_registry().get("shared").body == "User procedure"
+
+
+@pytest.mark.parametrize("category", ["research", "web", "browser", "code", "full"])
+def test_scoped_skills_reach_non_chat_tasks(tmp_path, monkeypatch, category):
+    from rune.agent.loop import NativeAgentLoop
+    from rune.skills import registry as module
+
+    monkeypatch.setenv("RUNE_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(module, "_registry", None)
+    monkeypatch.setattr("rune.skills.matcher._semantic_scores", lambda *args: {})
+    skill = tmp_path / ".rune" / "skills" / "review" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: review\ndescription: Review source evidence\n---\nCheck source revisions.")
+    loop = NativeAgentLoop()
+    loop._auto_skill = True
+    loop._workspace_root = str(tmp_path)
+    context = loop._build_skill_context("review", category)
+    assert "Review source evidence" in context and "skill_load" in context
+    assert "Check source revisions." not in context
+    assert loop._build_skill_context("review", "chat") is None
 
 
 class TestTokenize:
@@ -89,8 +145,7 @@ class TestMatchSkills:
             Skill(name="deploy", description="Deploy application"),
         ]
         matches = match_skills("xyzzy quantum entanglement", skills)
-        # Low scores may still appear above the 0.05 threshold due to fuzzy matching
-        # but they should be scored low
+        # Fuzzy matches may exceed the minimum threshold but should retain a low score.
         for m in matches:
             assert m.score < 0.5
 
@@ -183,9 +238,7 @@ class TestParseSkillFile:
         assert count == 0
 
 
-# ---------------------------------------------------------------------------
 # Skill Context Building
-# ---------------------------------------------------------------------------
 
 
 class TestBuildSkillContext:
@@ -371,8 +424,7 @@ class TestValidateSkillRequirements:
 
 
 class TestSemanticMatching:
-    """Semantic (embedding) signal rescues reworded same-intent goals that
-    lexical-only matching missed (e.g. 0.22 → surfaced)."""
+    """Semantic matching must recover reworded goals missed by lexical matching."""
 
     def _patch_embeddings(self, monkeypatch, vec_map):
         import rune.skills.matcher as matcher

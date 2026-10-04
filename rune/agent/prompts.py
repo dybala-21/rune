@@ -1,9 +1,4 @@
-"""System prompts and prompt builders for the RUNE agent.
-
-Ported from src/agent/prompts.ts - modular prompt sections with
-goal-aware conditional assembly. Each section is independently
-injectable based on task classification and goal category.
-"""
+"""Assemble agent prompts from task-specific sections and runtime context."""
 
 from __future__ import annotations
 
@@ -49,7 +44,8 @@ You MUST respond in the SAME language the user used.
 - **No repetition**: NEVER repeat the same information in different wordings. Say it once clearly.
 - **Structured output**: Use bullet points, tables, or headers for complex information. Avoid wall-of-text paragraphs.
 - **One final answer**: After tool calls, provide ONE clear summary. Do NOT restate earlier partial answers. Between tool calls, output only a 1-sentence status note (e.g. "Searching for more sources..."). Save your full analysis for AFTER all research is complete.
-- **Context-appropriate length**: Simple questions → 1-3 sentences. Analysis tasks → structured sections. Do NOT over-explain simple results.
+- **Source content vs. tool formatting**: Use file_read with raw=true for verbatim file replies. Path headers, line-number prefixes and END markers in ordinary reads belong to the tool, not the file. If the read was truncated, retrieve the rest before claiming to reproduce the entire file.
+- **Requested format first**: Follow the user's output format exactly, including a single value or JSON only. Otherwise, use 1-3 sentences for simple questions and structured sections for analysis.
 - **ask_user discipline**: If the user gives an empty/skipped response, proceed autonomously. NEVER repeat the same question.
 
 ## Bash Efficiency (CRITICAL)
@@ -230,7 +226,7 @@ PROMPT_WEB_EFFICIENCY = """
 - web_search once → extract answer from snippets → **respond immediately**. No browser entry.
 - List requests (e.g., latest 4 videos) also don't need browser if search snippets/web_fetch suffice.
 - Browser is only for **login/interaction/dynamic content** requirements.
-- Response format: key information + source URL. No disclaimers. Short and direct."""
+- Response format: follow the user's requested format. Otherwise, give key information with source URLs. Do not add citations or commentary to a value-only or JSON-only answer; keep its evidence in tool results."""
 
 PROMPT_WEB_DEEP = """
 ## Research Protocol (MANDATORY)
@@ -342,7 +338,7 @@ For non-code document tasks (business plans, reports, proposals, etc.):
 1. **Inspect sources first**: Read supplied office files with document_read. Use web_search/web_fetch when external facts are needed. Never fabricate numbers.
 2. **Match the requested format**: Use document_create for XLSX, DOCX, PPTX, PDF, CSV or HTML. Use file_write for Markdown/text. Save under `{cwd}` unless another location was requested.
 3. **Keep related files consistent**: For multiple documents derived from tabular data, use document_bundle with explicit filters and metrics. Reference shared values as {{metric_id}} in text and cells. When conditions change, inspect the existing bundle with document_bundle_inspect. If document_bundle_update is available, pass its revision and current source hash with the changed fields; otherwise pass the revised full specification to document_bundle. Preserve unspecified documents and fields. On a revision conflict, inspect again before deciding how to apply the requested change. Link the returned version paths.
-4. **Verify saved content**: Reopen documents using document_read and check source totals, units and requested sections. Bundle native readback is automatic; visual layout still needs inspection when a renderer is available. Report a missing font or unsupported formula instead of claiming success.
+4. **Verify saved content**: Reopen documents using document_read and check source totals, units and requested sections. Use document_preview when page count or visual layout matters, and inspect its page image. It uses a headless renderer; a desktop app is unnecessary for this check. Other pages and unsupported formulas remain unverified. Report missing renderers or fonts instead of claiming success.
 
 ### Self-Review (mandatory before final output)
 Before writing the file, verify:
@@ -562,16 +558,11 @@ steps, not explanations."""
 AGENT_SYSTEM_PROMPT = PROMPT_CORE
 
 
-# Marker separating the turn-stable instructional prefix from the per-turn
-# dynamic tail (memory, goal, datetime). The provider adapter converts it into
-# an Anthropic cache breakpoint and strips it for every other provider, so it
-# must never reach a model. See _apply_anthropic_cache_control.
+# Separate the stable prompt prefix from dynamic context; adapters remove this cache marker.
 SYSTEM_CACHE_BOUNDARY = "␞␞RUNE_CACHE_BOUNDARY␞␞"
 
 
-# The read fan-out sentence inside PROMPT_CORE's Working Memory item 4.
-# Kept as a named constant so the builder can strip it when
-# RUNE_FANOUT_READS=0; a unit test pins it to the PROMPT_CORE text.
+# Keep this sentence in sync with PROMPT_CORE so RUNE_FANOUT_READS=0 can remove it.
 FANOUT_HINT = (
     ": emit ALL independent read-only calls (file_read / file_search / "
     "file_list) in a SINGLE response — they execute concurrently. One read "
@@ -601,23 +592,21 @@ def build_system_prompt(
     skill_context: str | None = None,  # matched learned skill, if any
     mark_cache_boundary: bool = False,  # insert SYSTEM_CACHE_BOUNDARY for caching
 ) -> str:
-    """Build the full system prompt for an agent run.
-
-    Combines modular prompt sections based on goal classification,
-    task category, and runtime context. Mirrors the TS
-    ``createNativeAgentPrompt`` logic.
-    """
+    """Build the system prompt from classification, task category and runtime context."""
     category = goal_category or "full"
 
     # Token optimization: lightweight prompt for chat category
     from rune.config.defaults import TOKEN_OPTIMIZATION_ENABLED
     if TOKEN_OPTIMIZATION_ENABLED and category == "chat":
         parts: list[str] = [PROMPT_CHAT]
-        # Skip code/web/browser sections - chat only needs basics
-        # Jump to environment/context sections below
+        # Chat skips tool sections but still receives environment and context.
     else:
         # 1. Always start with PROMPT_CORE
         parts: list[str] = [PROMPT_CORE]
+
+    if category == "chat" and getattr(classification, "intent_categories", None):
+        parts.append("For verbatim file replies, use file_read with raw=true and return only file content. Tool-added Path headers, line numbers, "
+                     "END markers and inspection summaries are not file content. Retrieve omitted content before claiming a full reproduction.")
 
     # 2. Add PROMPT_CODE for code / full categories (skip for chat-optimized)
     if category in ("code", "full") and "calculation" not in getattr(classification, "intent_categories", ()):
@@ -647,11 +636,7 @@ def build_system_prompt(
     if output_expectation == "file":
         parts.append(PROMPT_FILE_OUTPUT.replace("{cwd}", cwd))
 
-    # Intent flags drive sections 5 and 7. When the field is *missing*
-    # (no classification or older callers), fall back to including both —
-    # losing email/document guidance is worse than spending the extra
-    # tokens. An explicit empty frozenset means "intent classifier
-    # determined neither applies" and is respected.
+    # Missing intent flags retain guidance; an explicit empty set excludes it.
     intents = getattr(classification, "intent_categories", None)
     if intents is None:
         intents = frozenset({"email", "document"})
@@ -677,9 +662,7 @@ def build_system_prompt(
                 server_lines.append(f"- **{server}**: {count} tools available (mcp.{server}.*)")
             parts.append("\n".join(server_lines))
 
-    # Per-turn context (datetime, repo map, goal, memory, ...) goes here and is
-    # appended after the instructional sections, keeping the leading prefix
-    # byte-identical across turns for prompt caching. Only the position moves.
+    # Append per-turn context after instructions to preserve the cacheable prefix.
     dynamic_parts: list[str] = []
     if browser_state is not None and category != "chat":
         dynamic_parts.append(
@@ -712,9 +695,7 @@ def build_system_prompt(
     if repo_map:
         dynamic_parts.append(f"\n## Repository Map\n{repo_map}")
     elif environment and environment.get("cwd"):
-        # No map means either a non-code goal or a tree with nothing
-        # tree-sitter can parse — a directory of spreadsheets and notes hits
-        # both. Those runs would otherwise start knowing only their path.
+        # Show a workspace outline when no parseable code map is available.
         from rune.agent.workspace_listing import listing_section
         section = listing_section(environment["cwd"])
         if section:
@@ -787,10 +768,7 @@ def build_system_prompt(
         goal_type = getattr(classification, "goal_type", str(classification))
         dynamic_parts.append(f"## Task Classification\n\nType: {goal_type}")
 
-    # Memory context. Producers pass this in three shapes and all must reach the
-    # model: an AgentMemoryContext (``.formatted``), the raw run-context dict
-    # (``{"memory_context": "<text>"}``, what the CLI/controller pass), or a
-    # plain string. Handling only ``.formatted`` would drop the dict/string ones.
+    # Accept memory context as a formatted object, run-context dict or plain string.
     if memory_context is not None:
         formatted = getattr(memory_context, "formatted", None)
         if formatted is None:
@@ -804,11 +782,9 @@ def build_system_prompt(
         if formatted:
             dynamic_parts.append(f"## Memory Context\n\n{formatted}")
 
-    # Learned skill: an approach distilled from a past verified run, matched to
-    # this goal. Advisory; the model adapts it.
     if skill_context:
         dynamic_parts.append(
-            "## Learned Skill (from a past verified run; adapt as needed)\n\n"
+            "## Available procedures\n\n"
             f"{skill_context}"
         )
 
@@ -816,8 +792,7 @@ def build_system_prompt(
     if knowledge_inventory:
         dynamic_parts.append(f"## Knowledge Inventory\n\n{knowledge_inventory}")
 
-    # Instructional prefix first, then the dynamic tail. When both sides exist,
-    # insert the boundary the adapter turns into an Anthropic breakpoint.
+    # Insert the cache boundary between stable instructions and per-turn context.
     if mark_cache_boundary and parts and dynamic_parts:
         prompt = (
             "\n\n".join(parts)
@@ -837,10 +812,7 @@ def build_continuation_prompt(
     reason: str,
     evidence: str | None = None,
 ) -> str:
-    """Build a continuation prompt when the agent needs to keep going.
-
-    Used when the completion gate determines the task is not yet done.
-    """
+    """Build continuation guidance when the completion gate finds unfinished work."""
     parts: list[str] = [
         "## Continuation Required",
         "",

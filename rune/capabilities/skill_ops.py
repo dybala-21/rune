@@ -1,15 +1,9 @@
-"""Skill operations capability for RUNE.
-
-Ported from src/capabilities/skill.ts - creates and manages
-SKILL.md files that encode reusable agent behaviours.
-
-OpenClaw self-extending pattern: the agent writes SKILL.md files with
-validated frontmatter, registers them in the skill registry, and can
-promote candidate/shadow skills to active.
-"""
+"""Create, register and promote reusable SKILL.md instructions."""
 
 from __future__ import annotations
 
+import asyncio
+import json
 import re
 from pathlib import Path
 
@@ -17,6 +11,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from rune.capabilities.registry import CapabilityRegistry
 from rune.capabilities.types import CapabilityDefinition
+from rune.safety.execution_environment import execution_workspace
 from rune.types import CapabilityResult, Domain, RiskLevel
 from rune.utils.logger import get_logger
 
@@ -81,7 +76,7 @@ class SkillPromoteParams(BaseModel):
 def _skills_dir(scope: str) -> Path:
     """Resolve the skills directory based on scope."""
     if scope == "project":
-        return Path.cwd() / ".rune" / "skills"
+        return Path(execution_workspace()) / ".rune" / "skills"
     from rune.utils.paths import rune_home
     return rune_home() / "skills"
 
@@ -93,20 +88,15 @@ def _format_skill_md(
     author: str = "rune-agent",
     signature: str | None = None,
 ) -> str:
-    """Build a SKILL.md file with YAML frontmatter.
-
-    The frontmatter contains validated metadata so the skill registry
-    can parse it without guessing.
-    """
+    """Build SKILL.md with validated YAML frontmatter."""
     lines = [
         "---",
         f"name: {name}",
-        "description: >",
-        f"  {description}",
-        f"author: {author}",
+        f"description: {json.dumps(description, ensure_ascii=False)}",
+        f"author: {json.dumps(author, ensure_ascii=False)}",
     ]
     if signature:
-        lines.append(f"signature: {signature}")
+        lines.append(f"signature: {json.dumps(signature)}")
     lines.append("metadata:")
     lines.append("  lifecycle: active")
     lines.append("---")
@@ -125,11 +115,7 @@ def _format_skill_md(
 # skill.create implementation
 
 async def skill_create(params: SkillCreateParams) -> CapabilityResult:
-    """Create a SKILL.md file and register it in the skill registry.
-
-    Validates the name as kebab-case, writes frontmatter with author
-    and optional signature, then hot-reloads into the registry.
-    """
+    """Validate, write and register a kebab-case skill with optional signing."""
     log.info("skill_create", name=params.name, scope=params.scope, author=params.author)
 
     skills_dir = _skills_dir(params.scope)
@@ -140,7 +126,7 @@ async def skill_create(params: SkillCreateParams) -> CapabilityResult:
     try:
         from rune.skills.registry import get_skill_registry
 
-        registry = get_skill_registry()
+        registry = get_skill_registry(workspace=execution_workspace())
         existing = registry.get(params.name)
         if existing:
             return CapabilityResult(
@@ -171,9 +157,7 @@ async def skill_create(params: SkillCreateParams) -> CapabilityResult:
         from rune.skills.registry import get_skill_registry
 
         registry = get_skill_registry()
-        # load_skills scans a directory for SKILL.md and registers what it
-        # finds; the freshly written skill_dir is exactly that. The old code
-        # called load_skill_from_path, which the registry never defined.
+        # Load the new directory through the registry's SKILL.md scanner.
         loaded = registry.load_skills(skill_dir) > 0
     except Exception as exc:
         log.warning("skill_hot_reload_failed", name=params.name, error=str(exc))
@@ -209,20 +193,16 @@ async def skill_create(params: SkillCreateParams) -> CapabilityResult:
 # skill.promote implementation
 
 async def skill_promote(params: SkillPromoteParams) -> CapabilityResult:
-    """Promote a candidate/shadow/retired skill to active.
-
-    Mirrors the TS ``skill.promote`` capability.
-    """
+    """Promote an eligible skill to active."""
     log.info("skill_promote", name=params.name, force=params.force)
 
     try:
         from rune.skills.lifecycle import SkillState, get_state, set_state
+        from rune.skills.persistence import persist_skill_state
         from rune.skills.registry import get_skill_registry
 
-        registry = get_skill_registry()
-        # The registry never had promote_skill. Promotion is a lifecycle
-        # state transition, which lifecycle.set_state owns; do it here on the
-        # loaded skill rather than on a method that did not exist.
+        registry = get_skill_registry(workspace=execution_workspace())
+        # Apply promotion through the lifecycle state transition.
         skill = registry.get(params.name)
         if skill is None:
             return CapabilityResult(
@@ -235,6 +215,9 @@ async def skill_promote(params: SkillPromoteParams) -> CapabilityResult:
         changed = prev_lifecycle != SkillState.ACTIVE
         if changed:
             set_state(skill, SkillState.ACTIVE)
+            if skill.file_path and not persist_skill_state(skill):
+                set_state(skill, prev_lifecycle)
+                return CapabilityResult(success=False, error="The skill's new state could not be saved.")
 
         return CapabilityResult(
             success=True,
@@ -267,8 +250,48 @@ async def skill_promote(params: SkillPromoteParams) -> CapabilityResult:
 
 # Registration
 
+class SkillLookupParams(BaseModel):
+    name: str = Field(min_length=1, max_length=200, description="Exact name from the skill catalog")
+
+
+class SkillSearchParams(BaseModel):
+    query: str = Field(min_length=1, max_length=2000, description="The current step needing expertise")
+
+
+async def skill_load(params: SkillLookupParams) -> CapabilityResult:
+    from rune.skills.discovery import load
+
+    try:
+        text, name = await asyncio.to_thread(load, params.name, execution_workspace())
+        return CapabilityResult(success=True, output=text, metadata={"loaded_skill": name})
+    except Exception as exc:
+        log.debug("skill_load_failed", name=params.name, error=str(exc))
+        return CapabilityResult(success=False, error=str(exc))
+
+
+async def skill_search(params: SkillSearchParams) -> CapabilityResult:
+    from rune.skills.discovery import candidates
+
+    try:
+        found = await asyncio.to_thread(candidates, params.query, execution_workspace())
+        return CapabilityResult(success=True, output=json.dumps(found, ensure_ascii=False))
+    except Exception as exc:
+        log.debug("skill_search_failed", error=str(exc))
+        return CapabilityResult(success=False, error=str(exc))
+
+
 def register_skill_ops_capabilities(registry: CapabilityRegistry) -> None:
-    """Register skill operations capabilities (create + promote)."""
+    """Register skill discovery, loading and lifecycle operations."""
+    registry.register(CapabilityDefinition(
+        name="skill_search", description="Find active skill summaries for the current step. Does not load instructions.",
+        domain=Domain.FILE, risk_level=RiskLevel.LOW, group="read",
+        parameters_model=SkillSearchParams, execute=skill_search,
+    ))
+    registry.register(CapabilityDefinition(
+        name="skill_load", description="Read an active skill's instructions by exact name. Load only skills relevant to the current step; different steps may use different skills. This grants no execution permission.",
+        domain=Domain.FILE, risk_level=RiskLevel.LOW, group="read",
+        parameters_model=SkillLookupParams, execute=skill_load,
+    ))
     registry.register(CapabilityDefinition(
         name="skill_create",
         description=(

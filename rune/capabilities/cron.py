@@ -1,26 +1,21 @@
-"""Cron capabilities for RUNE.
-
-Ported from src/capabilities/cron.ts - create, list, update, and delete
-scheduled tasks using the HeartbeatScheduler.
-"""
+"""Create, list, update and delete tasks in the heartbeat scheduler."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pydantic import BaseModel, Field
 
 from rune.capabilities.registry import CapabilityRegistry
 from rune.capabilities.types import CapabilityDefinition
+from rune.proactive.routine import RoutinePolicy
 from rune.types import CapabilityResult, Domain, RiskLevel
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
 
 
-# CronJob - DB-backed via MemoryStore.  The ``command`` column stores a
-# JSON payload ``{"bash": "...", "goal": "...", "notify_channel": "...",
-# "description": "..."}`` so goal-based jobs work without schema migration.
+# Store command and goal metadata as JSON in the existing command column.
 
 import json as _json
 
@@ -37,6 +32,7 @@ class CronJob:
     description: str = ""
     status: str = "active"
     last_run_at: str = ""
+    policy: RoutinePolicy = field(default_factory=RoutinePolicy)
 
 
 def _get_store():
@@ -52,16 +48,18 @@ def _row_to_cronjob(row: dict) -> CronJob:
     notify = ""
     desc = ""
     bash_cmd = raw_cmd
+    policy = RoutinePolicy()
 
     try:
         payload = _json.loads(raw_cmd)
-        if isinstance(payload, dict):
-            bash_cmd = payload.get("bash", "")
-            goal = payload.get("goal", "")
-            notify = payload.get("notify_channel", "")
-            desc = payload.get("description", "")
-    except (ValueError, TypeError):
-        pass  # plain bash command string
+    except (_json.JSONDecodeError, TypeError):
+        payload = None
+    if isinstance(payload, dict):
+        bash_cmd = payload.get("bash", "")
+        goal = payload.get("goal", "")
+        notify = payload.get("notify_channel", "")
+        desc = payload.get("description", "")
+        policy = RoutinePolicy.model_validate(payload.get("policy", {}))
 
     return CronJob(
         id=row["id"],
@@ -73,17 +71,20 @@ def _row_to_cronjob(row: dict) -> CronJob:
         description=desc,
         status="active" if row.get("enabled", True) else "paused",
         last_run_at=row.get("last_run_at", "") or "",
+        policy=policy,
     )
 
 
-def _pack_command(command: str, goal: str, notify_channel: str, description: str) -> str:
+def _pack_command(command: str, goal: str, notify_channel: str, description: str,
+                  policy: RoutinePolicy | None = None) -> str:
     """Pack goal/notify/description into the command column as JSON."""
-    if goal or notify_channel:
+    if goal or notify_channel or policy is not None:
         return _json.dumps({
             "bash": command,
             "goal": goal,
             "notify_channel": notify_channel,
             "description": description,
+            "policy": (policy or RoutinePolicy()).model_dump(mode="json"),
         }, ensure_ascii=False)
     return command
 
@@ -91,6 +92,8 @@ def _pack_command(command: str, goal: str, notify_channel: str, description: str
 # Parameter schemas
 
 class CronCreateParams(BaseModel):
+    policy: RoutinePolicy = Field(default_factory=RoutinePolicy, description="Execution limits, workspace, checks and notification policy")
+    max_runs: int | None = Field(None, ge=1, description="Maximum started runs; unset means no count limit")
     name: str = Field(description="Unique name for the cron job")
     schedule: str = Field(
         description="Cron expression (minute hour day month weekday)"
@@ -126,6 +129,8 @@ class CronUpdateParams(BaseModel):
     goal: str | None = Field(default=None, description="New agent goal")
     notify_channel: str | None = Field(default=None, description="Change notification channel (telegram/discord/slack/tui)")
     enabled: bool | None = Field(default=None, description="Enable or disable the job")
+    policy: RoutinePolicy | None = None
+    max_runs: int | None = Field(None, ge=1)
 
 
 # Helpers
@@ -180,19 +185,13 @@ def _validate_cron_expr(expr: str) -> str | None:
 # Implementations
 
 async def cron_create(params: CronCreateParams) -> CapabilityResult:
-    """Create a new scheduled cron job.
-
-    Supports two execution modes:
-    - ``command``: runs a bash command (legacy).
-    - ``goal``: runs a full agent loop with the given goal, optionally
-      sending the result to a channel (``notify_channel``).
-    """
+    """Schedule a command or agent goal, optionally delivering its result to a channel."""
     log.debug("cron_create", name=params.name, schedule=params.schedule)
 
-    if not params.command and not params.goal:
+    if bool(params.command.strip()) == bool(params.goal.strip()):
         return CapabilityResult(
             success=False,
-            error="Either 'command' (bash) or 'goal' (agent task) must be provided.",
+            error="Provide one 'command' (bash) or 'goal' (agent task).",
         )
 
     error = _validate_cron_expr(params.schedule)
@@ -212,11 +211,13 @@ async def cron_create(params: CronCreateParams) -> CapabilityResult:
         packed = _pack_command(
             params.command or "", params.goal or "",
             params.notify_channel or "", params.description or "",
+            params.policy.bind_workspace(),
         )
         job_id = store.create_cron_job(
             name=params.name,
             schedule=params.schedule,
             command=packed,
+            max_runs=params.max_runs,
         )
 
         log.info("cron_job_created", name=params.name, id=job_id,
@@ -277,6 +278,9 @@ async def cron_list(params: CronListParams) -> CapabilityResult:
                 lines.append(f"    Desc: {job.description}")
             if job.last_run_at:
                 lines.append(f"    Last run: {job.last_run_at}")
+            lines.append(f"    Limits: {job.policy.timeout_seconds}s, {job.policy.token_budget} tokens, {job.policy.max_steps} steps")
+            if job.policy.workspace:
+                lines.append(f"    Workspace: {job.policy.workspace}")
             lines.append("")
 
         return CapabilityResult(
@@ -305,25 +309,32 @@ async def cron_update(params: CronUpdateParams) -> CapabilityResult:
                 return CapabilityResult(success=False, error=f"Cron job '{params.job_id}' not found.")
 
         job_id = existing["id"]
+        updates = {}
 
         if params.schedule is not None:
             error = _validate_cron_expr(params.schedule)
             if error:
                 return CapabilityResult(success=False, error=error)
-            store.update_cron_job(job_id, schedule=params.schedule)
+            updates["schedule"] = params.schedule
 
         if params.enabled is not None:
-            store.update_cron_job(job_id, enabled=params.enabled)
+            updates["enabled"] = params.enabled
+        if "max_runs" in params.model_fields_set:
+            updates["max_runs"] = params.max_runs
 
         # Update command payload (goal/notify_channel/command)
-        if params.command is not None or params.goal is not None or params.notify_channel is not None:
+        if params.command is not None or params.goal is not None or params.notify_channel is not None or params.policy is not None:
             current = _row_to_cronjob(existing)
             new_cmd = params.command if params.command is not None else current.command
             new_goal = params.goal if params.goal is not None else current.goal
             new_notify = params.notify_channel if params.notify_channel is not None else current.notify_channel
             new_desc = current.description
-            packed = _pack_command(new_cmd, new_goal, new_notify, new_desc)
-            store.update_cron_job(job_id, command=packed)
+            if bool(new_cmd.strip()) == bool(new_goal.strip()):
+                return CapabilityResult(success=False, error="Provide one command or agent goal")
+            policy = params.policy.bind_workspace() if params.policy else current.policy
+            updates["command"] = _pack_command(new_cmd, new_goal, new_notify, new_desc, policy)
+        if updates:
+            store.update_cron_job(job_id, **updates)
 
         log.info("cron_job_updated", job_id=job_id)
         return CapabilityResult(
@@ -363,80 +374,103 @@ async def cron_delete(params: CronDeleteParams) -> CapabilityResult:
 
 async def execute_cron_job(job: CronJob) -> None:
     """Execute a single cron job (bash command or agent goal)."""
-    if job.status != "active":
-        return
-
-    if job.goal:
-        await _execute_goal_job(job)
-    elif job.command:
-        await _execute_bash_job(job)
-
-    # Record execution in DB
-    try:
-        store = _get_store()
-        store.record_cron_run(job.id)
-    except Exception:
-        pass
-
-
-async def _execute_bash_job(job: CronJob) -> None:
-    """Execute a cron job as a bash command."""
-    try:
-        from rune.capabilities.bash import BashParams, bash_execute
-        result = await bash_execute(BashParams(command=job.command))
-        if not result.success:
-            log.warning("cron_bash_failed", name=job.name, error=result.error)
-    except Exception as exc:
-        log.warning("cron_bash_error", name=job.name, error=str(exc))
-
-
-async def _execute_goal_job(job: CronJob) -> None:
-    """Execute a cron job as an agent goal, optionally sending results to a channel."""
     import asyncio
 
+    from rune.proactive.routine import claim_occurrence, run_while_current, should_notify
+    from rune.proactive.routine_observation import observe, reusable
+
+    store = _get_store()
+    row = store.get_cron_job(job.id)
+    if row is None:
+        return
+    job = _row_to_cronjob(row)
+    if job.status != "active" or job.policy.expired:
+        return
+    if row.get("max_runs") is not None and row.get("run_count", 0) >= row["max_runs"]:
+        return
+    claims, occurrence, decision = claim_occurrence(job)
+    try:
+        if decision != "claimed":
+            log.info("cron_occurrence_skipped", job_id=job.id, reason=decision)
+            return
+        previous = claims.latest_result(f"cron:{job.id}:")
+        observed = None
+        if job.policy.input_paths or job.policy.output_paths:
+            observed = await asyncio.to_thread(observe, job.policy)
+        if observed and reusable(job, observed, previous):
+            result = {**previous, "status": "unchanged",
+                      "status_before_reuse": previous.get("status_before_reuse", previous["status"]),
+                      "reused": True}
+            claims.finish(occurrence, result)
+            if job.notify_channel and should_notify(job.policy, result, previous):
+                await _send_to_channel(job.notify_channel, job.name, "Tracked files are unchanged; the previous result was retained.")
+            return
+        # Count started attempts, including interrupted ones, against max_runs.
+        store.record_cron_run(job.id)
+        job = _row_to_cronjob(store.get_cron_job(job.id))
+        try:
+            result = await run_while_current(job, store, _execute_goal_job if job.goal else _execute_bash_job)
+        except asyncio.CancelledError:
+            claims.finish(occurrence, {"status": "interrupted", "error": "Inspect external effects before resuming."})
+            raise
+        except Exception as exc:
+            result = {"status": "failed", "verified": False, "execution_unknown": True,
+                      "output": "", "error": str(exc)}
+        if observed:
+            after = await asyncio.to_thread(observe, job.policy)
+            result.update(observations=after, routine_goal=job.goal, routine_command=job.command)
+            if (result.get("success") and not result.get("execution_unknown")
+                    and (not after["complete"] or not observed["complete"] or observed["inputs"] != after["inputs"]
+                         or any(item["state"] != "present" for group in ("inputs", "outputs") for item in after[group].values()))):
+                result.update(status="unverified", success=False, verified=False,
+                              error="Tracked files are missing, changed during execution or could not be inspected; the result needs review.")
+        claims.finish(occurrence, result)
+        if job.notify_channel and should_notify(job.policy, result, previous):
+            output = result.get("output") or result.get("error") or result["status"]
+            if not result.get("verified"):
+                output = f"{result['status']}: {output}"
+            await _send_to_channel(job.notify_channel, job.name, output)
+    except Exception as exc:
+        log.warning("cron_execution_failed", job_id=job.id, error=str(exc))
+    finally:
+        claims.close()
+
+
+async def _execute_bash_job(job: CronJob) -> dict:
+    """Execute a cron job as a bash command."""
+    from rune.capabilities.bash import BashParams, bash_execute
+    from rune.safety.approval_context import approval_required
+    from rune.utils.paths import user_workspace
+
+    with approval_required():
+        result = await bash_execute(BashParams(command=job.command, cwd=job.policy.workspace or str(user_workspace()),
+                                               timeout=job.policy.timeout_seconds * 1000))
+    status = "completed" if result.success else (
+        "needs_approval" if result.metadata.get("requires_approval") else "failed"
+    )
+    return {"status": status, "success": result.success, "verified": False,
+            "output": result.output, "error": result.error,
+            "execution_unknown": result.metadata.get("action_status") == "unknown"}
+
+
+async def _execute_goal_job(job: CronJob) -> dict:
+    """Execute a cron job as an agent goal, optionally sending results to a channel."""
     log.info("cron_goal_start", name=job.name, goal=job.goal[:100])
 
-    try:
-        # Run agent loop (reuse the same factory pattern as proactive bridge)
-        from rune.agent.loop import NativeAgentLoop
-        from rune.types import AgentConfig
+    from rune.agent.background import BackgroundTask, run_background
 
-        cfg = AgentConfig(max_iterations=30, timeout_seconds=120)
-        loop = NativeAgentLoop(config=cfg)
-        result = await asyncio.wait_for(loop.run(job.goal), timeout=120)
-
-        output = getattr(result, "answer", None) or getattr(result, "reason", str(result))
-        success = getattr(result, "reason", "") in ("completed", "verified")
-        log.info("cron_goal_done", name=job.name, success=success)
-
-        # Send result to channel if configured
-        if job.notify_channel and output:
-            await _send_to_channel(job.notify_channel, job.name, output)
-
-    except TimeoutError:
-        log.warning("cron_goal_timeout", name=job.name)
-        if job.notify_channel:
-            await _send_to_channel(
-                job.notify_channel, job.name, f"⏱ Timed out: {job.goal[:100]}"
-            )
-    except Exception as exc:
-        log.warning("cron_goal_error", name=job.name, error=str(exc))
-        if job.notify_channel:
-            await _send_to_channel(
-                job.notify_channel, job.name, f"❌ Failed: {str(exc)[:200]}"
-            )
+    result = await run_background(BackgroundTask(
+        goal=job.goal, source="cron", workspace=job.policy.workspace,
+        verification=job.policy.verification, max_steps=job.policy.max_steps,
+        timeout_seconds=job.policy.timeout_seconds, token_budget=job.policy.token_budget,
+    ))
+    log.info("cron_goal_done", name=job.name, status=result["status"])
+    return result
 
 
 async def _send_to_channel(channel_name: str, job_name: str, text: str) -> None:
-    """Send cron job result via the gateway notification router.
-
-    Routes through ``ChannelGateway.route_notification`` which handles:
-    - Named channel delivery (telegram/discord/slack)
-    - Priority-based routing rules
-    - TUI fallback when no external channel is available
-    """
+    """Route a job result by channel and priority, with a local notification fallback."""
     try:
-        from rune.channels.types import Priority
         from rune.daemon.gateway import GatewayNotification, get_gateway
 
         gateway = get_gateway()
@@ -447,8 +481,9 @@ async def _send_to_channel(channel_name: str, job_name: str, text: str) -> None:
         notification = GatewayNotification(
             title=f"🔔 [{job_name}]",
             body=text,
-            priority=Priority.HIGH if channel_name else Priority.NORMAL,
+            priority="high" if channel_name else "medium",
             source="cron",
+            channel=channel_name,
         )
         await gateway.route_notification(notification)
         log.info("cron_result_routed", name=job_name)
@@ -461,7 +496,13 @@ def get_active_cron_jobs() -> list[CronJob]:
     try:
         store = _get_store()
         rows = store.list_cron_jobs(enabled_only=True)
-        return [_row_to_cronjob(r) for r in rows]
+        jobs = []
+        for row in rows:
+            try:
+                jobs.append(_row_to_cronjob(row))
+            except (TypeError, ValueError, KeyError) as exc:
+                log.warning("invalid_cron_job", job_id=row.get("id"), error=str(exc))
+        return jobs
     except Exception as exc:
         log.debug("get_active_cron_jobs_failed", error=str(exc))
         return []

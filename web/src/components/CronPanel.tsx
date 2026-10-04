@@ -5,7 +5,9 @@ import {
   updateCronJob,
   deleteCronJob,
   type CronJobInfo,
+  type RoutinePolicy,
 } from '../api';
+import { RoutineFields, RoutineHistory, defaultRoutinePolicy } from './RoutineFields';
 import { useFocusTrap } from '../hooks/useFocusTrap';
 
 interface CronPanelProps {
@@ -35,6 +37,9 @@ export function CronPanel({ onClose }: CronPanelProps) {
   const [name, setName] = useState('');
   const [schedule, setSchedule] = useState('');
   const [command, setCommand] = useState('');
+  const [taskType, setTaskType] = useState<'goal' | 'command'>('goal');
+  const [policy, setPolicy] = useState<RoutinePolicy>(defaultRoutinePolicy);
+  const [notifyChannel, setNotifyChannel] = useState('');
   const [enabled, setEnabled] = useState(true);
   const [maxRuns, setMaxRuns] = useState('');
 
@@ -73,6 +78,9 @@ export function CronPanel({ onClose }: CronPanelProps) {
     setName('');
     setSchedule('');
     setCommand('');
+    setTaskType('goal');
+    setPolicy(defaultRoutinePolicy());
+    setNotifyChannel('');
     setEnabled(true);
     setMaxRuns('');
     setError(null);
@@ -83,17 +91,20 @@ export function CronPanel({ onClose }: CronPanelProps) {
     setSelectedId(job.id);
     setName(job.name);
     setSchedule(job.schedule);
-    setCommand(job.command);
+    setCommand(job.goal || job.command);
+    setTaskType(job.goal ? 'goal' : 'command');
+    setPolicy(job.policy || defaultRoutinePolicy());
+    setNotifyChannel(job.notifyChannel || '');
     setEnabled(job.enabled);
-    setMaxRuns(job.maxRuns !== undefined ? String(job.maxRuns) : '');
+    setMaxRuns(job.maxRuns != null ? String(job.maxRuns) : '');
     setError(null);
   };
 
   const parseMaxRuns = (): number | undefined => {
     const trimmed = maxRuns.trim();
     if (!trimmed) return undefined;
-    const parsed = Number.parseInt(trimmed, 10);
-    if (!Number.isFinite(parsed) || parsed < 1) {
+    const parsed = Number(trimmed);
+    if (!Number.isSafeInteger(parsed) || parsed < 1) {
       throw new Error('Max runs must be a positive integer');
     }
     return parsed;
@@ -104,11 +115,21 @@ export function CronPanel({ onClose }: CronPanelProps) {
     setError(null);
     try {
       const maxRunsValue = parseMaxRuns();
+      for (const [name, value, min, max] of [
+        ['Time limit', policy.timeout_seconds, 1, 1800],
+        ['Token limit', policy.token_budget, 1000, 500000],
+        ['Step limit', policy.max_steps, 1, 200],
+      ] as const) {
+        if (!Number.isInteger(value) || value < min || value > max) throw new Error(`${name} must be an integer from ${min} to ${max}`);
+      }
       if (mode === 'create') {
         await createCronJob({
           name: name.trim(),
           schedule: schedule.trim(),
-          command: command.trim(),
+          command: taskType === 'command' ? command.trim() : '',
+          goal: taskType === 'goal' ? command.trim() : '',
+          policy,
+          notifyChannel,
           enabled,
           ...(maxRunsValue !== undefined ? { maxRuns: maxRunsValue } : {}),
         });
@@ -118,9 +139,12 @@ export function CronPanel({ onClose }: CronPanelProps) {
           jobId: selectedId,
           name: name.trim(),
           schedule: schedule.trim(),
-          command: command.trim(),
+          command: taskType === 'command' ? command.trim() : '',
+          goal: taskType === 'goal' ? command.trim() : '',
+          policy,
+          notifyChannel,
           enabled,
-          ...(maxRunsValue !== undefined ? { maxRuns: maxRunsValue } : {}),
+          maxRuns: maxRunsValue ?? null,
         });
       }
       await loadJobs();
@@ -134,7 +158,7 @@ export function CronPanel({ onClose }: CronPanelProps) {
 
   const handleDelete = async () => {
     if (!selectedId) return;
-    // Confirm by the job's name — the id is internal and identifies nothing to the user.
+    // Use the job name so the confirmation identifies what will be deleted.
     const name = jobs.find((job) => job.id === selectedId)?.name || selectedId;
     const ok = window.confirm(`Delete the scheduled job "${name}"?`);
     if (!ok) return;
@@ -206,17 +230,17 @@ export function CronPanel({ onClose }: CronPanelProps) {
             <path d="M9 5.2V9l2.8 1.8" />
           </svg>
           <span style={{ fontWeight: 600, fontSize: 15, color: 'var(--text-primary)' }}>
-            Cron Jobs
+            Scheduled tasks
           </span>
           <span style={{
             fontSize: 11,
-            color: heartbeatActive ? 'var(--success)' : 'var(--danger)',
-            background: heartbeatActive ? 'var(--success-subtle)' : 'var(--danger-subtle)',
-            border: `1px solid ${heartbeatActive ? 'var(--success)' : 'var(--danger)'}`,
+            color: heartbeatActive ? 'var(--success)' : 'var(--text-muted)',
+            background: heartbeatActive ? 'var(--success-subtle)' : 'var(--bg-secondary)',
+            border: `1px solid ${heartbeatActive ? 'var(--success)' : 'var(--border)'}`,
             borderRadius: 'var(--radius-sm)',
             padding: '2px 8px',
           }}>
-            {heartbeatActive ? 'Heartbeat active' : 'Heartbeat inactive'}
+            {heartbeatActive ? 'Scheduler connected' : 'Runs while Rune is running'}
           </span>
           <div style={{ flex: 1 }} />
           <button
@@ -230,7 +254,7 @@ export function CronPanel({ onClose }: CronPanelProps) {
             onClick={resetForm}
             style={primaryButtonStyle}
           >
-            + New Job
+            + New task
           </button>
           <button
             onClick={onClose}
@@ -249,9 +273,10 @@ export function CronPanel({ onClose }: CronPanelProps) {
           </button>
         </div>
 
-        <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
-          <div style={{
-            width: 360,
+        <div className="routine-layout" style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+          <div className="routine-list" style={{
+            width: 'clamp(180px, 28vw, 300px)',
+            flexShrink: 0,
             borderRight: '1px solid var(--border)',
             overflowY: 'auto',
             minHeight: 0,
@@ -260,7 +285,7 @@ export function CronPanel({ onClose }: CronPanelProps) {
               <div style={{ padding: 16, color: 'var(--text-muted)', fontSize: 12 }}>Loading...</div>
             ) : jobs.length === 0 ? (
               <div style={{ padding: 16, color: 'var(--text-muted)', fontSize: 12 }}>
-                No cron jobs yet.
+                No scheduled tasks yet.
               </div>
             ) : (
               jobs.map((job) => {
@@ -330,7 +355,7 @@ export function CronPanel({ onClose }: CronPanelProps) {
             gap: 12,
           }}>
             <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>
-              {mode === 'create' ? 'Create Cron Job' : `Edit Cron Job (${selectedId})`}
+              {mode === 'create' ? 'New scheduled task' : 'Edit scheduled task'}
             </div>
 
             {error && (
@@ -348,6 +373,7 @@ export function CronPanel({ onClose }: CronPanelProps) {
 
             <LabeledField label="Name">
               <input
+                aria-label="Task name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="GeekNews 1-minute briefing"
@@ -357,18 +383,25 @@ export function CronPanel({ onClose }: CronPanelProps) {
 
             <LabeledField label="Schedule">
               <input
+                aria-label="Schedule"
                 value={schedule}
                 onChange={(e) => setSchedule(e.target.value)}
-                placeholder='*/1 * * * * or "every morning at 9"'
+                placeholder='0 9 * * 1-5'
                 style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
               />
               <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-muted)' }}>
-                Presets: <code>@daily</code>, <code>@hourly</code>, <code>@weekdays</code>, <code>@morning</code>
+                Five cron fields in Rune’s local time zone. Example: 0 9 * * 1-5 runs weekdays at 9 AM.
               </div>
             </LabeledField>
 
-            <LabeledField label="Command">
+            <LabeledField label="Task type">
+              <select aria-label="Task type" value={taskType} onChange={e => setTaskType(e.target.value as 'goal' | 'command')} style={inputStyle}>
+                <option value="goal">Agent task</option><option value="command">Shell command</option>
+              </select>
+            </LabeledField>
+            <LabeledField label={taskType === 'goal' ? 'What should Rune do?' : 'Shell command'}>
               <textarea
+                aria-label={taskType === 'goal' ? 'Agent task' : 'Shell command'}
                 value={command}
                 onChange={(e) => setCommand(e.target.value)}
                 placeholder="Check https://news.hada.io/new and generate a briefing for new posts"
@@ -382,9 +415,16 @@ export function CronPanel({ onClose }: CronPanelProps) {
               />
             </LabeledField>
 
+            <RoutineFields policy={policy} onChange={setPolicy} />
+            <LabeledField label="Notification channel (optional)">
+              <input aria-label="Notification channel" value={notifyChannel} onChange={e => setNotifyChannel(e.target.value)} placeholder="None; results stay here" style={inputStyle} />
+              <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-muted)' }}>Use a connected channel name, such as telegram or slack, to send results to its configured recipient.</div>
+            </LabeledField>
+            {selectedJob && <RoutineHistory key={selectedJob.id} job={selectedJob} onRefresh={loadJobs} />}
             <div style={{ display: 'flex', gap: 12 }}>
               <LabeledField label="Max Runs (optional)" style={{ flex: 1 }}>
                 <input
+                  aria-label="Maximum runs"
                   value={maxRuns}
                   onChange={(e) => setMaxRuns(e.target.value)}
                   placeholder="Unlimited if empty"
@@ -405,7 +445,7 @@ export function CronPanel({ onClose }: CronPanelProps) {
                     checked={enabled}
                     onChange={(e) => setEnabled(e.target.checked)}
                   />
-                  {enabled ? 'enabled' : 'disabled'}
+                  {enabled ? 'Enabled' : 'Paused'}
                 </label>
               </LabeledField>
             </div>

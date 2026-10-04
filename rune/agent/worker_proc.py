@@ -1,11 +1,7 @@
-"""Run one subtask in its own process inside an isolated worktree.
+"""Run one isolated subtask in a separate process with its own working directory.
 
-A separate process is needed because cwd is process-global, so coroutine workers
-can't each have their own. The parent sets RUNE_ISOLATION_ROOT and RUNE_WORKER.
-
-  python -m rune.agent.worker_proc --spec <json> --result <json>
-  spec:   {goal, root, provider?, model?, max_iterations?}
-  result: {ok, answer, iterations, actions, trace_reason, error}
+The parent sets RUNE_ISOLATION_ROOT and RUNE_WORKER. Invoke with python -m
+rune.agent.worker_proc --spec <json> --result <json>.
 """
 
 from __future__ import annotations
@@ -36,13 +32,12 @@ async def _run(spec: dict) -> dict:
 
     loop = NativeAgentLoop(config=cfg)
     loop._auto_skill = False
+    blocked: list[str] = []
 
     async def _approve(_cmd: str, _reason: str) -> bool:
-        return True  # non-interactive; Guardian + isolation still apply
-    try:
-        loop.set_approval_callback(_approve)
-    except Exception:
-        pass
+        blocked.append(_cmd)
+        return False
+    loop.set_approval_callback(_approve)
 
     actions = {"n": 0}
 
@@ -50,15 +45,26 @@ async def _run(spec: dict) -> dict:
         actions["n"] += 1
     loop.on("tool_call", _count)
 
-    trace = await loop.run(spec["goal"], context=spec.get("context"))
+    from rune.agent.run_outcome import run_outcome
+    from rune.safety.approval_context import approval_required
+
+    context = {**(spec.get("context") or {}), "workspace_root": root}
+    with approval_required():
+        trace = await loop.run(spec["goal"], context=context, max_steps=cfg.max_iterations)
     answer = (getattr(loop, "_last_answer_text", "") or "").strip()
+    outcome = run_outcome(trace)
+    completed = outcome.success
+    needs_approval = bool(blocked) and not outcome.verified
     return {
-        "ok": True,
+        "ok": completed and not needs_approval,
+        "verified": outcome.verified,
+        "outcome": outcome.payload(),
         "answer": answer,
         "iterations": int(getattr(trace, "final_step", 0) or 0),
         "actions": actions["n"],
         "trace_reason": getattr(trace, "reason", ""),
-        "error": "",
+        "error": "User approval is required" if needs_approval else ("" if completed else trace.reason),
+        "blocked_tools": blocked,
     }
 
 

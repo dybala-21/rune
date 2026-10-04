@@ -21,7 +21,7 @@ from rune.computer.protocol import DesktopAction, DesktopCondition, DesktopError
 
 TOOLS = frozenset({"desktop_apps", "desktop_open", "desktop_observe", "desktop_wait", "desktop_act", "desktop_phase", "think", "ask_user"})
 PREPARATION_TOOLS = frozenset({"web_search", "web_fetch", "file_read", "file_list", "file_search",
-                             "document_read", "document_create", "document_bundle", "document_bundle_inspect",
+                             "document_read", "document_preview", "document_create", "document_bundle", "document_bundle_inspect",
                              "table_requirements", "table_verify"})
 _current: ContextVar[DesktopSession | None] = ContextVar("desktop_session", default=None)
 _access: ContextVar[Callable[[], Awaitable[DesktopSession]] | None] = ContextVar("desktop_access", default=None)
@@ -236,8 +236,7 @@ class DesktopSession:
                     self.check()
                     if polls and loop.time() >= deadline:
                         raise TimeoutError
-                    # Finish the current reply; cancelling it would desynchronize the native pipe.
-                    # MacHost bounds each read separately. The deadline limits new polls.
+                    # Finish the reply to keep the pipe in sync; the deadline stops new polls.
                     data = await self._observe(request.app)
                     polls += 1
                     evidence = match_condition(request.condition, self.view)

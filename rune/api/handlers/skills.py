@@ -1,13 +1,10 @@
-"""Skills handler - GET /skills, GET /skills/{id}, POST /skills/match.
-
-Ported from src/api/handlers/skills.ts - skill registry CRUD and
-matching API.
-"""
+"""Manage registered skills and find matches for user goals."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import re
 from pathlib import Path
 from typing import Any, Literal
@@ -99,13 +96,7 @@ def _skills_root(scope: str) -> Path:
 
 
 def _scope_of(path: Path) -> str | None:
-    """Which skills directory a file lives under, or ``None`` if neither.
-
-    Frontmatter carries a ``scope`` field, but it is just text in a file the
-    skill itself provides. Trusting it let a skill claim ``builtin`` to become
-    undeletable, or claim the wrong scope so the containment check pointed at a
-    directory it was never in. Location is the only trustworthy answer.
-    """
+    """Derive scope from the file location, never from untrusted frontmatter."""
     try:
         resolved = path.resolve()
     except OSError:
@@ -120,12 +111,7 @@ def _scope_of(path: Path) -> str | None:
 
 
 def _editable_file(skill: Any) -> tuple[Path, str]:
-    """The file to rewrite for this skill, and the scope it actually has.
-
-    Raises if the skill has no file, or its file sits outside both skills
-    directories — the two cases where a write would land somewhere the user
-    never asked for.
-    """
+    """Resolve a skill's file and scope; reject missing files or paths outside skill roots."""
     if not skill.file_path:
         raise HTTPException(
             status_code=409, detail=f"Skill has no file on disk: {skill.name}"
@@ -149,30 +135,26 @@ def _editable_file(skill: Any) -> tuple[Path, str]:
 def _to_info(skill: Any) -> SkillInfoResponse:
     meta = skill.metadata or {}
     location = _scope_of(Path(skill.file_path)) if skill.file_path else None
+    created = meta.get("created_at") or meta.get("createdAt")
     return SkillInfoResponse(
         name=skill.name,
         description=skill.description,
-        # Where the file is, falling back to what it says only when it is not
-        # in a skills directory at all (a programmatically registered skill).
+        # Derive scope from location, falling back to metadata only for programmatic skills.
         scope=location or skill.scope,
         lifecycle=meta.get("lifecycle", "stable"),
         author=skill.author or None,
-        version=meta.get("version"),
+        version=str(meta["version"]) if meta.get("version") is not None else None,
         category=meta.get("category"),
-        tags=[t.strip() for t in meta["tags"].split(",")] if meta.get("tags") else None,
+        tags=([str(t).strip() for t in meta["tags"]] if isinstance(meta.get("tags"), list)
+              else [t.strip() for t in str(meta["tags"]).split(",")] if meta.get("tags") else None),
         userInvocable=None,
-        createdAt=meta.get("created_at") or meta.get("createdAt"),
+        createdAt=str(created) if created is not None else None,
         filePath=skill.file_path or None,
     )
 
 
 async def _registry() -> Any:
-    """The skill registry, built off the event loop the first time.
-
-    Building it walks both skill directories with rglob. That is tens of
-    milliseconds on a cold call, and doing it inline stalls everything else the
-    server is serving — SSE heartbeats and a run's streaming output included.
-    """
+    """Build the registry off the event loop so directory scans do not stall streaming."""
     from rune.skills import registry as registry_module
 
     if registry_module._registry is not None:  # noqa: SLF001
@@ -186,12 +168,7 @@ async def _reload_registry_async() -> Any:
 
 
 def _reload_registry() -> Any:
-    """Re-read both skill directories so a write is visible immediately.
-
-    Skills registered in memory rather than loaded from a file — the ones the
-    self-improving loop distills — are carried across. Dropping the registry
-    outright discarded them on every save from the settings panel.
-    """
+    """Reload skill files while retaining programmatically registered skills."""
     from rune.skills import registry as registry_module
 
     existing = registry_module._registry  # noqa: SLF001
@@ -208,12 +185,7 @@ def _reload_registry() -> Any:
 
 
 def _one_line(value: str) -> str:
-    """Collapse a value to a single line so it cannot forge frontmatter.
-
-    The registry reads frontmatter line by line, so a newline inside a value
-    would start a new key: a description ending in "\\nscope: builtin" would
-    write a skill that comes back undeletable, under a name nobody asked for.
-    """
+    """Flatten metadata values so embedded newlines cannot inject frontmatter keys."""
     return " ".join(value.split())
 
 
@@ -229,7 +201,7 @@ def _write_skill_at(path: Path, name: str, description: str, body: str, scope: s
         [
             "---",
             f"name: {name}",
-            f"description: {_one_line(description)}",
+            f"description: {json.dumps(_one_line(description), ensure_ascii=False)}",
             f"scope: {scope}",
             "---",
             "",
@@ -289,9 +261,7 @@ async def create_skill(req: SkillCreateRequest) -> SkillDetailResponse:
 
     target = _skills_root(req.scope) / name / "SKILL.md"
     if target.exists():
-        # A file can be there under a name the registry does not know, because
-        # the frontmatter names it something else. Overwriting it would destroy
-        # a skill the user never mentioned.
+        # Do not overwrite an existing file whose frontmatter registers it under another name.
         raise HTTPException(
             status_code=409, detail=f"A file already exists at {target}"
         )
@@ -301,8 +271,7 @@ async def create_skill(req: SkillCreateRequest) -> SkillDetailResponse:
 
     skill = (await _reload_registry_async()).get(name)
     if skill is None:
-        # Written but it did not load back under its own name. Take the file
-        # away rather than leaving it to be picked up by the next scan.
+        # Remove files that failed registration so a later scan cannot load them unexpectedly.
         _discard(path)
         await _reload_registry_async()
         raise HTTPException(status_code=500, detail=f"Skill written but not loadable: {name}")
@@ -354,11 +323,7 @@ async def delete_skill(skill_name: str) -> SkillDeleteResponse:
 
 @router.post("/match", response_model=SkillMatchResponse, dependencies=[Depends(auth)])
 async def match_skills(req: SkillMatchRequest) -> SkillMatchResponse:
-    """Find skills matching a natural language query.
-
-    Uses keyword/semantic matching to find the most relevant skills
-    for the given query string.
-    """
+    """Find skills matching a natural-language query."""
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="Query is required")
 

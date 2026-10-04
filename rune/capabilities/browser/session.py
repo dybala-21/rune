@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from functools import wraps
@@ -16,6 +16,7 @@ from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
 _current: ContextVar[BrowserSession | None] = ContextVar("browser_session", default=None)
+_manual: ContextVar[bool] = ContextVar("manual_browser_input", default=False)
 _sessions: WeakSet[BrowserSession] = WeakSet()
 
 
@@ -37,6 +38,7 @@ class BrowserSession:
     uncertain_action: bool = False
     needs_observation: bool = False
     bound_task: asyncio.Task | None = None
+    bound_control: Any = None
     native_host: Any = None
     owner_id: str = ""
     native_target: str = ""
@@ -101,6 +103,15 @@ def current_session() -> BrowserSession:
     return session
 
 
+@contextmanager
+def manual_browser_input():
+    token = _manual.set(True)
+    try:
+        yield
+    finally:
+        _manual.reset(token)
+
+
 async def describe_browser_session() -> dict[str, Any]:
     """Read bounded routing context without opening a browser or taking a screenshot."""
     session = _current.get()
@@ -155,9 +166,13 @@ def browser_operation(function: Callable) -> Callable:
         from rune.agent.run_control import current_control
         session = current_session()
         control = current_control()
+        if session.bound_control is not None and control is not session.bound_control and not _manual.get():
+            raise RuntimeError("This browser belongs to another execution")
         if control is not None and session.acquire_control and session._owner is not asyncio.current_task():
             await session.acquire_control()
         async with session.operation():
+            if session.bound_control is not None and control is not session.bound_control and not _manual.get():
+                raise RuntimeError("This browser belongs to another execution")
             if control is not None:
                 control.check()
             return await function(*args, **kwargs)

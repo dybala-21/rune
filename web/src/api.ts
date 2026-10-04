@@ -1,6 +1,24 @@
 /** REST API 호출 (Client → Server) */
 
+import type { ProactiveFeedItem } from './types';
+
 const BASE = '';
+
+export async function respondToSuggestion(suggestionId: string, response: 'accept' | 'dismiss') {
+  const result = await post<{ acknowledged: boolean; executionStatus: string }>('/api/v1/proactive/feedback', {
+    suggestionId, response,
+  });
+  window.dispatchEvent(new Event('rune:proactive-changed'));
+  return result;
+}
+
+export async function fetchProactiveSuggestions(signal?: AbortSignal): Promise<ProactiveFeedItem[]> {
+  await ensureWebAuth();
+  const response = await fetch('/api/v1/proactive/feed', { credentials: 'include', cache: 'no-store', signal });
+  if (!response.ok) throw new ApiError('Could not refresh suggestions', response.status);
+  const data = await response.json() as { suggestions: ProactiveFeedItem[] };
+  return data.suggestions;
+}
 
 let _clientId: string | null = null;
 let _webAuthReady = false;
@@ -127,8 +145,7 @@ export function getLiveSessionId(): string {
   return liveSessionId();
 }
 
-// Set by the message response or agent_start, whichever arrives first.
-// Cleared when the tab switches conversations.
+// Accept the first response or agent_start ID; clear it when switching conversations.
 let _currentRunId = '';
 export function setCurrentRunId(id: string): void { _currentRunId = id; }
 export function getCurrentRunId(): string { return _currentRunId; }
@@ -206,7 +223,7 @@ export function resumeRun(runId: string): Promise<{ runId: string; sessionId: st
   return post('/api/runs/resume', { runId }, false, AbortSignal.timeout(15000));
 }
 
-// ── Workspace API (directory pinned per conversation) ──
+// Workspace API (directory pinned per conversation)
 
 export async function fetchWorkspace(): Promise<{ path: string }> {
   return rpc('workspace.get', { sessionId: liveSessionId() });
@@ -232,7 +249,7 @@ export async function readWorkspaceFile(path: string): Promise<{ path: string; c
   return rpc('files.read', { sessionId: liveSessionId(), path });
 }
 
-// ── Embedded terminal ──
+// Embedded terminal
 
 export async function fetchTerminalStatus(): Promise<{ enabled: boolean }> {
   return rpc('terminal.status', {});
@@ -339,7 +356,7 @@ export function sendQuestion(id: string, answer: string, selectedIndex?: number)
   return post('/api/question', { ...payload, responseId: interactionResponseId(id, payload) });
 }
 
-// ── Sessions API ──
+// Sessions API
 
 export interface SessionInfo {
   id: string;
@@ -391,7 +408,7 @@ export async function fetchSessionEvents(sessionId: string, params?: {
   return rpc('sessions.events', { sessionId, ...params });
 }
 
-// ── Skills API ──
+// Skills API
 
 export interface SkillInfo {
   name: string;
@@ -441,7 +458,7 @@ export async function deleteSkill(name: string): Promise<void> {
   return rpc('skills.delete', { name });
 }
 
-// ── Env API ──
+// Env API
 
 export interface EnvVarInfo {
   key: string;
@@ -463,9 +480,10 @@ export async function unsetEnvVar(key: string, scope: 'user' | 'project'): Promi
   return rpc('env.unset', { key, scope });
 }
 
-// ── Config API ──
+// Config API
 
 export interface ConfigInfo {
+  executionEnvironment?: { backend: 'local' | 'container'; image: string; allowNetwork: boolean; managed?: boolean };
   proactiveEnabled: boolean;
   advisorEnabled: boolean;
   /** bypass | standard | strict — shown when approvals are switched off. */
@@ -519,6 +537,7 @@ export async function fetchConfig(): Promise<ConfigInfo> {
 }
 
 export async function patchConfig(params: {
+  executionEnvironment?: { backend?: 'local' | 'container'; image?: string };
   proactiveEnabled?: boolean;
   advisorEnabled?: boolean;
   decisionRouting?: { backend?: 'connected' | 'jev'; timeoutMs?: number };
@@ -537,7 +556,7 @@ export async function patchConfig(params: {
   return rpc('config.patch', params);
 }
 
-// ── Cron API ──
+// Cron API
 
 export type CronJobType = 'briefing' | 'check_in' | 'monitoring' | 'reminder' | 'learning' | 'custom';
 export type CronJobConditionType = 'skip_if_interacted_today' | 'skip_weekends' | 'skip_if_idle_over' | 'require_channel';
@@ -565,6 +584,10 @@ export interface CronJobInfo {
   name: string;
   schedule: string;
   command: string;
+  goal?: string;
+  notifyChannel?: string;
+  policy?: RoutinePolicy;
+  recentRuns?: RoutineRun[];
   enabled: boolean;
   createdAt: string;
   lastRunAt?: string;
@@ -575,6 +598,25 @@ export interface CronJobInfo {
   dependsOn?: string[];
   actor?: CronJobActorInfo;
   target?: CronJobTargetInfo;
+}
+
+export interface RoutinePolicy {
+  workspace: string;
+  max_steps: number;
+  timeout_seconds: number;
+  token_budget: number;
+  deadline: string | null;
+  verification: string[];
+  input_paths?: string[];
+  output_paths?: string[];
+  notify: 'always' | 'changes' | 'failures';
+}
+
+export interface RoutineRun {
+  id: string;
+  started_at: number;
+  blocked: boolean;
+  result: { status: string; output?: string; error?: string; note?: string; verified?: boolean } | null;
 }
 
 export interface CronBuiltinTaskInfo {
@@ -595,6 +637,9 @@ export async function createCronJob(params: {
   name: string;
   schedule: string;
   command: string;
+  goal?: string;
+  notifyChannel?: string;
+  policy?: RoutinePolicy;
   enabled?: boolean;
   maxRuns?: number;
   type?: CronJobType;
@@ -611,8 +656,11 @@ export async function updateCronJob(params: {
   name?: string;
   schedule?: string;
   command?: string;
+  goal?: string;
+  notifyChannel?: string;
+  policy?: RoutinePolicy;
   enabled?: boolean;
-  maxRuns?: number;
+  maxRuns?: number | null;
   type?: CronJobType;
   conditions?: CronJobConditionInfo[];
   dependsOn?: string[];
@@ -626,7 +674,11 @@ export async function deleteCronJob(jobId: string): Promise<{ jobId: string }> {
   return rpc('cron.delete', { jobId });
 }
 
-// ── Health API ──
+export async function reconcileCronJob(jobId: string, operationId: string, note: string): Promise<{ reconciled: boolean }> {
+  return rpc('cron.reconcile', { jobId, operationId, note });
+}
+
+// Health API
 
 export interface HealthInfo {
   status: 'ok' | 'degraded' | 'down';
@@ -645,7 +697,7 @@ export async function fetchHealth(): Promise<HealthInfo> {
   return rpc('health', {});
 }
 
-// ── Channels API ──
+// Channels API
 
 export interface ChannelInfo {
   name: string;

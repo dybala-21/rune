@@ -24,12 +24,14 @@ log = get_logger(__name__)
 
 class ExecutionStatus(StrEnum):
     SUCCESS = "success"
+    COMPLETED = "completed"
     FAILURE = "failure"
     SKIPPED = "skipped"
     # Shown to the user; execution has not started.
     DELIVERED = "delivered"
     # Execution was claimed, but its outcome could not be confirmed.
     UNVERIFIED = "unverified"
+    NEEDS_APPROVAL = "needs_approval"
 
 
 @dataclass(slots=True)
@@ -43,6 +45,7 @@ class ExecutionRecord:
     error: str | None = None
     attempt: int = 1
     duration_ms: float = 0.0
+    result: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -62,12 +65,9 @@ class BridgeConfig:
     retry_safe: bool = False
 
 
-# Factories accept a goal and optionally verification commands. Results include
-# success and, when checked, verified or tests_passed.
+# Factories take a goal and optional checks; results report success and verification.
 AgentFactory = Callable[..., Coroutine[Any, Any, dict[str, Any]]]
 
-
-# ProactiveAgentBridge
 
 class ProactiveAgentBridge:
     """Dispatch suggestions with shared execution claims and an hourly limit."""
@@ -173,21 +173,40 @@ class ProactiveAgentBridge:
 
     async def _poll_loop(self) -> None:
         """Main polling loop - runs until stopped."""
+        next_evaluation = 0.0
         while self._running:
             try:
-                await self._poll_once()
+                now = asyncio.get_running_loop().time()
+                if now >= next_evaluation:
+                    await self._poll_once()
+                    next_evaluation = asyncio.get_running_loop().time() + self._config.poll_interval_seconds
+                else:
+                    await self._dispatch_accepted()
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 log.error("bridge_poll_error", error=str(exc))
 
             try:
-                await asyncio.sleep(self._config.poll_interval_seconds)
+                await asyncio.sleep(min(1.0, self._config.poll_interval_seconds))
             except asyncio.CancelledError:
                 break
 
+    async def _dispatch_accepted(self) -> None:
+        if self._is_rate_limited():
+            return
+        for suggestion in self._engine.list_suggestions():
+            if (suggestion.status == "accepted" and suggestion.response_source == "user"
+                    and suggestion.execution_status is None):
+                await self.execute_suggestion(suggestion, force=True)
+
+    def queue_accepted(self, suggestion: Suggestion) -> None:
+        if self._running and suggestion.status == "accepted" and suggestion.response_source == "user":
+            self._dispatch(suggestion, force=True)
+
     async def _poll_once(self) -> None:
-        """Single poll iteration: evaluate engine and execute suggestions."""
+        """Evaluate new suggestions independently of user-response polling."""
+        await self._dispatch_accepted()
         suggestions = await self._engine.evaluate(self._context)
 
         for suggestion in suggestions:
@@ -228,11 +247,11 @@ class ProactiveAgentBridge:
         return await coro
 
     def _outcome_from_result(self, result: object) -> ExecutionStatus:
-        """Require a success flag and a passing check to record SUCCESS.
-
-        A truthy success flag without a passing check is UNVERIFIED.
-        Missing or false success flags, and non-dict results, are FAILURE.
-        """
+        """Require success and a passing check for SUCCESS; unchecked completion stays distinct."""
+        if isinstance(result, dict) and result.get("status") == "needs_approval":
+            return ExecutionStatus.NEEDS_APPROVAL
+        if isinstance(result, dict) and result.get("execution_unknown"):
+            return ExecutionStatus.UNVERIFIED
         if not isinstance(result, dict) or not bool(result.get("success", False)):
             return ExecutionStatus.FAILURE
         verified = result.get("verified")
@@ -240,16 +259,14 @@ class ProactiveAgentBridge:
             verified = result.get("tests_passed")
         if verified is True:
             return ExecutionStatus.SUCCESS
+        if result.get("status") == "completed":
+            return ExecutionStatus.COMPLETED
         return ExecutionStatus.UNVERIFIED
 
     async def execute_suggestion(
         self, suggestion: Suggestion, *, force: bool = False
     ) -> ExecutionRecord:
-        """Deliver a suggestion, or execute it when auto_execute or force is set.
-
-        Concurrent callers share the execution. Failed attempts are retried only
-        when retry_safe is enabled, up to max_retries with exponential backoff.
-        """
+        """Deliver or explicitly execute a suggestion; retry only when retry_safe permits it."""
         return await asyncio.shield(self._dispatch(suggestion, force=force))
 
     @staticmethod
@@ -261,10 +278,14 @@ class ProactiveAgentBridge:
     def _dispatch(
         self, suggestion: Suggestion, *, force: bool = False
     ) -> asyncio.Future[ExecutionRecord]:
-        """Claim execution before yielding so concurrent callers can join it.
-
-        Delivered suggestions remain eligible for a later explicit accept.
-        """
+        """Share concurrent claims; delivered suggestions can still be accepted."""
+        if suggestion.status in ("dismissed", "expired") or (
+            suggestion.expires_at and suggestion.expires_at <= datetime.now(UTC)
+        ):
+            self._engine.record_execution(suggestion.id, ExecutionStatus.SKIPPED,
+                                          {"error": "Suggestion dismissed or expired"})
+            return self._ready(self._record(suggestion, ExecutionStatus.SKIPPED, attempt=0,
+                                           error="Suggestion dismissed or expired"))
         if not (self._config.auto_execute or force):
             record = self._delivered.get(suggestion.id)
             if record is None:
@@ -295,12 +316,17 @@ class ProactiveAgentBridge:
             if suggestion.id in self._inflight:
                 return self._inflight[suggestion.id]
             if saved is not None:
+                self._engine.record_execution(suggestion.id, saved["status"], saved.get("result", {}))
                 return self._ready(ExecutionRecord(
                     suggestion_id=suggestion.id, suggestion_title=suggestion.title,
                     status=ExecutionStatus(saved["status"]), error=saved.get("error"),
                     attempt=saved["attempt"], duration_ms=saved["duration_ms"],
                     timestamp=datetime.fromisoformat(saved["timestamp"]),
+                    result=saved.get("result", {}),
                 ))
+            self._engine.record_execution(suggestion.id, ExecutionStatus.UNVERIFIED, {
+                "error": "An earlier execution has no saved outcome. Inspect external state before retrying.",
+            })
             return self._ready(ExecutionRecord(
                 suggestion_id=suggestion.id, suggestion_title=suggestion.title,
                 status=ExecutionStatus.UNVERIFIED, attempt=0,
@@ -337,7 +363,9 @@ class ProactiveAgentBridge:
             "status": record.status.value, "error": record.error,
             "attempt": record.attempt, "duration_ms": record.duration_ms,
             "timestamp": record.timestamp.isoformat(),
+            "result": record.result,
         })
+        self._engine.record_execution(record.suggestion_id, record.status.value, record.result)
 
     async def _execute_attempts(self, suggestion: Suggestion) -> ExecutionRecord:
         max_attempts = 1 + (self._config.max_retries if self._config.retry_safe else 0)
@@ -347,7 +375,8 @@ class ProactiveAgentBridge:
             start = datetime.now(UTC)
             try:
                 goal = f"{suggestion.title}: {suggestion.description}"
-                result = await self._call_factory(goal, suggestion.verification)
+                async with asyncio.timeout(self._config.timeout_ms / 1000):
+                    result = await self._call_factory(goal, suggestion.verification)
 
                 duration = (datetime.now(UTC) - start).total_seconds() * 1000
                 outcome = self._outcome_from_result(result)
@@ -358,10 +387,8 @@ class ProactiveAgentBridge:
                         ExecutionStatus.SUCCESS,
                         attempt=attempt,
                         duration_ms=duration,
+                        result=result,
                     )
-                    self._engine.record_feedback(suggestion.id, True)
-                    if self._feedback_learner is not None:
-                        self._feedback_learner.record_feedback(suggestion, "accepted")
                     try:
                         from rune.proactive.reflexion import get_reflexion_learner
                         get_reflexion_learner().record_task_outcome({
@@ -378,14 +405,15 @@ class ProactiveAgentBridge:
                         result_summary=str(result.get("output", ""))[:200] if isinstance(result, dict) else "",
                     )
                     return record
-                elif outcome == ExecutionStatus.UNVERIFIED:
+                elif outcome in (ExecutionStatus.COMPLETED, ExecutionStatus.UNVERIFIED, ExecutionStatus.NEEDS_APPROVAL):
                     # An unknown outcome must not trigger retries or success learning.
                     log.info("proactive_unverified", suggestion=suggestion.title)
                     return self._record(
                         suggestion,
-                        ExecutionStatus.UNVERIFIED,
+                        outcome,
                         attempt=attempt,
                         duration_ms=duration,
+                        result=result,
                     )
                 else:
                     error_msg = (
@@ -399,8 +427,13 @@ class ProactiveAgentBridge:
                         error=error_msg,
                         attempt=attempt,
                         duration_ms=duration,
+                        result=result if isinstance(result, dict) else {},
                     )
 
+            except TimeoutError:
+                return self._record(suggestion, ExecutionStatus.UNVERIFIED, attempt=attempt,
+                                    duration_ms=(datetime.now(UTC) - start).total_seconds() * 1000,
+                                    error="Time limit reached; inspect external state before retrying.")
             except Exception as exc:
                 duration = (datetime.now(UTC) - start).total_seconds() * 1000
                 last_record = self._record(
@@ -421,19 +454,9 @@ class ProactiveAgentBridge:
                 )
                 await asyncio.sleep(backoff)
 
-        self._engine.record_feedback(suggestion.id, False)
-        if self._feedback_learner is not None:
-            self._feedback_learner.record_feedback(suggestion, "dismissed")
-
         try:
             from rune.proactive.reflexion import get_reflexion_learner
             learner = get_reflexion_learner()
-            learner.record_rejection(
-                event_type=suggestion.type,
-                suggestion_type=suggestion.type,
-                score=suggestion.confidence,
-                reason="execution_failed",
-            )
             learner.record_task_outcome({
                 "domain": suggestion.type,
                 "success": False,
@@ -463,13 +486,14 @@ class ProactiveAgentBridge:
         duration_ms: float = 0.0,
         result_summary: str = "",
     ) -> None:
-        """Record the outcome for autonomy promotion and demotion decisions."""
+        """Record execution history without inferring user approval."""
         executor = self._autonomous_executor
         if executor is None:
             try:
                 from rune.agent.autonomous import get_autonomous_executor
                 executor = get_autonomous_executor()
-            except Exception:
+            except Exception as exc:
+                log.debug("autonomous_executor_unavailable", error=str(exc))
                 return
 
         try:
@@ -478,7 +502,6 @@ class ProactiveAgentBridge:
 
             from rune.agent.autonomous import AutonomousExecution
 
-            feedback = "approved" if success else "full_revert"
             domain = getattr(suggestion, "type", "unknown") or "unknown"
             # Map common suggestion types to TaskDomain literals
             domain_map = {
@@ -499,7 +522,6 @@ class ProactiveAgentBridge:
                 result_summary=result_summary[:200] if result_summary else "",
                 duration_ms=duration_ms,
                 reversible=False,
-                user_feedback=feedback,
             )
             executor.record_execution(execution)
             log.debug(
@@ -533,6 +555,7 @@ class ProactiveAgentBridge:
         error: str | None = None,
         attempt: int = 1,
         duration_ms: float = 0.0,
+        result: dict[str, Any] | None = None,
     ) -> ExecutionRecord:
         """Create and store an execution record."""
         record = ExecutionRecord(
@@ -542,8 +565,15 @@ class ProactiveAgentBridge:
             error=error,
             attempt=attempt,
             duration_ms=duration_ms,
+            result={key: result[key] for key in ("run_id", "status", "output", "error", "duration_ms", "evidence")
+                    if key in (result or {})},
         )
         self._history.append(record)
+        if error and "error" not in record.result:
+            record.result["error"] = error
+        usage = (result or {}).get("timings", {}).get("usage")
+        if usage is not None:
+            record.result["usage"] = usage
         log.info(
             "bridge_execution",
             suggestion=suggestion.title,
@@ -570,8 +600,6 @@ class ProactiveAgentBridge:
         self._history.clear()
 
 
-# Module-level factory
-
 _bridge: ProactiveAgentBridge | None = None
 
 
@@ -584,25 +612,7 @@ def initialize_proactive_bridge(
     autonomous_executor: Any | None = None,
     execution_store: ExecutionStore | None = None,
 ) -> ProactiveAgentBridge:
-    """Create or replace the singleton ProactiveAgentBridge.
-
-    Parameters
-    ----------
-    engine:
-        The proactive suggestion engine to poll.
-    agent_factory:
-        Async callable that takes a goal string and returns a result dict.
-    config:
-        Optional bridge configuration.
-    context:
-        Optional context dict passed to the engine on each poll.
-    feedback_learner:
-        Optional FeedbackLearner for recording feedback with full
-        suggestion context (type, confidence, description).
-    autonomous_executor:
-        Optional :class:`~rune.agent.autonomous.AutonomousExecutor` for
-        recording execution outcomes (feeds promotion/demotion logic).
-    """
+    """Create or replace the bridge with its engine, execution factory and feedback hooks."""
     global _bridge
     if _bridge is not None:
         _bridge.stop()

@@ -1,10 +1,4 @@
-"""Tests for auto-skill reuse wiring (default-off flag).
-
-The auto-skill system was built but not wired in. It is gated on verification:
-distil a skill only from a completed/verified run, and inject a matching one into
-a later task. These tests cover the wiring; the flag is off by default, so they
-set it explicitly.
-"""
+"""Check opt-in skill generation, persistence and reuse after eligible runs."""
 
 from __future__ import annotations
 
@@ -48,12 +42,12 @@ def test_auto_skill_enabled_env_overrides_config(monkeypatch):
 
 def test_build_system_prompt_renders_skill_section():
     prompt = build_system_prompt(goal="x", skill_context="STEP 1: read the file")
-    assert "## Learned Skill" in prompt
+    assert "## Available procedures" in prompt
     assert "STEP 1: read the file" in prompt
 
 
 def test_build_system_prompt_omits_skill_section_when_absent():
-    assert "## Learned Skill" not in build_system_prompt(goal="x")
+    assert "## Available procedures" not in build_system_prompt(goal="x")
 
 
 # Loop wiring (no LLM — pattern extraction is local; refiner=None)
@@ -76,9 +70,16 @@ def test_build_skill_context_only_for_code_or_full():
 
 
 @pytest.mark.asyncio
-async def test_distill_then_inject_roundtrip(monkeypatch):
+async def test_distill_then_inject_roundtrip(tmp_path, monkeypatch):
     """A verified run distils a skill; a later matching goal retrieves it."""
-    # Isolate the registry singleton for this test.
+    from rune.config import get_config
+    from rune.skills.lifecycle import SkillState, get_state, set_state
+    from rune.skills.persistence import persist_skill_state
+
+    monkeypatch.setenv("RUNE_HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("rune.agent.loop._FastSkillRefiner", lambda: _FakeRefiner(""))
+    monkeypatch.setattr(get_config().skills, "auto_skill", True)
     reg = get_skill_registry()
     monkeypatch.setattr(reg, "_skills", {})
 
@@ -105,10 +106,17 @@ async def test_distill_then_inject_roundtrip(monkeypatch):
     assert len(reg._skills) == 1
     registered = next(iter(reg._skills.values()))
     assert registered.author == "auto"
+    assert get_state(registered) == SkillState.CANDIDATE
+    assert registered.file_path
 
-    # ...and a later similar goal retrieves it for injection.
+    # A successful example is a candidate, not evidence of general usefulness.
     injected = loop._build_skill_context("fix the parser module bug", "code")
-    assert injected is not None and len(injected) > 0
+    assert injected is None
+    set_state(registered, SkillState.ACTIVE)
+    assert persist_skill_state(registered)
+    catalog = loop._build_skill_context("fix the parser module bug", "code")
+    assert catalog and registered.name in catalog
+    assert registered.body not in catalog
 
 
 @pytest.mark.asyncio
@@ -125,8 +133,7 @@ async def test_failed_run_distills_nothing(monkeypatch):
     assert len(reg._skills) == 0
 
 
-# --- Strategic skill body synthesis (distilled skills are reusable procedures,
-# not verbatim tool-call transcripts that an agent gains nothing from) ---
+# Skill bodies should describe reusable procedures rather than replaying literal tool calls.
 
 
 class _FakeRefiner:
@@ -218,9 +225,7 @@ async def test_distilled_body_falls_back_when_refiner_fails(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_auto_skill_persists_distilled_skill_for_cross_session_reuse(monkeypatch):
-    """auto_skill (not just gated_learning) must persist the skill to disk, else
-    it dies with the one-shot process and is never reused next session — the
-    documented cause of 'no cross-session lift'."""
+    """Persist generated skills even when background evaluation is disabled."""
     from types import SimpleNamespace
 
     from rune.agent.memory_bridge import maybe_generate_skill
