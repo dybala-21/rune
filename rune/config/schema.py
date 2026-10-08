@@ -87,6 +87,8 @@ class LLMConfig(BaseModel):
     routing_mode: str = Field(default="cloud-first", alias="routingMode")
     request_timeout_ms: int = Field(default=600_000, alias="requestTimeoutMs")
     max_retries: int = Field(default=2, alias="maxRetries")
+    model_request_limit: int = Field(default=100, ge=0, alias="modelRequestLimit")
+    cost_budget_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False, alias="costBudgetUsd")
 
     @model_validator(mode="after")
     def migrate_reasoning_preference(self):

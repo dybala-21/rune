@@ -161,6 +161,13 @@ def resolve_intent_contract(
     }
     category = _CATEGORY_MAP.get(_gt, _gt)
 
+    if _gt == "artifact":
+        return IntentContract(
+            kind="mixed", tool_requirement="write",
+            grounding_requirement="none", output_expectation="file",
+            requires_code_verification=False,
+        )
+
     if category == "browser":
         return IntentContract(
             kind="browser_write", tool_requirement="write",
@@ -186,7 +193,7 @@ def resolve_intent_contract(
         )
 
     if requires_execution:
-        if category == "code":
+        if category == "code" and (getattr(classification, "requires_code", False) or _gt == "code"):
             return IntentContract(
                 kind="code_write",
                 tool_requirement="write",
@@ -200,7 +207,8 @@ def resolve_intent_contract(
             tool_requirement="write",
             grounding_requirement="none",
             output_expectation=output_expectation,
-            requires_code_verification=False,
+            requires_code_verification=getattr(classification, "requires_code", False),
+            requires_code_write_artifact=getattr(classification, "requires_code", False),
         )
 
     if category == "web":

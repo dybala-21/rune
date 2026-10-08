@@ -1,7 +1,5 @@
 """A persistent routine reuses unchanged inputs and reruns changed inputs."""
 
-import json
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -13,7 +11,7 @@ from rune.proactive.routine import RoutinePolicy
 
 
 @pytest.mark.asyncio
-async def test_routine_change_detection(live_model, tmp_path, monkeypatch, request):
+async def test_routine_change_detection(live_model, live_report, tmp_path, monkeypatch, request):
     from rune.agent import loop
     from rune.config import get_config
     from rune.proactive import routine
@@ -67,23 +65,9 @@ async def test_routine_change_detection(live_model, tmp_path, monkeypatch, reque
         verdict = "passed"
     finally:
         store.close()
-        if directory := request.config.getoption("--live-report-dir"):
-            runs = []
-            for result in results:
-                if result.get("reused"):
-                    continue
-                timing = result.get("timings") or {}
-                usage = timing.get("usage") or {}
-                priced = usage.get("calls") == usage.get("reported_calls") and not usage.get("unpriced_calls")
-                runs.append({"seconds": result.get("duration_ms", 0) / 1000,
-                             "snapshot": {"timings": timing, "usage": {
-                                 "total": usage.get("total_tokens"), "cost": {"usd": usage.get("cost_usd") if priced else None},
-                             }}})
-            path = Path(directory)
-            path.mkdir(parents=True, exist_ok=True)
-            (path / f"{live_model[0]}-{request.node.name}.json").write_text(json.dumps({
-                "provider": live_model[0], "model": live_model[1], "outcome": verdict,
-                "decision_backend": get_config().llm.decision_routing.backend,
-                "scope": "Real-model background routine; three ticks, including one without model execution",
-                "results": results, "runs": runs, "tool_calls": calls,
-            }, indent=2, ensure_ascii=False))
+        from scripts.e2e_provenance import background_run
+
+        live_report({"outcome": verdict,
+                     "scope": "Real-model background routine; three ticks, including one without model execution",
+                     "results": results, "runs": [background_run(r) for r in results if not r.get("reused")],
+                     "tool_calls": calls})

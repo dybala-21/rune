@@ -1,6 +1,7 @@
 """Explicitly enabled tests against the configured model providers."""
 
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -57,3 +58,37 @@ def live_model(request, monkeypatch, live_trial):
         cfg.llm.decision_routing.backend = backend
     monkeypatch.setattr(loader, "_config", cfg)
     return selection
+
+
+@pytest.fixture
+def live_report(request, live_model):
+    from rune.config import get_config
+    from scripts.e2e_provenance import (
+        ReportWriter,
+        digest,
+        environment,
+        model_settings,
+        source_state,
+    )
+
+    directory = request.config.getoption("--live-report-dir")
+    if not hasattr(request.config, "_rune_evaluation"):
+        request.config._rune_evaluation = (uuid4().hex, source_state(), environment())
+    batch, source, env = request.config._rune_evaluation
+    params = {key: value for key, value in request.node.callspec.params.items() if key != "live_trial"}
+    scenario = request.node.nodeid.split("[", 1)[0]
+    signature = digest({"scenario": scenario, "parameters": params})
+    writer = ReportWriter(Path(directory), source=source, batch_id=batch, scenario=scenario,
+                          scenario_hash=signature, environment=env) if directory else None
+
+    def write(report, *, settings=None):
+        if writer:
+            cfg = get_config()
+            return writer.write({"provider": live_model[0], "model": live_model[1],
+                                 "decision_backend": cfg.llm.decision_routing.backend, **report},
+                                settings={**model_settings(cfg), **(settings or {})})
+        return None
+
+    yield write
+    if writer and not writer.written:
+        write({"outcome": "incomplete", "runs": [], "scope": "Trial ended without a result report"})

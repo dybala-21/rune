@@ -1,10 +1,8 @@
 """Calibrate the claim reviewer with synthetic code and real test output."""
 
-import json
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 import pytest
 
@@ -60,7 +58,7 @@ def review_case(tmp_path):
     ("The old function divided by len(values) + 1. Empty input returned 0.0 instead of raising ValueError.", False),
     ("수정 전에는 1개 통과, 2개 실패했습니다. 수정 후에는 3개 모두 통과했습니다.", False),
 ], ids=["universal", "direction", "supported_behavior", "supported_counts"])
-async def test_claim_review_scope(review_case, live_model, monkeypatch, request, answer, needs_correction):
+async def test_claim_review_scope(review_case, live_model, live_report, monkeypatch, request, answer, needs_correction):
     import rune.llm.client as clients
 
     client = clients.get_llm_client()
@@ -85,13 +83,10 @@ async def test_claim_review_scope(review_case, live_model, monkeypatch, request,
     seconds = time.monotonic() - started
     passed = (bool(note) == needs_correction and len(replies) == 1
               and (note is None or "contradicts or exceeds" in note))
-    report_dir = request.config.getoption("--live-report-dir")
-    if report_dir:
-        path = Path(report_dir)
-        path.mkdir(parents=True, exist_ok=True)
-        (path / f"{live_model[0]}-{request.node.callspec.id}.json").write_text(json.dumps({
-            "provider": live_model[0], "model": live_model[1], "answer": answer,
-            "expected_correction": needs_correction, "passed": passed, "seconds": seconds,
-            "note": note, "replies": replies, "timings": timing_snapshot(timing),
-        }, ensure_ascii=False, indent=2, default=str))
+    from scripts.e2e_provenance import background_run
+
+    live_report({"outcome": "passed" if passed else "failed", "answer": answer,
+                 "expected_correction": needs_correction, "scope": "Claim reviewer; not a full workflow",
+                 "note": note, "replies": replies,
+                 "runs": [background_run({"duration_ms": seconds * 1000, "timings": timing_snapshot(timing)})]})
     assert passed, note or replies

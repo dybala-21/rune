@@ -12,15 +12,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-# Read-only tools are exempt from hard blocking because sequential
-# reads of different files are a legitimate pattern.
+# Repeated reads may target different files, so tool names alone cannot block them.
 _READ_ONLY_TOOLS: frozenset[str] = frozenset({
-    "file_read", "file_list", "file_search",
+    "file_read", "file_list", "file_search", "document_read",
     "code_analyze", "code_find_def", "code_find_refs",
     "project_map", "think",
 })
 
-_BLOCK_GRACE = 2  # extra calls allowed after nudge before hard block
+_BLOCK_GRACE = 2  # Calls allowed after the nudge.
 
 
 @dataclass
@@ -41,7 +40,7 @@ class ToolCallPolicy:
     max_consecutive_same_tool: int = 5
     disable_parallel: bool = False
 
-    # Internal state — reset per round via reset()
+    # Reset at the start of each stream.
     _force_count: int = field(default=0, repr=False)
     _tool_history: list[str] = field(default_factory=list, repr=False)
 

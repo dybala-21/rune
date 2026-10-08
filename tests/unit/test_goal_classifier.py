@@ -31,11 +31,50 @@ def client(monkeypatch, *responses):
 
 
 async def test_valid_routing_needs_one_constrained_call(monkeypatch):
-    stub = client(monkeypatch, response(verdict(goal_type="code_modify", requires_execution=True)))
+    stub = client(monkeypatch, response(verdict(goal_type="code_modify", requires_execution=True, intent_categories=["coding"])))
     result = await classify_goal("Fix the test and summarize the result")
     assert result.available and result.requires_execution and result.is_complex_coding
     assert stub.completion.await_count == 1
     assert stub.completion.call_args.kwargs["response_format"] == RESPONSE_FORMAT
+    assert from_wire(to_wire(result)) == result
+
+
+@pytest.mark.parametrize("route,intents,software,write", [
+    ("artifact", ["document", "table"], False, False),
+    ("artifact", [], False, False),
+    ("code_modify", ["document", "table"], False, False),
+    ("full", ["document", "table"], False, False),
+    ("full", ["desktop"], False, False),
+    ("code_modify", ["coding"], True, True),
+    ("full", ["coding", "document"], True, True),
+    ("research", ["coding"], True, False),
+])
+async def test_requested_domain_controls_coding_guidance(monkeypatch, route, intents, software, write):
+    from rune.agent.intent_engine import resolve_intent_contract
+    from rune.agent.loop import NativeAgentLoop, _compute_explore_budget
+    from rune.agent.prompts import PROMPT_CODE, PROMPT_COMPLEX_TASK
+
+    stub = client(monkeypatch, response(verdict(goal_type=route, intent_categories=intents,
+                                              table_output="xlsx" if "table" in intents else "none")))
+    result = await classify_goal("Requested outcome")
+    assert result.available and result.requires_code is write
+    assert result.is_complex_coding is write
+    assert (_compute_explore_budget(result) > 0) is write
+    assert stub.completion.await_count == 1
+    contract = resolve_intent_contract(result, 0.9)
+    assert contract.requires_code_verification is write
+    assert contract.requires_code_write_artifact is write
+    if "document" in intents:
+        assert contract.tool_requirement == "write"
+        assert contract.output_expectation == "file"
+
+    from unittest.mock import Mock
+    repo_map = Mock(return_value="project symbols")
+    monkeypatch.setattr("rune.intelligence.repo_map.build_repo_map_sync", repo_map)
+    prompt = await NativeAgentLoop()._build_system_prompt("Requested outcome", result)
+    assert (PROMPT_CODE in prompt) is software
+    assert (PROMPT_COMPLEX_TASK in prompt) is write
+    assert repo_map.call_count == int(software)
     assert from_wire(to_wire(result)) == result
 
 
@@ -61,6 +100,7 @@ async def test_extra_prose_is_rejected_and_retried_once(monkeypatch):
     {"intent_categories": None}, {"requires_execution": "false"},
     {"requires_desktop_input": "false"}, {"confidence": float("nan")},
     {"goal_type": "invented"}, {"intent_categories": ["unknown"]},
+    {"goal_type": "artifact", "intent_categories": ["coding"]},
 ])
 async def test_invalid_decision_cannot_enable_tools(monkeypatch, change):
     bad = response(verdict(**change))

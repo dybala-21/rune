@@ -203,6 +203,37 @@ async def test_pausing_active_task_stops_worker_and_requires_review(tmp_path, mo
     store.close()
 
 
+@pytest.mark.parametrize("change", ["pause", "delete", "goal"])
+async def test_change_during_fast_completion_keeps_recovery_claim(tmp_path, monkeypatch, change):
+    monkeypatch.setenv("RUNE_HOME", str(tmp_path))
+    store = MemoryStore(tmp_path / "memory.db")
+    monkeypatch.setattr(cron, "_get_store", lambda: store)
+    job_id = store.create_cron_job(name="report", schedule="* * * * *",
+                                  command=cron._pack_command("", "original", "", ""))
+
+    async def worker(job):
+        if change == "pause":
+            store.update_cron_job(job.id, enabled=False)
+        elif change == "delete":
+            store.delete_cron_job(job.id)
+        else:
+            store.update_cron_job(job.id, command=cron._pack_command("", "replacement", "", ""))
+        return {"status": "verified", "success": True, "verified": True, "output": "Saved"}
+
+    monkeypatch.setattr(cron, "_execute_goal_job", worker)
+    try:
+        await cron.execute_cron_job(cron._row_to_cronjob(store.get_cron_job(job_id)))
+        records = ExecutionStore(tmp_path / "data" / "routine-executions.db")
+        try:
+            run = records.recent(f"cron:{job_id}:")[0]
+            assert run["blocked"] and run["result"]["execution_unknown"]
+            assert not run["result"]["verified"]
+        finally:
+            records.close()
+    finally:
+        store.close()
+
+
 @pytest.mark.asyncio
 async def test_notification_never_falls_back_to_another_external_channel():
     from unittest.mock import Mock

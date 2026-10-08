@@ -84,19 +84,20 @@ class Workflow:
                     and target.name.startswith("test_") and target.suffix == ".py")
         return target.is_relative_to(self.workspace) and (named or new_test)
 
-    def write_report(self, path: Path, outcome: str):
+    def write_report(self, outcome: str):
         from scripts.e2e_report import metrics
 
         artifacts = {p.name: p.read_text() for p in self.workspace.iterdir()
                      if p.is_file() and p.suffix in {".py", ".csv", ".txt"} and p.stat().st_size < 100_000}
-        report = {"provider": self.provider, "model": self.model, "outcome": outcome, "case": path.stem,
+        report = {"provider": self.provider, "model": self.model, "outcome": outcome,
                   "decision_backend": getattr(self, "decision_backend", None),
                   "scope": "Web API, real model, managed browser. Background learning disabled; no cross-model fallback.",
                   "runs": self.runs, "decisions": self.decisions, "artifacts": artifacts,
                   "metrics": metrics(self.runs)}
-        path.write_text(json.dumps(report, ensure_ascii=False, indent=2))
+        path = self.reporter(report, settings={"max_iterations": 16, "timeout_seconds": 180,
+                                             "cross_provider_failover": False, "browser_profile": "managed"})
         costs = [(r["snapshot"].get("usage") or {}).get("cost", {}).get("usd") for r in self.runs]
-        print(json.dumps({"provider": self.provider, "case": path.stem, "outcome": outcome,
+        print(json.dumps({"provider": self.provider, "report": str(path) if path else None, "outcome": outcome,
                           "seconds": sum(r["seconds"] for r in self.runs),
                           "usd": sum(costs) if costs and all(c is not None for c in costs) else None}), flush=True)
 

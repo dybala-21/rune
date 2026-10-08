@@ -219,12 +219,15 @@ def _source_bytes(source: Path) -> bytes:
     return data
 
 
-def _failure(exc: Exception) -> CapabilityResult:
+def _failure(exc: Exception, *, not_executed: bool = False) -> CapabilityResult:
     log.warning("document_bundle_failed", error=str(exc))
-    return CapabilityResult(success=False, error=f"Bundle was not published: {exc}", metadata={
-        "code": getattr(exc, "code", "bundle_failed"),
-        "current_revision": getattr(exc, "current_revision", None),
-    })
+    metadata = {"code": getattr(exc, "code", "bundle_failed"),
+                "current_revision": getattr(exc, "current_revision", None)}
+    if not_executed:
+        metadata["action_status"] = "not_executed"
+        if isinstance(exc, BundleError) and exc.code == "invalid_source":
+            metadata["failure_kind"] = "invalid_request"
+    return CapabilityResult(success=False, error=f"Bundle was not published: {exc}", metadata=metadata)
 
 
 async def _render_staged(payload: dict[str, Any]) -> dict[str, Any]:
@@ -247,15 +250,18 @@ async def _render_staged(payload: dict[str, Any]) -> dict[str, Any]:
 
 async def _create_version(params: DocumentBundleParams, base: BundleSnapshot | None,
                           expected_source: str | None = None) -> CapabilityResult:
-    root = Path(params.directory).expanduser().resolve()
-    source = Path(params.source_path).expanduser().resolve()
-    _authorize(root, source)
-    check_controls(root)
-    data = _source_bytes(source)
-    source_hash = _hash(data)
-    if expected_source is not None and source_hash != expected_source:
-        raise BundleError("source_changed", "Source differs from the inspected snapshot")
-    spec = params.model_copy(update={"directory": str(root), "source_path": str(source)})
+    try:
+        root = Path(params.directory).expanduser().resolve()
+        source = Path(params.source_path).expanduser().resolve()
+        _authorize(root, source)
+        check_controls(root)
+        data = _source_bytes(source)
+        source_hash = _hash(data)
+        if expected_source is not None and source_hash != expected_source:
+            raise BundleError("source_changed", "Source differs from the inspected snapshot")
+        spec = params.model_copy(update={"directory": str(root), "source_path": str(source)})
+    except Exception as exc:
+        return _failure(exc, not_executed=True)
     (root / "versions").mkdir(parents=True, exist_ok=True)
     revision = uuid.uuid4().hex
     final = root / "versions" / revision
@@ -370,6 +376,7 @@ def register_document_bundle_capability(registry: CapabilityRegistry) -> None:
     registry.register(CapabilityDefinition(
         name="document_bundle",
         description=("Create/update consistent XLSX, DOCX, PPTX and PDF files from one CSV/XLSX source. "
+                     "Publishes under directory/versions/<revision>/; use document_create for requested standalone paths. "
                      "Specify row filters, aggregates and {{metric_id}} references in document content. "
                      "Reopens every file and publishes a complete version with source/output hashes. "
                      "Inspect the current version before changing an existing bundle."),

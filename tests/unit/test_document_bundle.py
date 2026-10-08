@@ -16,6 +16,7 @@ from rune.capabilities.document_bundle import document_bundle
 
 @pytest.fixture
 def office(tmp_path, monkeypatch):
+    monkeypatch.setenv("RUNE_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("RUNE_BUNDLE_UPDATE_ENABLED", "1")
     guardian = SimpleNamespace(
         validate_file_path=lambda _: SimpleNamespace(allowed=True),
@@ -150,6 +151,38 @@ async def test_tool_is_available_and_anchors_workspace_paths(office, monkeypatch
     spec["directory"] = "anchored"
     output = await tools["document_bundle"].function(**spec)
     assert (tmp_path / "anchored/current.json").exists(), output
+
+
+async def test_rejected_source_can_be_retried_in_another_directory(office, tmp_path):
+    from rune.agent.file_outcomes import FileOutcomes
+
+    outcomes = FileOutcomes(str(tmp_path))
+    office.directory = str(tmp_path)
+    before = set(tmp_path.rglob("*"))
+    rejected = await document_bundle(office)
+    assert not rejected.success and rejected.metadata["action_status"] == "not_executed"
+    assert set(tmp_path.rglob("*")) == before
+    outcomes.observe("document_bundle", office.model_dump(), rejected)
+    assert not outcomes.blocker()
+    office.directory = str(tmp_path / "published")
+    result = await document_bundle(office)
+    assert result.success, result.error
+    outcomes.observe("document_bundle", office.model_dump(), result)
+    assert not outcomes.blocker()
+
+
+async def test_publication_failure_remains_an_unknown_mutation(office, monkeypatch, tmp_path):
+    from rune.agent.file_outcomes import FileOutcomes, may_have_changed
+
+    def failed_publish(*args):
+        raise OSError("Publication interrupted")
+
+    monkeypatch.setattr("rune.capabilities.document_bundle.publish", failed_publish)
+    result = await document_bundle(office)
+    assert not result.success and may_have_changed(result)
+    outcomes = FileOutcomes(str(tmp_path))
+    outcomes.observe("document_bundle", office.model_dump(), result)
+    assert "outcome unknown" in outcomes.blocker()
 
 
 @pytest.mark.asyncio
