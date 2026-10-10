@@ -8,6 +8,7 @@ from typing import Any, Literal
 from rune.agent.goal_classifier import (
     ClassificationResult,
     classify_goal,
+    is_coding_task,
 )
 from rune.utils.logger import get_logger
 
@@ -193,7 +194,10 @@ def resolve_intent_contract(
         )
 
     if requires_execution:
-        if category == "code" and (getattr(classification, "requires_code", False) or _gt == "code"):
+        code_write = getattr(classification, "requires_code", False) or _gt == "code" or (
+            _gt == "code_modify" and is_coding_task(classification)
+        )
+        if category == "code" and code_write:
             return IntentContract(
                 kind="code_write",
                 tool_requirement="write",

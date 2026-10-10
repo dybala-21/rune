@@ -54,10 +54,13 @@ class ClassificationResult:
 
 
 def is_coding_task(classification: ClassificationResult) -> bool:
+    intents = getattr(classification, "intent_categories", ())
     return bool(
-        "coding" in getattr(classification, "intent_categories", ())
+        "coding" in intents
         or getattr(classification, "requires_code", False)
         or getattr(classification, "is_complex_coding", False)
+        # Older classifications identify software work by goal_type alone.
+        or (getattr(classification, "goal_type", "") == "code_modify" and not intents)
     )
 
 

@@ -78,6 +78,29 @@ async def test_requested_domain_controls_coding_guidance(monkeypatch, route, int
     assert from_wire(to_wire(result)) == result
 
 
+@pytest.mark.parametrize("route,intents,software,write", [
+    ("code_modify", [], True, True),
+    ("code_modify", ["coding"], True, True),
+    ("code_modify", ["document", "table"], False, False),
+    ("artifact", [], False, False),
+    ("research", ["coding"], True, False),
+])
+def test_restored_classification_keeps_coding_requirements(route, intents, software, write):
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.agent.intent_engine import resolve_intent_contract
+    from rune.agent.prompts import PROMPT_CODE, build_system_prompt
+
+    classification = ClassificationResult(route, 0.9, 2, requires_execution=True,
+                                          intent_categories=frozenset(intents))
+    restored = from_wire(to_wire(classification))
+    contract = resolve_intent_contract(restored, 0.9)
+    prompt = build_system_prompt("Requested outcome", classification=restored)
+    assert (PROMPT_CODE in prompt) is software
+    assert contract.requires_code_verification is write
+    assert contract.requires_code_write_artifact is write
+    assert (contract.kind == "code_write") is write
+
+
 async def test_calculation_extraction_reuses_the_routing_call(monkeypatch):
     from rune.agent.calculation import calculation_context
 
