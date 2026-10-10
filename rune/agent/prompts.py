@@ -325,7 +325,7 @@ PROMPT_FILE_OUTPUT = """
 
 This task expects file output. Produce a real file using file_write, document_create,
 or document_bundle as appropriate for the requested format.
-- Path: `{cwd}/{descriptive_filename}.md` (or appropriate extension)
+- Preserve requested filenames and paths; resolve relative paths under `{cwd}`. Choose a descriptive filename only when none was supplied.
 - Announce-only responses ("I will write it") without a successful file tool = TASK FAILURE
 - For research tasks: do ALL research first, THEN write the complete file in one file_write call. Do NOT write a TODO draft first and edit later - that wastes tool rounds.
 - For simple tasks: write the file directly."""
@@ -337,7 +337,7 @@ For non-code document tasks (business plans, reports, proposals, etc.):
 
 1. **Inspect sources first**: Read supplied office files with document_read. Use web_search/web_fetch when external facts are needed. Never fabricate numbers.
 2. **Match the requested format**: Use document_create for XLSX, DOCX, PPTX, PDF, CSV or HTML. Use file_write for Markdown/text. Save under `{cwd}` unless another location was requested.
-3. **Keep related files consistent**: For multiple documents derived from tabular data, use document_bundle with explicit filters and metrics. Reference shared values as {{metric_id}} in text and cells. When conditions change, inspect the existing bundle with document_bundle_inspect. If document_bundle_update is available, pass its revision and current source hash with the changed fields; otherwise pass the revised full specification to document_bundle. Preserve unspecified documents and fields. On a revision conflict, inspect again before deciding how to apply the requested change. Link the returned version paths.
+3. **Keep related files consistent**: Reuse the same verified source values across documents. For requested filenames or paths, use document_create at those locations; do not move them into a version folder. Use document_bundle for an existing bundle or a requested versioned document set, with explicit filters, metrics and {{metric_id}} references. Inspect an existing bundle before changing it. If document_bundle_update is available, pass its revision and source hash with the changed fields; otherwise pass the revised full specification to document_bundle. Preserve unspecified fields. On a revision conflict, inspect again. Link the returned version paths for bundles.
 4. **Verify saved content**: Reopen documents using document_read and check source totals, units and requested sections. Use document_preview when page count or visual layout matters, and inspect its page image. It uses a headless renderer; a desktop app is unnecessary for this check. Other pages and unsupported formulas remain unverified. Report missing renderers or fonts instead of claiming success.
 
 ### Self-Review (mandatory before final output)
@@ -588,7 +588,7 @@ def build_system_prompt(
     is_deep_research: bool = False,
     browser_state: dict | None = None,
     defer_browser: bool = False,
-    advisor_native_enabled: bool = False,  # Phase A: Claude native advisor
+    advisor_native_enabled: bool = False,
     skill_context: str | None = None,  # matched learned skill, if any
     mark_cache_boundary: bool = False,  # insert SYSTEM_CACHE_BOUNDARY for caching
 ) -> str:
@@ -608,8 +608,10 @@ def build_system_prompt(
         parts.append("For verbatim file replies, use file_read with raw=true and return only file content. Tool-added Path headers, line numbers, "
                      "END markers and inspection summaries are not file content. Retrieve omitted content before claiming a full reproduction.")
 
-    # 2. Add PROMPT_CODE for code / full categories (skip for chat-optimized)
-    if category in ("code", "full") and "calculation" not in getattr(classification, "intent_categories", ()):
+    from rune.agent.goal_classifier import is_coding_task
+
+    coding = is_coding_task(classification) if classification is not None else category in ("code", "full")
+    if coding:
         parts.append(PROMPT_CODE)
 
     if "calculation" in getattr(classification, "intent_categories", ()):
@@ -743,20 +745,14 @@ def build_system_prompt(
     if is_complex_coding and not is_multi_task and not is_continuation:
         parts.append(PROMPT_COMPLEX_TASK)
 
-    # Execution mode enforcement
     if requires_execution:
         parts.append(
             "\n\n## Execution Mode (MANDATORY)\n"
-            "This task requires actual changes — diagnosis alone is NOT completion.\n"
-            "- After identifying an issue: immediately use file_edit/file_write/bash to fix it.\n"
-            "- After making changes: verify with build/test commands.\n"
-            "- Your completion is measured by tool execution results (edits, builds), "
-            "NOT text explanations.\n"
-            "- WRONG: \"The issue is X, you should change Y\" → RIGHT: call file_edit "
-            "to change Y, then run tests."
+            "Run the requested commands or checks and inspect their results.\n"
+            "Report what actually ran and any failures. Execution alone does not authorize "
+            "editing files or fixing unrelated issues."
         )
 
-    # Native advisor timing guidance (Anthropic pairs only)
     if advisor_native_enabled:
         parts.append(PROMPT_ADVISOR_TIMING)
 

@@ -11,6 +11,7 @@ from contextvars import ContextVar
 from functools import wraps
 from typing import Any
 
+from rune.agent.request_budget import bound_budget, scopes
 from rune.llm.usage import merge_usage, token_counts
 
 _current: ContextVar[dict | None] = ContextVar("run_timing", default=None)
@@ -30,6 +31,11 @@ def current_usage() -> dict | None:
     return copy.deepcopy(run["usage"]) if run is not None else None
 
 
+def streamed_tokens() -> int:
+    run = _current.get()
+    return run["streamed_tokens"] if run is not None else 0
+
+
 def _record_usage(run: dict, row: dict, response: Any, *, streaming: bool, request: dict) -> None:
     usage = response.get("usage") if isinstance(response, dict) else getattr(response, "usage", None)
     counts = token_counts(usage)
@@ -44,17 +50,25 @@ def _record_usage(run: dict, row: dict, response: Any, *, streaming: bool, reque
     row["usage"] = counts
     missing_before = previous is not None and not previous["cache_write_reported"]
     missing_after = not counts["cache_write_reported"]
-    for totals in (run["usage"], run["usage"]["by_model"][row["model"]]):
-        totals["reported_calls"] += int(previous is None)
-        totals["cost_usd"] += (cost or 0) - (old_cost or 0)
-        totals["unpriced_calls"] += int(cost is None) - int(previous is not None and old_cost is None)
-        totals["cache_write_unreported_calls"] += int(missing_after) - int(missing_before)
-        for key in _TOKEN_FIELDS:
-            totals[key] += counts[key] - (previous[key] if previous else 0)
-    # The streaming loop accounts for its own usage; auxiliary calls share its budget here.
-    budget = getattr(run["owner"], "_token_budget", None)
-    if not streaming and budget is not None:
-        budget.used += counts["total_tokens"] - (previous["total_tokens"] if previous else 0)
+    delta = counts["total_tokens"] - (previous["total_tokens"] if previous else 0)
+    updated = set()
+    for scope in scopes(run):
+        for totals in (scope["usage"], scope["usage"]["by_model"][row["model"]]):
+            totals["reported_calls"] += int(previous is None)
+            totals["cost_usd"] += (cost or 0) - (old_cost or 0)
+            totals["unpriced_calls"] += int(cost is None) - int(previous is not None and old_cost is None)
+            totals["cache_write_unreported_calls"] += int(missing_after) - int(missing_before)
+            for key in _TOKEN_FIELDS:
+                totals[key] += counts[key] - (previous[key] if previous else 0)
+        if streaming:
+            scope["streamed_tokens"] += delta
+        budget = bound_budget(scope)
+        if budget is not None and id(budget) not in updated:
+            budget.used += delta
+            updated.add(id(budget))
+        reservation = row.get("reservation")
+        if reservation in scope["reservations"]:
+            scope["reservations"][reservation] = max(0, scope["reservations"][reservation] - delta)
 
 
 @contextmanager
@@ -105,12 +119,17 @@ def timed(kind: str, *, name_arg: int | None = None):
 
 @contextmanager
 def capture_timing(owner=None):
+    parent = _current.get()
+    if parent is not None and getattr(parent["owner"], "_token_budget", None) is None:
+        parent = None
     run = {"started": time.monotonic(), "spans": [], "droppedSpans": 0,
-           "owner": owner, "usage": {**_usage_totals(), "by_model": {}}}
+           "owner": owner, "usage": {**_usage_totals(), "by_model": {}},
+           "streamed_tokens": 0, "reservations": {}, "budget_blocked": "", "parent": parent}
     token = _current.set(run)
     try:
         yield run
     finally:
+        run["closed"] = True
         _current.reset(token)
 
 
@@ -131,6 +150,12 @@ def timed_run(fn):
                 if args and hasattr(args[0], "__dict__"):
                     args[0]._last_run_timings = snapshot
             result.timings = snapshot
+            budget = bound_budget(run)
+            if budget is not None:
+                result.total_tokens_used = budget.used
+            if run["budget_blocked"]:
+                result.reason = "request_budget_exhausted"
+                result.completion_check = {"requirement": "Model budget", "detail": run["budget_blocked"]}
             return result
     return wrapper
 
@@ -139,26 +164,45 @@ async def timed_completion(completion, params):
     run = _current.get()
     if run is None:
         return await completion(**params)
+    from rune.agent.request_budget import BudgetExceeded, admit, input_estimate, settle
+
+    estimated = input_estimate(params) if any(getattr(bound_budget(s), "total", None) is not None for s in scopes(run)) else 0
+    reservation = 0
+    for scope in scopes(run):
+        try:
+            params, allowance = admit(scope, params, estimated)
+            if allowance:
+                reservation = allowance
+        except BudgetExceeded as exc:
+            scope["budget_blocked"] = run["budget_blocked"] = str(exc)
+            raise
     measurement = span("model", model=params.get("model"),
                        reasoningEffort=params.get("reasoning_effort") or
                        (params.get("extra_body") or {}).get("reasoning_effort") or
                        (params.get("extra_body") or {}).get("reasoning", {}).get("effort"))
     started = time.monotonic()
     row = measurement.__enter__()
+    if reservation:
+        row["reservation"] = id(row)
+        for scope in scopes(run):
+            scope["reservations"][row["reservation"]] = reservation
     if params.get("tools"):
-        # Store only a hash of the tool catalog.
+        # Fingerprint the catalog without recording its contents.
         catalog = json.dumps(params["tools"], sort_keys=True, separators=(",", ":"), default=str)
         row["toolCatalogHash"] = hashlib.sha256(catalog.encode()).hexdigest()[:16]
         row["toolCount"] = len(params["tools"])
-    run["usage"]["calls"] += 1
-    run["usage"]["by_model"].setdefault(row["model"], _usage_totals())["calls"] += 1
+    for scope in scopes(run):
+        scope["usage"]["calls"] += 1
+        scope["usage"]["by_model"].setdefault(row["model"], _usage_totals())["calls"] += 1
     try:
         response = await completion(**params)
     except BaseException as exc:
+        settle(run, row, exc)
         measurement.__exit__(type(exc), exc, exc.__traceback__)
         raise
     if not params.get("stream"):
         _record_usage(run, row, response, streaming=False, request=params)
+        settle(run, row)
         measurement.__exit__(None, None, None)
         return response
 
@@ -175,8 +219,10 @@ async def timed_completion(completion, params):
                         row.setdefault("firstTextMs", round((time.monotonic() - started) * 1000, 1))
                 yield chunk
         except BaseException as exc:
+            settle(run, row, exc)
             measurement.__exit__(type(exc), exc, exc.__traceback__)
             raise
         else:
+            settle(run, row)
             measurement.__exit__(None, None, None)
     return stream()

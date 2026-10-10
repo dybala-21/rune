@@ -228,6 +228,8 @@ class AgentConfig:
     max_tokens: int = 16_384
     # Override the intent-scaled token budget; None retains the default.
     token_budget_override: int | None = None
+    model_request_limit: int | None = None
+    cost_budget_usd: float | None = None
     _overridden: bool = False  # True when --model or --provider CLI flags are used
 
 

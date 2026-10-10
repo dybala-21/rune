@@ -751,6 +751,7 @@ class AgentLoopController:
             "research": "explore",
             "web": "explore",
             "code_modify": "implement",
+            "artifact": "implement",
             "execution": "implement",
             "full": "implement",
         }

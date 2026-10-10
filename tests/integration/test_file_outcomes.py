@@ -185,3 +185,17 @@ def test_unreadable_delete_target_is_not_confirmed_absent(monkeypatch, tmp_path)
     monkeypatch.setattr(Path, "lstat", denied)
     assert not outcomes.reconcile()
     assert outcomes.blocker()
+
+
+@pytest.mark.parametrize("kind", [None, "invalid_request"])
+def test_preflight_rejection_cannot_erase_an_unknown_write(tmp_path, kind):
+    from rune.agent.file_outcomes import FileOutcomes
+
+    outcomes = FileOutcomes(str(tmp_path))
+    params = {"path": "report.docx"}
+    outcomes.observe("document_create", params, CapabilityResult(success=False, error="Interrupted"))
+    before = dict(outcomes.pending)
+    outcomes.observe("file_write", params, CapabilityResult(success=False, error="Rejected before execution",
+                     metadata={"action_status": "not_executed", "failure_kind": kind}))
+    assert outcomes.pending == before
+    assert "outcome unknown" in outcomes.blocker()

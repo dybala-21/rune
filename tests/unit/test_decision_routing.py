@@ -132,6 +132,25 @@ def test_data_calculations_do_not_require_a_command_or_output_file():
     assert result["requires_execution"] is False and result["table_output"] == "none"
 
 
+@pytest.mark.parametrize("coding", ["yes", "no"])
+async def test_jev_keeps_document_and_software_intents_separate(setup, monkeypatch, coding):
+    cfg, client = setup
+    cfg.llm.decision_routing.backend = "jev"
+
+    async def request(**kwargs):
+        return payload(kwargs["questions"], goal_type="code_modify" if coding == "yes" else "artifact", coding=coding, document="yes")
+
+    external = AsyncMock(side_effect=request)
+    monkeypatch.setattr(jev, "_request", external)
+    result = await classify_goal("Create the requested deliverables")
+    assert result.available and result.decision_backend == "jev"
+    assert "document" in result.intent_categories
+    assert result.requires_code is (coding == "yes")
+    assert result.is_complex_coding is (coding == "yes")
+    assert external.await_count == 1
+    client.completion.assert_not_called()
+
+
 def test_file_role_batch_excludes_ambiguous_names_and_respects_limits(monkeypatch):
     from rune.agent.provenance import role_hint_names
 
@@ -152,6 +171,57 @@ async def test_key_alone_does_not_enable_external_routing(setup, monkeypatch):
     assert result.available and result.decision_backend == "connected"
     assert client.completion.await_count == 1
     external.assert_not_called()
+
+
+@pytest.mark.parametrize("backend", ["connected", "jev", "fallback"])
+async def test_multiturn_office_code_browser_routes_do_not_leak(setup, monkeypatch, backend):
+    from rune.agent.intent_engine import resolve_intent_contract
+    from rune.agent.loop import NativeAgentLoop
+    from rune.agent.prompts import PROMPT_CODE
+
+    cfg, client = setup
+    cfg.llm.decision_routing.backend = "connected" if backend == "connected" else "jev"
+    cases = [
+        ("Create report.docx from these notes", "artifact", ["document"], False, False),
+        ("Now fix the parser and run its tests", "code_modify", ["coding"], True, False),
+        ("Open the booking page and select the date", "browser", [], False, False),
+        ("Read the price displayed there", "web", [], False, True),
+        ("Put that price in report.docx", "artifact", ["document"], False, True),
+    ]
+    previous, previous_type = "", ""
+    connected_payloads, jev_payloads = [], []
+    loop = NativeAgentLoop()
+    for request, route, intents, execute, related in cases:
+        values = {"goal_type": route, "confidence": .99, "reason": "requested outcome",
+                  "intent_categories": intents, "requires_execution": execute, "requires_desktop_input": False,
+                  "is_related_to_previous": related, "table_output": "none", "calculation_expression": ""}
+        client.completion.return_value = {"choices": [{"message": {"content": json.dumps(values)}}]}
+
+        async def jev_request(route=route, intents=intents, execute=execute, related=related, **kwargs):
+            jev_payloads.append(kwargs["state"])
+            return payload(kwargs["questions"], goal_type="unknown" if backend == "fallback" else route,
+                           document="yes" if "document" in intents else "no", coding="yes" if "coding" in intents else "no",
+                           requires_execution="yes" if execute else "no", is_related_to_previous="yes" if related else "no",
+                           **{key: "output" for key in kwargs["questions"] if key.startswith("file_role_")})
+
+        monkeypatch.setattr(jev, "_request", jev_request)
+        result = await classify_goal(request, previous_goal=previous, previous_goal_type=previous_type,
+                                     browser_state={"status": "open", "url": "https://example.org/booking"})
+        assert result.available and result.goal_type == route
+        assert result.decision_backend == ("jev" if backend == "jev" else "connected")
+        assert result.intent_categories == frozenset(intents)
+        assert result.is_domain_change is bool(previous and not related)
+        assert resolve_intent_contract(result, .99).requires_code_verification is execute
+        prompt = await loop._build_system_prompt(request, result)
+        assert (PROMPT_CODE in prompt) is ("coding" in intents)
+        if backend != "jev":
+            connected_payloads.append(json.loads(client.completion.call_args.kwargs["messages"][1]["content"]))
+        previous, previous_type = request, route
+    assert client.completion.await_count == (0 if backend == "jev" else len(cases))
+    for states in (connected_payloads, jev_payloads):
+        for index, state in enumerate(states):
+            assert state["previous_request"] == (cases[index - 1][0] if index else "")
+            assert state["previous_goal_type"] == (cases[index - 1][1] if index else "")
 
 
 @pytest.mark.parametrize("local,has_key,reason", [(True, True, "local"), (False, False, "missing_key")])

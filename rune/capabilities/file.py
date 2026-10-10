@@ -15,7 +15,7 @@ from rune.safety.approval_context import was_approved
 from rune.safety.guardian import get_guardian
 from rune.types import CapabilityResult, Domain, RiskLevel
 
-# Parameter schemas (Zod to Pydantic)
+_OFFICE_FORMATS = {".docx", ".xlsx", ".pptx"}
 
 class FileReadParams(BaseModel):
     path: str = Field(description="Absolute or relative file path")
@@ -68,6 +68,17 @@ class FileSearchParams(BaseModel):
 
 # Implementations
 
+def _reject_office_text(path: Path, requested: str, *, write: bool) -> CapabilityResult | None:
+    if not ({path.suffix.lower(), Path(requested).suffix.lower()} & _OFFICE_FORMATS):
+        return None
+    tool = "document_create" if write else "document_read"
+    return CapabilityResult(
+        success=False,
+        error=(f"Office documents require their native format. Use {tool} for {requested}; "
+               "load it with tool_search if needed. Text file tools cannot read or write this format."),
+        metadata={"action_status": "not_executed", "failure_kind": "invalid_request"},
+    )
+
 def _authorize_mutation(path: str) -> CapabilityResult | None:
     check = get_guardian().validate_file_path(path)
     if not check.allowed or (check.requires_approval and not was_approved()):
@@ -91,6 +102,8 @@ async def file_read(params: FileReadParams) -> CapabilityResult:
         return CapabilityResult(success=False, error=validation.reason)
 
     file_path = Path(params.path).expanduser().resolve()
+    if blocked := _reject_office_text(file_path, params.path, write=False):
+        return blocked
     if not file_path.is_file():
         return CapabilityResult(
             success=False,
@@ -189,6 +202,8 @@ async def file_write(params: FileWriteParams) -> CapabilityResult:
         return blocked
 
     file_path = Path(params.path).expanduser().resolve()
+    if blocked := _reject_office_text(file_path, params.path, write=True):
+        return blocked
 
     # Defense-in-depth: block writes near filesystem root
     _home = os.environ.get("HOME", str(Path.home()))
@@ -258,6 +273,8 @@ async def file_edit(params: FileEditParams) -> CapabilityResult:
         return blocked
 
     file_path = Path(params.path).expanduser().resolve()
+    if blocked := _reject_office_text(file_path, params.path, write=True):
+        return blocked
 
     # Defense-in-depth: block edits near filesystem root
     _home = os.environ.get("HOME", str(Path.home()))

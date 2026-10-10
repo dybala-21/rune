@@ -44,7 +44,7 @@ from rune.agent.completion_gate import (
     evaluate_completion_gate,
 )
 from rune.agent.failover import FailoverManager, classify_error
-from rune.agent.goal_classifier import ClassificationResult, classify_goal
+from rune.agent.goal_classifier import ClassificationResult, classify_goal, is_coding_task
 from rune.agent.intent_engine import resolve_intent_contract
 from rune.agent.litellm_adapter import LiteLLMAgent, UsageLimits
 from rune.agent.output_integrity import (
@@ -149,6 +149,7 @@ _BUDGET_BY_INTENT: dict[str, int] = {
     "chat": 50_000,
     "quick_fix": 100_000,
     "code_modify": 200_000,
+    "artifact": 200_000,
     "research": 300_000,
     "deep_research": 500_000,
     "complex_coding": 1_000_000,
@@ -159,6 +160,7 @@ _MAX_OUTPUT_TOKENS_BY_INTENT: dict[str, int] = {
     "chat": 4_096,
     "quick_fix": 4_096,
     "code_modify": 8_192,
+    "artifact": 8_192,
     "research": 8_192,
     "deep_research": 16_384,
     "complex_coding": 8_192,
@@ -587,6 +589,12 @@ class NativeAgentLoop(EventEmitter):
     def __init__(self, config: AgentConfig | None = None) -> None:
         super().__init__()
         self._config = config or AgentConfig()
+        from rune.config import get_config
+        limits = get_config().llm
+        if self._config.model_request_limit is None:
+            self._config.model_request_limit = limits.model_request_limit
+        if self._config.cost_budget_usd is None:
+            self._config.cost_budget_usd = limits.cost_budget_usd
         self._status = AgentStatus.IDLE
         self._step = 0
         self._stall = StallState()
@@ -687,6 +695,8 @@ class NativeAgentLoop(EventEmitter):
         self._step = 0
         self._stall = StallState()
         self._token_budget = TokenBudget()
+        if self._config.token_budget_override is not None:
+            self._token_budget.total = self._config.token_budget_override
         self._wind_down_phase = "none"
         self._wind_down_write_forced = False
         self._step_start_time = 0.0
@@ -950,6 +960,7 @@ class NativeAgentLoop(EventEmitter):
 
     def _record_completion_block(self, name: str, detail: str) -> None:
         self._completion_check = {"name": name, "detail": detail[:4000]}
+        log.info("completion_check_blocked", check=name, detail=detail[:4000])
 
     def _max_gate_reason(self) -> str:
         """Choose the stop reason for unresolved completion checks."""
@@ -1159,22 +1170,22 @@ class NativeAgentLoop(EventEmitter):
                 "web": "research",
                 "research": "research",
                 "code_modify": "code_modify",
+                "artifact": "artifact",
                 "execution": "code_modify",
                 "browser": "research",
                 "full": "deep_research",
             }
             budget_intent = _goal_to_budget.get(intent_key, "research")
-            # Apply the repository-work floor to tokens as well as tool rounds.
-            if budget_intent in ("code_modify", "quick_fix") and _repo_scale_workspace(
+            # Repository changes need a larger budget than isolated edits.
+            if is_coding_task(classification) and budget_intent in ("code_modify", "quick_fix") and _repo_scale_workspace(
                 (context or {}).get("workspace_root") or "."
             ):
                 budget_intent = "complex_coding"
             self._token_budget.total = _BUDGET_BY_INTENT.get(budget_intent, 500_000)
-            # Optional explicit override (used by /goal for heavy tasks).
+            # Explicit limits take precedence, including zero.
             _budget_override = getattr(self._config, "token_budget_override", None)
-            if _budget_override:
+            if _budget_override is not None:
                 self._token_budget.total = int(_budget_override)
-            # Output token scaling by intent
             self._max_output_tokens = _MAX_OUTPUT_TOKENS_BY_INTENT.get(budget_intent, 8_192)
             log.info(
                 "token_budget_set",
@@ -1464,6 +1475,7 @@ class NativeAgentLoop(EventEmitter):
         if TOKEN_OPTIMIZATION_ENABLED:
             _CATEGORY_MAP: dict[str, str] = {
                 "code_modify": "code",
+                "artifact": "artifact",
                 "research": "code",
                 "execution": "code",
                 "web": "web",
@@ -1474,6 +1486,7 @@ class NativeAgentLoop(EventEmitter):
         else:
             _CATEGORY_MAP: dict[str, str] = {
                 "code_modify": "code",
+                "artifact": "artifact",
                 "research": "code",
                 "execution": "code",
                 "web": "web",
@@ -1488,7 +1501,7 @@ class NativeAgentLoop(EventEmitter):
 
         # Build repo map for code tasks (auto-selects most relevant symbols)
         repo_map_text: str | None = None
-        if goal_category in ("code", "full") and "calculation" not in classification.intent_categories:
+        if is_coding_task(classification):
             try:
                 from rune.intelligence.repo_map import build_repo_map_sync
 
@@ -1886,19 +1899,23 @@ class NativeAgentLoop(EventEmitter):
             tools = [t for t in tools if t != "browser_screenshot"]
 
         from rune.agent.execution_journal import active_journal
+        from rune.agent.role_decisions import RoleDecisions
         from rune.agent.table_acceptance import TableAcceptance
 
-        # Preparation can verify files; native-only tables still use app evidence.
+        role_decisions = RoleDecisions(goal, self._workspace_root)
+        # Native table tasks use app evidence; file tasks use table checks.
         journal = active_journal()
         self._table_acceptance = TableAcceptance(
             (context or {}).get("original_goal") or goal,
             required="table" in classification.intent_categories and not _desktop_mode,
             prior=[m["content"] for m in message_history or [] if m.get("role") == "user" and m.get("content")],
             previous=journal.previous if journal else None,
+            workspace=self._workspace_root, input_roles=role_decisions.roles,
         )
         system_prompt += (
             "\nFor source-derived aggregate CSV/XLSX deliverables, first call table_requirements with the original "
-            "source. Follow its fixed columns and data conditions, then call table_verify on every delivered table. "
+            "source. Read referenced input policies before fixing requirements; their snapshots are included by the harness. "
+            "Follow its fixed columns and data conditions, then call table_verify on every delivered table. "
             "Repair reported differences and recheck after edits. Do not substitute generated data for the source. "
             "Report unsupported conditions separately; table data checks do not verify prose or visual layout.\n"
         )
@@ -1947,8 +1964,8 @@ class NativeAgentLoop(EventEmitter):
                 max_uses=_native_cfg.max_uses,
             )
 
-        # Raise repository-work rounds, including full scope; keep read-only caps small.
-        _repo_fix = (
+        # Extra repository rounds apply only to coding tasks.
+        _repo_fix = is_coding_task(classification) and (
             getattr(classification, "goal_type", "")
             in ("code_modify", "execution", "full")
             or getattr(classification, "requires_code", False)
@@ -1961,9 +1978,6 @@ class NativeAgentLoop(EventEmitter):
             repo_fix=_repo_fix,
         )
         _explore_budget = _compute_explore_budget(classification, _repo_fix)
-        from rune.agent.role_decisions import RoleDecisions
-
-        role_decisions = RoleDecisions(goal, self._workspace_root)
         agent = LiteLLMAgent(
             model=model,
             system_prompt=system_prompt,
@@ -2343,6 +2357,8 @@ class NativeAgentLoop(EventEmitter):
                 messages = self._prepare_step(messages, workspace_root)
 
             request_timeout = None
+            from rune.agent.timing import streamed_tokens
+            streamed_before = streamed_tokens()
             try:
                 remaining_tokens = max(0, self._token_budget.total - self._token_budget.used)
                 usage_limits = UsageLimits(
@@ -2417,7 +2433,7 @@ class NativeAgentLoop(EventEmitter):
                     cache_write_tokens = getattr(usage, "cache_write_tokens", 0) or 0
                     reasoning_tokens = getattr(usage, "reasoning_tokens", 0) or 0
                     step_tokens = request_tokens + response_tokens
-                    self._token_budget.used += step_tokens
+                    self._token_budget.used += max(0, step_tokens - (streamed_tokens() - streamed_before))
                     trace.total_tokens_used = self._token_budget.used
                     await self.emit(
                         "step_tokens",
@@ -3226,6 +3242,12 @@ class NativeAgentLoop(EventEmitter):
                             break
 
             except Exception as exc:
+                from rune.agent.request_budget import BudgetExceeded
+                if isinstance(exc, BudgetExceeded):
+                    self._record_completion_block("Model budget", str(exc))
+                    trace.reason = exc.reason
+                    trace.final_step = self._step
+                    break
                 from rune.computer.protocol import DesktopError
                 if isinstance(exc, DesktopError):
                     self._record_completion_block("Desktop outcome", str(exc))
@@ -3904,8 +3926,8 @@ class NativeAgentLoop(EventEmitter):
         """Raise a small budget to the coding limit when execution proves it needs one."""
         if self._budget_upgraded_for_code:
             return
-        if getattr(self._config, "token_budget_override", None):
-            # A caller named a number; it is not ours to widen.
+        if getattr(self._config, "token_budget_override", None) is not None:
+            # Never raise an explicit budget.
             self._budget_upgraded_for_code = True
             return
         if self._structured_writes < self._CODE_WORK_WRITE_THRESHOLD:

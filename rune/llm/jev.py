@@ -59,10 +59,11 @@ def build_questions(state: dict) -> tuple[dict, dict[str, str]]:
             "chat": "Conversation or a general question, including direct arithmetic answers.",
             "web": "Online lookup or reading a URL, without interacting with webpage controls.",
             "research": "Read-only analysis of files, data, code or a project, including data sums and counts.",
-            "code_modify": "Create, save, or edit files or code, including reading sources and verifying the resulting deliverable.",
+            "code_modify": "Implement or modify software, including related reports and tests.",
+            "artifact": "Create or revise non-code files, documents, reports, spreadsheets or presentations, including source reads and saved-file checks.",
             "execution": "Run commands, tests, builds, installs, or deployments.",
             "browser": "Interact with webpage controls, forms, seats, or bookings.",
-            "full": "Operate native apps, or fulfill independent outcomes across categories. Reading, writing and verifying one deliverable belong to code_modify, not full.",
+            "full": "Operate native apps, or fulfill independent outcomes across categories. Reading, writing and verifying non-code deliverables belong to artifact, not full.",
         }),
         "desktop": _choice("What native app access does the current request require?", {
             "none": "No native app access. Creating, saving or rereading DOCX/PDF/PPTX/XLSX files uses document/file tools. File formats, direct arithmetic, and webpage interaction alone do not require a native app.",
@@ -72,6 +73,10 @@ def build_questions(state: dict) -> tuple[dict, dict[str, str]]:
         "requires_execution": _choice("Does correctness require running code, scripts, commands, or tests?", {
             "yes": "The user requests code/tests/commands to run, or executing them is required for correctness.",
             "no": "Reading, analysis, or answers from code-computed file profiles. File sums/counts and native app input alone do not require a command run.",
+        }),
+        "coding": _choice("Is software work itself a requested outcome?", {
+            "yes": "Implement, debug, test or analyze software, including requests that also produce a report.",
+            "no": "Documents, tables, prose or app operation without requested software work. Helper scripts for these deliverables do not make the task coding.",
         }),
         "email": _choice("Is the request work on email itself?", {
             "yes": "Work on an inbox, email message, draft, or reply.",
@@ -144,9 +149,9 @@ def _routing_values(picked: dict[str, str], confidences: dict[str, float], expre
     if (picked["desktop"] != "none" and picked["goal_type"] in {"chat", "web", "research", "browser"}
             or picked["calculation"] not in {"none", "data"} and picked["goal_type"] != "chat"
             or picked["calculation"] == "data" and (picked["goal_type"] != "research" or picked["requires_execution"] != "no")
-            or picked["table_output"] != "none" and picked["goal_type"] not in {"code_modify", "full"}):
+            or picked["table_output"] != "none" and picked["goal_type"] not in {"artifact", "code_modify", "full"}):
         raise DecisionAbstained("inconsistent_decision")
-    intents = [key for key in ("email", "document") if picked[key] == "yes"]
+    intents = [key for key in ("coding", "email", "document") if picked[key] == "yes"]
     if picked["desktop"] != "none":
         intents.append("desktop")
     if picked["table_output"] != "none":

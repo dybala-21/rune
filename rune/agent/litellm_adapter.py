@@ -72,12 +72,10 @@ from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
 
+_MAX_TOOL_CALLS_PER_RESPONSE = 32
+
 _BENCH_STOP_BATCH_ON_TOOL_FAILURE_ENV = "RUNE_BENCH_STOP_BATCH_ON_TOOL_FAILURE"
-# Optional per-assistant-turn cap on serial write/execute tool calls. Off by
-# default (unset/<=0). When set to N>0, only the first N write/execute calls in
-# a turn run; the rest are skipped so the model must read their results before
-# scheduling more. Counters the v6/v7 single-turn tool explosion where one
-# response queued many alternative artifact writes before any feedback.
+# Cap writes and commands per response; unset or non-positive disables the cap.
 _BENCH_MAX_WRITE_EXEC_PER_TURN_ENV = "RUNE_BENCH_MAX_WRITE_EXEC_PER_TURN"
 _STOP_BATCH_FAILURE_TOOLS = frozenset({
     "bash_execute",
@@ -1034,27 +1032,20 @@ class StreamResult:
         """Yield text deltas, auto-executing tool calls when encountered."""
         _max_tool_rounds = self._max_tool_rounds
         _tool_round = 0
-        # The cap kills the run without a final LLM turn, so the model cannot
-        # disclose it — the harness must. Read by the loop into the trace.
+        _oversized_batches = 0
+        # The loop reports this limit because no final model response follows.
         self.tool_budget_exhausted = False
-        _force_tool = False  # tool_choice="required" flag for retry
-        _output_recovery_count = 0  # max output tokens recovery attempts
+        _force_tool = False
+        _output_recovery_count = 0
         _MAX_OUTPUT_RECOVERY = 2
-        # Exploration-budget state: consecutive tool rounds without an edit
-        # tool, the escalation stage reached (0 none, 1 nudged, 2 forced), and
-        # the one-shot "force file_edit via tool_choice" flag for the next call.
+        # Exploration stages: 0 = none, 1 = nudged, 2 = forced edit.
         _explore_rounds = 0
         _explore_stage = 0
         _force_edit_tool = False
-        # Verify-on-stop state (per stream_text call). The mechanical verdict
-        # is NOT cleared here: a run is often several streams, and the one
-        # that ran the tests is rarely the one that talks last — clearing per
-        # stream let a text-only closing phase erase the evidence. The loop
-        # clears it once per run.
+        # Reset edit tracking per stream; keep the test verdict until the run ends.
         self._vos_edited = False
         self._vos_edited_paths: set[str] = set()
         self._vos_nudges = 0
-        # Artifact-provenance state (per stream_text call).
         self._artifact_ledger = None
         self._artifact_nudges = 0
         self._artifact_roles_tried = False
@@ -1067,19 +1058,21 @@ class StreamResult:
         self._tamper_blocks = 0
         self._postconditions = []
         self._postcondition_nudges = 0
-        # Directories changed wholesale — by one shell glob, or by a run of
-        # single-file removals — whose result nothing has looked at since.
+        # Track directories that still need inspection after deletions.
         self._reobs_dirs: set[str] = set()
         self._reobs_removed: dict[str, int] = {}
         self._reobs_nudges = 0
         self._policy.reset()
         report_language = "ko" if any("가" <= char <= "힣" for char in self._request) else "en"
 
-        # Classify unresolved files during the first response. Tools wait
-        # for the result before checking whether a write invents an input.
+        # Start file classification now; writes wait for it before checking inputs.
         self._start_artifact_role_classification()
 
         while True:
+            from rune.agent.request_budget import BudgetExceeded
+            remaining_tokens = self._request_tokens_limit - self._usage.input_tokens - self._usage.output_tokens
+            if remaining_tokens <= 0 or self._response_tokens_limit <= 0:
+                raise BudgetExceeded("The token budget was reached. No further request was sent.")
             control = current_control()
             if control is not None and await control.checkpoint(self._messages):
                 self._collected_text = ""
@@ -1130,6 +1123,10 @@ class StreamResult:
                 }
                 _force_edit_tool = False
 
+            if recovery_tools and self._tool_catalog is not None:
+                for name in sorted(recovery_tools - self._tool_catalog.loaded):
+                    if name in self._tool_catalog.all:
+                        await self._tool_catalog.search(name)
             _tools = self._tool_schemas or None
             if desktop is not None and _tools:
                 allowed = desktop.allowed_tools()
@@ -1154,13 +1151,11 @@ class StreamResult:
 
             _effective_max = _clamp_max_tokens(
                 self._model,
-                min(self._max_tokens, self._response_tokens_limit),
+                min(self._max_tokens, self._response_tokens_limit, remaining_tokens),
             )
             _acompletion_kwargs: dict[str, Any] = {
                 "model": self._model,
-                # Mask stale tool outputs for the wire only; self._messages
-                # stays full so history/rollover are unaffected.
-                # Cache the stable prefix and transcript where the provider supports it.
+                # Compact the outgoing history; retain full messages for rollover.
                 "messages": _apply_anthropic_message_cache(
                     self._model,
                     _ensure_anthropic_user_tail(
@@ -1236,6 +1231,7 @@ class StreamResult:
 
             text_this_turn = ""
             tool_calls_by_index: dict[int, dict[str, Any]] = {}
+            _batch_overflow = False
             _finish_reason: str | None = None
             # Live-streaming state for this turn.
             _tool_seen = False
@@ -1280,6 +1276,9 @@ class StreamResult:
                     for tc in choice.delta.tool_calls:
                         idx = tc.index if hasattr(tc, "index") else 0
                         if idx not in tool_calls_by_index:
+                            if len(tool_calls_by_index) >= _MAX_TOOL_CALLS_PER_RESPONSE:
+                                _batch_overflow = True
+                                break
                             tool_calls_by_index[idx] = {
                                 "id": getattr(tc, "id", None) or "",
                                 "type": "function",
@@ -1297,6 +1296,10 @@ class StreamResult:
                 # Usage from final chunk
                 if hasattr(chunk, "usage") and chunk.usage:
                     self._update_usage(chunk.usage)
+                if _batch_overflow:
+                    if close := getattr(self._stream, "aclose", None):
+                        await close()
+                    break
 
             if control is not None and plan_revision != control.revision:
                 # No tool calls from this response have entered the history yet.
@@ -1354,12 +1357,25 @@ class StreamResult:
                              names=[c["function"]["name"] for c in _recovered])
                     for _i, _c in enumerate(_recovered):
                         tool_calls_by_index[_i] = _c
-                    text_this_turn = ""  # the text WAS the call, not an answer
+                    text_this_turn = ""  # Parsed as a tool call, so do not display it.
 
-            # Post-stream decision: yield text or discard
-            # We check ALL continuation paths (tool_calls, force_tool,
-            # truncation recovery) BEFORE yielding.  Any path that
-            # loops back makes the current text intermediate/speculative.
+            if _batch_overflow or len(tool_calls_by_index) > _MAX_TOOL_CALLS_PER_RESPONSE:
+                # Reject the whole response before any tool can change state.
+                self._collected_text = self._collected_text[:_collected_len_before]
+                _oversized_batches += 1
+                log.warning("tool_batch_limit_exceeded", attempts=_oversized_batches,
+                            limit=_MAX_TOOL_CALLS_PER_RESPONSE)
+                if _oversized_batches >= 2:
+                    self.tool_budget_exhausted = True
+                    break
+                self._messages.append({"role": "user", "content": (
+                    f"Your response exceeded {_MAX_TOOL_CALLS_PER_RESPONSE} tool calls. "
+                    "None of those calls ran. Send a smaller batch of distinct, necessary calls, "
+                    "then use their results before requesting more work."
+                )})
+                continue
+
+            # Text preceding a tool call is not a final answer.
             _has_tools = bool(tool_calls_by_index) or _finish_reason == "tool_calls"
             _discard = _has_tools and bool(text_this_turn)
 
@@ -1714,36 +1730,14 @@ class StreamResult:
                             "explore_budget_force_edit", rounds=_explore_rounds
                         )
 
-            # Replace previous browser_observe results with 1-line
-            # summary.  Only the latest snapshot is useful; older ones
-            # waste tokens as context accumulates across rounds.
-            _latest_observe_idx = -1
-            for _i, _m in enumerate(self._messages):
-                if (_m.get("role") == "tool"
-                        and "Interactive Elements" in _m.get("content", "")):
-                    _latest_observe_idx = _i
-            if _latest_observe_idx > 0:
-                for _i, _m in enumerate(self._messages[:_latest_observe_idx]):
-                    if (_m.get("role") == "tool"
-                            and "Interactive Elements" in _m.get("content", "")):
-                        _m["content"] = "[Previous page snapshot — superseded by latest observe]"
+            from rune.agent.browser_context import compact_browser_history
+
+            self._messages = compact_browser_history(self._messages)
 
             if _is_last_round:
                 break
 
-            # Loop back to make another LLM call with tool results
-
-    # Tool group mapping for failure-based group blocking.
-    # When browser_act fails 3 times, all browser_* tools are blocked.
-
-        # The final word on edited work belongs to a harness-run check, not
-        # to whatever the model happened to execute last. Measured: the stop
-        # check reported a failure, the model then ran a narrower command of
-        # its own that passed, and that pass overwrote the verdict — the run
-        # exited 0 with the real tests still failing. Re-run the covering
-        # tests here, restricted to files that existed before the editing
-        # started, and let THAT outcome be what the end of the run answers
-        # to. One bounded subprocess, only on runs that edited code.
+        # Recheck edited files against the original test set before accepting the run.
         if (
             getattr(self, "_vos_edited_paths", None)
             and os.environ.get(_VOS_EXEC_ENV, "1") != "0"
@@ -2465,12 +2459,11 @@ class LiteLLMAgent:
         if not _dominated_by_history:
             messages.append({"role": "user", "content": goal})
 
-        # Extract limits
         request_limit = 1_000_000
         response_limit = self._max_tokens
         if usage_limits is not None:
-            request_limit = getattr(usage_limits, "request_tokens_limit", request_limit) or request_limit
-            response_limit = getattr(usage_limits, "response_tokens_limit", response_limit) or response_limit
+            request_limit = getattr(usage_limits, "request_tokens_limit", request_limit)
+            response_limit = getattr(usage_limits, "response_tokens_limit", response_limit)
 
         stream_result = StreamResult(
             model=self._model,

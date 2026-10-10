@@ -15,10 +15,47 @@ from rune.capabilities.table_acceptance import (
     expected_table,
     read_tabular,
 )
+from rune.types import CapabilityResult
 
 REQUEST = "Exclude cancelled orders, remove exact duplicates, sum amount by team. Save summary.csv."
 SOURCE = ("id,team,status,amount\n1,A,confirmed,10.005\n1,A,confirmed,10.005\n"
           "2,A,cancelled,99\n3,B,confirmed,5.005\n4,A,confirmed,2.000\n")
+
+
+@pytest.mark.parametrize("reader", ["file_read", "document_read"])
+def test_known_source_moves_to_requirements_instead_of_repeated_reads(reader):
+    state = TableAcceptance(REQUEST, required=True, input_roles={"sales.csv": "input", "summary.csv": "output"})
+    for path, success in (("summary.csv", True), ("sales.csv", False)):
+        state.observe(reader, {"path": path}, CapabilityResult(success=success))
+        assert reader in state.recovery_tools()
+    state.observe(reader, {"path": "sales.csv"}, CapabilityResult(success=True))
+    assert state.recovery_tools() == {"table_requirements", "ask_user"}
+
+
+def test_reading_different_documents_is_not_a_tool_loop():
+    from rune.agent.tool_call_policy import ToolCallPolicy
+
+    policy = ToolCallPolicy()
+    for _ in range(12):
+        assert not policy.should_block_tool("document_read")
+        policy.record_tool_call("document_read")
+
+
+async def test_requirement_repair_reports_schema_and_quote_errors_together(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    invalid = plan().model_dump()
+    invalid.update(grand_total=["TOTAL", ""], requirements=[REQUEST + " (from the user)"])
+    corrected = plan().model_dump()
+    completion = AsyncMock(side_effect=[json.dumps(invalid), json.dumps(corrected)])
+    monkeypatch.setattr("rune.agent.requirement_gate._completion", completion)
+    result = await extract_plan(REQUEST, [], "sales.csv", ["team", "amount"], [])
+    assert result == plan()
+    repair = json.loads(completion.call_args_list[1].args[1])
+    issues = repair["validation_errors"]
+    assert any("Grand-total" in issue["message"] for issue in issues)
+    assert any(issue["field"] == ["requirements", 0] and issue["value"].endswith("(from the user)") for issue in issues)
+    assert completion.await_count == 2
 
 
 def plan(**changes):
@@ -126,12 +163,28 @@ async def test_table_write_requests_verification_without_waiting_for_final_answe
     state = TableAcceptance(REQUEST, required=True)
     assert "file_list" in state.recovery_tools()
     state.observe("file_read", {"path": str(source)}, CapabilityResult(success=True, output=SOURCE))
-    assert state.recovery_tools() == {"table_requirements", "ask_user"}
+    assert {"table_requirements", "file_read", "document_read"} <= state.recovery_tools()
+    assert "file_write" not in state.recovery_tools()
     contract = (await state.requirements(str(source), None)).metadata["tableContract"]
     state.observe("file_write", {"path": str(output)}, CapabilityResult(success=True, output="Written"))
     assert state.recovery_tools() == {"table_verify", "ask_user"}
     assert (await state.verify(contract["id"], str(output), None, 1)).success
     assert state.recovery_tools() is None
+
+
+async def test_csv_sheet_error_retries_arguments_without_repeated_source_reads(office):
+    from rune.capabilities.table_checks import TableRequirementsParams, table_requirements
+
+    source, _, calls = office
+    state = TableAcceptance(REQUEST, required=True)
+    with acceptance_scope(state):
+        rejected = await table_requirements(TableRequirementsParams(source_path=str(source), sheet="Summary"))
+        assert not rejected.success and "sheet=null" in rejected.error
+        assert state.recovery_tools() == {"table_requirements", "ask_user"}
+        assert not calls
+        accepted = await table_requirements(TableRequirementsParams(source_path=str(source)))
+        assert accepted.success and state.recovery_tools() is None
+        assert len(calls) == 1
 
 
 async def test_computed_preview_uses_source_values_and_discloses_truncation(office):
@@ -150,16 +203,20 @@ async def test_computed_preview_uses_source_values_and_discloses_truncation(offi
     assert len(preview["rows"]) == 10 and preview["total_rows"] == 12 and not preview["complete"]
 
 
-async def test_complete_preview_applies_numeric_order_and_retains_total(office, monkeypatch):
+@pytest.mark.parametrize("position,sort", [(None, True), ("first", True), ("last", True), ("first", False)])
+async def test_complete_preview_applies_numeric_order_and_retains_total(office, monkeypatch, position, sort):
     source, _, _ = office
 
     async def ordered(*args):
-        return plan(grand_total=["Total"], order_by=[{"column": "amount", "direction": "asc"}])
+        return plan(grand_total=["Total"], grand_total_position=position,
+                    order_by=[{"column": "amount", "direction": "asc"}] if sort else [])
 
     monkeypatch.setattr("rune.agent.table_acceptance.extract_plan", ordered)
     result = await TableAcceptance(REQUEST, required=True).requirements(str(source), None)
     preview = json.loads(result.output)["computed_preview"]
-    assert preview["rows"] == [["B", "5.01"], ["A", "12.01"], ["Total", "17.01"]]
+    groups = [["B", "5.01"], ["A", "12.01"]] if sort else [["A", "12.01"], ["B", "5.01"]]
+    total = [["Total", "17.01"]]
+    assert preview["rows"] == (total + groups if position == "first" else groups + total)
     assert preview["complete"]
 
 
@@ -279,6 +336,63 @@ def test_grand_total_labels_cannot_hide_a_source_group():
     with pytest.raises(ValueError):
         plan(applicable=False, unverified=["unsupported"], filters=[], deduplicate_by=[],
              group_by=[], aggregates=[], grand_total=["Total"])
+
+
+@pytest.mark.parametrize("position", [None, "first", "last"])
+@pytest.mark.parametrize("index", [0, 1, 2])
+@pytest.mark.parametrize("exact_label", [True, False])
+def test_total_position_is_independent_of_group_sort_and_values(position, index, exact_label):
+    contract = plan(grand_total=["TOTAL"], grand_total_position=position, exact_total_label=exact_label,
+                    order_by=[{"column": "team"}])
+    headers, source = read_tabular(SOURCE.encode(), ".csv")
+    expected, _ = expected_table(contract, headers, source)
+    label = "TOTAL" if exact_label else "Grand total"
+    rows = [{"team": "A", "amount": "12.01"}, {"team": "B", "amount": "5.01"}]
+    rows.insert(index, {"team": label, "amount": "17.01"})
+    result = compare_table(contract, expected, ["team", "amount"], rows)
+    valid = position is None or index == (0 if position == "first" else 2)
+    assert result["status"] == ("pass" if valid else "fail")
+    assert result["issues"] == ([] if valid else [{"check": "grand_total_position",
+                                                 "expected": position, "actual_data_rows": [index + 1]}])
+    for wrong in (rows + [rows[index]], rows[:index] + rows[index + 1:],
+                  rows[:index] + [{"team": label, "amount": "999"}] + rows[index + 1:]):
+        assert compare_table(contract, expected, ["team", "amount"], wrong)["status"] == "fail"
+
+
+def test_total_position_requires_a_supported_position_and_total():
+    with pytest.raises(ValueError, match="requires a grand-total row"):
+        plan(grand_total_position="last")
+    with pytest.raises(ValueError):
+        plan(grand_total=["TOTAL"], grand_total_position="middle")
+
+
+async def test_xlsx_total_position_can_be_repaired_against_the_same_contract(office, monkeypatch):
+    from openpyxl import Workbook
+
+    source, output, _ = office
+
+    async def xlsx_plan(*args):
+        return plan(output_names=["summary.xlsx"], output_sheet="Summary",
+                    grand_total=["TOTAL"], grand_total_position="last")
+
+    monkeypatch.setattr("rune.agent.table_acceptance.extract_plan", xlsx_plan)
+    state = TableAcceptance(REQUEST, required=True)
+    contract = (await state.requirements(str(source), None)).metadata["tableContract"]
+    output = output.with_suffix(".xlsx")
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Summary"
+    for row in (["team", "amount"], ["TOTAL", 17.01], ["A", 12.01], ["B", 5.01]):
+        ws.append(row)
+    wb.save(output)
+    rejected = await state.verify(contract["id"], str(output), None, 1)
+    assert not rejected.success and "grand_total_position" in rejected.output
+    ws.delete_rows(2)
+    ws.append(["TOTAL", 17.01])
+    wb.save(output)
+    wb.close()
+    verified = await state.verify(contract["id"], str(output), None, 1)
+    assert verified.success and "grand_total_position" in verified.output
 
 
 def test_unspecified_display_labels_do_not_become_data_requirements():

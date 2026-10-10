@@ -128,8 +128,9 @@ def usage_payload(trace: Any) -> dict | None:
     missing = usage["calls"] - usage["reported_calls"] + usage.get("unpriced_calls", usage["reported_calls"])
     return {"total": usage["total_tokens"], "input": usage["input_tokens"], "output": usage["output_tokens"],
             "cacheRead": usage["cached_input_tokens"], "cacheCreation": usage["cache_write_tokens"],
-            "cost": {"usd": None if missing else usage.get("cost_usd", 0),
+            "cost": {"usd": None if missing or usage.get("incomplete_calls") else usage.get("cost_usd", 0),
                      "knownUsd": usage.get("cost_usd", 0), "unpricedCalls": missing,
+                     **({"incomplete": True} if usage.get("incomplete_calls") else {}),
                      "scope": "model_tokens"}}
 
 

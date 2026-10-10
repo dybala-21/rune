@@ -154,7 +154,7 @@ def extract_intent_from_goal(
         hint_lower = hint.lower()
         if hint_lower in ("web", "research"):
             domain = Domain.NETWORK
-        elif hint_lower in ("code_modify",):
+        elif hint_lower in ("code_modify", "artifact"):
             domain = Domain.FILE
         elif hint_lower in ("execution",):
             domain = Domain.PROCESS

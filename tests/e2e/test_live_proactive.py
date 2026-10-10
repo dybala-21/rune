@@ -1,8 +1,6 @@
 """Proactive feedback through the API, real agent, and durable execution store."""
 
 import asyncio
-import json
-from pathlib import Path
 
 import httpx
 import pytest
@@ -10,7 +8,7 @@ from fastapi import FastAPI
 
 
 @pytest.mark.asyncio
-async def test_proactive_accept_dismiss_and_restart(live_model, tmp_path, monkeypatch, request):
+async def test_proactive_accept_dismiss_and_restart(live_model, live_report, tmp_path, monkeypatch, request):
     from rune.agent.background import BackgroundTask, run_background
     from rune.api.handlers.proactive import router
     from rune.config import get_config
@@ -99,14 +97,10 @@ async def test_proactive_accept_dismiss_and_restart(live_model, tmp_path, monkey
     finally:
         bridge.stop()
         await asyncio.sleep(0)
-        directory = request.config.getoption("--live-report-dir")
-        if directory:
-            path = Path(directory)
-            path.mkdir(parents=True, exist_ok=True)
-            (path / f"{live_model[0]}-proactive.json").write_text(json.dumps({
-                "provider": live_model[0], "model": live_model[1], "outcome": outcome,
-                "scope": "Synthetic context hints; real generation pipeline, feedback API, bridge, configured model and persistent stores.",
-                "runs": results,
-            }, ensure_ascii=False, indent=2))
+        from scripts.e2e_provenance import background_run
+
+        live_report({"outcome": outcome,
+                     "scope": "Synthetic hints; real feedback API, agent and persistent stores.",
+                     "runs": [background_run(result) for result in results], "results": results})
         records.close()
         store.close()

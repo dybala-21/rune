@@ -6,9 +6,11 @@ import pytest
 from rune.capabilities.file import (
     FileDeleteParams,
     FileEditParams,
+    FileReadParams,
     FileWriteParams,
     file_delete,
     file_edit,
+    file_read,
     file_write,
 )
 
@@ -19,7 +21,8 @@ def authorized_workspace(tmp_path, monkeypatch):
         return SimpleNamespace(allowed=Path(path).resolve().is_relative_to(tmp_path.resolve()),
                                requires_approval=False, reason="outside test workspace")
 
-    monkeypatch.setattr("rune.capabilities.file.get_guardian", lambda: SimpleNamespace(validate_file_path=validate))
+    monkeypatch.setattr("rune.capabilities.file.get_guardian", lambda: SimpleNamespace(
+        validate_file_path=validate, validate_file_read_path=validate))
 
 
 async def test_actual_changes_cover_create_replace_and_delete_without_git(tmp_path, monkeypatch):
@@ -81,3 +84,34 @@ def test_unavailable_previews_are_explicit_and_bounded(tmp_path, body):
     path.write_text(body)
     change = file_change(path, "", existed=False)
     assert change["patch"] == "" and "unavailable" in change["notice"]
+
+
+@pytest.mark.parametrize("extension", [".docx", ".XLSX", ".pptx"])
+async def test_text_tools_cannot_create_or_overwrite_office_files(tmp_path, extension):
+    path = tmp_path / ("document" + extension)
+    params = FileWriteParams(path=str(path), content="plain text")
+    rejected = await file_write(params)
+    assert not rejected.success and not path.exists()
+    assert rejected.metadata["action_status"] == "not_executed"
+    assert "document_create" in rejected.error
+    path.write_bytes(b"PK\x03\x04\xffexisting document")
+    before = path.read_bytes()
+    assert not (await file_write(params)).success
+    assert not (await file_edit(FileEditParams(path=str(path), search="document", replace="text"))).success
+    assert path.read_bytes() == before
+    path.write_text("This is not a valid Office file")
+    read = await file_read(FileReadParams(path=str(path)))
+    assert not read.success and "document_read" in read.error
+
+
+async def test_office_guard_checks_both_symlink_names(tmp_path):
+    target, alias = tmp_path / "report.xlsx", tmp_path / "alias.txt"
+    target.write_text("unchanged")
+    alias.symlink_to(target)
+    assert not (await file_write(FileWriteParams(path=str(alias), content="changed"))).success
+    target.rename(tmp_path / "report.txt")
+    alias.unlink()
+    alias = tmp_path / "alias.xlsx"
+    alias.symlink_to(tmp_path / "report.txt")
+    assert not (await file_write(FileWriteParams(path=str(alias), content="changed"))).success
+    assert (tmp_path / "report.txt").read_text() == "unchanged"
