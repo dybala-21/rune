@@ -79,6 +79,9 @@ def rates_for(model: str) -> Rates | None:
 def estimate_request_cost(model: str, usage: dict, request: dict | None = None) -> float | None:
     """Estimate token charges only; unknown rates or usage return None."""
     request = {**(request or {}), **((request or {}).get("extra_body") or {})}
+    source = request.get("_rune_source_model", model)
+    if source.partition("/")[0] in _LOCAL:
+        return 0.0
     rates = rates_for(model)
     if rates is None or request.get("api_base") or request.get("base_url"):
         return None
@@ -118,6 +121,13 @@ def estimate_request_cost(model: str, usage: dict, request: dict | None = None) 
     return total * factor / 1_000_000
 
 
+def request_price_known(params: dict) -> bool:
+    """Check supported token pricing before sending a budgeted request."""
+    return estimate_request_cost(params["model"], {
+        "input_tokens": 0, "output_tokens": 0, "cache_write_reported": True,
+    }, params) is not None
+
+
 def usage_payload(trace: Any) -> dict | None:
     usage = getattr(trace, "timings", {}).get("usage")
     if not usage:
@@ -126,7 +136,8 @@ def usage_payload(trace: Any) -> dict | None:
     if not usage:
         return None
     missing = usage["calls"] - usage["reported_calls"] + usage.get("unpriced_calls", usage["reported_calls"])
-    return {"total": usage["total_tokens"], "input": usage["input_tokens"], "output": usage["output_tokens"],
+    return {"modelCalls": usage["calls"], "unreportedCalls": max(0, usage["calls"] - usage["reported_calls"]),
+            "total": usage["total_tokens"], "input": usage["input_tokens"], "output": usage["output_tokens"],
             "cacheRead": usage["cached_input_tokens"], "cacheCreation": usage["cache_write_tokens"],
             "cost": {"usd": None if missing or usage.get("incomplete_calls") else usage.get("cost_usd", 0),
                      "knownUsd": usage.get("cost_usd", 0), "unpricedCalls": missing,
@@ -138,11 +149,15 @@ def combine_usage_payloads(*parts: dict | None, pending: bool = False, incomplet
     parts = tuple(part for part in parts if part is not None)
     if not parts:
         return None
+    pending = pending or any((part.get("cost") or {}).get("pending") for part in parts)
+    incomplete = incomplete or any((part.get("cost") or {}).get("incomplete") for part in parts)
     missing = sum((part.get("cost") or {}).get("unpricedCalls", 0) for part in parts)
     known = sum((part.get("cost") or {}).get("knownUsd", 0) for part in parts)
     complete = not (pending or incomplete) and all((part.get("cost") or {}).get("usd") is not None for part in parts)
     return {**{key: sum(part.get(key, 0) for part in parts)
-               for key in ("total", "input", "output", "cacheRead", "cacheCreation")},
+               for key in ("total", "input", "output", "cacheRead", "cacheCreation", "unreportedCalls")},
+            **({"modelCalls": sum(part["modelCalls"] for part in parts)}
+               if all("modelCalls" in part for part in parts) else {}),
             "cost": {"usd": known if complete else None, "knownUsd": known,
                      "unpricedCalls": missing, **({"pending": True} if pending else {}),
                      **({"incomplete": True} if incomplete else {}), "scope": "model_tokens"}}

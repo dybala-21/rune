@@ -1,5 +1,6 @@
 """Retry explicit parameter incompatibilities without changing the model."""
 
+import hashlib
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -10,17 +11,25 @@ from rune.agent.model_traits import (
     is_temperature_error,
     needs_responses_api,
     note_completion_tokens_required,
-    note_reasoning_effort_rejected,
     note_responses_only,
     note_temperature_rejected,
-    reasoning_effort_rejected,
     traits,
 )
 from rune.agent.timing import timed_completion
 from rune.llm.reasoning import apply_reasoning_control
+from rune.llm.target import ModelCompatibilityError
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
+
+
+def _compatibility_key(params: dict):
+    context = tuple(params.get(key) for key in ("api_base", "base_url", "api_key", "vertex_project", "vertex_location"))
+    features = (bool(params.get("tools")), bool(params.get("response_format") or params.get("output_config")),
+                params.get("reasoning_effort"))
+    if not any(context) and not any(features):
+        return params["model"]
+    return (params["model"], hashlib.sha256(repr((context, features)).encode()).hexdigest())
 
 
 def _gemini_tool_images(model: str, messages: list[dict]) -> list[dict]:
@@ -77,22 +86,22 @@ async def compatible_completion(
     kwargs: dict[str, Any],
 ) -> Any:
     params = dict(kwargs)
-    apply_reasoning_control(params)
     model = params["model"]
+    key = _compatibility_key(params)
+    requested_effort = params.get("reasoning_effort")
+    apply_reasoning_control(params)
     if "messages" in params:
         params["messages"] = _gemini_tool_images(model, params["messages"])
-    capabilities = traits(model)
-    if reasoning_effort_rejected(model):
-        params.pop("reasoning_effort", None)
+    capabilities = traits(model, cache_key=key)
     if not capabilities.temperature:
         params.pop("temperature", None)
     if capabilities.max_completion_tokens and "max_tokens" in params:
         params["max_completion_tokens"] = params.pop("max_tokens")
     routed = False
-    if capabilities.responses_api or needs_responses_api(model) or "/responses/" in model:
+    if capabilities.responses_api or needs_responses_api(key) or "/responses/" in model:
         routed = _route_responses(params)
-    # Each correction can happen once: endpoint, token cap, temperature, effort.
-    retries_left = 4
+    # Each compatible correction can happen once: endpoint, token cap, temperature.
+    retries_left = 3
     while True:
         try:
             return await timed_completion(completion, params)
@@ -102,19 +111,21 @@ async def compatible_completion(
             retries_left -= 1
             if not routed and is_responses_only_error(exc) and _route_responses(params):
                 routed = True
-                note_responses_only(model)
+                note_responses_only(key)
                 log.warning("responses_api_required", model=model)
             elif "temperature" in params and is_temperature_error(exc):
-                note_temperature_rejected(model)
+                note_temperature_rejected(key)
                 params.pop("temperature")
                 log.warning("temperature_unsupported_retry", model=model)
             elif "max_tokens" in params and is_max_tokens_rename_error(exc):
-                note_completion_tokens_required(model)
+                note_completion_tokens_required(key)
                 params["max_completion_tokens"] = params.pop("max_tokens")
                 log.warning("completion_token_parameter_retry", model=model)
-            elif "reasoning_effort" in params and is_reasoning_effort_error(exc):
-                note_reasoning_effort_rejected(model)
-                params.pop("reasoning_effort")
-                log.warning("reasoning_effort_unsupported_retry", model=model)
+            elif requested_effort is not None and (is_reasoning_effort_error(exc)
+                    or any(field in str(exc).lower() for field in ("thinkingconfig", "thinking_level", "output_config.effort", "reasoning.effort"))):
+                raise ModelCompatibilityError(
+                    f"{model} rejected reasoning effort {requested_effort!r} for this request. "
+                    "The requested setting was preserved; no retry used a different reasoning default."
+                ) from exc
             else:
                 raise

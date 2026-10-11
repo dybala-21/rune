@@ -24,7 +24,6 @@ def setup(monkeypatch):
     cfg.llm.active_model = "grok-4.6"
     monkeypatch.setattr("rune.config.get_config", lambda: cfg)
     monkeypatch.setattr(rune.llm.model_selection, "get_config", lambda: cfg)
-    monkeypatch.setattr(rune.llm.client, "get_config", lambda: cfg)
     monkeypatch.setattr(decision_router, "_cooldown", None)
     monkeypatch.setattr(decision_router, "_rejected_key", None)
     monkeypatch.setattr(decision_router, "_verified_key", None)
@@ -71,6 +70,9 @@ async def test_file_roles_survive_independent_routing_abstention(setup, monkeypa
     assert result.decision_details["confidence_by_field"]["desktop"] == .99
     assert "source.csv" not in str(result.decision_details)
     assert external.await_count == 1 and client.completion.await_count == int(uncertain_routing)
+    if uncertain_routing:
+        schema = client.completion.call_args.kwargs['response_format']['json_schema']['schema']
+        assert 'file_roles' not in schema['properties']
     assert decision_router.accelerator_status() == "ready"
 
 

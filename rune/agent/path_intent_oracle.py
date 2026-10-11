@@ -1,11 +1,4 @@
-"""Path intent oracle - LLM-based intentional path allowlist resolution.
-
-Ported from src/agent/path-intent-oracle.ts (150 lines) - uses LLM
-structured output to distinguish user-intended workspace paths from
-paths that merely appear in logs/history/reference context.
-
-resolveIntentionalPathAllowlist(): LLM oracle with caching + conservative fallback.
-"""
+"""Distinguish requested workspace paths from paths quoted in reference material."""
 
 from __future__ import annotations
 
@@ -178,16 +171,17 @@ async def _call_path_intent_oracle(
     import json
 
     from rune.agent.litellm_adapter import _resolve_litellm_model, litellm
+    from rune.llm.request_params import compatible_completion
 
     fallback: list[str] = []
 
     model_str = model if isinstance(model, str) else getattr(model, "model", str(model))
-    resolved = _resolve_litellm_model(model_str)
+    resolved, extra = _resolve_litellm_model(model_str)
 
     try:
-        resp = await litellm.acompletion(
-            model=resolved,
-            messages=[
+        resp = await compatible_completion(litellm.acompletion, litellm.BadRequestError, {
+            "model": resolved,
+            "messages": [
                 {
                     "role": "system",
                     "content": (
@@ -200,10 +194,11 @@ async def _call_path_intent_oracle(
                 },
                 {"role": "user", "content": _build_prompt(goal, candidates)},
             ],
-            temperature=0.0,
-            max_tokens=512,
-            response_format={"type": "json_object"},
-        )
+            "temperature": 0.0,
+            "max_tokens": 512,
+            "response_format": {"type": "json_object"},
+            **extra,
+        })
 
         raw = resp.choices[0].message.content or "{}"
         obj = json.loads(raw)

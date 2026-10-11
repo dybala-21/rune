@@ -1,8 +1,4 @@
-"""LLM client for RUNE.
-
-Ported from src/llm/client.ts - multi-provider support via LiteLLM,
-health checks with caching, and provider availability detection.
-"""
+"""Model selection, provider health checks and LiteLLM requests."""
 
 from __future__ import annotations
 
@@ -13,7 +9,6 @@ from dataclasses import dataclass
 
 import httpx
 
-from rune.config import get_config
 from rune.types import LLMAvailabilityStatus, ModelTier, Provider
 from rune.utils.logger import get_logger
 
@@ -231,51 +226,36 @@ class LLMClient:
         )
 
     def _effective_provider(self, provider: Provider | None) -> Provider:
-        """Provider to call when none is passed explicitly.
-
-        Uses the session choice (``active_provider``, set by ``-p`` / ``/model``)
-        before the static ``default_provider``. Without this, subsystems that
-        call with no explicit provider (classifier, gates, learning) route to
-        ``default_provider`` even when the user selected another provider.
-        """
+        """Resolve explicit, active and default providers in that order."""
         if provider is not None:
             return provider
-        config = get_config()
-        active = getattr(config.llm, "active_provider", None)
+        from rune.llm.context import llm_settings
+        settings = llm_settings()
+        active = getattr(settings, "active_provider", None)
         if active:
             try:
                 return Provider(active)
             except ValueError:
                 pass
-        return Provider(config.llm.default_provider)
+        return Provider(settings.default_provider)
 
     def resolve_model(self, tier: ModelTier, provider: Provider | None = None) -> str:
         """Resolve a model ID from tier and provider."""
-        config = get_config()
+        from rune.llm.context import llm_settings
+        settings = llm_settings()
         provider = self._effective_provider(provider)
 
-        # Local providers (ollama) usually have a single model installed, so the
-        # per-tier defaults (e.g. fast=llama3.2) are typically NOT present. When
-        # the user selected a model for the session, use it for every tier;
-        # otherwise aux calls (consolidation, classifier, gates) hit an
-        # uninstalled tier model and fail. Cloud providers keep per-tier models
-        # (all reachable via API), so the cheaper fast tier still applies there.
+        # Keep local helpers on the selected model; other tier models may not be installed.
         if provider == Provider.OLLAMA:
-            active = (getattr(config.llm, "active_model", None) or "").strip()
+            active = (getattr(settings, "active_model", None) or "").strip()
             if active:
                 return active
 
-        models_config = config.llm.models
+        models_config = settings.models
         tier_models = getattr(models_config, provider.value, models_config.ollama)
         resolved = getattr(tier_models, tier, tier_models.best)
 
-        # The configured name is only a guess about what the local server
-        # holds; when the server has told us, what is installed wins. The
-        # refresh is a no-op once the list is known, so only the first
-        # resolution in a process pays the bounded localhost round-trip —
-        # a scheduled-task version of this left the first few resolutions
-        # answering from the guess, and they went to a model that was not
-        # there.
+        # Check installed local models before falling back to a tier default.
         if provider == Provider.OLLAMA:
             refresh_ollama_installed_sync()
             return pick_ollama_model(resolved)
@@ -297,52 +277,20 @@ class LLMClient:
         reasoning_effort: str | None = None,
         max_retries: int | None = None,
     ) -> dict:
-        """Send a completion request via LiteLLM.
-
-        Returns the raw LiteLLM response dict.
-        """
-        # Through the adapter's lazy accessor so drop_params and the debug
-        # suppression are set before any request goes out — a plain
-        # `import litellm` configures nothing.
+        """Send a request and return the unmodified LiteLLM response."""
+        # The adapter configures LiteLLM before its first request.
         from rune.agent.litellm_adapter import litellm
 
         resolved_model = model or self.resolve_model(tier, provider)
 
-        # Prepend the LiteLLM provider prefix. Use the same effective provider as
-        # resolve_model so the prefix matches the chosen provider.
-        effective_provider = self._effective_provider(provider)
-        _PREFIX_MAP = {
-            Provider.ANTHROPIC: "anthropic/",
-            Provider.GEMINI: "gemini/",
-            Provider.XAI: "xai/",
-            Provider.AZURE: "azure/",
-            Provider.OLLAMA: "ollama/",
-        }
-        prefix = _PREFIX_MAP.get(effective_provider, "")
-        provider_extra: dict = {}
+        from rune.llm.target import resolve_target
 
-        if effective_provider == Provider.GEMINI:
-            import os as _os
-            creds = _os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
-            if creds and _os.path.isfile(creds):
-                prefix = "vertex_ai/"
-                proj = _os.environ.get("VERTEX_PROJECT") or _os.environ.get(
-                    "VERTEXAI_PROJECT"
-                )
-                loc = (
-                    _os.environ.get("VERTEX_LOCATION")
-                    or _os.environ.get("VERTEXAI_LOCATION")
-                    or "us-central1"
-                )
-                if proj:
-                    provider_extra["vertex_project"] = proj
-                provider_extra["vertex_location"] = loc
+        target_provider = provider or (None if "/" in resolved_model else self._effective_provider(None))
+        target = resolve_target(resolved_model, target_provider)
+        resolved_model = target.wire_model
+        provider_extra = {**dict(target.options), "_rune_source_model": target.key}
 
-        if prefix and not resolved_model.startswith(prefix):
-            resolved_model = f"{prefix}{resolved_model}"
-
-        # Clamp to model's hard output cap; the traits table + the retry
-        # below handle models litellm's DB gets wrong (see model_traits).
+        # Respect the model's output cap before applying parameter compatibility rules.
         from rune.agent.litellm_adapter import _clamp_max_tokens
         from rune.agent.model_traits import (
             traits,

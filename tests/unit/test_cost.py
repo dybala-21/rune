@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from rune.llm.pricing import estimate_request_cost, usage_payload
+from rune.llm.pricing import combine_usage_payloads, estimate_request_cost, usage_payload
 from rune.llm.usage import token_counts
 from rune.ui.cost import estimate_cost, format_cost
 
@@ -85,3 +85,21 @@ def test_regional_vertex_prices_are_not_silently_treated_as_global():
 def test_anthropic_write_without_a_read_field_is_included_in_input():
     usage = token_counts({"input_tokens": 100, "output_tokens": 20, "cache_creation_input_tokens": 300})
     assert usage["input_tokens"] == 400 and usage["cache_write_tokens"] == 300
+
+
+@pytest.mark.parametrize("state", ["pending", "incomplete"])
+def test_combining_usage_keeps_partial_accounting_visible(state):
+    parts = [{"total": 100, "input": 90, "output": 10, "modelCalls": 1, "unreportedCalls": 0,
+              "cost": {"usd": .01, "knownUsd": .01, "unpricedCalls": 0}},
+             {"total": 50, "input": 40, "output": 10, "modelCalls": 2, "unreportedCalls": 1,
+              "cost": {"usd": None, "knownUsd": .02, "unpricedCalls": 1, state: True}}]
+    combined = combine_usage_payloads(*parts)
+    assert combined["modelCalls"] == 3 and combined["unreportedCalls"] == 1
+    assert combined["cost"]["usd"] is None and combined["cost"][state] is True
+    assert combined["cost"]["knownUsd"] == pytest.approx(.03)
+    assert combined["cost"]["unpricedCalls"] == 1
+
+
+def test_legacy_usage_does_not_invent_a_request_count():
+    combined = combine_usage_payloads({"total": 100, "input": 90, "output": 10})
+    assert "modelCalls" not in combined and combined["cost"]["usd"] is None

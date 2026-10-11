@@ -67,10 +67,11 @@ class RunMaintenance:
             classification_hint=classification_hint,
             wait_for_consolidation=True,
         )
+        payload = {**asdict(inp), "remaining_budget": getattr(trace, "timings", {}).get("remainingBudget")}
         with self._store.db:
             self._store.db.execute(
                 "INSERT INTO web_run_maintenance (run_id, payload) VALUES (?, ?)",
-                (run_id, json.dumps(asdict(inp), ensure_ascii=False)),
+                (run_id, json.dumps(payload, ensure_ascii=False)),
             )
         self._wake()
 
@@ -95,9 +96,11 @@ class RunMaintenance:
                 started = time.monotonic()
                 try:
                     payload = json.loads(raw)
+                    remaining = payload.pop("remaining_budget", None) or {}
                     if stage == "pending":
                         self._set_stage(run_id, "learning")
                         from rune.agent.agent_context import post_process_agent_result
+                        from rune.agent.request_budget import BudgetExceeded
                         from rune.agent.timing import capture_timing, timing_phase, timing_snapshot
                         from rune.llm.pricing import usage_payload
 
@@ -106,13 +109,21 @@ class RunMaintenance:
                             "wait_for_consolidation": True,
                         })
                         status = "running"
-                        with capture_timing() as measured:
+                        # Older queued jobs have no remaining allowance for model calls.
+                        owner = SimpleNamespace(
+                            _token_budget=SimpleNamespace(total=remaining.get("tokens", 0), used=0),
+                            _config=SimpleNamespace(model_request_limit=remaining.get("modelRequests", 0),
+                                                    cost_budget_usd=remaining.get("costUsd")),
+                        )
+                        with capture_timing(owner) as measured:
                             try:
                                 await self._publish(run_id, {"status": status})
                                 with timing_phase("maintenance"):
                                     async with asyncio.timeout(120):
                                         await post_process_agent_result(inp)
-                                status = "completed"
+                                status = "limited" if measured["budget_blocked"] else "completed"
+                            except BudgetExceeded:
+                                status = "limited"
                             except BaseException:
                                 status = "interrupted" if self._closing else "failed"
                                 raise

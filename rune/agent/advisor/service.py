@@ -1,6 +1,4 @@
-"""Provider-agnostic advisor orchestration. Resolves model, validates
-pairing, builds payload, invokes LiteLLM, parses response, tracks budget.
-Singleton per episode via ``AdvisorService.for_episode``."""
+"""Resolve, validate and budget advisor calls for each episode."""
 
 from __future__ import annotations
 
@@ -298,11 +296,10 @@ class AdvisorService:
             )
 
     async def _invoke_llm(self, request: AdvisorRequest) -> Any:
-        """Single-shot LiteLLM call. Non-streaming, no tools, bounded
-        output, per-provider timeout. One implementation for every
-        provider LiteLLM supports."""
+        """Request advice within the run's remaining budget."""
         payload = build_payload(request)
         from rune.agent.litellm_adapter import _resolve_litellm_model, litellm
+        from rune.llm.request_params import compatible_completion
 
         raw_model = f"{self._config.provider}/{self._config.model}"
         resolved_model, extra = _resolve_litellm_model(raw_model)
@@ -318,18 +315,13 @@ class AdvisorService:
         ]
 
         timeout_s = max(1.0, self._config.timeout_ms / 1000.0)
-        # 4096 keeps room for reasoning tokens (o1, gemini-2.5-pro, etc.)
-        # while still bounding runaway output. Advisor text itself stays
-        # small (100 words) per the system prompt.
+        # Leave room for reasoning while bounding the response.
         return await asyncio.wait_for(
-            litellm.acompletion(
-                model=resolved_model,
-                messages=messages,
-                temperature=0.0,
-                max_tokens=4_096,
-                stream=False,
+            compatible_completion(litellm.acompletion, litellm.BadRequestError, {
+                "model": resolved_model, "messages": messages,
+                "temperature": 0.0, "max_tokens": 4_096, "stream": False,
                 **extra,
-            ),
+            }),
             timeout=timeout_s,
         )
 

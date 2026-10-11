@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
@@ -9,11 +10,14 @@ import time
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
+from types import SimpleNamespace
 from typing import Any
 
-from rune.agent.request_budget import bound_budget, scopes
+from rune.agent.request_budget import bound_budget, remaining_budget, scopes
 from rune.llm.usage import merge_usage, token_counts
+from rune.utils.logger import get_logger
 
+log = get_logger(__name__)
 _current: ContextVar[dict | None] = ContextVar("run_timing", default=None)
 _phase: ContextVar[str] = ContextVar("timing_phase", default="setup")
 _TOKEN_FIELDS = ("input_tokens", "output_tokens", "total_tokens", "cached_input_tokens",
@@ -29,6 +33,16 @@ def _usage_totals() -> dict:
 def current_usage() -> dict | None:
     run = _current.get()
     return copy.deepcopy(run["usage"]) if run is not None else None
+
+
+def check_isolated_worker_budget() -> None:
+    from rune.agent.request_budget import BudgetExceeded
+
+    run = _current.get()
+    if run is not None and any(getattr(bound_budget(s), "total", None) is not None for s in scopes(run)):
+        # Subprocess workers cannot yet reserve or settle against their parent's budget.
+        run["budget_blocked"] = "Isolated workers cannot enforce the shared run budget. No worker was started."
+        raise BudgetExceeded(run["budget_blocked"])
 
 
 def streamed_tokens() -> int:
@@ -126,16 +140,38 @@ def capture_timing(owner=None):
            "owner": owner, "usage": {**_usage_totals(), "by_model": {}},
            "streamed_tokens": 0, "reservations": {}, "budget_blocked": "", "parent": parent}
     token = _current.set(run)
+    from rune.llm.context import model_scope
     try:
-        yield run
+        with model_scope():
+            yield run
     finally:
         run["closed"] = True
         _current.reset(token)
 
 
+class _ExecutionTokens:
+    def __init__(self, loop):
+        self._loop = loop
+        self.used = 0
+
+    @property
+    def total(self):
+        override = self._loop._config.token_budget_override
+        return override if override is not None else self._loop._token_budget.total
+
+
+@contextmanager
+def capture_execution(loop):
+    # Keep preflight and follow-up usage when the loop resets its own counters.
+    owner = SimpleNamespace(_config=loop._config, _token_budget=_ExecutionTokens(loop))
+    with capture_timing(owner) as run:
+        yield run
+
+
 def timing_snapshot(run: dict) -> dict:
     return {"totalMs": round((time.monotonic() - run["started"]) * 1000, 1),
             "spans": copy.deepcopy(run["spans"]), "droppedSpans": run["droppedSpans"],
+            "remainingBudget": remaining_budget(run),
             "usage": copy.deepcopy(run["usage"])}
 
 
@@ -160,22 +196,81 @@ def timed_run(fn):
     return wrapper
 
 
+async def close_stream(response) -> None:
+    if close := getattr(response, "aclose", None):
+        try:
+            async with asyncio.timeout(5):
+                await close()
+        except Exception as exc:
+            log.debug("model_stream_close_failed", error_type=type(exc).__name__)
+
+
+class _MeasuredStream:
+    def __init__(self, response, record, finish):
+        self._response = response
+        self._iterator = response.__aiter__()
+        self._record = record
+        self._finish = finish
+        self._closed = False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._closed:
+            raise StopAsyncIteration
+        try:
+            chunk = await anext(self._iterator)
+            self._record(chunk)
+            return chunk
+        except StopAsyncIteration:
+            await self._close(None)
+            raise
+        except BaseException as exc:
+            await self._close(exc)
+            raise
+
+    async def aclose(self):
+        await self._close(GeneratorExit())
+
+    async def _close(self, error):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._finish(error)
+        finally:
+            response = self._response if hasattr(self._response, "aclose") else self._iterator
+            await close_stream(response)
+
+
 async def timed_completion(completion, params):
     run = _current.get()
+    wire_params = {key: value for key, value in params.items() if key != "_rune_source_model"}
     if run is None:
-        return await completion(**params)
-    from rune.agent.request_budget import BudgetExceeded, admit, input_estimate, settle
+        return await completion(**wire_params)
+    from rune.agent.request_budget import (
+        BudgetExceeded,
+        admit,
+        check_request_budget,
+        input_estimate,
+        settle,
+    )
 
-    estimated = input_estimate(params) if any(getattr(bound_budget(s), "total", None) is not None for s in scopes(run)) else 0
+    parents = tuple(scopes(run))
     reservation = 0
-    for scope in scopes(run):
-        try:
+    try:
+        # Reject exhausted runs before tokenizing a potentially large prompt.
+        for scope in parents:
+            check_request_budget(scope)
+        estimated = input_estimate(params) if any(getattr(bound_budget(s), "total", None) is not None for s in parents) else 0
+        for scope in parents:
             params, allowance = admit(scope, params, estimated)
             if allowance:
                 reservation = allowance
-        except BudgetExceeded as exc:
-            scope["budget_blocked"] = run["budget_blocked"] = str(exc)
-            raise
+    except BudgetExceeded as exc:
+        scope["budget_blocked"] = run["budget_blocked"] = str(exc)
+        raise
     measurement = span("model", model=params.get("model"),
                        reasoningEffort=params.get("reasoning_effort") or
                        (params.get("extra_body") or {}).get("reasoning_effort") or
@@ -195,7 +290,7 @@ async def timed_completion(completion, params):
         scope["usage"]["calls"] += 1
         scope["usage"]["by_model"].setdefault(row["model"], _usage_totals())["calls"] += 1
     try:
-        response = await completion(**params)
+        response = await completion(**{key: value for key, value in params.items() if key != "_rune_source_model"})
     except BaseException as exc:
         settle(run, row, exc)
         measurement.__exit__(type(exc), exc, exc.__traceback__)
@@ -206,23 +301,18 @@ async def timed_completion(completion, params):
         measurement.__exit__(None, None, None)
         return response
 
-    async def stream():
-        try:
-            async for chunk in response:
-                _record_usage(run, row, chunk, streaming=True, request=params)
-                elapsed = round((time.monotonic() - started) * 1000, 1)
-                row.setdefault("firstEventMs", elapsed)
-                row["lastEventMs"] = elapsed
-                row["eventCount"] = row.get("eventCount", 0) + 1
-                for choice in getattr(chunk, "choices", None) or []:
-                    if getattr(getattr(choice, "delta", None), "content", None):
-                        row.setdefault("firstTextMs", round((time.monotonic() - started) * 1000, 1))
-                yield chunk
-        except BaseException as exc:
-            settle(run, row, exc)
-            measurement.__exit__(type(exc), exc, exc.__traceback__)
-            raise
-        else:
-            settle(run, row)
-            measurement.__exit__(None, None, None)
-    return stream()
+    def record(chunk):
+        _record_usage(run, row, chunk, streaming=True, request=params)
+        elapsed = round((time.monotonic() - started) * 1000, 1)
+        row.setdefault("firstEventMs", elapsed)
+        row["lastEventMs"] = elapsed
+        row["eventCount"] = row.get("eventCount", 0) + 1
+        for choice in getattr(chunk, "choices", None) or []:
+            if getattr(getattr(choice, "delta", None), "content", None):
+                row.setdefault("firstTextMs", elapsed)
+
+    def finish(error):
+        settle(run, row, error)
+        measurement.__exit__(type(error) if error else None, error, getattr(error, "__traceback__", None))
+
+    return _MeasuredStream(response, record, finish)

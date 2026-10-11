@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import time
 from dataclasses import dataclass, field
@@ -36,13 +37,13 @@ def _key_id() -> str:
 
 
 def accelerator_status(selected=None) -> str:
-    from rune.config import get_config
+    from rune.llm.context import llm_settings
     from rune.llm.model_selection import get_effective_model_selection
 
     selected = selected or get_effective_model_selection()
     if selected.provider == "ollama":
         return "local"
-    llm = get_config().llm
+    llm = llm_settings()
     # Automatic model selection keeps its existing classifier and cost policy.
     if llm.route_simple_queries and not (llm.active_model or "").strip():
         return "automatic_model"
@@ -58,12 +59,12 @@ def accelerator_status(selected=None) -> str:
 
 async def classify_request(system: str, content: str) -> RoutingDecision:
     from rune.agent import classification_response as contract
-    from rune.config import get_config
     from rune.llm.client import get_llm_client
     from rune.llm.model_selection import get_effective_model_selection
 
     selected = get_effective_model_selection()
-    settings = get_config().llm.decision_routing.model_copy()
+    from rune.llm.context import llm_settings
+    settings = llm_settings().decision_routing.model_copy()
     # Jev and the fallback share one deadline.
     deadline = asyncio.get_running_loop().time() + contract.ROUTING_TIMEOUT
     reason = ""
@@ -103,7 +104,12 @@ async def classify_request(system: str, content: str) -> RoutingDecision:
                         _cooldown = (key_id, time.monotonic() + 30)
             log.info("decision_fallback", backend="jev", reason=reason, **diagnostics)
 
+    request = json.loads(content).get("request_to_classify", "")
+    roles = artifact_roles.matching_roles(request) if artifact_roles is not None else {}
     values = await contract.request_classification(
         get_llm_client(), system, content, selected=selected, deadline=deadline,
+        file_roles=roles,
     )
+    if roles:
+        artifact_roles = ArtifactRoleHints.for_request(request, roles)
     return RoutingDecision(values, "connected", selected.model, reason, artifact_roles, diagnostics)

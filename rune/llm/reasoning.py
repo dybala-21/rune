@@ -82,7 +82,9 @@ def reasoning_control(model: str) -> ReasoningControl:
     provider, name = reasoning_model_key(model).split("/", 1)
     if provider == "xai":
         from rune.llm.xai import REASONING, model_name
-        return ReasoningControl(REASONING.get(model_name(model), ()), "xai")
+        efforts = REASONING.get(model_name(model))
+        if efforts is not None:
+            return ReasoningControl(efforts, "xai")
     catalog = {"openai": _OPENAI, "anthropic": _ANTHROPIC, "gemini": _GEMINI}.get(provider, {})
     known = catalog.get(name)
     # Dated snapshots of a documented model keep that model's control surface.
@@ -99,16 +101,16 @@ def reasoning_control(model: str) -> ReasoningControl:
             return ReasoningControl(tuple(
                 level for level in _LEVELS
                 if info.get(f"supports_{level}_reasoning_effort") is True
-            ))
+            ), "xai" if provider == "xai" else "litellm")
     except Exception as exc:
         log.debug("reasoning_metadata_unavailable", model=model, error=type(exc).__name__)
     return ReasoningControl()
 
 
 def configured_reasoning_effort(model: str) -> str | None:
-    from rune.config import get_config
+    from rune.llm.context import llm_settings
 
-    value = get_config().llm.reasoning_efforts.get(reasoning_model_key(model))
+    value = llm_settings().reasoning_efforts.get(reasoning_model_key(model))
     if value is None:
         return None
     return value if value in reasoning_control(model).efforts else None

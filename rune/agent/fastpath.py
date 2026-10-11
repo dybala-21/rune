@@ -1,16 +1,4 @@
-"""Rung-0 fast path: single-shot localize → edit → repro-gated verify.
-
-Before paying for the full agentic loop, one cheap non-agentic pass:
-locate the fault from the repo structure, generate a few SEARCH/REPLACE
-candidates in one prompt each, and accept only a candidate that flips a
-baseline-failing reproduction script to passing without breaking the
-targeted regression tests. That flip is a discriminating check, so the
-result may honestly be called verified. Anything less falls through to the
-agentic rung, which starts fresh and receives only structured evidence
-(the repro script and its failing output) — never a failed diff.
-
-Python-only for now; other stacks skip the fast path entirely.
-"""
+"""Try Python fixes before the full loop; require a passing repro and regression tests."""
 
 from __future__ import annotations
 
@@ -50,6 +38,7 @@ async def _complete(model: str | None, provider: str | None, prompt: str,
                     n: int = 1) -> list[str]:
     """n independent completions for one prompt; failures return fewer."""
     from rune.agent.litellm_adapter import _resolve_litellm_model, litellm
+    from rune.llm.request_params import compatible_completion
 
     resolved, extra = _resolve_litellm_model(
         f"{provider}:{model}" if provider and model else (model or "")
@@ -58,12 +47,12 @@ async def _complete(model: str | None, provider: str | None, prompt: str,
     async def one() -> str | None:
         try:
             resp = await asyncio.wait_for(
-                litellm.acompletion(
-                    model=resolved,
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=4096,
+                compatible_completion(litellm.acompletion, litellm.BadRequestError, {
+                    "model": resolved,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 4096,
                     **extra,
-                ),
+                }),
                 timeout=_LLM_TIMEOUT_S,
             )
             return resp.choices[0].message.content or ""

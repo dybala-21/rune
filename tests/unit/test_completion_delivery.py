@@ -4,6 +4,7 @@ import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -301,7 +302,9 @@ async def test_maintenance_usage_survives_completion_and_reload(tmp_path, monkey
     service = RunMaintenance(store, publish)
     service.start()
     service.enqueue('r1', agent_context.AgentContext(goal='first'),
-                    SimpleNamespace(reason='completed'), 'answer', 10, classification_hint='web')
+                    SimpleNamespace(reason='completed', timings={'remainingBudget': {
+                        'tokens': 10000, 'modelRequests': 10, 'costUsd': None,
+                    }}), 'answer', 10, classification_hint='web')
     try:
         await asyncio.wait_for(entered.wait(), 1)
         assert runs.get('r1')['status'] == 'completed'
@@ -331,6 +334,60 @@ async def test_maintenance_usage_survives_completion_and_reload(tmp_path, monkey
         release.set()
         await service.close(grace_seconds=0)
         runs.close()
+
+
+@pytest.mark.parametrize("limit", ["requests", "cost", "tokens", "unknown_cost", "legacy"])
+async def test_maintenance_keeps_remaining_limits_after_restart(tmp_path, monkeypatch, isolated_wiring, limit):
+    from rune.agent.timing import capture_timing, timed_completion, timing_snapshot
+    from rune.llm.pricing import usage_payload
+
+    monkeypatch.setattr("rune.agent.request_budget.input_estimate", lambda _: 10)
+    request = AsyncMock(return_value={"usage": {"prompt_tokens": 100, "completion_tokens": 100}})
+    if limit == "unknown_cost":
+        request.return_value = {}
+    owner = SimpleNamespace(_token_budget=SimpleNamespace(total=210 if limit == "tokens" else 10000, used=0),
+                            _config=SimpleNamespace(model_request_limit=2 if limit == "requests" else 10,
+                                                    cost_budget_usd=.0005 if limit in {"cost", "unknown_cost"} else None))
+    model = "xai/grok-4.6"
+    with capture_timing(owner) as measured:
+        await timed_completion(request, {"model": model, "messages": [], "max_tokens": 200})
+        timings = timing_snapshot(measured)
+    trace = SimpleNamespace(reason="completed", timings={} if limit == "legacy" else timings)
+    path = tmp_path / "usage.db"
+    store = RunStore(path)
+    runs = RunSnapshots(store)
+    runs.start("r1", "s1", "report")
+    runs.record("agent_complete", {"runId": "r1", "usage": usage_payload(SimpleNamespace(timings=timings))})
+    service = RunMaintenance(store)
+    service.start()
+    await service.close(grace_seconds=0)
+    service.enqueue("r1", agent_context.AgentContext(goal="report"), trace, "answer", 10)
+    runs.close()
+
+    async def learn(_):
+        for _ in range(3):
+            await timed_completion(request, {"model": "xai/grok-4.6", "messages": [], "max_tokens": 200})
+
+    monkeypatch.setattr(agent_context, "post_process_agent_result", learn)
+    restored = RunSnapshots(RunStore(path))
+    restored.open()
+    async def publish(event, data):
+        restored.record(event, data)
+    worker = RunMaintenance(restored._store, publish)
+    worker.start()
+    try:
+        await worker._worker
+        result = restored.get("r1")
+        extra_calls = 1 if limit == "requests" else 0
+        assert request.await_count == 1 + extra_calls
+        assert result["usage"]["modelCalls"] == 1 + extra_calls
+        assert result["maintenance"]["status"] == "limited"
+        assert result["status"] == "completed"
+        assert result["usage"]["cost"]["knownUsd"] == pytest.approx(0 if limit == "unknown_cost" else .0008 * (1 + extra_calls))
+        assert not result["usage"]["cost"].get("pending")
+    finally:
+        await worker.close()
+        restored.close()
 
 
 @pytest.mark.parametrize("decision,granted", [("approve_once", True), ("deny", False)])

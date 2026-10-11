@@ -15,6 +15,7 @@ import {
 import { toast } from '../utils/toast';
 import { SettingsSection, SettingsItem, MemoryField, memoryInputStyle } from './SettingsControls';
 import { DecisionRoutingSettings } from './DecisionRoutingSettings';
+import { RunLimitSettings } from './RunLimitSettings';
 
 interface SettingsSidebarProps {
   onOpenSkillPanel: (selectedName?: string) => void;
@@ -267,6 +268,30 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
       background: 'var(--bg-primary)',
     }}>
       <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
+        {config?.runLimits && <RunLimitSettings limits={config.runLimits} onSaved={load} />}
+        {config?.vertexLocation && <div style={{ padding: '10px 14px', fontSize: 13 }}>
+          <label htmlFor="vertex-location">Gemini (Vertex AI) location</label>
+          <select id="vertex-location" value={config.vertexLocation} disabled={toggling}
+            onChange={async event => {
+              setToggling(true);
+              try {
+                await patchConfig({ vertexLocation: event.target.value });
+                setConfig(await fetchConfig());
+              } catch (error) {
+                toast.error(error instanceof Error ? error.message : "Couldn't change the Gemini location");
+              } finally { setToggling(false); }
+            }} style={{ display: 'block', marginTop: 8, width: '100%' }}>
+            <option value="auto">Automatic</option>
+            <option value="global">Global</option>
+            <option value="us-central1">Iowa (us-central1)</option>
+            {!['auto', 'global', 'us-central1'].includes(config.vertexLocation)
+              && <option value={config.vertexLocation}>{config.vertexLocation}</option>}
+          </select>
+          <p style={{ color: 'var(--text-muted)', fontSize: 12 }}>
+            Automatic uses the Global endpoint. Requests may be processed outside your region.
+            Applies to new runs.
+          </p>
+        </div>}
         {config && <div style={{ padding: '10px 14px', fontSize: 13 }}>
           <label htmlFor="command-environment">Command environment</label>
           <select id="command-environment" disabled={toggling || config.executionEnvironment?.managed}

@@ -1,5 +1,4 @@
-"""Advisor request/decision types. Read-only: state snapshot in, plan out.
-Tool calls in advisor responses are stripped by normalizer."""
+"""Types for advisory plans; the advisor cannot execute tools."""
 
 from __future__ import annotations
 
@@ -78,12 +77,7 @@ class AdvisorDecision:
 
 @dataclass(slots=True)
 class AdvisorBudget:
-    """Per-episode advisor budget tracking. Separate from executor token
-    budget so advisor tokens never starve the main loop.
-
-    ``call_history`` captures one structured dict per advisor call so the
-    loop's episode-end write path can batch them into the advisor_events
-    table (Tier 2). Contains metadata only — no plan text is retained."""
+    """Track advisor limits and call metadata within the shared run budget."""
 
     max_calls: int = 3
     calls_used: int = 0

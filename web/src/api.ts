@@ -482,7 +482,14 @@ export async function unsetEnvVar(key: string, scope: 'user' | 'project'): Promi
 
 // Config API
 
+export interface RunLimits {
+  modelRequests: number;
+  costUsd: number | null;
+}
+
 export interface ConfigInfo {
+  vertexLocation?: string | null;
+  runLimits?: RunLimits;
   executionEnvironment?: { backend: 'local' | 'container'; image: string; allowNetwork: boolean; managed?: boolean };
   proactiveEnabled: boolean;
   advisorEnabled: boolean;
@@ -537,6 +544,8 @@ export async function fetchConfig(): Promise<ConfigInfo> {
 }
 
 export async function patchConfig(params: {
+  vertexLocation?: string;
+  runLimits?: Partial<RunLimits>;
   executionEnvironment?: { backend?: 'local' | 'container'; image?: string };
   proactiveEnabled?: boolean;
   advisorEnabled?: boolean;
@@ -588,6 +597,12 @@ export interface CronJobInfo {
   notifyChannel?: string;
   policy?: RoutinePolicy;
   recentRuns?: RoutineRun[];
+  budget?: {
+    used: { modelRequests: number; tokens: number; costUsd: number; requestsKnown: boolean; tokensKnown: boolean; costKnown: boolean };
+    remaining: { modelRequests: number | null; tokens: number | null; costUsd: number | null };
+    blocked: boolean;
+    reason: string;
+  };
   enabled: boolean;
   createdAt: string;
   lastRunAt?: string;
@@ -605,6 +620,9 @@ export interface RoutinePolicy {
   max_steps: number;
   timeout_seconds: number;
   token_budget: number;
+  total_tokens?: number | null;
+  total_model_requests?: number | null;
+  total_cost_usd?: number | null;
   deadline: string | null;
   verification: string[];
   input_paths?: string[];

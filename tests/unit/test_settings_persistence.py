@@ -1,10 +1,4 @@
-"""Settings written from the UI have to survive a restart.
-
-Every handler here used to change memory and report success, so a toggle looked
-like it applied and was gone on the next launch. These tests pin the write path:
-the file is patched surgically, unrelated keys and comments survive, and secrets
-never get rewritten.
-"""
+"""Settings survive restarts without rewriting unrelated fields or secrets."""
 
 from __future__ import annotations
 
@@ -44,6 +38,37 @@ llm:
 proactive:
   enabled: true
 """
+
+
+async def test_vertex_selection_validates_before_saving_and_keeps_explicit_regions(config_home, monkeypatch):
+    from fastapi import HTTPException
+
+    from rune.api.handlers.config import ConfigPatchRequest, patch_config
+    from rune.config import get_config, load_config
+    from rune.llm.target import resolve_target
+
+    credentials = config_home / 'credentials.json'
+    credentials.write_text('{}')
+    monkeypatch.setenv('GOOGLE_APPLICATION_CREDENTIALS', str(credentials))
+    monkeypatch.setenv('VERTEX_LOCATION', 'us-central1')
+    path = config_home / 'config.yaml'
+    path.write_text('vertex_location: us-central1\nllm:\n  activeProvider: openai\n  activeModel: gpt-4o\n')
+    selection = {'provider': 'gemini', 'model': 'gemini-3.1-pro-preview'}
+    with pytest.raises(HTTPException, match='not available'):
+        await patch_config(ConfigPatchRequest(activeModel=selection))
+    assert get_config().llm.active_provider == 'openai'
+    assert 'activeProvider: openai' in path.read_text()
+    assert os.environ['VERTEX_LOCATION'] == 'us-central1'
+
+    result = await patch_config(ConfigPatchRequest(activeModel=selection, vertexLocation='auto'))
+    assert result.updated
+    assert load_config(force=True).vertex_location == 'auto'
+    assert resolve_target(selection['model'], 'gemini').kwargs()['vertex_location'] == 'global'
+
+    monkeypatch.setattr('rune.config.save_config_values', lambda _: None)
+    with pytest.raises(HTTPException, match='Could not save'):
+        await patch_config(ConfigPatchRequest(vertexLocation='global'))
+    assert get_config().vertex_location == os.environ['VERTEX_LOCATION'] == 'auto'
 
 
 class TestTheWriterOnlyTouchesWhatItIsAsked:
@@ -356,3 +381,108 @@ class TestPatchValidatesBeforeApplying:
         assert exc.value.status_code == 400
         assert not (tmp_path / ".rune" / ".env").exists()
 
+
+class TestRunLimits:
+    async def test_reused_loops_refresh_inherited_limits_without_changing_overrides(self, config_home):
+        from rune.agent.loop import NativeAgentLoop
+        from rune.api.handlers.config import ConfigPatchRequest, patch_config
+        from rune.types import AgentConfig
+
+        requested = AgentConfig()
+        inherited = NativeAgentLoop(requested)
+        explicit = NativeAgentLoop(AgentConfig(model_request_limit=4, cost_budget_usd=.1))
+        await patch_config(ConfigPatchRequest(runLimits={"modelRequests": 0, "costUsd": .01}))
+        assert inherited._config.model_request_limit == 100
+        inherited._reset_run_state()
+        explicit._reset_run_state()
+        assert inherited._config.model_request_limit == 0 and inherited._config.cost_budget_usd == .01
+        assert explicit._config.model_request_limit == 4 and explicit._config.cost_budget_usd == .1
+        assert requested.model_request_limit is None and requested.cost_budget_usd is None
+        await patch_config(ConfigPatchRequest(runLimits={"modelRequests": 8, "costUsd": None}))
+        inherited._reset_run_state()
+        assert inherited._config.model_request_limit == 8 and inherited._config.cost_budget_usd is None
+
+    def test_api_limits_apply_to_new_runs(self, config_home, monkeypatch):
+        from types import SimpleNamespace
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from rune.agent.loop import NativeAgentLoop
+        from rune.api.handlers import config as api
+
+        monkeypatch.setattr(api, "_memory_tuning_state", lambda: {})
+        monkeypatch.setattr("rune.llm.reasoning.reasoning_control", lambda _: SimpleNamespace(efforts=(), budgets={}))
+        app = FastAPI()
+        app.include_router(api.router)
+        app.dependency_overrides[api.auth] = lambda: None
+        previous = NativeAgentLoop()
+        with TestClient(app) as client:
+            assert client.get("/config").json()["runLimits"] == {"modelRequests": 100, "costUsd": None}
+            limits = {"modelRequests": 8, "costUsd": 0.1}
+            assert client.patch("/config", json={"runLimits": limits}).json() == {"updated": True}
+            assert client.get("/config").json()["runLimits"] == limits
+            assert client.patch("/config", json={"runLimits": {"costUsd": -1}}).status_code == 422
+        current = NativeAgentLoop()
+        assert current._config.model_request_limit == 8 and current._config.cost_budget_usd == 0.1
+        assert previous._config.model_request_limit == 100 and previous._config.cost_budget_usd is None
+
+    async def test_limits_survive_reload_and_zero_blocks_model_calls(self, config_home, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from rune.agent.loop import NativeAgentLoop
+        from rune.agent.request_budget import BudgetExceeded
+        from rune.agent.timing import capture_timing, timed_completion
+        from rune.api.handlers.config import ConfigPatchRequest, patch_config
+        from rune.config import load_config
+
+        await patch_config(ConfigPatchRequest(runLimits={"modelRequests": 0, "costUsd": 0.25}))
+        cfg = load_config(force=True)
+        assert cfg.llm.model_request_limit == 0 and cfg.llm.cost_budget_usd == 0.25
+        agent = NativeAgentLoop()
+        request = AsyncMock()
+        monkeypatch.setattr("rune.agent.request_budget.input_estimate", lambda _: pytest.fail("A blocked run must not tokenize"))
+        with capture_timing(agent), pytest.raises(BudgetExceeded, match="request limit"):
+            await timed_completion(request, {"model": "test", "messages": []})
+        request.assert_not_called()
+
+    async def test_partial_patch_preserves_other_limits_and_clears_alternate_spelling(self, config_home):
+        from rune.api.handlers.config import ConfigPatchRequest, patch_config
+        from rune.config import load_config
+
+        (config_home / "config.yaml").write_text(
+            "llm:\n  model_request_limit: 12\n  cost_budget_usd: 0.5\n  defaultModel: saved-model\n")
+        load_config(force=True)
+        await patch_config(ConfigPatchRequest(runLimits={"costUsd": None}))
+        cfg = load_config(force=True)
+        assert cfg.llm.model_request_limit == 12 and cfg.llm.cost_budget_usd is None
+        assert cfg.llm.default_model == "saved-model"
+        await patch_config(ConfigPatchRequest(runLimits={"costUsd": 0}))
+        assert load_config(force=True).llm.cost_budget_usd == 0
+
+    async def test_failed_save_leaves_active_limits_unchanged(self, config_home, monkeypatch):
+        from fastapi import HTTPException
+
+        from rune.api.handlers.config import ConfigPatchRequest, patch_config
+        from rune.config import get_config
+
+        cfg = get_config()
+        before = cfg.llm.model_copy(deep=True)
+        monkeypatch.setattr("rune.config.save_config_values", lambda _: None)
+        with pytest.raises(HTTPException) as error:
+            await patch_config(ConfigPatchRequest(runLimits={"modelRequests": 0, "costUsd": 0}))
+        assert error.value.status_code == 500
+        assert cfg.llm == before
+
+    @pytest.mark.parametrize("limits", [
+        {"modelRequests": -1}, {"modelRequests": 1.5}, {"modelRequests": True},
+        {"modelRequests": None}, {"costUsd": -0.1}, {"costUsd": float("nan")},
+        {"costUsd": float("inf")}, {"costUsd": True}, {"costUSD": 1},
+    ])
+    def test_invalid_limits_are_rejected_before_saving(self, limits):
+        from pydantic import ValidationError
+
+        from rune.api.handlers.config import ConfigPatchRequest
+
+        with pytest.raises(ValidationError):
+            ConfigPatchRequest(runLimits=limits)

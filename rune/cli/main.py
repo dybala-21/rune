@@ -337,7 +337,7 @@ def _handle_non_interactive(
     # Discarded best-of runs may read memory and use MCP, but must not persist learning.
     _throwaway = bool(os.environ.get("RUNE_IN_BEST_OF"))
 
-    async def _run() -> Any:
+    async def _run(measured: dict) -> Any:
         from rune.agent.agent_context import (
             PostProcessInput,
             PrepareContextOptions,
@@ -441,6 +441,9 @@ def _handle_non_interactive(
             # Reuse classification only if sanitizing and path expansion left the goal unchanged.
             classification=classification if ctx.goal == message else None,
         )
+        if measured["budget_blocked"]:
+            trace.reason = "request_budget_exhausted"
+            trace.completion_check = {"requirement": "Model budget", "detail": measured["budget_blocked"]}
 
         if conv_manager is not None and conv_id:
             from rune.api import conversation_wiring as conv_wiring
@@ -515,7 +518,16 @@ def _handle_non_interactive(
 
     async def _run_and_grade() -> None:
         nonlocal _exit_code
-        trace = await _run()
+        from rune.agent.timing import capture_execution, timing_snapshot
+
+        with capture_execution(loop) as measured:
+            trace = await _run(measured)
+        if trace is not None:
+            snapshot = timing_snapshot(measured)
+            trace.timings = {**getattr(trace, "timings", {}), "usage": snapshot["usage"],
+                             "remainingBudget": snapshot["remainingBudget"]}
+            trace.total_tokens_used = snapshot["usage"]["total_tokens"]
+            loop._last_run_timings = trace.timings
         # Return nonzero when the last mechanical check failed.
         if trace is not None and getattr(trace, "reason", "") == "checks_failed":
             _exit_code = 1

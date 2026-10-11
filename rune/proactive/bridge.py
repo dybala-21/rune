@@ -59,6 +59,7 @@ class BridgeConfig:
     backoff_base_seconds: float = 2.0
     max_steps: int = 50
     timeout_ms: int = 180_000
+    token_budget: int = 50_000
     # When disabled, suggestions need an explicit accept before execution.
     auto_execute: bool = False
     # Enable only if replaying the whole goal cannot duplicate external actions.
@@ -346,15 +347,28 @@ class ProactiveAgentBridge:
         return task
 
     async def _run_claimed(self, suggestion: Suggestion) -> ExecutionRecord:
-        try:
-            record = await self._execute_attempts(suggestion)
-        except asyncio.CancelledError:
-            record = self._record(
-                suggestion, ExecutionStatus.UNVERIFIED,
-                error="Execution interrupted; inspect external state before retrying.",
-            )
-            self._save_record(record)
-            raise
+        from types import SimpleNamespace
+
+        from rune.agent.timing import capture_timing, timing_snapshot
+        from rune.config import get_config
+
+        limits = get_config().llm
+        owner = SimpleNamespace(
+            _token_budget=SimpleNamespace(total=self._config.token_budget, used=0),
+            _config=SimpleNamespace(model_request_limit=limits.model_request_limit, cost_budget_usd=limits.cost_budget_usd),
+        )
+        with capture_timing(owner) as measured:
+            try:
+                record = await self._execute_attempts(suggestion)
+            except asyncio.CancelledError:
+                record = self._record(
+                    suggestion, ExecutionStatus.UNVERIFIED,
+                    error="Execution interrupted; inspect external state before retrying.",
+                    result={"timings": timing_snapshot(measured)},
+                )
+                self._save_record(record)
+                raise
+            record.result["timings"] = timing_snapshot(measured)
         self._save_record(record)
         return record
 
@@ -368,6 +382,8 @@ class ProactiveAgentBridge:
         self._engine.record_execution(record.suggestion_id, record.status.value, record.result)
 
     async def _execute_attempts(self, suggestion: Suggestion) -> ExecutionRecord:
+        from rune.agent.request_budget import BudgetExceeded
+
         max_attempts = 1 + (self._config.max_retries if self._config.retry_safe else 0)
         last_record: ExecutionRecord | None = None
 
@@ -430,6 +446,9 @@ class ProactiveAgentBridge:
                         result=result if isinstance(result, dict) else {},
                     )
 
+            except BudgetExceeded as exc:
+                return self._record(suggestion, ExecutionStatus.UNVERIFIED, attempt=attempt,
+                                    error=str(exc), result={"status": "budget_exhausted", "error": str(exc)})
             except TimeoutError:
                 return self._record(suggestion, ExecutionStatus.UNVERIFIED, attempt=attempt,
                                     duration_ms=(datetime.now(UTC) - start).total_seconds() * 1000,

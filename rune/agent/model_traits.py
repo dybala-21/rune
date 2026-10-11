@@ -1,11 +1,8 @@
-"""Model request settings that supplement LiteLLM's catalog.
-
-Static overrides cover model families; provider errors add corrections
-for individual models during the process lifetime.
-"""
+"""Supplement LiteLLM's model catalog with documented settings and API rejections."""
 
 from __future__ import annotations
 
+from collections.abc import Hashable
 from dataclasses import dataclass, replace
 from functools import lru_cache
 
@@ -14,8 +11,7 @@ from rune.llm.reasoning import reasoning_control
 
 @dataclass(frozen=True)
 class ModelTraits:
-    # Anthropic request shaping applies: cache_control breakpoints and
-    # the no-assistant-tail rule.
+    # Apply Anthropic cache boundaries and remove trailing assistant messages.
     anthropic_wire: bool = False
     # Send speed="fast" only to models that accept it.
     speed_param: bool = False
@@ -28,9 +24,7 @@ class ModelTraits:
 
 _DEFAULT = ModelTraits()
 
-# (required substrings, traits): the first row whose substrings all
-# appear in the lowercased model id wins, so specific families must
-# stay above general ones.
+# First match wins; put specific models before families.
 _STATIC: tuple[tuple[tuple[str, ...], ModelTraits], ...] = (
     (("claude-opus-5",), ModelTraits(anthropic_wire=True, speed_param=True, temperature=False, vision=True)),
     (("claude", "opus"), ModelTraits(anthropic_wire=True, speed_param=True)),
@@ -44,17 +38,14 @@ _STATIC: tuple[tuple[tuple[str, ...], ModelTraits], ...] = (
     (("gpt-5",), ModelTraits(temperature=False)),
 )
 
-# Cache provider rejections by resolved model ID for this process.
-_TEMPERATURE_REJECTED: set[str] = set()
-_COMPLETION_TOKENS_REQUIRED: set[str] = set()
-# Reasoning support alone does not guarantee support alongside tools.
-_REASONING_EFFORT_REJECTED: set[str] = set()
-# Route models to Responses after the provider rejects Chat Completions.
-_RESPONSES_ONLY: set[str] = set()
+# Keep rejections within the endpoint and request features that produced them.
+_TEMPERATURE_REJECTED: set[Hashable] = set()
+_COMPLETION_TOKENS_REQUIRED: set[Hashable] = set()
+_RESPONSES_ONLY: set[Hashable] = set()
 
 
-def traits(model: str) -> ModelTraits:
-    """Traits for a resolved model id: static table + learned overlay."""
+def traits(model: str, *, cache_key: Hashable | None = None) -> ModelTraits:
+    """Combine model settings with rejections observed for this request context."""
     m = (model or "").lower()
     found = _DEFAULT
     for needles, entry in _STATIC:
@@ -64,9 +55,10 @@ def traits(model: str) -> ModelTraits:
     from rune.llm.xai import model_name as xai_model_name
     if xai_model_name(model) is not None:
         found = replace(found, vision=True)
-    if found.temperature and model in _TEMPERATURE_REJECTED:
+    key = model if cache_key is None else cache_key
+    if found.temperature and key in _TEMPERATURE_REJECTED:
         found = replace(found, temperature=False)
-    if model in _COMPLETION_TOKENS_REQUIRED:
+    if key in _COMPLETION_TOKENS_REQUIRED:
         found = replace(found, max_completion_tokens=True)
     return found
 
@@ -100,47 +92,27 @@ def supports_vision(model: str) -> bool:
         return False
 
 
-def note_temperature_rejected(model: str) -> None:
+def note_temperature_rejected(model: Hashable) -> None:
     """Record that *model* rejected temperature; traits() reflects it."""
     _TEMPERATURE_REJECTED.add(model)
 
 
-def note_completion_tokens_required(model: str) -> None:
+def note_completion_tokens_required(model: Hashable) -> None:
     _COMPLETION_TOKENS_REQUIRED.add(model)
 
 
-def note_reasoning_effort_rejected(model: str) -> None:
-    """Record that *model* refused reasoning_effort alongside tools."""
-    _REASONING_EFFORT_REJECTED.add(model)
-
-
-def reasoning_effort_rejected(model: str) -> bool:
-    """Whether *model* has refused reasoning_effort in this process.
-
-    Deliberately not cached, and deliberately not folded into
-    :func:`supports_reasoning_effort`: that one is ``lru_cache``d, so a True
-    answered before the first rejection would mask everything learned after it.
-    """
-    return model in _REASONING_EFFORT_REJECTED
-
-
-def note_responses_only(model: str) -> None:
+def note_responses_only(model: Hashable) -> None:
     """Record that *model* needs /v1/responses for a request carrying tools."""
     _RESPONSES_ONLY.add(model)
 
 
-def needs_responses_api(model: str) -> bool:
+def needs_responses_api(model: Hashable) -> bool:
     """Whether *model* has refused tools on chat/completions in this process."""
     return model in _RESPONSES_ONLY
 
 
 def is_responses_only_error(exc: Exception) -> bool:
-    """Whether a BadRequest is the endpoint pointing at /v1/responses.
-
-    Two distinct refusals mean the same thing: "function tools ... are not
-    supported ... use /v1/responses", and "this model is not supported in the
-    v1/chat/completions endpoint".
-    """
+    """Check whether the provider requires the Responses endpoint."""
     m = str(exc).lower()
     if "v1/responses" in m or "/responses" in m:
         return True
@@ -150,12 +122,7 @@ def is_responses_only_error(exc: Exception) -> bool:
 
 
 def is_max_tokens_rename_error(exc: Exception) -> bool:
-    """Whether the provider is asking for max_completion_tokens instead.
-
-    Newer OpenAI models refuse the older spelling outright, and that refusal
-    arrives before any complaint about tools — so without handling it the run
-    never gets far enough to learn the model needs /v1/responses.
-    """
+    """Check whether the provider requires max_completion_tokens."""
     m = str(exc).lower()
     return "max_tokens" in m and "max_completion_tokens" in m
 
