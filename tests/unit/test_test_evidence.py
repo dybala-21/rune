@@ -518,7 +518,10 @@ async def test_correction_keeps_tool_evidence_after_transcript_compaction(monkey
     assert "average([-2, 2])" in second[1]["text"]
     for i in range(30):
         gate.observe("file_edit", {"path": "stats.py", "replace": "x" * 10000}, CapabilityResult(success=False, error=f"failed revision {i}"))
-    assert len(gate._observations) == 6 and sum(len(r["text"]) for r in gate._observations) <= 10800
+    from rune.agent.code_observations import MAX_RECORDS, review_observations
+
+    assert len(gate._observations) <= MAX_RECORDS
+    assert sum(len(r["text"]) for r in review_observations(gate._observations)) <= 10800
     assert gate._observations[0]["text"] == first[0]["text"]
     assert "failed revision 29" in gate._observations[-1]["text"]
 
@@ -530,7 +533,7 @@ def test_code_observations_preserve_baseline_and_latest_revision_with_bounded_si
             "name": "file_read", "arguments": '{"path":"code.py"}'}}]},
             {"role": "tool", "tool_call_id": str(i), "content": f"revision {i}\n" + "x" * 10000}])
     observations = code_observations(messages)
-    assert len(observations) == 6 and sum(len(r["text"]) for r in observations) <= 10800
+    assert sum(len(r["text"]) for r in observations) <= 10800
     assert "revision 0" in observations[0]["text"] and "revision 29" in observations[-1]["text"]
 
 

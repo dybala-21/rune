@@ -97,7 +97,13 @@ class FileOutcomes:
         if result.success:
             self.pending.pop(key, None)
         else:
+            metadata = result.metadata or {}
+            if (metadata.get("action_status") == "not_executed"
+                    and metadata.get("failure_kind") == "invalid_request"):
+                return
             status = "outcome unknown" if may_have_changed(result) else "not executed"
+            if status == "not executed" and key in self.pending and self.pending[key].status == "outcome unknown":
+                return
             if tool == "file_write" and isinstance(params.get("content"), str):
                 try:
                     expected_hash = hashlib.sha256(params["content"].encode(params.get("encoding", "utf-8"))).hexdigest()

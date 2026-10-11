@@ -1201,6 +1201,7 @@ _USER_FRIENDLY_REASON: dict[str, str] = {
     "stalled": "I couldn't make further progress. Please try rephrasing your request.",
     "max_iterations": "I've reached my step limit. Here's what I found so far.",
     "token_budget_exhausted": "I ran out of processing budget. Please try a simpler request.",
+    "request_budget_exhausted": "The configured model budget stopped further requests. Some work may be unfinished.",
 }
 
 

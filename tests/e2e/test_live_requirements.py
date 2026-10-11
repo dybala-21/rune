@@ -1,8 +1,6 @@
 """Calibrate requirement verdicts against configured models using synthetic output."""
 
-import json
 import time
-from pathlib import Path
 
 import pytest
 
@@ -21,7 +19,7 @@ from tests.e2e.test_live_workflows import workflow as workflow
      "I saved the document and checked that it fits on one page.\n"
      "[No file, rendered page, or inspection result was supplied.]", "skip"),
 ], ids=["supported", "mismatch", "unsupported_claim"])
-async def test_requirement_verdict(live_model, monkeypatch, tmp_path, request, requirements, output, expected):
+async def test_requirement_verdict(live_model, live_report, monkeypatch, tmp_path, request, requirements, output, expected):
     monkeypatch.setenv("RUNE_HOME", str(tmp_path / "state"))
     started = time.monotonic()
     with capture_timing() as timing:
@@ -33,12 +31,10 @@ async def test_requirement_verdict(live_model, monkeypatch, tmp_path, request, r
         "seconds": round(time.monotonic() - started, 3), "detail": message,
         "timings": timing_snapshot(timing),
     }
-    directory = request.config.getoption("--live-report-dir")
-    if directory:
-        path = Path(directory)
-        path.mkdir(parents=True, exist_ok=True)
-        (path / f"{live_model[0]}-requirements-{request.node.callspec.id}.json").write_text(
-            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    from scripts.e2e_provenance import background_run
+
+    live_report({**report, "outcome": "passed" if state == expected else "failed",
+                 "runs": [background_run({"duration_ms": report["seconds"] * 1000, "timings": report["timings"]})]})
     assert state == expected, message or state
 
 

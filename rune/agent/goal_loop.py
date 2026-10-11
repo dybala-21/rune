@@ -522,12 +522,15 @@ class GoalLoop:
                 tokens=int(getattr(trace, "total_tokens_used", 0) or 0),
                 verdict=verdict,
             )
-            self._last_inner_reason = trace.reason or ""  # for the C1 steer
+            self._last_inner_reason = trace.reason or ""
+
+            if it.reason == "request_budget_exhausted":
+                self._record(hist, it)
+                stop_cause = "budget"
+                break
 
             if verdict == "verified":
-                # With no validation commands and no reviewer there is no
-                # objective check, so fall back to the inner evidence score
-                # rather than accept a bare "completed".
+                # Without independent checks, require the inner evidence threshold.
                 no_objective = not spec.validation_commands and not (
                     self._cfg.adversarial_review and self._review is not None
                 )
@@ -612,9 +615,7 @@ class GoalLoop:
             if self._plateaued(hist):
                 stop_cause = "stagnation"
                 break
-            # Progress-aware extension: a slow but converging model is not
-            # capped at max_iterations while it is still advancing - bounded
-            # by max_extra_iterations and the inviolable token ceiling.
+            # Allow progress-based extensions within the iteration and token limits.
             if (
                 n >= effective_max
                 and self._advancing(hist)
@@ -624,12 +625,11 @@ class GoalLoop:
             ):
                 effective_max += 1
 
-        # Gap #4: climb the escalation ladder before giving up. When the local
-        # loop is stuck (tried and could not pass validation) and an escalation
-        # path was injected, run ONE attempt on the stronger model and re-judge.
+        # A stronger model gets one attempt unless the request budget is exhausted.
         if (
             stop_cause in _STUCK_STOP_CAUSES
             and self._escalate is not None
+            and not (hist and hist[-1].reason == "request_budget_exhausted")
         ):
             self._append_progress("ESCALATE one attempt on a stronger model (stuck)")
             accepted, last_answer = await self._escalated_attempt(

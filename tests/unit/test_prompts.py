@@ -76,8 +76,7 @@ class TestPromptConstants:
         assert AGENT_SYSTEM_PROMPT is PROMPT_CORE
 
     def test_fanout_hint_pinned_to_core(self):
-        # The builder strips FANOUT_HINT verbatim when RUNE_FANOUT_READS=0,
-        # so the constant must stay byte-identical to the PROMPT_CORE text.
+        # The builder removes FANOUT_HINT by exact string match.
         from rune.agent.prompts import FANOUT_HINT
         assert FANOUT_HINT in PROMPT_CORE
 
@@ -93,7 +92,7 @@ class TestFanoutHintSwitch:
         monkeypatch.setenv("RUNE_FANOUT_READS", "0")
         prompt = build_system_prompt(goal="test")
         assert FANOUT_HINT not in prompt
-        # the surrounding item survives the strip
+        # Keep the surrounding instruction.
         assert "then read them together in one step." in prompt
 
 
@@ -112,8 +111,7 @@ class TestBuildSystemPrompt:
         assert "Current Task" in prompt
 
     def test_memory_context_reaches_prompt_in_all_shapes(self):
-        # Producers pass memory_context as an object (.formatted), the
-        # raw run-context dict, or a plain string — ALL must reach the model.
+        # All supported memory formats must reach the prompt.
         marker = "integer division must floor"
         section = f"## Learned Rules\n- floor: {marker}"
 
@@ -222,9 +220,7 @@ class TestBuildSystemPrompt:
         assert "Document Creation Protocol" not in prompt
 
     def test_missing_classification_protective_includes_both(self):
-        # When classification is omitted (e.g. fallback path), include both
-        # sections defensively — losing email/document guidance is worse
-        # than the extra tokens.
+        # Missing classification keeps both workflows available.
         prompt = build_system_prompt(goal="fix the bug")
         assert "Email Reading Workflow" in prompt
         assert "Document Creation Protocol" in prompt
@@ -361,6 +357,8 @@ class TestBuildSystemPrompt:
         )
         prompt = build_system_prompt(goal="fix and run", classification=cls)
         assert "Execution Mode (MANDATORY)" in prompt
+        assert "immediately use file_edit" not in prompt
+        assert "Execution alone does not authorize" in prompt
 
     def test_complex_coding_not_duplicated_with_multi_task(self):
         """Complex coding protocol should NOT appear when multi_task is also set."""

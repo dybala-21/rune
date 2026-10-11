@@ -92,3 +92,43 @@ async def test_stream_discovers_a_tool_before_dispatch(monkeypatch):
     assert agent._tool_catalog is None
     assert [tool["function"]["name"] for tool in agent._tool_schemas] == ["office_export_7"]
     assert set(agent._tool_lookup) == {"office_export_7"}
+
+
+async def test_required_reads_are_loaded_and_completion_restores_task_tools(monkeypatch):
+    from rune.agent.litellm_adapter import LiteLLMAgent
+    from rune.agent.tool_adapter import ToolWrapper
+    from tests.unit.test_live_streaming import _chunk, _tc
+
+    recovery = {"document_read", "table_requirements"}
+    reads, writes = AsyncMock(return_value="Policy content"), AsyncMock(return_value="Saved")
+
+    async def requirements(**kwargs):
+        nonlocal recovery
+        recovery = None
+        return "Contract fixed"
+
+    tools = [ToolWrapper(name=name, description=name + " " + "x" * 1500, function=fn) for name, fn in [
+        ("document_read", reads), ("table_requirements", requirements), ("file_write", writes),
+        *[(f"service_{i}", AsyncMock()) for i in range(30)],
+    ]]
+    seen = []
+
+    async def complete(**params):
+        seen.append({tool["function"]["name"] for tool in params["tools"]})
+
+        async def chunks():
+            if len(seen) <= 3:
+                yield _chunk(tool_calls=_tc(["document_read", "table_requirements", "file_write"][len(seen) - 1]),
+                             finish="tool_calls")
+            else:
+                yield _chunk(content="Done.", finish="stop")
+        return chunks()
+
+    monkeypatch.setattr("rune.agent.litellm_adapter.litellm.acompletion", complete)
+    agent = LiteLLMAgent("openai/gpt-5.4", tools=tools)
+    async with agent.run_stream("Create a document", tool_recovery=lambda: recovery) as stream:
+        assert "".join([part async for part in stream.stream_text()]) == "Done."
+    assert seen[:2] == [{"document_read", "table_requirements"}] * 2
+    assert {"file_write", "tool_search"} <= seen[2]
+    reads.assert_awaited_once()
+    writes.assert_awaited_once()

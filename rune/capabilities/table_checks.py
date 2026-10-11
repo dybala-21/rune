@@ -15,14 +15,14 @@ log = get_logger(__name__)
 class TableRequirementsParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
     source_path: str = Field(min_length=1, description="Original CSV or values-only XLSX source; never a generated substitute")
-    sheet: str | None = None
+    sheet: str | None = Field(default=None, description="Source XLSX worksheet only. Omit or use null for CSV. The output worksheet is taken from the user's request.")
 
 
 class TableVerifyParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
     contract_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     output_path: str = Field(min_length=1, description="Saved aggregate output, never the original source. Source preservation is checked automatically.")
-    sheet: str | None = None
+    sheet: str | None = Field(default=None, description="Output XLSX worksheet; omit to use the contract's sheet. Omit or use null for CSV.")
     header_row: int = Field(default=1, ge=1, le=100)
 
 
@@ -51,6 +51,7 @@ def register_table_checks(registry: CapabilityRegistry) -> None:
     for name, params, execute, description in (
         ("table_requirements", TableRequirementsParams, table_requirements,
          "Before producing an aggregate CSV/XLSX from source data, fix the data requirements from the original user request. "
+         "Read referenced input policies first; the harness includes their contents and binds their file revisions. "
          "Returns an immutable contract, exact output columns, filters, duplicate policy and unsupported requirements. "
          "The agent cannot supply or change the acceptance conditions. Use table_verify after creating the output."),
         ("table_verify", TableVerifyParams, table_verify,

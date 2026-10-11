@@ -13,6 +13,7 @@ from typing import Any
 from rune.agent.attachments import content_text
 from rune.agent.check_commands import check_commands
 from rune.agent.classification_response import decode_object
+from rune.agent.code_observations import observation, retain_observations, review_observations
 from rune.agent.test_summary import without_recorded_tables
 from rune.agent.timing import timing_phase
 from rune.utils.logger import get_logger
@@ -62,6 +63,8 @@ For claims covering an input class or a direction of change, return an explanati
 supported (needs_correction=false). Briefly test the claimed scope against the code: unchanged results,
 boundaries and signs where relevant. A passing baseline refutes a claim that every original result was wrong.
 For other explanations, report only concrete contradictions or unobserved test-specific inputs/assertions.
+CODE_OBSERVATIONS is bounded: missing actions or omitted code do not establish that an action never happened.
+Earlier reads show earlier revisions; compare them with later successful edits and reads before rejecting a change claim.
 Cite an answer line and an observation ID, give a short reason identifying the relevant code or result,
 then set needs_correction. Rune retrieves the complete bounded observation. Do not demand new tests.
 
@@ -160,9 +163,10 @@ def claim_runs(evidence: list[dict]) -> list[dict]:
 
 
 def code_observations(messages: list[Any]) -> list[dict[str, Any]]:
-    """Keep initial reads and recent changes for the final review."""
+    """Rebuild bounded evidence when live observations are unavailable."""
     calls: dict[str, dict] = {}
     records = []
+    count = 0
     for message in messages:
         if not isinstance(message, dict):
             continue
@@ -174,14 +178,10 @@ def code_observations(messages: list[Any]) -> list[dict[str, Any]]:
         call = calls.get(message.get("tool_call_id"))
         if not call or call.get("name") not in {"file_read", "file_write", "file_edit", "bash_execute"}:
             continue
-        text = _observation_text(call['name'], call.get('arguments', ''), content_text(message.get('content', '')))
-        records.append({"id": len(records) + 1, "text": text})
-    return records if len(records) <= 6 else [*records[:3], *records[-3:]]
-
-
-def _observation_text(name: str, arguments: str, output: str) -> str:
-    text = f"{name}({arguments})\nObserved result:\n{output}"
-    return text if len(text) <= 1800 else text[:1100] + "\n[excerpt omitted]\n" + text[-650:]
+        count += 1
+        records = retain_observations([*records, observation(
+            count, call["name"], call.get("arguments", ""), content_text(message.get("content", "")))])
+    return review_observations(records)
 
 
 def _quote_matches(answer: str, line: int, quote: str) -> bool:
@@ -331,14 +331,18 @@ class TestClaimGate:
     def observe(self, name: str, params: dict, result: Any) -> None:
         if name not in {"file_read", "file_write", "file_edit", "bash_execute"} or (result.metadata or {}).get("cached"):
             return
-        output = f"success={result.success}\n{result.output or ''}"
+        output = result.output or ""
         if result.error and result.error.strip() not in (result.output or ""):
             output += "\n" + result.error
+        change = (result.metadata or {}).get("fileChange", {})
+        if result.success and change.get("patch"):
+            params = {"path": change.get("path") or params.get("path")}
+            output += "\nApplied patch:\n" + change["patch"]
+            if change.get("notice"):
+                output += "\n" + change["notice"]
         self._observation_count += 1
-        self._observations.append({"id": self._observation_count, "text": _observation_text(
-            name, json.dumps(params, ensure_ascii=False, default=str), output)})
-        if len(self._observations) > 6:
-            self._observations = [*self._observations[:3], *self._observations[-3:]]
+        self._observations = retain_observations([*self._observations, observation(
+            self._observation_count, name, params, output, result.success)])
 
     async def review(self, state, answer: str, messages: list[Any] | None = None) -> str | None:
         evidence = comparison_evidence(state)
@@ -348,8 +352,8 @@ class TestClaimGate:
                          if state.passed and state.last_write else answer)
         if review_answer != answer and not review_answer.strip():
             return None
-        # Keep review evidence across transcript compaction.
-        observations = list(self._observations) or code_observations(messages or [])
+        # Preserve earlier changes when the transcript is compacted.
+        observations = review_observations(self._observations) or code_observations(messages or [])
         key = hashlib.sha256((str(state.sequence) + answer + json.dumps(observations)).encode()).hexdigest()
         if key in self._results:
             return self._results[key]

@@ -14,7 +14,7 @@ log = get_logger(__name__)
 
 _PROPERTIES = {
     "goal_type": {
-        "type": "string", "enum": ["chat", "web", "research", "code_modify", "execution", "browser", "full"],
+        "type": "string", "enum": ["chat", "web", "research", "code_modify", "execution", "browser", "full", "artifact"],
         "description": "Route by the requested outcome. Reading or summarizing even an already open webpage is web. Browser requires interaction with webpage controls, not merely an open browser or use of a page-reading tool. Native app state/features use full with desktop intent.",
     },
     "confidence": {"type": "number", "minimum": 0, "maximum": 1,
@@ -24,8 +24,8 @@ _PROPERTIES = {
         "type": "boolean",
         "description": "True only for required code, script, shell or test execution. False for native app input, including calculations in Calculator, unless the user also requests code/tests to run.",
     },
-    "intent_categories": {"type": "array", "items": {"type": "string", "enum": ["email", "document", "table", "desktop", "calculation"]},
-                          "description": "desktop requires native app features or unsaved app state. Creating or rereading Office/PDF files alone uses document/file tools, without desktop."},
+    "intent_categories": {"type": "array", "items": {"type": "string", "enum": ["coding", "email", "document", "table", "desktop", "calculation"]},
+                          "description": "coding requires software work as an outcome, not helper code for a document. desktop requires native app features or unsaved state. Office/PDF files alone use document/file tools."},
     "requires_desktop_input": {"type": "boolean", "description": "True only for input in a native app required by the request. Saving or checking a file through document tools is false."},
     "is_related_to_previous": {"type": "boolean"},
     "table_output": {
@@ -112,6 +112,8 @@ def validate_decision(data: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(data["calculation_expression"], str):
         raise InvalidClassification("invalid_calculation_expression")
     desktop = "desktop" in data["intent_categories"]
+    if data["goal_type"] == "artifact" and "coding" in data["intent_categories"]:
+        raise InvalidClassification("inconsistent_artifact_route")
     if data["requires_desktop_input"] and not desktop:
         raise InvalidClassification("inconsistent_desktop_input")
     if desktop and data["goal_type"] != "full":

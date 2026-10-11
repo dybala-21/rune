@@ -27,11 +27,11 @@ def build_trust_payload(trace: Any) -> dict[str, Any]:
     out: dict[str, Any] = {
         **outcome.payload(),
         "reason": reason,
-        "budgetExhausted": bool(getattr(trace, "tool_budget_exhausted", False)),
+        "budgetExhausted": bool(getattr(trace, "tool_budget_exhausted", False)) or reason == "request_budget_exhausted",
         "testsPassedAfterEdit": getattr(trace, "tests_passed_after_edit", None),
         "verification": getattr(trace, "verification", None),
         "completionCheck": getattr(trace, "completion_check", None)
-        if reason in ("completed_gate_warnings", "max_gate_blocked", "desktop_blocked") else None,
+        if reason in ("completed_gate_warnings", "max_gate_blocked", "desktop_blocked", "request_budget_exhausted") else None,
         "artifactReceipts": getattr(trace, "artifact_receipts", []),
         "tableAcceptance": getattr(trace, "table_acceptance", None),
         "requirementAcceptance": getattr(trace, "requirement_acceptance", None),

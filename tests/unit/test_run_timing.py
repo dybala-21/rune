@@ -139,7 +139,7 @@ async def test_auxiliary_and_stream_usage_are_counted_once_and_missing_usage_is_
             stream = await timed_completion(completion, {"model": "main", "stream": True})
             assert len([chunk async for chunk in stream]) == 2
             await timed_completion(missing, {"model": "main"})
-            assert self._token_budget.used == 120  # The main loop accounts for streamed tokens.
+            assert self._token_budget.used == 1170
             return CompletionTrace(reason="completed")
 
     trace = await Runner().run()

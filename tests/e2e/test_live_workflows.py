@@ -7,7 +7,6 @@ import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
 import pytest
 from starlette.testclient import TestClient
@@ -17,7 +16,7 @@ from tests.e2e.workflow_harness import Workflow, gui_calls
 
 
 @pytest.fixture
-def workflow(live_model, monkeypatch, tmp_path, request):
+def workflow(live_model, live_report, monkeypatch, tmp_path, request):
     from rune.agent import failover, loop
     from rune.api import conversation_wiring
     from rune.api.run_maintenance import RunMaintenance
@@ -68,15 +67,12 @@ def workflow(live_model, monkeypatch, tmp_path, request):
     conversation_wiring._reset_for_tests()
     with TestClient(create_app(), client=("127.0.0.1", 50000)) as client:
         result = Workflow(client, workspace, provider, model)
+        result.reporter = live_report
         result.decision_backend = cfg.llm.decision_routing.backend
         result.decisions = decisions
         yield result
-        output = request.config.getoption("--live-report-dir")
-        if output:
-            path = Path(output).resolve()
-            path.mkdir(parents=True, exist_ok=True)
-            outcome = "passed" if getattr(request.node, "live_passed", False) else "failed"
-            result.write_report(path / f"{provider}-{request.node.name}.json", outcome)
+        outcome = "passed" if getattr(request.node, "live_passed", False) else "failed"
+        result.write_report(outcome)
     conversation_wiring._reset_for_tests()
 
 

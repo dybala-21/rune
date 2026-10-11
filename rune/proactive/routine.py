@@ -69,7 +69,7 @@ def should_notify(policy: RoutinePolicy, result: dict, previous: dict | None) ->
         if current_id is not None and previous_id is not None:
             return (current_id != previous_id or result.get("status") != prior_status
                     or result.get("error") != previous.get("error"))
-    # Compare actual output; a model's claim that nothing changed is not an oracle.
+    # Detect changes from saved output, not the model's description.
     return previous is None or any(result.get(key) != previous.get(key) for key in ("status", "output"))
 
 
@@ -78,17 +78,22 @@ async def run_while_current(job, store, execute) -> dict:
 
     from rune.capabilities.cron import _row_to_cronjob
 
+    def current():
+        row = store.get_cron_job(job.id)
+        return bool(row and _row_to_cronjob(row) == job and not job.policy.expired)
+
+    if not current():
+        return {"status": "cancelled", "success": False, "verified": False,
+                "output": "", "error": "The task changed before execution started."}
     task = asyncio.create_task(execute(job))
     try:
         while not task.done():
             done, _ = await asyncio.wait({task}, timeout=1)
-            if done:
-                break
-            row = store.get_cron_job(job.id)
-            current = _row_to_cronjob(row) if row else None
-            if current != job or job.policy.expired:
+            if not current():
                 return {"status": "interrupted", "verified": False, "execution_unknown": True,
                         "output": "", "error": "The task changed, stopped or expired. Inspect its effects before resuming."}
+            if done:
+                break
         return await task
     finally:
         if not task.done():

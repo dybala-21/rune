@@ -22,6 +22,14 @@ class Aggregate(BaseModel):
     operation: Literal["sum", "count", "mean", "min", "max"]
     column: str | None = None
     decimals: int = Field(default=0, ge=0, le=6)
+    unit: str | None = Field(default=None, min_length=1, max_length=64)
+    unit_required: bool = False
+
+
+class TableReport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    filename: str = Field(pattern=r"^[^/\\]+\.(?:docx|pptx|pdf|md|txt)$")
+    coverage: Literal["mentioned", "all", "grand_total"] = "mentioned"
 
 
 class TableSort(BaseModel):
@@ -39,6 +47,7 @@ class TablePlan(BaseModel):
     deduplicate_by: list[str] = Field(default_factory=list, max_length=32)
     group_by: list[str] = Field(default_factory=list, max_length=4)
     grand_total: list[str] = Field(default_factory=list, max_length=4)
+    grand_total_position: Literal["first", "last"] | None = None
     exact_headers: bool = True
     exact_total_label: bool = True
     csv_bom: bool | None = None
@@ -47,6 +56,7 @@ class TablePlan(BaseModel):
     output_names: list[Annotated[str, Field(pattern=r"^[^/\\]+\.(?:[cC][sS][vV]|[xX][lL][sS][xX])$")]] = Field(
         default_factory=list, max_length=12, description="Output CSV/XLSX basenames only; no directories or surrounding prose.")
     output_sheet: str | None = Field(default=None, min_length=1, max_length=31)
+    reports: list[TableReport] = Field(default_factory=list, max_length=6)
     unverified: list[str] = Field(default_factory=list, max_length=24)
     out_of_scope: list[str] = Field(default_factory=list, max_length=24)
 
@@ -59,6 +69,12 @@ class TablePlan(BaseModel):
         if not self.applicable and not self.unverified:
             raise ValueError("Explain why the request cannot be checked")
         names = self.group_by + [a.name for a in self.aggregates]
+        if self.grand_total_position is not None and not self.grand_total:
+            raise ValueError("Grand-total position requires a grand-total row")
+        if self.group_by and not self.grand_total and any(r.coverage == "grand_total" for r in self.reports):
+            raise ValueError("A report of the grand total requires a computed grand-total row")
+        if len({r.filename.casefold() for r in self.reports}) != len(self.reports):
+            raise ValueError("Duplicate companion report filenames")
         if self.grand_total and (len(self.grand_total) != len(self.group_by)
                                  or not any(label.strip() for label in self.grand_total)
                                  or any(len(label) > 128 for label in self.grand_total)):
@@ -249,6 +265,12 @@ def compare_table(plan: TablePlan, expected: list[tuple[str, ...]],
         if difference:
             issues.append({"check": check, "count": sum(difference.values()),
                            "examples": [[str(v) for v in row] for row in list(difference)[:5]]})
+    if plan.grand_total_position is not None:
+        positions = [i for i, row in enumerate(actual) if row[:len(plan.group_by)] == tuple(plan.grand_total)]
+        target = 0 if plan.grand_total_position == "first" else len(actual) - 1
+        if positions != [target]:
+            issues.append({"check": "grand_total_position", "expected": plan.grand_total_position,
+                           "actual_data_rows": [i + 1 for i in positions]})
     if plan.order_by:
         ordered = (row for row in map(canonical, actual)
                    if not plan.grand_total or row[:len(plan.group_by)] != tuple(plan.grand_total))
@@ -266,4 +288,6 @@ def compare_table(plan: TablePlan, expected: list[tuple[str, ...]],
             if out_of_order:
                 break
     return {"status": "fail" if issues else "pass", "issues": issues,
-            "checks": ["columns", "aggregates", "group_coverage", "row_multiplicity", *(["row_order"] if plan.order_by else [])]}
+            "checks": ["columns", "aggregates", "group_coverage", "row_multiplicity",
+                       *(["row_order"] if plan.order_by else []),
+                       *(["grand_total_position"] if plan.grand_total_position else [])]}
