@@ -89,12 +89,16 @@ async def test_selection_survives_reload_and_auxiliary_calls_stay_on_xai(monkeyp
     client = LLMClient()
     assert client._effective_provider(None) == Provider.XAI
     assert client.resolve_model(ModelTier.FAST) == get_config().llm.models.xai.fast
-    assert adapter._resolve_litellm_model("xai:grok-4.6") == ("xai/grok-4.6", {})
-    assert adapter._resolve_litellm_model("xai/grok-4.6") == ("xai/grok-4.6", {})
+    for name in ("xai:grok-4.6", "xai/grok-4.6"):
+        assert adapter._resolve_litellm_model(name) == ("xai/grok-4.6", {
+            "api_key": "test-key", "_rune_source_model": "xai/grok-4.6",
+        })
     completion = AsyncMock(return_value={"choices": []})
     monkeypatch.setattr(adapter.litellm, "acompletion", completion)
     await client.completion([{"role": "user", "content": "classify"}], tier=ModelTier.FAST)
     assert completion.call_args.kwargs["model"] == "xai/grok-4.3"
+    assert completion.call_args.kwargs["api_key"] == "test-key"
+    assert "_rune_source_model" not in completion.call_args.kwargs
 
 
 @pytest.mark.parametrize("model,efforts", [

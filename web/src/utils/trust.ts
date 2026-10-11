@@ -53,6 +53,15 @@ export function describeTrust(trust: TrustInfo): TrustPresentation {
     return { ...base, title: 'Checks failed', note: trust.honestNote || 'A recorded check failed. Review the evidence before using this result.', tone: 'warning', glyph: '⚠', ok: false };
   }
   if (completion === 'incomplete') {
+    if (verification === 'passed' && trust.reason === 'max_gate_blocked'
+      && trust.completionCheck?.name === 'Test result claims'
+      && trust.explanationReview?.status === 'unavailable') {
+      return {
+        ...base, title: 'Tests passed · summary unchecked', tone: 'warning', glyph: '⚠', ok: false,
+        canEscalate: false,
+        note: 'The recorded tests passed. The explanation review was unavailable; the full task is not marked complete.',
+      };
+    }
     if (trust.reason === 'desktop_blocked') {
       return {
         ...base, title: 'Desktop task stopped', tone: 'warning', glyph: '⚠', ok: false,

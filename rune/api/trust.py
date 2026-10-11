@@ -24,12 +24,17 @@ def build_cancelled_trust(trace: Any = None, *, artifact_receipts: list[dict[str
 def build_trust_payload(trace: Any) -> dict[str, Any]:
     outcome = run_outcome(trace)
     reason = outcome.reason
+    review = getattr(trace, "explanation_review", None) or {}
+    check = getattr(trace, "completion_check", None) or {}
+    review_unavailable = (reason == "max_gate_blocked" and review.get("status") == "unavailable"
+                          and check.get("name") == "Test result claims")
     out: dict[str, Any] = {
         **outcome.payload(),
         "reason": reason,
         "budgetExhausted": bool(getattr(trace, "tool_budget_exhausted", False)) or reason == "request_budget_exhausted",
         "testsPassedAfterEdit": getattr(trace, "tests_passed_after_edit", None),
         "verification": getattr(trace, "verification", None),
+        "explanationReview": getattr(trace, "explanation_review", None),
         "completionCheck": getattr(trace, "completion_check", None)
         if reason in ("completed_gate_warnings", "max_gate_blocked", "desktop_blocked", "request_budget_exhausted") else None,
         "artifactReceipts": getattr(trace, "artifact_receipts", []),
@@ -37,7 +42,7 @@ def build_trust_payload(trace: Any) -> dict[str, Any]:
         "requirementAcceptance": getattr(trace, "requirement_acceptance", None),
         "workspaceWarning": getattr(trace, "workspace_warning", "") or "",
         "unsourcedNumbers": list(getattr(trace, "unsourced_numbers", None) or []),
-        "canEscalate": can_escalate(reason),
+        "canEscalate": can_escalate(reason) and not review_unavailable,
         "honestNote": honest_failure_note(reason, run_was_verifiable(trace)) or "",
         "escalationHint": "",
     }

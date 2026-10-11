@@ -530,9 +530,7 @@ def _guided_for_model(model: str, has_tools: bool, provider_extra: object) -> bo
     )
 
 
-# How many consecutive turns the guided schema forbids {final} (forcing a tool
-# call) while no real artifact has been produced, before allowing a no-op final
-# so a genuinely actionless task can still terminate.
+# Bound forced tool calls so tasks needing no action can still finish.
 _GUIDED_FORCE_ACTION_CAP = 5
 
 
@@ -604,65 +602,7 @@ def _build_tool_lookup(tools: list[Any]) -> dict[str, Any]:
 
 
 
-# Provider prefix resolution
-
-_PROVIDER_PREFIX: dict[str, str] = {
-    "anthropic": "anthropic/",
-    "xai": "xai/",
-    "gemini": "gemini/",
-    "azure": "azure/",
-    # Ollama uses openai/ prefix to route through the OpenAI-compatible
-    # /v1 endpoint. LiteLLM's native ollama/ adapter has broken tool_calls
-    # parsing in streaming mode (BerriAI/litellm#24091).
-    "ollama": "openai/",
-}
-
-# Extra kwargs injected per provider (e.g., api_base for ollama).
-_PROVIDER_EXTRA: dict[str, dict[str, str]] = {
-    "ollama": {
-        "api_base": "http://localhost:11434/v1",
-        "api_key": "ollama",
-    },
-}
-
-
-def _vertex_active() -> bool:
-    """True when GOOGLE_APPLICATION_CREDENTIALS points to an existing file."""
-    import os as _os
-    path = _os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
-    if not (path and _os.path.isfile(path)):
-        return False
-    global _VERTEX_SDK_WARNED
-    try:
-        import google.auth  # noqa: F401
-    except ImportError:
-        if not _VERTEX_SDK_WARNED:
-            log.warning(
-                "vertex_sdk_missing",
-                hint="install with: uv pip install 'rune-ai[vertex]'",
-            )
-            _VERTEX_SDK_WARNED = True
-    return True
-
-
-_VERTEX_SDK_WARNED: bool = False
-
-
-def _vertex_extra() -> dict[str, str]:
-    """Return vertex_project / vertex_location kwargs for LiteLLM."""
-    import os as _os
-    extra: dict[str, str] = {}
-    proj = _os.environ.get("VERTEX_PROJECT") or _os.environ.get("VERTEXAI_PROJECT")
-    loc = (
-        _os.environ.get("VERTEX_LOCATION")
-        or _os.environ.get("VERTEXAI_LOCATION")
-        or "us-central1"
-    )
-    if proj:
-        extra["vertex_project"] = proj
-    extra["vertex_location"] = loc
-    return extra
-
+from rune.llm.target import resolve_target
 
 _MODEL_OUTPUT_CAP_CACHE: dict[str, int] = {}
 
@@ -843,37 +783,8 @@ def _ensure_anthropic_user_tail(model: str, messages: list[Any]) -> list[Any]:
 
 
 def _resolve_litellm_model(model_str: str) -> tuple[str, dict[str, str]]:
-    """Convert 'provider:model' to LiteLLM format.
-
-    Returns (model_id, extra_kwargs) where extra_kwargs contains
-    provider-specific parameters like api_base for ollama or
-    vertex_project/vertex_location for Vertex AI.
-    """
-    # Already in LiteLLM format (e.g. "ollama/gemma4:26b" from failover)
-    if "/" in model_str:
-        # Reroute ollama/ to openai/ for working tool calling
-        if model_str.startswith("ollama/"):
-            model_name = model_str[len("ollama/"):]
-            extra = dict(_PROVIDER_EXTRA.get("ollama", {}))
-            return f"openai/{model_name}", extra
-        # Reroute gemini/ to vertex_ai/ when service-account creds are active
-        if model_str.startswith("gemini/") and _vertex_active():
-            model_name = model_str[len("gemini/"):]
-            return f"vertex_ai/{model_name}", _vertex_extra()
-        if model_str.startswith("vertex_ai/"):
-            return model_str, _vertex_extra()
-        return model_str, {}
-    # RUNE format: "provider:model"
-    if ":" in model_str:
-        provider, model_name = model_str.split(":", 1)
-        if provider == "gemini" and _vertex_active():
-            return f"vertex_ai/{model_name}", _vertex_extra()
-        if provider == "vertex_ai":
-            return f"vertex_ai/{model_name}", _vertex_extra()
-        prefix = _PROVIDER_PREFIX.get(provider, "")
-        extra = dict(_PROVIDER_EXTRA.get(provider, {}))
-        return f"{prefix}{model_name}", extra
-    return model_str, {}  # OpenAI models need no prefix
+    target = resolve_target(model_str)
+    return target.wire_model, {**dict(target.options), "_rune_source_model": target.key}
 
 
 # StreamResult - mirrors PydanticAI's StreamedRunResult interface
@@ -964,14 +875,10 @@ class StreamResult:
         self._guided = _guided_for_model(
             self._model, bool(tool_schemas), self._provider_extra
         )
-        # Guided-mode {final} guard: weak models bail with a final answer after a
-        # failed edit without ever writing anything. Block {final} until a
-        # write/exec tool has actually succeeded (capped, so genuine no-op finals
-        # still terminate).
+        # Require a successful write or command before accepting an action result.
         self._action_ok = False
         self._final_blocks = 0
-        # Turns we've forced a tool-only schema (no {final}) while waiting for the
-        # first real artifact. Capped so a genuinely no-op task still terminates.
+        # Count forced tool turns against _GUIDED_FORCE_ACTION_CAP.
         self._forced_action_turns = 0
         # Live streaming: emit prose content deltas as they arrive so the answer
         # types out instead of appearing all at once at turn end. Restricted to
@@ -2038,7 +1945,8 @@ class StreamResult:
         from rune.agent.provenance import classify_roles
         roles = await classify_roles(
             getattr(self, "_artifact_request", ""),
-            sorted(ledger.referenced - ledger.roles.keys()), self._model, None,
+            sorted(ledger.referenced - ledger.roles.keys()),
+            self._provider_extra.get("_rune_source_model", self._model), None,
         )
         self._role_decisions.remember(roles)
         self._apply_artifact_roles(ledger, roles)
@@ -2495,7 +2403,12 @@ class LiteLLMAgent:
         try:
             yield stream_result
         finally:
-            await stream_result._close_artifact_roles()
+            from rune.agent.timing import close_stream
+
+            try:
+                await close_stream(stream_result._stream)
+            finally:
+                await stream_result._close_artifact_roles()
 
     def native_advisor_events(self) -> list[dict[str, Any]]:
         if self._last_stream_result is None:

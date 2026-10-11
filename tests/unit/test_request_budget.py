@@ -133,10 +133,11 @@ async def test_recorded_cost_or_unknown_cost_stops_further_requests(known):
     model = "xai/grok-4.6" if known else "unknown"
     request = AsyncMock(return_value={"usage": {"prompt_tokens": 1000, "completion_tokens": 100}})
     with capture_timing(owner(tokens=10000, cost=.001)):
-        await timed_completion(request, {"model": model, "messages": [], "max_tokens": 100})
+        if known:
+            await timed_completion(request, {"model": model, "messages": [], "max_tokens": 100})
         with pytest.raises(BudgetExceeded, match="cost"):
             await timed_completion(request, {"model": model, "messages": []})
-    assert request.await_count == 1
+    assert request.await_count == int(known)
 
 
 async def test_budget_stop_does_not_restart_or_escalate_goal(tmp_path):
@@ -210,3 +211,126 @@ async def test_early_exit_trace_keeps_billed_auxiliary_usage():
 
     trace = await Runner().run()
     assert trace.total_tokens_used == trace.timings["usage"]["total_tokens"] == 110
+
+
+@pytest.mark.parametrize("caller", ["advisor", "fastpath", "path_oracle"])
+async def test_auxiliary_calls_share_the_run_limit_and_usage(monkeypatch, caller):
+    from rune.agent.advisor.protocol import AdvisorRequest
+    from rune.agent.advisor.service import AdvisorConfig, AdvisorService
+    from rune.agent.fastpath import _complete
+    from rune.agent.path_intent_oracle import _call_path_intent_oracle
+
+    request = AsyncMock(return_value=SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(content='{"requested_paths": [], "confidence": 1}'))],
+        usage={"prompt_tokens": 100, "completion_tokens": 10},
+    ))
+    monkeypatch.setattr("litellm.acompletion", request)
+    monkeypatch.setattr("rune.agent.request_budget.input_estimate", lambda _: 10)
+    monkeypatch.setattr("rune.agent.litellm_adapter._resolve_litellm_model", lambda _: ("xai/grok-4.6", {}))
+    async def invoke():
+        try:
+            if caller == "advisor":
+                service = AdvisorService(AdvisorConfig(enabled=True, provider="xai", model="grok-4.6", timeout_ms=1000))
+                await service._invoke_llm(AdvisorRequest(
+                    trigger="stuck", goal="test", classification_summary="", activity_phase="execution",
+                    step=1, token_budget_frac=.5, evidence_snapshot={}, gate_state=None,
+                    stall_state={}, recent_messages=[], files_written=[],
+                ))
+            elif caller == "fastpath":
+                await _complete("grok-4.6", "xai", "test", n=2)
+            else:
+                await _call_path_intent_oracle("test", ["/tmp"], "xai/grok-4.6", 0.8)
+        except BudgetExceeded:
+            pass
+
+    with capture_timing(owner(tokens=10000, calls=1)) as measured:
+        await invoke()
+        await invoke()
+    assert request.await_count == 1
+    assert measured["usage"]["calls"] == 1
+    assert measured["usage"]["total_tokens"] == 110
+    assert measured["usage"]["cost_usd"] > 0
+    assert request.call_args.kwargs["model"] == "xai/grok-4.6"
+
+
+@pytest.mark.parametrize("consume", [False, True])
+async def test_closing_an_unfinished_stream_closes_the_provider(monkeypatch, consume):
+    monkeypatch.setattr("rune.agent.request_budget.input_estimate", lambda _: 10)
+    response = SimpleNamespace(aclose=AsyncMock())
+    class Response:
+        def __aiter__(self):
+            return self
+        async def __anext__(self):
+            return {"usage": {"prompt_tokens": 100, "completion_tokens": 10}}
+        async def aclose(self):
+            await response.aclose()
+    with capture_timing(owner(tokens=10000, cost=.1)) as measured:
+        stream = await timed_completion(AsyncMock(return_value=Response()),
+                                       {"model": "xai/grok-4.6", "messages": [], "stream": True})
+        if consume:
+            await anext(stream)
+        await stream.aclose()
+        await stream.aclose()
+        response.aclose.assert_awaited_once()
+        assert measured["unpriced_finished"]
+        with pytest.raises(BudgetExceeded):
+            await timed_completion(AsyncMock(), {"model": "xai/grok-4.6", "messages": []})
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_agent_stream_exit_closes_the_provider(monkeypatch, cancel):
+    from rune.agent.litellm_adapter import LiteLLMAgent
+
+    entered = asyncio.Event()
+    closed = AsyncMock()
+    class Response:
+        def __aiter__(self):
+            return self
+        async def __anext__(self):
+            entered.set()
+            if cancel:
+                await asyncio.Event().wait()
+            return _chunk("Partial answer")
+        async def aclose(self):
+            await closed()
+
+    monkeypatch.setattr("litellm.acompletion", AsyncMock(return_value=Response()))
+    monkeypatch.setattr("rune.agent.request_budget.input_estimate", lambda _: 10)
+    agent = LiteLLMAgent(model="xai/grok-4.6", tools=[], system_prompt="test")
+    async def consume():
+        async with agent.run_stream("test") as stream:
+            async for _ in stream.stream_text():
+                break
+
+    with capture_timing(owner(tokens=10000, cost=.1)) as measured:
+        task = asyncio.create_task(consume())
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        if cancel:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            await task
+        closed.assert_awaited_once()
+        assert measured["unpriced_finished"]
+        assert measured["usage"]["calls"] == 1
+
+
+@pytest.mark.parametrize("wave", [False, True])
+async def test_isolated_workers_cannot_bypass_parent_budget(monkeypatch, wave):
+    from rune.agent.parallel_isolated import WorkerSpec, run_isolated_worker, run_wave_and_merge
+
+    create = AsyncMock()
+    spawn = AsyncMock()
+    monkeypatch.setattr("rune.agent.worktree.create", create)
+    monkeypatch.setattr("asyncio.create_subprocess_exec", spawn)
+    spec = WorkerSpec("test", "Create a report")
+    with capture_timing(owner()) as measured:
+        with pytest.raises(BudgetExceeded, match="shared run budget"):
+            if wave:
+                await run_wave_and_merge("/unused", [spec])
+            else:
+                await run_isolated_worker("/unused", spec)
+        assert measured["budget_blocked"]
+    create.assert_not_called()
+    spawn.assert_not_called()

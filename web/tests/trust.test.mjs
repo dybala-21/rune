@@ -33,6 +33,15 @@ const cases = [
   { name: 'tool limit reached after passing checks', trace: { tool_budget_exhausted: true, evidence_gate: gate('pass') }, title: 'Incomplete', tone: 'warning', ok: false, card: true },
   { name: 'token budget ended a web task', trace: { reason: 'token_budget_exhausted' }, title: 'Incomplete', tone: 'warning', ok: false, card: true },
   { name: 'repeated gate blocks allow escalation', trace: { reason: 'max_gate_blocked' }, title: 'Incomplete', tone: 'warning', ok: false, card: true, escalate: true },
+  { name: 'review timeout preserves passing tests without recommending model escalation', trace: {
+    reason: 'max_gate_blocked', verification: { required: true, status: 'pass' }, tests_passed_after_edit: true,
+    explanation_review: { status: 'unavailable', detail: 'Review timed out.' },
+    completion_check: { name: 'Test result claims', detail: 'Review timed out.' },
+  }, title: 'Tests passed · summary unchecked', tone: 'warning', ok: false, card: true, escalate: false },
+  { name: 'a contradicted summary keeps the task incomplete', trace: {
+    reason: 'max_gate_blocked', verification: { required: true, status: 'pass' }, tests_passed_after_edit: true,
+    explanation_review: { status: 'contradicted' }, completion_check: { name: 'Test result claims' },
+  }, title: 'Incomplete', tone: 'warning', ok: false, card: true, escalate: true },
   { name: 'advisor abort allows escalation', trace: { reason: 'advisor_abort' }, title: 'Incomplete', tone: 'warning', ok: false, card: true, escalate: true },
   { name: 'unresolved output checks do not imply a missing response or a saved file', trace: { reason: 'completed_gate_warnings' }, title: 'Review needed', tone: 'warning', ok: false, card: true },
   { name: 'unresolved requirement includes the concrete blocker', trace: { reason: 'completed_gate_warnings', completion_check: { name: 'Output requirements', detail: 'Comparison table is missing.' } }, title: 'Review needed', tone: 'warning', ok: false, card: true },

@@ -77,21 +77,12 @@ _FALLBACK_PROFILES: list[LLMProfile] = [
 
 
 def build_profiles_from_config() -> list[LLMProfile]:
-    """Build failover profile list from user config, with hardcoded fallbacks.
-
-    The user's configured provider/model becomes priority 0 (primary).
-    Remaining fallback profiles are appended with lower priority, skipping
-    any that duplicate the primary.
-    """
+    """Put the selected model first; keep local runs on the local provider."""
     try:
-        from rune.config import get_config
-        cfg = get_config()
-        llm = cfg.llm
+        from rune.llm.context import llm_settings
+        llm = llm_settings()
 
-        # active_provider/active_model (set by -p/-m and /model) take priority,
-        # each independently. An all-or-nothing check would let a -m-only launch
-        # fall back to the default provider's best tier, running a model other
-        # than the one requested.
+        # Resolve provider and model overrides independently for single-flag CLI use.
         active_provider = getattr(llm, "active_provider", None)
         active_model = (getattr(llm, "active_model", None) or "").strip()
 
@@ -102,10 +93,7 @@ def build_profiles_from_config() -> list[LLMProfile]:
             models = getattr(llm.models, provider, None)
             model_name = models.best if models else "gpt-5.2"
             if provider == "ollama":
-                # A configured local model name is a guess that goes stale;
-                # what the server actually holds decides. Asked here because
-                # this is the one place the agent loop picks its model — it
-                # does not pass through resolve_model.
+                # This path bypasses LLMClient.resolve_model, so check installed models here.
                 from rune.llm.client import (
                     pick_ollama_model,
                     refresh_ollama_installed_sync,
@@ -122,6 +110,8 @@ def build_profiles_from_config() -> list[LLMProfile]:
             thinking_level="basic" if provider == "openai" else "extended",
             priority=0,
         )
+        if provider == "ollama":
+            return [primary]
 
         # Append fallbacks that don't duplicate the primary
         profiles = [primary]
@@ -160,6 +150,10 @@ class FailoverResult:
 
 def classify_error(error: Exception | str) -> FailoverReason:
     """Classify an LLM error into a failover reason."""
+    from rune.llm.target import ModelCompatibilityError
+
+    if isinstance(error, ModelCompatibilityError):
+        return "invalid_request"
     if isinstance(error, TimeoutError):
         return "timeout"
     msg = str(error).lower()

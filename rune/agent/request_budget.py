@@ -23,6 +23,21 @@ def bound_budget(run: dict):
     return run["bound_budget"]
 
 
+def remaining_budget(run: dict) -> dict | None:
+    budget = bound_budget(run)
+    if budget is None or not hasattr(budget, "total"):
+        return None
+    config = getattr(run["owner"], "_config", None)
+    usage = run["usage"]
+    calls = getattr(config, "model_request_limit", None)
+    cost = getattr(config, "cost_budget_usd", None)
+    tokens = max(0, budget.total - budget.used - sum(run["reservations"].values()))
+    if run["budget_blocked"] or (cost is not None and (run.get("unpriced_finished") or usage["unpriced_calls"])):
+        tokens = 0
+    return {"tokens": tokens, "modelRequests": None if calls is None else max(0, calls - usage["calls"]),
+            "costUsd": None if cost is None else max(0, cost - usage["cost_usd"])}
+
+
 def input_estimate(params: dict) -> int:
     from rune.utils.tokenizer import count_tokens
 
@@ -40,7 +55,7 @@ def input_estimate(params: dict) -> int:
     return count_tokens(json.dumps(content, ensure_ascii=False, default=str)) + 16
 
 
-def admit(run: dict, params: dict, estimated_input: int | None = None) -> tuple[dict, int]:
+def check_request_budget(run: dict) -> None:
     if run.get("closed"):
         raise BudgetExceeded("The parent run ended; it cannot authorize further model requests.")
     if run["budget_blocked"]:
@@ -48,7 +63,7 @@ def admit(run: dict, params: dict, estimated_input: int | None = None) -> tuple[
     owner = run["owner"]
     budget = bound_budget(run)
     if budget is None or not hasattr(budget, "total"):
-        return params, 0
+        return
     config = getattr(owner, "_config", None)
     usage = run["usage"]
     limit = getattr(config, "model_request_limit", None)
@@ -63,6 +78,18 @@ def admit(run: dict, params: dict, estimated_input: int | None = None) -> tuple[
     remaining = budget.total - budget.used - sum(run["reservations"].values())
     if remaining <= 0:
         raise BudgetExceeded("The token budget was reached. No further request was sent.")
+
+
+def admit(run: dict, params: dict, estimated_input: int | None = None) -> tuple[dict, int]:
+    check_request_budget(run)
+    budget = bound_budget(run)
+    if budget is None or not hasattr(budget, "total"):
+        return params, 0
+    if getattr(getattr(run["owner"], "_config", None), "cost_budget_usd", None) is not None:
+        from rune.llm.pricing import request_price_known
+        if not request_price_known(params):
+            raise BudgetExceeded("Pricing is unavailable for this model or endpoint. No request was sent; the configured cost limit cannot be checked.")
+    remaining = budget.total - budget.used - sum(run["reservations"].values())
     expected_input = input_estimate(params) if estimated_input is None else estimated_input
     if expected_input >= remaining:
         raise BudgetExceeded("The next prompt exceeds the estimated remaining token budget.")

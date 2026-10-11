@@ -4,6 +4,7 @@ import { retryRequestId, updateDelivery } from '../utils/messageDelivery';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { restoreRunMessages, type RunSnapshot } from '../utils/runSnapshot';
 import { toast } from '../utils/toast';
+import { usageSummary } from '../utils/usageSummary';
 import { useSSE } from './useSSE';
 import { useProactiveSuggestions } from './useProactiveSuggestions';
 import { withProactive, withoutProactive } from '../utils/proactive';
@@ -1040,7 +1041,7 @@ export function useAgent() {
       case '/cost': {
         const t = tokenUsageRef.current;
         pushSystem(t
-          ? `Token usage: ${t.input} input / ${t.output} output (total ${t.total}). Local (ollama) runs are free; cloud cost depends on the active model.`
+          ? usageSummary(t)
           : 'No token usage recorded yet.');
         return true;
       }

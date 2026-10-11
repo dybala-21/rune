@@ -28,6 +28,37 @@ class ExecutionStore:
         self._db.execute("""CREATE TABLE IF NOT EXISTS resources (
             resource TEXT PRIMARY KEY, operation_id TEXT NOT NULL
         )""")
+        self._db.execute("""CREATE TABLE IF NOT EXISTS operation_usage (
+            operation_id TEXT PRIMARY KEY, model_requests INTEGER NOT NULL, tokens INTEGER NOT NULL,
+            cost_usd REAL NOT NULL, requests_known INTEGER NOT NULL,
+            tokens_known INTEGER NOT NULL, cost_known INTEGER NOT NULL
+        )""")
+        from rune.proactive.routine_budget import recorded_usage
+
+        for operation_id, raw in self._db.execute("""
+            SELECT id, result FROM operations WHERE result IS NOT NULL
+            AND id NOT IN (SELECT operation_id FROM operation_usage)
+        """).fetchall():
+            self._save_usage(operation_id, recorded_usage(json.loads(raw)))
+
+    def _save_usage(self, operation_id: str, usage: dict) -> None:
+        self._db.execute("INSERT OR IGNORE INTO operation_usage VALUES (?, ?, ?, ?, ?, ?, ?)", (
+            operation_id, usage["modelRequests"], usage["tokens"], usage["costUsd"],
+            usage["requestsKnown"], usage["tokensKnown"], usage["costKnown"],
+        ))
+
+    def usage(self, prefix: str, *, exclude: str = "") -> dict:
+        row = self._db.execute("""
+            SELECT COALESCE(SUM(u.model_requests), 0), COALESCE(SUM(u.tokens), 0),
+                   COALESCE(SUM(u.cost_usd), 0),
+                   COUNT(*) - COALESCE(SUM(u.requests_known), 0),
+                   COUNT(*) - COALESCE(SUM(u.tokens_known), 0),
+                   COUNT(*) - COALESCE(SUM(u.cost_known), 0)
+            FROM operations o LEFT JOIN operation_usage u ON o.id = u.operation_id
+            WHERE o.id >= ? AND o.id < ? AND o.id != ?
+        """, (prefix, prefix + "\uffff", exclude)).fetchone()
+        return {"modelRequests": row[0], "tokens": row[1], "costUsd": row[2],
+                "requestsKnown": row[3] == 0, "tokensKnown": row[4] == 0, "costKnown": row[5] == 0}
 
     def get(self, operation_id: str) -> tuple[str, dict[str, Any] | None] | None:
         row = self._db.execute(
@@ -68,6 +99,10 @@ class ExecutionStore:
                 "UPDATE operations SET result = ? WHERE id = ? AND result IS NULL",
                 (json.dumps(result, ensure_ascii=False), operation_id),
             ).rowcount
+            if changed:
+                from rune.proactive.routine_budget import recorded_usage
+
+                self._save_usage(operation_id, recorded_usage(result))
             # An interrupted action keeps its lease until its effects are inspected.
             if changed and result.get("status") != "interrupted" and not result.get("execution_unknown"):
                 self._db.execute("DELETE FROM resources WHERE operation_id = ?", (operation_id,))
@@ -119,10 +154,11 @@ class ExecutionStore:
             self._db.execute("ROLLBACK")
             raise
 
-    def latest_result(self, prefix: str) -> dict[str, Any] | None:
+    def latest_result(self, prefix: str, *, executed_only: bool = False) -> dict[str, Any] | None:
         row = self._db.execute(
             """SELECT result FROM operations WHERE substr(id, 1, ?) = ? AND result IS NOT NULL
-               ORDER BY started_at DESC LIMIT 1""", (len(prefix), prefix),
+               AND (? = 0 OR json_extract(result, '$.not_started') IS NOT 1)
+               ORDER BY started_at DESC, rowid DESC LIMIT 1""", (len(prefix), prefix, executed_only),
         ).fetchone()
         return json.loads(row[0]) if row else None
 

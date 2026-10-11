@@ -1,6 +1,8 @@
 /** SSE 이벤트 타입 (서버에서 수신) */
 
 export interface TokenUsage {
+  modelCalls?: number;
+  unreportedCalls?: number;
   total: number;
   input: number;
   output: number;
@@ -63,6 +65,7 @@ export interface AgentStartData {
   runId?: string;
 }
 export interface TrustInfo {
+  explanationReview?: { status: 'not_checked' | 'pass' | 'contradicted' | 'inconclusive' | 'unavailable'; detail: string } | null;
   requirementAcceptance?: {
     required: boolean;
     status: 'pass' | 'fail' | 'inconclusive' | 'not_checked';

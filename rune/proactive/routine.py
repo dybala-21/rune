@@ -19,11 +19,14 @@ class RoutinePolicy(BaseModel):
     max_steps: int = Field(30, ge=1, le=200)
     timeout_seconds: int = Field(120, ge=1, le=1800)
     token_budget: int = Field(50_000, ge=1000, le=500_000)
+    total_tokens: int | None = Field(None, ge=0, strict=True)
+    total_model_requests: int | None = Field(None, ge=0, strict=True)
+    total_cost_usd: float | None = Field(None, ge=0, allow_inf_nan=False, strict=True)
     deadline: AwareDatetime | None = None
     verification: list[str] = Field(default_factory=list, max_length=10)
     notify: Literal["always", "changes", "failures"] = "changes"
     input_paths: list[str] = Field(default_factory=list, max_length=32,
-                                  description="Explicit input files, relative to workspace. Skip successful unchanged work only when these and tracked outputs are unchanged. Omit for time-dependent or external-data tasks.")
+                                  description="Input files or folders, relative to workspace. Skip successful unchanged work only when these and tracked outputs are unchanged. Omit for time-dependent or external-data tasks.")
     output_paths: list[str] = Field(default_factory=list, max_length=32,
                                    description="Output files to compare for changes; missing or modified outputs require another run.")
 
@@ -43,6 +46,9 @@ class RoutinePolicy(BaseModel):
         workspace = normalize_path(self.workspace) if self.workspace else user_workspace()
         return self.model_copy(update={"workspace": str(workspace)})
 
+    def patched(self, update: RoutinePolicy) -> RoutinePolicy:
+        return RoutinePolicy.model_validate({**self.model_dump(), **update.model_dump(exclude_unset=True)}).bind_workspace()
+
 
 def claim_occurrence(job) -> tuple[ExecutionStore, str, str]:
     store = ExecutionStore(rune_data() / "routine-executions.db")
@@ -57,8 +63,10 @@ def claim_occurrence(job) -> tuple[ExecutionStore, str, str]:
 def should_notify(policy: RoutinePolicy, result: dict, previous: dict | None) -> bool:
     if policy.notify == "always":
         return True
-    if policy.notify == "failures":
-        return result.get("status") in ("failed", "unverified", "needs_approval", "interrupted")
+    if policy.notify == "failures" and result.get("status") not in (
+        "failed", "unverified", "needs_approval", "interrupted", "budget_exhausted",
+    ):
+        return False
     if result.get("status") == "unchanged":
         return False
     if previous is not None:
@@ -70,7 +78,7 @@ def should_notify(policy: RoutinePolicy, result: dict, previous: dict | None) ->
             return (current_id != previous_id or result.get("status") != prior_status
                     or result.get("error") != previous.get("error"))
     # Detect changes from saved output, not the model's description.
-    return previous is None or any(result.get(key) != previous.get(key) for key in ("status", "output"))
+    return previous is None or any(result.get(key) != previous.get(key) for key in ("status", "output", "error"))
 
 
 async def run_while_current(job, store, execute) -> dict:
@@ -83,7 +91,7 @@ async def run_while_current(job, store, execute) -> dict:
         return bool(row and _row_to_cronjob(row) == job and not job.policy.expired)
 
     if not current():
-        return {"status": "cancelled", "success": False, "verified": False,
+        return {"status": "cancelled", "success": False, "verified": False, "not_started": True,
                 "output": "", "error": "The task changed before execution started."}
     task = asyncio.create_task(execute(job))
     try:

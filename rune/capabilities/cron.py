@@ -33,6 +33,7 @@ class CronJob:
     status: str = "active"
     last_run_at: str = ""
     policy: RoutinePolicy = field(default_factory=RoutinePolicy)
+    continuation: str = field(default="", compare=False)
 
 
 def _get_store():
@@ -184,9 +185,22 @@ def _validate_cron_expr(expr: str) -> str | None:
 
 # Implementations
 
+def _background_change() -> CapabilityResult | None:
+    from rune.agent.background import current_background_task
+    from rune.safety.approval_context import was_approved
+
+    if current_background_task() is not None and not was_approved():
+        reason = "Background tasks need user approval to change schedules or execution limits."
+        return CapabilityResult(success=False, error=reason,
+                                metadata={"requires_approval": True, "action_status": "not_executed", "reason": reason})
+    return None
+
+
 async def cron_create(params: CronCreateParams) -> CapabilityResult:
     """Schedule a command or agent goal, optionally delivering its result to a channel."""
     log.debug("cron_create", name=params.name, schedule=params.schedule)
+    if blocked := _background_change():
+        return blocked
 
     if bool(params.command.strip()) == bool(params.goal.strip()):
         return CapabilityResult(
@@ -295,6 +309,8 @@ async def cron_list(params: CronListParams) -> CapabilityResult:
 async def cron_update(params: CronUpdateParams) -> CapabilityResult:
     """Update an existing cron job in DB."""
     log.debug("cron_update", job_id=params.job_id)
+    if blocked := _background_change():
+        return blocked
 
     try:
         store = _get_store()
@@ -331,7 +347,7 @@ async def cron_update(params: CronUpdateParams) -> CapabilityResult:
             new_desc = current.description
             if bool(new_cmd.strip()) == bool(new_goal.strip()):
                 return CapabilityResult(success=False, error="Provide one command or agent goal")
-            policy = params.policy.bind_workspace() if params.policy else current.policy
+            policy = current.policy.patched(params.policy) if params.policy else current.policy
             updates["command"] = _pack_command(new_cmd, new_goal, new_notify, new_desc, policy)
         if updates:
             store.update_cron_job(job_id, **updates)
@@ -349,6 +365,8 @@ async def cron_update(params: CronUpdateParams) -> CapabilityResult:
 async def cron_delete(params: CronDeleteParams) -> CapabilityResult:
     """Delete a cron job from DB."""
     log.debug("cron_delete", name=params.name)
+    if blocked := _background_change():
+        return blocked
 
     try:
         store = _get_store()
@@ -376,7 +394,11 @@ async def execute_cron_job(job: CronJob) -> None:
     """Execute a single cron job (bash command or agent goal)."""
     import asyncio
 
+    from rune.agent.request_budget import BudgetExceeded
+    from rune.agent.timing import capture_timing, timing_snapshot
     from rune.proactive.routine import claim_occurrence, run_while_current, should_notify
+    from rune.proactive.routine_budget import budget_owner
+    from rune.proactive.routine_context import continuation
     from rune.proactive.routine_observation import observe, reusable
 
     store = _get_store()
@@ -389,36 +411,71 @@ async def execute_cron_job(job: CronJob) -> None:
     if row.get("max_runs") is not None and row.get("run_count", 0) >= row["max_runs"]:
         return
     claims, occurrence, decision = claim_occurrence(job)
+    started = False
+    measured = None
+    result = {}
     try:
         if decision != "claimed":
             log.info("cron_occurrence_skipped", job_id=job.id, reason=decision)
             return
         previous = claims.latest_result(f"cron:{job.id}:")
+        progress = claims.latest_result(f"cron:{job.id}:", executed_only=True)
         observed = None
         if job.policy.input_paths or job.policy.output_paths:
             observed = await asyncio.to_thread(observe, job.policy)
-        if observed and reusable(job, observed, previous):
-            result = {**previous, "status": "unchanged",
-                      "status_before_reuse": previous.get("status_before_reuse", previous["status"]),
+        current = store.get_cron_job(job.id)
+        if (current is None or _row_to_cronjob(current) != job or job.policy.expired
+                or (current.get("max_runs") is not None and current.get("run_count", 0) >= current["max_runs"])):
+            claims.finish(occurrence, {"status": "cancelled", "success": False, "verified": False,
+                                       "not_started": True, "output": "", "error": "The task changed before execution started."})
+            return
+        if observed and not observed["complete"]:
+            result = {"status": "unverified", "success": False, "verified": False, "not_started": True,
+                      "output": "", "error": "Tracked files could not be inspected. Check their paths, permissions and size limits.",
+                      "observations": observed}
+            claims.finish(occurrence, result)
+            if job.notify_channel and should_notify(job.policy, result, previous):
+                await _send_to_channel(job.notify_channel, job.name, result["error"])
+            return
+        if observed and reusable(job, observed, progress):
+            result = {**progress, "status": "unchanged",
+                      "status_before_reuse": progress.get("status_before_reuse", progress["status"]),
                       "reused": True}
             claims.finish(occurrence, result)
             if job.notify_channel and should_notify(job.policy, result, previous):
                 await _send_to_channel(job.notify_channel, job.name, "Tracked files are unchanged; the previous result was retained.")
             return
+        try:
+            owner = budget_owner(job.policy, claims.usage(f"cron:{job.id}:", exclude=occurrence))
+        except BudgetExceeded as exc:
+            result = {"status": "budget_exhausted", "success": False, "verified": False,
+                      "output": "", "error": str(exc), "not_started": True}
+            claims.finish(occurrence, result)
+            if job.notify_channel and should_notify(job.policy, result, previous):
+                await _send_to_channel(job.notify_channel, job.name, result["error"])
+            return
         # Count started attempts, including interrupted ones, against max_runs.
         store.record_cron_run(job.id)
-        job = _row_to_cronjob(store.get_cron_job(job.id))
-        try:
-            result = await run_while_current(job, store, _execute_goal_job if job.goal else _execute_bash_job)
-        except asyncio.CancelledError:
-            claims.finish(occurrence, {"status": "interrupted", "error": "Inspect external effects before resuming."})
-            raise
-        except Exception as exc:
-            result = {"status": "failed", "verified": False, "execution_unknown": True,
-                      "output": "", "error": str(exc)}
+        latest = store.get_cron_job(job.id)
+        job.last_run_at = (latest or {}).get("last_run_at") or ""
+        job.continuation = continuation(job, observed, progress)
+        with capture_timing(owner) as measured:
+            try:
+                started = True
+                result = await run_while_current(job, store, _execute_goal_job if job.goal else _execute_bash_job)
+            except BudgetExceeded as exc:
+                result = {"status": "budget_exhausted", "success": False, "verified": False,
+                          "output": "", "error": str(exc)}
+            except Exception as exc:
+                result = {"status": "failed", "verified": False, "execution_unknown": True,
+                          "output": "", "error": str(exc)}
+            result["timings"] = timing_snapshot(measured)
+            if measured["budget_blocked"] and not result.get("execution_unknown"):
+                result.update(status="budget_exhausted", success=False, verified=False, error=measured["budget_blocked"])
+        result.update(workspace=job.policy.workspace, routine_goal=job.goal, routine_command=job.command)
         if observed:
             after = await asyncio.to_thread(observe, job.policy)
-            result.update(observations=after, routine_goal=job.goal, routine_command=job.command)
+            result["observations"] = after
             if (result.get("success") and not result.get("execution_unknown")
                     and (not after["complete"] or not observed["complete"] or observed["inputs"] != after["inputs"]
                          or any(item["state"] != "present" for group in ("inputs", "outputs") for item in after[group].values()))):
@@ -430,7 +487,18 @@ async def execute_cron_job(job: CronJob) -> None:
             if not result.get("verified"):
                 output = f"{result['status']}: {output}"
             await _send_to_channel(job.notify_channel, job.name, output)
-    except Exception as exc:
+    except (asyncio.CancelledError, Exception) as exc:
+        cancelled = isinstance(exc, asyncio.CancelledError)
+        if decision == "claimed":
+            stopped = {"status": ("interrupted" if started else "cancelled") if cancelled else "failed",
+                       "success": False, "verified": False, "not_started": not started, "execution_unknown": started,
+                       "output": result.get("output", ""), "error": "Task cancelled" if cancelled else str(exc),
+                       "workspace": job.policy.workspace, "routine_goal": job.goal, "routine_command": job.command}
+            if measured is not None:
+                stopped["timings"] = timing_snapshot(measured)
+            claims.finish(occurrence, stopped)
+        if cancelled:
+            raise
         log.warning("cron_execution_failed", job_id=job.id, error=str(exc))
     finally:
         claims.close()
@@ -463,6 +531,7 @@ async def _execute_goal_job(job: CronJob) -> dict:
         goal=job.goal, source="cron", workspace=job.policy.workspace,
         verification=job.policy.verification, max_steps=job.policy.max_steps,
         timeout_seconds=job.policy.timeout_seconds, token_budget=job.policy.token_budget,
+        continuation=job.continuation,
     ))
     log.info("cron_goal_done", name=job.name, status=result["status"])
     return result

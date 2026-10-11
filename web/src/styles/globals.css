@@ -648,6 +648,12 @@ ol.md-list { list-style: decimal; }
 }
 @media (max-width: 720px) {
   .routine-layout { flex-direction: column; }
+  .routine-header { display: grid !important; grid-template-columns: 1fr auto auto; gap: 8px !important; padding: 12px !important; }
+  .routine-header > svg, .routine-header > div { display: none; }
+  .routine-header > span:first-of-type { grid-column: 1 / 3; grid-row: 1; }
+  .routine-header > span:last-of-type { grid-column: 1 / -1; grid-row: 2; justify-self: start; }
+  .routine-header > button { white-space: nowrap; }
+  .routine-header > button:last-child { grid-column: 3; grid-row: 1; }
   .routine-layout > .routine-list {
     width: 100% !important;
     max-height: 140px;

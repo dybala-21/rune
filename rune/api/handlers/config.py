@@ -29,7 +29,16 @@ class ActiveModelInfo(BaseModel):
     source: str
 
 
+class RunLimits(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid", strict=True)
+
+    model_requests: int = Field(100, ge=0, alias="modelRequests")
+    cost_usd: float | None = Field(None, ge=0, allow_inf_nan=False, alias="costUsd")
+
+
 class ConfigGetResponse(BaseModel):
+    vertex_location: str | None = Field(None, alias="vertexLocation")
+    run_limits: RunLimits = Field(default_factory=RunLimits, alias="runLimits")
     execution_environment: dict[str, Any] = Field(default_factory=dict, alias="executionEnvironment")
     proactive_enabled: bool = Field(False, alias="proactiveEnabled")
     gateway_channels: list[str] = Field(default_factory=list, alias="gatewayChannels")
@@ -57,6 +66,9 @@ class ExecutionEnvironmentPatch(BaseModel):
 
 
 class ConfigPatchRequest(BaseModel):
+    vertex_location: str | None = Field(None, alias="vertexLocation", min_length=1, max_length=64,
+                                       pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+    run_limits: RunLimits | None = Field(None, alias="runLimits")
     execution_environment: ExecutionEnvironmentPatch | None = Field(None, alias="executionEnvironment")
     proactive_enabled: bool | None = Field(None, alias="proactiveEnabled")
     active_model: dict[str, str] | None = Field(None, alias="activeModel")
@@ -194,6 +206,7 @@ async def get_config_endpoint() -> ConfigGetResponse:
     effective = get_effective_model_selection()
     from rune.agent.decision_router import accelerator_status
     from rune.cloud.boundary import hosted
+    from rune.llm.target import vertex_active
     from rune.safety.execution_environment import execution_config
     from rune.utils.env import effective_env_scope
 
@@ -204,6 +217,9 @@ async def get_config_endpoint() -> ConfigGetResponse:
     options = control.efforts
     effort = cfg.llm.reasoning_efforts.get(reasoning_model_key(model))
     return ConfigGetResponse(
+        vertexLocation=(os.environ.get("VERTEX_LOCATION") or os.environ.get("VERTEXAI_LOCATION")
+                        or cfg.vertex_location) if vertex_active() else None,
+        runLimits=RunLimits(modelRequests=cfg.llm.model_request_limit, costUsd=cfg.llm.cost_budget_usd),
         executionEnvironment={"backend": environment.backend, "image": environment.image,
                               "allowNetwork": environment.allow_network, "managed": hosted()},
         proactiveEnabled=cfg.proactive.enabled,
@@ -272,6 +288,16 @@ async def patch_config(req: ConfigPatchRequest) -> ConfigPatchResponse:
                     detail=f'Unknown provider "{provider}". Known providers: {known}',
                 ) from exc
 
+    if provider or model or req.vertex_location is not None:
+        from rune.llm.model_selection import get_effective_model_selection
+        from rune.llm.target import ModelCompatibilityError, resolve_target
+        selected = get_effective_model_selection()
+        try:
+            resolve_target(model or selected.model, provider or selected.provider,
+                           options={"vertex_location": req.vertex_location} if req.vertex_location else None)
+        except ModelCompatibilityError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     memory_plan: list[tuple[str, Any]] = []
     if req.memory_tuning is not None:
         memory_plan = _plan_memory_tuning(req.memory_tuning)
@@ -289,6 +315,15 @@ async def patch_config(req: ConfigPatchRequest) -> ConfigPatchResponse:
             raise HTTPException(status_code=400, detail="Add a TypeSafe API key before enabling Jev.")
 
     to_persist: dict[str, Any] = {}
+    if req.vertex_location is not None:
+        to_persist["vertex_location"] = req.vertex_location
+    limits = req.run_limits.model_dump(exclude_unset=True) if req.run_limits is not None else {}
+    limit_fields = {"model_requests": ("model_request_limit", "modelRequestLimit"),
+                    "cost_usd": ("cost_budget_usd", "costBudgetUsd")}
+    for name, value in limits.items():
+        field, alias = limit_fields[name]
+        # Clear the alternate spelling so resetting a limit survives reloads.
+        to_persist.update({f"llm.{alias}": value, f"llm.{field}": None})
     environment = req.execution_environment.model_dump(exclude_none=True) if req.execution_environment else {}
     from rune.cloud.boundary import hosted, sandbox
     if hosted() and any(value != getattr(sandbox(), key) for key, value in environment.items()):
@@ -312,7 +347,13 @@ async def patch_config(req: ConfigPatchRequest) -> ConfigPatchResponse:
         if save_config_values(to_persist) is None:
             raise HTTPException(status_code=500, detail="Could not save settings. No configuration changes were applied.")
 
-    updated = routing is not None or bool(environment)
+    updated = routing is not None or bool(environment) or bool(limits)
+    if req.vertex_location is not None:
+        cfg.vertex_location = req.vertex_location
+        os.environ["VERTEX_LOCATION"] = req.vertex_location
+        updated = True
+    for name, value in limits.items():
+        setattr(cfg.llm, limit_fields[name][0], value)
     if environment:
         cfg.safety.sandbox = cfg.safety.sandbox.model_copy(update=environment)
     if routing is not None:

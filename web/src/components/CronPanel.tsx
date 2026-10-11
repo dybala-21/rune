@@ -7,7 +7,7 @@ import {
   type CronJobInfo,
   type RoutinePolicy,
 } from '../api';
-import { RoutineFields, RoutineHistory, defaultRoutinePolicy } from './RoutineFields';
+import { RoutineFields, RoutineHistory, defaultRoutinePolicy, validateRoutinePolicy } from './RoutineFields';
 import { useFocusTrap } from '../hooks/useFocusTrap';
 
 interface CronPanelProps {
@@ -115,13 +115,7 @@ export function CronPanel({ onClose }: CronPanelProps) {
     setError(null);
     try {
       const maxRunsValue = parseMaxRuns();
-      for (const [name, value, min, max] of [
-        ['Time limit', policy.timeout_seconds, 1, 1800],
-        ['Token limit', policy.token_budget, 1000, 500000],
-        ['Step limit', policy.max_steps, 1, 200],
-      ] as const) {
-        if (!Number.isInteger(value) || value < min || value > max) throw new Error(`${name} must be an integer from ${min} to ${max}`);
-      }
+      validateRoutinePolicy(policy);
       if (mode === 'create') {
         await createCronJob({
           name: name.trim(),
@@ -216,6 +210,7 @@ export function CronPanel({ onClose }: CronPanelProps) {
         }}
       >
         <div
+          className="routine-header"
           style={{
             display: 'flex',
             alignItems: 'center',

@@ -30,6 +30,7 @@ class CronJobInfo(BaseModel):
     notify_channel: str = Field("", alias="notifyChannel")
     policy: RoutinePolicy = Field(default_factory=RoutinePolicy)
     recent_runs: list[dict[str, Any]] = Field(default_factory=list, alias="recentRuns")
+    budget: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
     created_at: str = Field(alias="createdAt")
     last_run_at: str | None = Field(None, alias="lastRunAt")
@@ -101,12 +102,14 @@ class ReconcileRequest(BaseModel):
 def _job_dict_to_info(j: dict[str, Any]) -> CronJobInfo:
     from rune.capabilities.cron import _row_to_cronjob
     from rune.proactive.execution_store import ExecutionStore
+    from rune.proactive.routine_budget import budget_state
     from rune.utils.paths import rune_data
 
     job = _row_to_cronjob(j)
     records = ExecutionStore(rune_data() / "routine-executions.db")
     try:
         runs = records.recent(f"cron:{job.id}:")
+        budget = budget_state(job.policy, records.usage(f"cron:{job.id}:"))
     finally:
         records.close()
     return CronJobInfo(
@@ -118,6 +121,7 @@ def _job_dict_to_info(j: dict[str, Any]) -> CronJobInfo:
         notifyChannel=job.notify_channel,
         policy=job.policy,
         recentRuns=runs,
+        budget=budget,
         enabled=j.get("enabled", True),
         createdAt=j.get("created_at", ""),
         lastRunAt=j.get("last_run_at"),
@@ -213,7 +217,7 @@ async def update_cron_job(job_id: str, req: CronUpdateRequest) -> CronUpdateResp
             raise HTTPException(status_code=400, detail="Provide one goal or shell command")
         channel = current.notify_channel if req.notify_channel is None else req.notify_channel.strip()
         kwargs["command"] = _pack_command(command, goal, channel,
-                                           current.description, req.policy.bind_workspace() if req.policy else current.policy)
+                                           current.description, current.policy.patched(req.policy) if req.policy else current.policy)
     if req.enabled is not None:
         kwargs["enabled"] = req.enabled
     if "max_runs" in req.model_fields_set:

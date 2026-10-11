@@ -127,7 +127,7 @@ def _resolve_api_keys(data: dict[str, Any]) -> dict[str, Any]:
             pass
 
     if "vertex_location" not in data or data["vertex_location"] is None:
-        data["vertex_location"] = os.environ.get("VERTEX_LOCATION", "us-central1")
+        data["vertex_location"] = os.environ.get("VERTEX_LOCATION") or os.environ.get("VERTEXAI_LOCATION", "auto")
 
     # Set env vars so litellm picks them up automatically
     if data.get("google_credentials_file"):

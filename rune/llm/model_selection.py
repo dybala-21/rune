@@ -1,8 +1,4 @@
-"""Model selection for RUNE.
-
-Ported from src/llm/model-selection.ts - active model selection,
-persistence, and effective model resolution.
-"""
+"""Read, resolve and persist the active model selection."""
 
 from __future__ import annotations
 
@@ -28,8 +24,8 @@ class ActiveModelSelection:
 
 def get_active_model_selection() -> ActiveModelSelection | None:
     """Return the user's explicit model override, or ``None``."""
-    config = get_config()
-    llm_cfg = config.llm
+    from rune.llm.context import llm_settings
+    llm_cfg = llm_settings()
 
     provider = getattr(llm_cfg, "active_provider", None)
     model = (getattr(llm_cfg, "active_model", None) or "").strip()
@@ -46,8 +42,8 @@ def get_effective_model_selection() -> ActiveModelSelection:
     if active is not None:
         return active
 
-    config = get_config()
-    llm_cfg = config.llm
+    from rune.llm.context import llm_settings
+    llm_cfg = llm_settings()
     provider = Provider(llm_cfg.default_provider)
 
     # Resolve default model for the provider
@@ -61,6 +57,8 @@ def persist_active_model_selection(
     selection: ActiveModelSelection, *, update_default: bool = False,
 ) -> ActiveModelSelection:
     """Set the active model and write it to config.yaml."""
+    from rune.llm.target import resolve_target
+    resolve_target(selection.model, selection.provider)
     llm_cfg = get_config().llm
     from rune.config import save_config_values
     updates = {

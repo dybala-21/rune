@@ -6,6 +6,7 @@ import asyncio
 import json
 import math
 import random
+from copy import deepcopy
 from typing import Any
 
 from rune.utils.logger import get_logger
@@ -129,11 +130,36 @@ def validate_decision(data: dict[str, Any]) -> dict[str, Any]:
 
 async def request_classification(
     client: Any, system: str, content: str, *, selected=None, deadline: float | None = None,
+    file_roles: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     from rune.llm.model_selection import get_effective_model_selection
     from rune.llm.reasoning import reasoning_control
 
     selected = selected or get_effective_model_selection()
+    response_format = RESPONSE_FORMAT
+    names = ()
+    if file_roles is not None:
+        from rune.agent.provenance import role_hint_names
+        request = json.loads(content).get("request_to_classify", "")
+        names = tuple(name for name in role_hint_names(request) if name not in file_roles)
+        if len(names) > 12:
+            names = ()
+        if names:
+            response_format = deepcopy(RESPONSE_FORMAT)
+            schema = response_format["json_schema"]["schema"]
+            schema["properties"]["file_roles"] = {"type": "array", "items": {
+                "type": "object", "properties": {
+                    "name": {"type": "string", "enum": list(names)},
+                    "role": {"type": "string", "enum": ["input", "output", "preserve"]},
+                }, "required": ["name", "role"], "additionalProperties": False,
+            }}
+            schema["required"].append("file_roles")
+            system += (
+                "\nAlso classify the supplied file names by their role in the current request: "
+                "input=existing source to read or modify; output=new file to create; "
+                "preserve=existing file explicitly left unchanged. Omit uncertain roles. "
+                "Use each name once. Names: " + json.dumps(list(names), ensure_ascii=False)
+            )
     messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
     from rune.llm.failures import request_failure
 
@@ -147,10 +173,24 @@ async def request_classification(
                 response = await client.completion(
                     messages=messages, model=selected.model, provider=selected.provider, max_tokens=1024 if attempt == 0 else 2048,
                     timeout=max(0.01, deadline - asyncio.get_running_loop().time()),
-                    response_format=RESPONSE_FORMAT, cache_system=True, max_retries=0,
+                    response_format=response_format, cache_system=True, max_retries=0,
                     **({"reasoning_effort": effort} if effort is not None else {}),
                 )
-                return decode_response(response)
+                data = decode_object(response)
+                roles = data.pop("file_roles", []) if names else []
+                values = validate_decision(data)
+                if names and isinstance(roles, list):
+                    proposed = {}
+                    for item in roles:
+                        if (not isinstance(item, dict) or set(item) != {"name", "role"}
+                                or not isinstance(item["name"], str) or not isinstance(item["role"], str)
+                                or item["name"] not in names or item["role"] not in {"input", "output", "preserve"}
+                                or item["name"] in proposed):
+                            proposed = {}
+                            break
+                        proposed[item["name"]] = item["role"]
+                    file_roles.update(proposed)
+                return values
             except InvalidClassification as exc:
                 log.warning("classification_response_rejected", attempt=attempt + 1, reason=str(exc))
                 if str(exc) == "refusal" or attempt:

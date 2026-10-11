@@ -87,6 +87,9 @@ async def run_isolated_worker(
     cmd_builder=_default_cmd,
 ) -> tuple[WorkerOutcome, IsolatedWorkspace]:
     """Return a worker outcome and worktree; the caller owns merging and cleanup."""
+    from rune.agent.timing import check_isolated_worker_budget
+
+    check_isolated_worker_budget()
     ws = await worktree.create(repo, spec.worker_id, isolation=isolation)
     outcome = WorkerOutcome(worker_id=spec.worker_id)
     tmpdir = tempfile.mkdtemp(prefix="rune-wspec-")
@@ -239,6 +242,9 @@ async def run_wave_and_merge(
     Rejected workers may retry with feedback and then a stronger model. A supplied post-merge
     check must pass or the merge is rolled back.
     """
+    from rune.agent.timing import check_isolated_worker_budget
+
+    check_isolated_worker_budget()
     results = await asyncio.gather(*[
         _run_worker_with_escalation(
             repo, s, isolation=isolation, timeout_seconds=timeout_seconds,

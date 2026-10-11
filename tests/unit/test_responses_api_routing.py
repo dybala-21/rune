@@ -1,14 +1,4 @@
-"""Newer OpenAI models cannot take tools on /v1/chat/completions at all.
-
-Measured live: gpt-6-astra and the gpt-5.6 family reject `tools` there with or
-without an explicit reasoning_effort, since they carry a default one and
-"none" is refused; gpt-5.3-codex is not served on that endpoint. All of them
-handle tools on /v1/responses.
-
-An agent step always carries tools, so those models could not take a single
-step. Dropping the parameter removed the wasted retries but never made the
-call work.
-"""
+"""Models requiring Responses keep their tools and reasoning settings when rerouted."""
 
 from __future__ import annotations
 
@@ -68,7 +58,6 @@ async def test_token_rename_and_endpoint_fallback_are_remembered():
 
 
 async def test_endpoint_refusal_preserves_effort_before_parameter_fallback(monkeypatch):
-    from rune.agent import model_traits as mt
     from rune.llm.reasoning import ReasoningControl
     from rune.llm.request_params import compatible_completion
 
@@ -84,7 +73,6 @@ async def test_endpoint_refusal_preserves_effort_before_parameter_fallback(monke
     await compatible_completion(api, ValueError, {"model": "openai/future-model", "reasoning_effort": "high"})
     assert len(calls) == 2
     assert calls[-1]["extra_body"]["reasoning"]["effort"] == "high"
-    assert not mt.reasoning_effort_rejected("openai/future-model")
 
 
 @pytest.mark.parametrize("model", ["openai/responses/future-model", "anthropic/claude-sonnet-5"])

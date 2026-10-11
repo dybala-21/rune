@@ -136,26 +136,44 @@ async def test_check_drains_large_output_and_never_passes_truncated_output(tmp_p
     assert result.code is None and "capture limit" in result.error
 
 
-async def test_cancelled_check_kills_process_before_releasing_workspace(tmp_path, monkeypatch):
+@pytest.mark.parametrize("shell_child", [False, True], ids=["direct-child", "shell-child"])
+async def test_cancelled_check_kills_process_before_releasing_workspace(tmp_path, monkeypatch, shell_child):
     import shlex
 
     from rune.safety.verification import run_check
 
+    fcntl = pytest.importorskip("fcntl")
     monkeypatch.setattr("rune.safety.verification.verification_blocker", lambda *_: None)
     pid_file = tmp_path / "pid"
-    script = f"import os,time; from pathlib import Path; Path({str(pid_file)!r}).write_text(str(os.getpid())); time.sleep(30)"
-    task = asyncio.create_task(run_check(shlex.join([sys.executable, "-c", script]), str(tmp_path), 60))
-    async with asyncio.timeout(5):
-        while not pid_file.exists():
-            await asyncio.sleep(0.01)
-    pid = int(pid_file.read_text())
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    with pytest.raises(ProcessLookupError):
-        os.kill(pid, 0)
-    with path_access(str(tmp_path), write=True):
-        pass
+    lock_file = tmp_path / "process.lock"
+    script = (
+        "import fcntl,os,time; from pathlib import Path; "
+        f"lock=open({str(lock_file)!r}, 'w'); fcntl.flock(lock, fcntl.LOCK_EX); "
+        f"Path({str(pid_file)!r}).write_text(str(os.getpid())); time.sleep(30)"
+    )
+    command = shlex.join([sys.executable, "-c", script])
+    command = command + "; :" if shell_child else "exec " + command
+    task = asyncio.create_task(run_check(command, str(tmp_path), 60))
+    try:
+        async with asyncio.timeout(5):
+            while not pid_file.exists() or not pid_file.read_text():
+                await asyncio.sleep(0.01)
+        pid = int(pid_file.read_text())
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        # Exit releases the lock even if an orphan's PID has not been reaped yet.
+        with lock_file.open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if not shell_child:
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+        with path_access(str(tmp_path), write=True):
+            pass
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 async def test_environment_is_frozen_and_missing_container_never_runs_locally(tmp_path, monkeypatch):

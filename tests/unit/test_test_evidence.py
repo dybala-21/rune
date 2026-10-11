@@ -378,10 +378,12 @@ async def test_review_deadline_is_shared_and_an_outage_does_not_trigger_a_rewrit
     gate = ClaimGate(_review_seconds=51.0)
     note = await gate.review(state, "Changed the implementation.")
     assert "could not be checked" in note and gate.attempts == 2
+    assert gate.snapshot() == {"status": "unavailable", "detail": note}
     assert client.completion.call_args.kwargs["timeout"] == 9.0
     assert client.completion.call_args.kwargs["max_retries"] == 0
     await gate.review(state, "Rephrased answer.")
     assert client.completion.await_count == 1
+    assert gate.snapshot() == {"status": "unavailable", "detail": note}
     client.completion.side_effect = None
     client.completion.return_value = {"choices": [{"message": {"content": json.dumps({"claims": [], "explanation_issues": []})}}]}
     assert await ClaimGate(attempts=1, _review_seconds=17.4).review(state, "Corrected answer.") is None

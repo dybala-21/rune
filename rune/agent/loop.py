@@ -588,13 +588,10 @@ class NativeAgentLoop(EventEmitter):
 
     def __init__(self, config: AgentConfig | None = None) -> None:
         super().__init__()
-        self._config = config or AgentConfig()
-        from rune.config import get_config
-        limits = get_config().llm
-        if self._config.model_request_limit is None:
-            self._config.model_request_limit = limits.model_request_limit
-        if self._config.cost_budget_usd is None:
-            self._config.cost_budget_usd = limits.cost_budget_usd
+        self._config = copy.copy(config) if config is not None else AgentConfig()
+        self._inherited_limits = tuple(name for name in ("model_request_limit", "cost_budget_usd")
+                                       if getattr(self._config, name) is None)
+        self._refresh_request_limits()
         self._status = AgentStatus.IDLE
         self._step = 0
         self._stall = StallState()
@@ -690,8 +687,16 @@ class NativeAgentLoop(EventEmitter):
         """Set the ask_user callback (AskUserCallback type)."""
         self._ask_user_callback = cb
 
+    def _refresh_request_limits(self) -> None:
+        from rune.config import get_config
+
+        limits = get_config().llm
+        for name in self._inherited_limits:
+            setattr(self._config, name, getattr(limits, name))
+
     def _reset_run_state(self) -> None:
         """Reset mutable per-run state before starting a fresh invocation."""
+        self._refresh_request_limits()
         self._step = 0
         self._stall = StallState()
         self._token_budget = TokenBudget()
@@ -1280,6 +1285,7 @@ class NativeAgentLoop(EventEmitter):
             trace.artifact_receipts = list(self._artifact_receipts)
             trace.unsourced_numbers = list(self._unsourced_numbers)
             trace.tests_passed_after_edit = self._verification.tests_passed_after_edit
+            trace.explanation_review = self._test_claim_gate.snapshot()
             if trace.reason in ("completed_gate_warnings", "max_gate_blocked", "desktop_blocked"):
                 trace.completion_check = self._completion_check
             await self.emit("completed", trace)

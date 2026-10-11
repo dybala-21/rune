@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import Any
 from uuid import uuid4
@@ -23,6 +24,14 @@ class BackgroundTask:
     max_steps: int = 30
     timeout_seconds: float = 120
     token_budget: int = 50_000
+    continuation: str = ""
+
+
+_current_task: ContextVar[BackgroundTask | None] = ContextVar("background_task", default=None)
+
+
+def current_background_task() -> BackgroundTask | None:
+    return _current_task.get()
 
 
 async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str, Any]:
@@ -52,6 +61,7 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
         "run_id": run_id, "source": task.source, "workspace": workspace, "success": False,
         "verified": False, "status": "unverified", "output": "", "error": None,
     }
+    scope = _current_task.set(task)
     try:
         with control_scope(control), approval_required(), environment_scope(workspace):
             async with asyncio.timeout(task.timeout_seconds):
@@ -59,7 +69,8 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
                 if task.verification:
                     from rune.agent.goal_validate import make_validate_fn
                     validate = make_validate_fn(cwd=workspace, timeout_s=task.timeout_seconds, auto_root=False)
-                trace = await loop.run(task.goal, context={"workspace_root": workspace}, max_steps=task.max_steps)
+                extra = {"extra_system_context": task.continuation} if task.continuation else {}
+                trace = await loop.run(task.goal, context={"workspace_root": workspace}, max_steps=task.max_steps, **extra)
                 outcome = run_outcome(trace)
                 if validate and outcome.success:
                     verification, evidence = await validate(task.verification)
@@ -80,6 +91,7 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
         result["execution_unknown"] = True
         result["status"] = "interrupted"
     finally:
+        _current_task.reset(scope)
         control.stop()
         result["duration_ms"] = round((time.monotonic() - started) * 1000, 1)
         result["timings"] = getattr(loop, "_last_run_timings", {})

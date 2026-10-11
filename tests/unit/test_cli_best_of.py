@@ -1,9 +1,4 @@
-"""Tests for CLI best-of-K (verifier-guided rejection sampling) wiring.
-
-Covers the new ``rune --message ... --best-of K`` path: subprocess attempt
-isolation + recursion guard, verifier-driven selection, file-restore on success,
-no-restore on none-pass, and that K==1 leaves the single-attempt path unchanged.
-"""
+"""Best-of CLI runs isolate attempts and restore only verified changes."""
 
 from __future__ import annotations
 
@@ -1365,7 +1360,8 @@ def _run_non_interactive_with_mocks(monkeypatch):
         files_written: list = []
 
         def __init__(self, *a, **k):
-            pass
+            self._config = k["config"]
+            self._token_budget = SimpleNamespace(total=500_000, used=0)
 
         def on(self, *a, **k):
             pass
@@ -2261,4 +2257,3 @@ async def test_each_attempt_is_spawned_with_its_own_temperature(monkeypatch, tmp
     # the later attempts also carry a distinct entry point in the message
     msgs = ["".join(c) for c in captured.values()]
     assert len({m for m in msgs}) == 3
-

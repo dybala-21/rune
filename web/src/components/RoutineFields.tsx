@@ -3,7 +3,25 @@ import { reconcileCronJob, type CronJobInfo, type RoutinePolicy } from '../api';
 
 export function defaultRoutinePolicy(): RoutinePolicy {
   return { workspace: '', max_steps: 30, timeout_seconds: 120, token_budget: 50000,
+    total_tokens: null, total_model_requests: null, total_cost_usd: null,
     deadline: null, verification: [], input_paths: [], output_paths: [], notify: 'changes' };
+}
+
+export function validateRoutinePolicy(policy: RoutinePolicy): void {
+  for (const [name, value, min, max] of [
+    ['Time limit', policy.timeout_seconds, 1, 1800],
+    ['Token limit', policy.token_budget, 1000, 500000],
+    ['Step limit', policy.max_steps, 1, 200],
+    ['Total token limit', policy.total_tokens, 0, Number.MAX_SAFE_INTEGER],
+    ['Total model requests', policy.total_model_requests, 0, Number.MAX_SAFE_INTEGER],
+  ] as const) {
+    if (value != null && (!Number.isSafeInteger(value) || value < min || value > max)) {
+      throw new Error(`${name} must be an integer from ${min} to ${max}`);
+    }
+  }
+  if (policy.total_cost_usd != null && (!Number.isFinite(policy.total_cost_usd) || policy.total_cost_usd < 0)) {
+    throw new Error('Total cost must be zero or greater, or left blank.');
+  }
 }
 
 const field: React.CSSProperties = { display: 'flex', flexDirection: 'column', gap: 5, fontSize: 12, color: 'var(--text-secondary)' };
@@ -15,14 +33,21 @@ export function RoutineFields({ policy, onChange }: { policy: RoutinePolicy; onC
     <summary style={{ cursor: 'pointer', fontSize: 12 }}>Scope and limits · {policy.timeout_seconds}s · {policy.token_budget.toLocaleString()} tokens</summary>
     <div style={{ display: 'grid', gap: 12, marginTop: 12 }}>
       <label style={field}>Working folder<input style={input} value={policy.workspace} onChange={e => update({ workspace: e.target.value })} placeholder="Rune's working folder if empty" /></label>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 10 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10 }}>
         <label style={field}>Time limit (seconds)<input style={input} type="number" min="1" max="1800" value={policy.timeout_seconds} onChange={e => update({ timeout_seconds: Number(e.target.value) })} /></label>
         <label style={field}>Token limit<input style={input} type="number" min="1000" max="500000" value={policy.token_budget} onChange={e => update({ token_budget: Number(e.target.value) })} /></label>
         <label style={field}>Step limit<input style={input} type="number" min="1" max="200" value={policy.max_steps} onChange={e => update({ max_steps: Number(e.target.value) })} /></label>
       </div>
+      <strong style={{ fontSize: 12 }}>Across all runs of this task</strong>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: 10 }}>
+        {([['Total tokens', 'total_tokens', '1'], ['Model requests', 'total_model_requests', '1'], ['Est. token cost (USD)', 'total_cost_usd', 'any']] as const).map(([label, key, step]) =>
+          <label key={key} style={field}>{label}<input style={input} type="number" min="0" step={step} placeholder="No total limit"
+            value={policy[key] ?? ''} onChange={e => update({ [key]: e.target.value === '' ? null : Number(e.target.value) })} /></label>)}
+      </div>
+      <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: 11 }}>These totals survive restarts, pauses and edits. Blank means no total limit; zero stops model calls. Cost is estimated and an in-flight request can exceed it. Embedding and tool fees are excluded.</p>
       <label style={field}>Stop after (date, time and time zone)<input style={input} value={policy.deadline ?? ''} onChange={e => update({ deadline: e.target.value || null })} placeholder="2026-12-31T18:00:00+09:00" /></label>
-      <label style={field}>Input files to watch (one per line)<textarea style={input} value={(policy.input_paths ?? []).join('\n')} onChange={e => update({ input_paths: e.target.value.split('\n') })} placeholder="Paths relative to the working folder" /></label>
-      <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: 11 }}>Skip completed work when these files and the outputs below are unchanged. Leave inputs empty for tasks that depend on time, email or live web data.</p>
+      <label style={field}>Input files or folders to watch (one per line)<textarea style={input} value={(policy.input_paths ?? []).join('\n')} onChange={e => update({ input_paths: e.target.value.split('\n') })} placeholder="Paths relative to the working folder" /></label>
+      <p style={{ margin: 0, color: 'var(--text-muted)', fontSize: 11 }}>Folders include new, changed and removed files. Each scheduled run checks up to 1,000 entries and 50 MB (10 MB per file). Declared outputs are excluded from watched input folders. Leave inputs empty for tasks that depend on time, email or live web data.</p>
       <label style={field}>Output files to check (one per line)<textarea style={input} value={(policy.output_paths ?? []).join('\n')} onChange={e => update({ output_paths: e.target.value.split('\n') })} placeholder="Missing or changed outputs trigger another run" /></label>
       <label style={field}>Verification commands (one per line)<textarea style={input} value={policy.verification.join('\n')} onChange={e => update({ verification: e.target.value.split('\n') })} placeholder="Optional checks for agent tasks; normal permissions apply" /></label>
       <label style={field}>Notify connected channel<select style={input} value={policy.notify} onChange={e => update({ notify: e.target.value as RoutinePolicy['notify'] })}>
@@ -49,6 +74,15 @@ export function RoutineHistory({ job, onRefresh }: { job: CronJobInfo; onRefresh
     finally { setSaving(false); }
   };
   return <section key={job.id} aria-label="Recent task runs" style={{ borderTop: '1px solid var(--border)', paddingTop: 12, fontSize: 12 }}>
+    {job.budget && <div style={{ marginBottom: 12 }}>
+      <strong>Recorded task usage</strong>
+      <p style={{ margin: '6px 0', color: 'var(--text-secondary)' }}>
+        {job.budget.used.modelRequests.toLocaleString()} model requests · {job.budget.used.tokens.toLocaleString()} tokens · ~${job.budget.used.costUsd.toFixed(4)}
+      </p>
+      {(!job.budget.used.requestsKnown || !job.budget.used.tokensKnown || !job.budget.used.costKnown) &&
+        <p style={{ color: 'var(--text-muted)' }}>Some usage is unavailable. These are the recorded amounts, not a complete total.</p>}
+      {job.budget.blocked && <p role="status" style={{ color: 'var(--warning)' }}>{job.budget.reason}</p>}
+    </div>}
     <strong>Recent runs</strong>
     {!job.recentRuns?.length && <p style={{ color: 'var(--text-muted)' }}>No runs yet.</p>}
     {job.recentRuns?.map(run => <details key={run.id} style={{ marginTop: 8 }}>

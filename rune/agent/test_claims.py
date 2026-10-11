@@ -323,10 +323,15 @@ def check_claims(answer: str, claims: Any, evidence: list[dict]) -> list[str]:
 @dataclass
 class TestClaimGate:
     attempts: int = 0
-    _results: dict[str, str | None] = field(default_factory=dict)
+    status: str = "not_checked"
+    detail: str = ""
+    _results: dict[str, tuple[str | None, str, str]] = field(default_factory=dict)
     _review_seconds: float = 0.0
     _observations: list[dict[str, Any]] = field(default_factory=list)
     _observation_count: int = 0
+
+    def snapshot(self) -> dict[str, str]:
+        return {"status": self.status, "detail": self.detail}
 
     def observe(self, name: str, params: dict, result: Any) -> None:
         if name not in {"file_read", "file_write", "file_edit", "bash_execute"} or (result.metadata or {}).get("cached"):
@@ -347,22 +352,30 @@ class TestClaimGate:
     async def review(self, state, answer: str, messages: list[Any] | None = None) -> str | None:
         evidence = comparison_evidence(state)
         if not evidence:
+            self.status, self.detail = "not_checked", ""
             return None
         review_answer = (without_recorded_tables(answer, evidence, single_check=len(state.checks) == 1)
                          if state.passed and state.last_write else answer)
         if review_answer != answer and not review_answer.strip():
+            self.status, self.detail = "pass", "The answer matches the recorded test results."
             return None
         # Preserve earlier changes when the transcript is compacted.
         observations = review_observations(self._observations) or code_observations(messages or [])
         key = hashlib.sha256((str(state.sequence) + answer + json.dumps(observations)).encode()).hexdigest()
         if key in self._results:
-            return self._results[key]
+            note, self.status, self.detail = self._results[key]
+            return note
         if self.attempts >= 2:
-            return "The final test summary remains unverified after one correction."
+            if self.status != "unavailable":
+                self.status = "inconclusive"
+                self.detail = "The final test summary remains unverified after one correction."
+            return self.detail
         timeout = 60.0 - self._review_seconds
         if timeout < 1:
             self.attempts = 2
-            return "The final test summary could not be checked within its review budget."
+            self.status = "unavailable"
+            self.detail = "The final test summary could not be checked within its review budget."
+            return self.detail
         self.attempts += 1
         from rune.llm.client import get_llm_client
         from rune.llm.model_selection import get_effective_model_selection
@@ -376,12 +389,15 @@ class TestClaimGate:
         answer_lines = {n: line for n, line in enumerate(review_answer.splitlines(), 1) if line.strip()}
         if not answer_lines:
             self.attempts = 2
-            return "The final answer contains no reviewable explanation."
+            self.status, self.detail = "inconclusive", "The final answer contains no reviewable explanation."
+            return self.detail
         payload = json.dumps({"answer_lines": answer_lines, "recorded_runs": claim_runs(evidence),
                               "code_observations": [{"id": f"observation_{record['id']}", "text": record["text"]}
                                                     for record in observations]}, ensure_ascii=False, separators=(",", ":"))
         if len(payload) > 40000:
-            return "The test summary exceeds the bounded claim-review scope. Report only directly recorded checks."
+            self.status = "inconclusive"
+            self.detail = "The test summary exceeds the bounded claim-review scope. Report only directly recorded checks."
+            return self.detail
         started = time.monotonic()
         stage = "request"
         response_format = deepcopy(_FORMAT)
@@ -437,8 +453,12 @@ class TestClaimGate:
                         reason=str(exc) if stage != "request" and isinstance(exc, ValueError) else None)
             # Avoid regenerating the answer when the verifier is unavailable.
             self.attempts = 2
+            self.status = "unavailable"
             note = "The final test summary could not be checked against its execution evidence."
+        else:
+            self.status = "contradicted" if note else "pass"
         finally:
             self._review_seconds += time.monotonic() - started
-        self._results[key] = note
+        self.detail = note or "The explanation agrees with the recorded evidence."
+        self._results[key] = note, self.status, self.detail
         return note

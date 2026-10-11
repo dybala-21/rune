@@ -254,6 +254,7 @@ class CompletionTrace:
     table_acceptance: dict[str, Any] | None = None
     requirement_acceptance: dict[str, Any] | None = None
     completion_check: dict[str, str] | None = None
+    explanation_review: dict[str, str] | None = None
     # Report commands outside the workspace because its snapshot cannot roll back their effects.
     workspace_warning: str = ""
     # Figures absent from retrieved sources; derived or rounded values may still be valid.
