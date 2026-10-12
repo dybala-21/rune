@@ -172,7 +172,7 @@ async def request_classification(
             try:
                 response = await client.completion(
                     messages=messages, model=selected.model, provider=selected.provider, max_tokens=1024 if attempt == 0 else 2048,
-                    timeout=max(0.01, deadline - asyncio.get_running_loop().time()),
+                    timeout=min(ROUTING_TIMEOUT, max(0.01, deadline - asyncio.get_running_loop().time())),
                     response_format=response_format, cache_system=True, max_retries=0,
                     **({"reasoning_effort": effort} if effort is not None else {}),
                 )

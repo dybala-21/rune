@@ -14,9 +14,9 @@ def inline_text(tokens) -> str | None:
 
 
 def recorded_tables(evidence: list[dict], language: str = "en") -> list[str]:
-    labels = (("테스트 결과", "수정 전", "수정 후", "전체 실행 결과", "실행 테스트 수", "실패 테스트 수", "실패 발생 수")
+    labels = (("테스트 결과", "수정 전", "수정 후", "전체 실행 결과", "실행 테스트 수", "통과 테스트 수", "실패 테스트 수", "실패 발생 수")
               if language == "ko" else
-              ("Test results", "Before", "After", "Suite status", "Tests run", "Failed tests", "Failure events"))
+              ("Test results", "Before", "After", "Suite status", "Tests run", "Passed tests", "Failed tests", "Failure events"))
     tables = []
     if len(evidence) > 3:
         return tables
@@ -34,7 +34,9 @@ def recorded_tables(evidence: list[dict], language: str = "en") -> list[str]:
             continue
         rows = [f"| {labels[0]}: `{command}` — `{cwd}` | {labels[1]} | {labels[2]} |",
                 "| --- | --- | --- |"]
-        for label, key in zip(labels[3:], ("check_status", "tests_run", "failed_tests", "failure_events"), strict=True):
+        for label, key in zip(labels[3:], ("check_status", "tests_run", "passed_tests", "failed_tests", "failure_events"), strict=True):
+            if key == "failure_events" and all(r["failure_events"] == r["failed_tests"] for r in (before, after)):
+                continue
             values = [str(r[key]) if r[key] is not None else "unknown" for r in (before, after)]
             rows.append(f"| {label} | {values[0]} | {values[1]} |")
         rows.extend(f"| `{name}` | {cases[0].get(name, 'unknown')} | {cases[1].get(name, 'unknown')} |" for name in names)

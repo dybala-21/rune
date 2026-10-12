@@ -213,6 +213,36 @@ async def test_provider_retry_after_cannot_extend_routing_deadline(monkeypatch):
     assert not result.available and stub.completion.await_count == 1
 
 
+@pytest.mark.parametrize("remaining", [35.0, 0.5])
+async def test_request_timeout_respects_the_cap_and_inherited_deadline(monkeypatch, remaining):
+    import asyncio
+    from types import SimpleNamespace
+
+    from rune.agent import classification_response as contract
+
+    now = 250.1  # Adding and subtracting 35 at this clock value rounds upward.
+    monkeypatch.setattr(contract, "asyncio", SimpleNamespace(
+        get_running_loop=lambda: SimpleNamespace(time=lambda: now),
+        timeout_at=lambda deadline: asyncio.timeout(deadline - now),
+        to_thread=asyncio.to_thread,
+    ))
+    stub = AsyncMock()
+    stub.completion.return_value = response(verdict())
+    await contract.request_classification(stub, "route", "request", deadline=now + remaining)
+    assert 0 < stub.completion.call_args.kwargs["timeout"] <= remaining
+
+
+async def test_model_compatibility_failure_keeps_the_actionable_reason(monkeypatch):
+    from rune.llm.target import ModelCompatibilityError
+
+    reason = "Vertex model gemini-3.1-pro-preview is not available in us-central1. Select a supported location: global."
+    stub = client(monkeypatch, ModelCompatibilityError(reason))
+    result = await classify_goal("Read the document")
+    assert not result.available and reason in result.reason
+    assert stub.completion.await_count == 1
+    assert from_wire(to_wire(result)).reason == result.reason
+
+
 @pytest.mark.parametrize("failure", [TimeoutError, httpx.ReadTimeout])
 async def test_ambiguous_timeout_is_not_sent_again(monkeypatch, failure):
     stub = client(monkeypatch, failure("secret response body"))
