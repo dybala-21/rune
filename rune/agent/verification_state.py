@@ -180,7 +180,7 @@ class VerificationState:
                 "Do not infer unobserved before/after statuses. Preserve unknowns. " +
                 (self.guidance() if self.pending else
                  "Required recorded checks have passed; compose the final answer without rerunning unchanged checks. "
-                 "Explain the original behavior from inspected code and observed results, including the actual exception or return value. "
+                 "Describe the observed code change and its purpose. Add return values or examples only when needed to explain it. "
                  "Do not infer a test's inputs or assertions from its name and status; omit those details unless observed. "
                  "Keep numerical comparisons scoped to observed inputs; state broader conditions only when derived from code."))
 

@@ -210,8 +210,9 @@ async def classify_tier2(
     except Exception as exc:
         from rune.agent.classification_response import InvalidClassification
         from rune.llm.failures import request_failure
+        from rune.llm.target import ModelCompatibilityError
         failure = request_failure(exc)
-        reason = str(exc) if isinstance(exc, InvalidClassification) else failure.kind
+        reason = str(exc) if isinstance(exc, (InvalidClassification, ModelCompatibilityError)) else failure.kind
         get_logger(__name__).warning("classification_unavailable", reason=reason, **failure.to_dict())
         return ClassificationResult(
             goal_type="full", confidence=0.5, tier=2,

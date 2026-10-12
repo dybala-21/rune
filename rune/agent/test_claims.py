@@ -59,18 +59,23 @@ action alone proves no success. Code-derived returns and exceptions are supporte
 missing printed values do not make them invented test inputs. Only attributing an unobserved input or
 assertion to a named test needs correction on that basis. Passing logs may rely on previously inspected tests.
 
-For claims covering an input class or a direction of change, return an explanation_issues entry even when
-supported (needs_correction=false). Briefly test the claimed scope against the code: unchanged results,
-boundaries and signs where relevant. A passing baseline refutes a claim that every original result was wrong.
+Respect the scope actually stated. A generic bug description does not claim that every input was wrong;
+a passing baseline does not refute it. Do not add a universal quantifier or demand an example for each test.
+For explicit claims covering an input class or a direction of change, return an explanation_issues entry
+even when supported (needs_correction=false). Check unchanged results, boundaries and signs against code.
+An unqualified direction such as "averages were smaller" is not a neutral bug description. Do not silently
+restrict it to positive inputs or passing examples; the answer itself must state that scope.
+A passing baseline refutes an explicit claim that every original result was wrong.
 For other explanations, report only concrete contradictions or unobserved test-specific inputs/assertions.
 CODE_OBSERVATIONS is bounded: missing actions or omitted code do not establish that an action never happened.
 Earlier reads show earlier revisions; compare them with later successful edits and reads before rejecting a change claim.
-Cite an answer line and an observation ID, give a short reason identifying the relevant code or result,
+Cite an answer line and an observation ID, give one short reason identifying the relevant code or result,
 then set needs_correction. Rune retrieves the complete bounded observation. Do not demand new tests.
 
 Test results: extract only explicit answer claims, unchanged, once per run/test/metric/value. The recorded
 runs are references, never claims to invent. Function outputs/exceptions are behavior, not test outcomes;
 use claims=[] when no test outcomes are stated. A failed suite does not mean all tests failed:
+suite/command status, including a table's overall result, uses status with test=-1;
 all_tests_status requires an explicit every-test claim. FAILED(failures=N) counts events (including subtests),
 not failed methods. passed_tests counts passes; tests_run includes failures/skips. Do not turn a metric or
 reference selection mistake into an explanation issue."""
@@ -248,7 +253,7 @@ def comparison_evidence(state) -> list[dict[str, Any]]:
         for phase, check in (("before", before), ("after", after)):
             if check is None:
                 pair[phase] = {"runner": "unobserved", "cases": [], "tests_run": None,
-                               "failure_events": None, "failed_tests": None,
+                               "failure_events": None, "failed_tests": None, "passed_tests": None,
                                "complete": False, "check_status": "unknown"}
                 continue
             report = check.report.snapshot()
@@ -444,8 +449,8 @@ class TestClaimGate:
                 log.warning("test_claim_review_partial", stages=[name for name, _ in errors])
             note = None if not issues else (
                 "The final explanation contradicts or exceeds recorded evidence:\n" + "\n".join(issues[:8])
-                + "\nChange only the disputed paragraphs. Replace unsupported generalizations with observed examples or the exact code change. "
-                "Preserve the recorded table and already correct counts; do not introduce a new generalization."
+                + "\nChange only the disputed claims. State the exact supported code change; remove unsupported scope. "
+                "Preserve the recorded table and correct counts. Do not repeat the table in prose or add new example analyses."
                 + "\nCorrect the wording using the recorded evidence. Do not edit files or rerun passing checks just to correct this summary."
             )
         except Exception as exc:

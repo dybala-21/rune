@@ -51,6 +51,7 @@ def test_before_after_and_subtests_survive_latest_result_replacement(state):
     context = state.model_context()
     assert "test_passing" in context and "| Failure events | 3 | 0 |" in context
     assert "| Failed tests | 1 | 0 |" in context
+    assert "| Passed tests | 1 | 2 |" in context
     assert '"checks": []' in context and '"recorded_comparison_sequences": [1, 3]' in context
     assert '"subtest_failures"' not in context
 
@@ -264,6 +265,7 @@ async def test_exact_recorded_result_table_needs_no_model_review(monkeypatch, st
     answer = (f"| Test results: `python3 -B -m unittest discover -v` — `{state.history[0].cwd}` | Before | After |\n"
               "| --- | --- | --- |\n"
               "| Suite status | fail | pass |\n| Tests run | 2 | 2 |\n"
+              "| Passed tests | 1 | 2 |\n"
               "| Failed tests | 1 | 0 |\n| Failure events | 3 | 0 |\n"
               "| `test_example.Cases.test_passing` | pass | pass |\n"
               "| `test_example.Cases.test_values` | fail | pass |")
@@ -271,8 +273,25 @@ async def test_exact_recorded_result_table_needs_no_model_review(monkeypatch, st
     client.completion.assert_not_awaited()
 
 
+def test_recorded_table_preserves_unknown_baseline_passes(state):
+    state.history.popleft()
+    table, = recorded_tables(comparison_evidence(state))
+    assert "| Passed tests | unknown | 2 |" in table
+
+
+def test_table_omits_redundant_failure_events_but_keeps_subtest_counts(state):
+    evidence = comparison_evidence(state)
+    table, = recorded_tables(evidence)
+    assert "| Failure events | 3 | 0 |" in table
+    evidence[0]["before"]["failure_events"] = 1
+    table, = recorded_tables(evidence)
+    assert "| Failed tests | 1 | 0 |" in table and "Failure events" not in table
+    assert not without_recorded_tables(table, evidence).strip()
+
+
 async def test_formatted_table_without_cwd_is_local_only_for_a_single_check(monkeypatch, state):
     table, = recorded_tables(comparison_evidence(state), "ko")
+    assert "| 통과 테스트 수 | 1 | 2 |" in table
     table = table.replace(f" — `{state.history[0].cwd}`", "")
     table = table.replace("| --- | --- | --- |", "| :--- | ---: | :---: |")
     table = table.replace("| 전체 실행 결과 | fail | pass |", "| **전체 실행 결과** | fail   | pass   |")
@@ -331,6 +350,7 @@ def test_agreements_do_not_hide_corrections_or_exhaust_the_issue_limit():
 
 @pytest.mark.parametrize("change", [
     lambda table: table.replace("| Failed tests | 1 | 0 |", "| Failed tests | 3 | 0 |"),
+    lambda table: table.replace("| Passed tests | 1 | 2 |", "| Passed tests | 2 | 2 |"),
     lambda table: table + "\nEvery test failed before the edit.",
     lambda table: table.replace("test_passing", "test_invented"),
     lambda table: table.replace("unittest discover", "unittest other_suite"),

@@ -57,7 +57,12 @@ def review_case(tmp_path):
     ("분모가 하나 더 커서 모든 평균이 실제보다 작았습니다.", True),
     ("The old function divided by len(values) + 1. Empty input returned 0.0 instead of raising ValueError.", False),
     ("수정 전에는 1개 통과, 2개 실패했습니다. 수정 후에는 3개 모두 통과했습니다.", False),
-], ids=["universal", "direction", "supported_behavior", "supported_counts"])
+    ("The incorrect denominator caused a bug in the mean calculation. Empty input did not raise ValueError.", False),
+    ("분모가 len(values) + 1이라 평균 계산에 오류가 있었고, 빈 목록에서 ValueError가 나지 않았습니다.", False),
+    ("| 테스트 실행 | 수정 전 | 수정 후 |\n| --- | --- | --- |\n| 전체 실행 결과 | fail | pass |", False),
+    ("분모를 len(values) + 1로 나눠 평균이 작아졌고, 빈 목록은 0을 반환해 ValueError가 나지 않았습니다.", True),
+], ids=["universal", "direction", "supported_behavior", "supported_counts", "bug_description", "bug_description_ko",
+        "suite_status", "unqualified_direction"])
 async def test_claim_review_scope(review_case, live_model, live_report, monkeypatch, request, answer, needs_correction):
     import rune.llm.client as clients
 
