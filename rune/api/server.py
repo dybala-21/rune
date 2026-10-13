@@ -2028,6 +2028,21 @@ def create_app() -> Any:
                 job_id = params.pop("jobId", "")
                 return _ok(await reconcile_cron_job(job_id, ReconcileRequest(**params)))
 
+            elif method == "cron.approval":
+                from rune.api.handlers.cron import RoutineApprovalRequest, resolve_routine_approval
+                job_id = params.pop("jobId", "")
+                return _ok(await resolve_routine_approval(job_id, RoutineApprovalRequest(**params)))
+
+            elif method in {"cron.approval.inspect", "cron.approval.refresh"}:
+                from rune.api.handlers.cron import (
+                    RoutineOperationRequest,
+                    inspect_routine_approval,
+                    refresh_routine_approval,
+                )
+                job_id = params.pop("jobId", "")
+                handler = inspect_routine_approval if method == "cron.approval.inspect" else refresh_routine_approval
+                return _ok(await handler(job_id, RoutineOperationRequest(**params)))
+
             # health
             elif method == "health":
                 from rune.api.handlers.health import health

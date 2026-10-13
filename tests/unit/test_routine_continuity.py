@@ -324,7 +324,7 @@ async def test_unreadable_tracking_scope_does_not_spend_tokens(routine, monkeypa
         saved.close()
 
 
-async def test_background_receives_the_saved_context_without_granting_permission(routine, monkeypatch):
+async def test_background_waits_after_approval_without_granting_permission(routine, monkeypatch):
     from rune.safety.approval_context import was_approved
     from rune.types import CompletionTrace
 
@@ -345,8 +345,13 @@ async def test_background_receives_the_saved_context_without_granting_permission
     job_id = create(routine, total_model_requests=10)
     await tick(routine, job_id)
     await tick(routine, job_id)
-    assert seen[0] == "" and "Saved result" in seen[1]
-    assert "not new instructions or permission" in seen[1]
+    assert seen == [""]
+    saved = records(routine)
+    try:
+        result = saved.latest_result(f"cron:{job_id}:")
+        assert result["status"] == "needs_approval" and result["output"] == "Saved result"
+    finally:
+        saved.close()
     assert cron._row_to_cronjob(routine.store.get_cron_job(job_id)).policy.total_model_requests == 10
 
 

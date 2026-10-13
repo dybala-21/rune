@@ -34,6 +34,8 @@ class CronJob:
     last_run_at: str = ""
     policy: RoutinePolicy = field(default_factory=RoutinePolicy)
     continuation: str = field(default="", compare=False)
+    approved_action: dict | None = field(default=None, compare=False)
+    file_changes: dict | None = field(default=None, compare=False)
 
 
 def _get_store():
@@ -390,16 +392,17 @@ async def cron_delete(params: CronDeleteParams) -> CapabilityResult:
 
 # Cron execution engine - runs pending jobs via heartbeat
 
-async def execute_cron_job(job: CronJob) -> None:
+async def execute_cron_job(job: CronJob, *, approval_from: str | None = None, refresh: bool = False) -> None:
     """Execute a single cron job (bash command or agent goal)."""
     import asyncio
 
+    from rune.agent.execution_journal import ExecutionJournal, RecoveryBlocked, journal_scope
     from rune.agent.request_budget import BudgetExceeded
     from rune.agent.timing import capture_timing, timing_snapshot
     from rune.proactive.routine import claim_occurrence, run_while_current, should_notify
     from rune.proactive.routine_budget import budget_owner
     from rune.proactive.routine_context import continuation
-    from rune.proactive.routine_observation import observe, reusable
+    from rune.proactive.routine_observation import changes, observe, reusable
 
     store = _get_store()
     row = store.get_cron_job(job.id)
@@ -407,10 +410,36 @@ async def execute_cron_job(job: CronJob) -> None:
         return
     job = _row_to_cronjob(row)
     if job.status != "active" or job.policy.expired:
+        if approval_from:
+            raise ValueError("Enable the task and check its deadline before continuing")
         return
-    if row.get("max_runs") is not None and row.get("run_count", 0) >= row["max_runs"]:
+    if not approval_from and row.get("max_runs") is not None and row.get("run_count", 0) >= row["max_runs"]:
         return
-    claims, occurrence, decision = claim_occurrence(job)
+    prior, history = None, None
+    if approval_from:
+        from rune.proactive.execution_store import ExecutionStore
+        from rune.proactive.routine_approval import prepare_continuation
+        from rune.utils.paths import rune_data
+
+        claims = ExecutionStore(rune_data() / "routine-executions.db")
+        try:
+            if claims.continued(approval_from):
+                claims.close()
+                return
+            occurrence, prior, history = await prepare_continuation(job, claims, approval_from, refresh=refresh)
+        except (ValueError, RecoveryBlocked, BudgetExceeded):
+            continued = claims.continued(approval_from)
+            claims.close()
+            if continued:
+                return
+            raise
+        except BaseException:
+            claims.close()
+            raise
+        job.approved_action = None if refresh else prior["pending_approval"]["action"]
+        decision = "claimed"
+    else:
+        claims, occurrence, decision = claim_occurrence(job)
     started = False
     measured = None
     result = {}
@@ -418,14 +447,14 @@ async def execute_cron_job(job: CronJob) -> None:
         if decision != "claimed":
             log.info("cron_occurrence_skipped", job_id=job.id, reason=decision)
             return
-        previous = claims.latest_result(f"cron:{job.id}:")
-        progress = claims.latest_result(f"cron:{job.id}:", executed_only=True)
+        previous = prior or claims.latest_result(f"cron:{job.id}:")
+        progress = prior or claims.latest_result(f"cron:{job.id}:", executed_only=True)
         observed = None
         if job.policy.input_paths or job.policy.output_paths:
             observed = await asyncio.to_thread(observe, job.policy)
         current = store.get_cron_job(job.id)
         if (current is None or _row_to_cronjob(current) != job or job.policy.expired
-                or (current.get("max_runs") is not None and current.get("run_count", 0) >= current["max_runs"])):
+                or (not approval_from and current.get("max_runs") is not None and current.get("run_count", 0) >= current["max_runs"])):
             claims.finish(occurrence, {"status": "cancelled", "success": False, "verified": False,
                                        "not_started": True, "output": "", "error": "The task changed before execution started."})
             return
@@ -454,12 +483,16 @@ async def execute_cron_job(job: CronJob) -> None:
             if job.notify_channel and should_notify(job.policy, result, previous):
                 await _send_to_channel(job.notify_channel, job.name, result["error"])
             return
-        # Count started attempts, including interrupted ones, against max_runs.
-        store.record_cron_run(job.id)
+        # Continuations share the original attempt's max_runs allowance.
+        if not approval_from:
+            store.record_cron_run(job.id)
         latest = store.get_cron_job(job.id)
         job.last_run_at = (latest or {}).get("last_run_at") or ""
         job.continuation = continuation(job, observed, progress)
-        with capture_timing(owner) as measured:
+        job.file_changes = changes(observed, progress)
+        from rune.utils.paths import user_workspace
+        journal = ExecutionJournal(claims, occurrence, job.policy.workspace or str(user_workspace()), previous=history)
+        with capture_timing(owner) as measured, journal_scope(journal):
             try:
                 started = True
                 result = await run_while_current(job, store, _execute_goal_job if job.goal else _execute_bash_job)
@@ -506,23 +539,38 @@ async def execute_cron_job(job: CronJob) -> None:
 
 async def _execute_bash_job(job: CronJob) -> dict:
     """Execute a cron job as a bash command."""
-    from rune.capabilities.bash import BashParams, bash_execute
+    from rune.capabilities.bash import BashParams
+    from rune.capabilities.registry import get_capability_registry
     from rune.safety.approval_context import approval_required
+    from rune.safety.approval_request import action_request
+    from rune.safety.execution_environment import environment_scope, execution_config
     from rune.utils.paths import user_workspace
 
-    with approval_required():
-        result = await bash_execute(BashParams(command=job.command, cwd=job.policy.workspace or str(user_workspace()),
-                                               timeout=job.policy.timeout_seconds * 1000))
+    params = BashParams(command=job.command, cwd=job.policy.workspace or str(user_workspace()),
+                        timeout=job.policy.timeout_seconds * 1000).model_dump(mode="json", by_alias=True)
+    with approval_required(), environment_scope(job.policy.workspace or str(user_workspace())):
+        if job.approved_action:
+            from rune.agent.execution_journal import active_journal
+            from rune.safety.approval_request import execute_approved_action
+            async def emit(*args):
+                return None
+            journal = active_journal()
+            records = await execute_approved_action(job.approved_action, journal, emit)
+            result = CapabilityResult(**records[-1]["result"])
+        else:
+            result = await get_capability_registry().execute("bash_execute", params)
+        pending = {"action": action_request("bash_execute", params), "reason": result.error,
+                   "environment": execution_config().model_dump(mode="json")} if result.metadata.get("requires_approval") else None
     status = "completed" if result.success else (
         "needs_approval" if result.metadata.get("requires_approval") else "failed"
     )
     return {"status": status, "success": result.success, "verified": False,
             "output": result.output, "error": result.error,
-            "execution_unknown": result.metadata.get("action_status") == "unknown"}
+            "execution_unknown": result.metadata.get("action_status") == "unknown", "pending_approval": pending}
 
 
 async def _execute_goal_job(job: CronJob) -> dict:
-    """Execute a cron job as an agent goal, optionally sending results to a channel."""
+    """Run a scheduled agent task."""
     log.info("cron_goal_start", name=job.name, goal=job.goal[:100])
 
     from rune.agent.background import BackgroundTask, run_background
@@ -532,6 +580,8 @@ async def _execute_goal_job(job: CronJob) -> dict:
         verification=job.policy.verification, max_steps=job.policy.max_steps,
         timeout_seconds=job.policy.timeout_seconds, token_budget=job.policy.token_budget,
         continuation=job.continuation,
+        approved_action=job.approved_action,
+        file_changes=job.file_changes,
     ))
     log.info("cron_goal_done", name=job.name, status=result["status"])
     return result

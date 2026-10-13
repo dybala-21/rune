@@ -35,6 +35,13 @@ def current_usage() -> dict | None:
     return copy.deepcopy(run["usage"]) if run is not None else None
 
 
+def remaining_tokens() -> int | None:
+    run = _current.get()
+    budgets = [remaining_budget(scope) for scope in scopes(run)] if run is not None else []
+    values = [budget["tokens"] for budget in budgets if budget is not None]
+    return min(values) if values else None
+
+
 def check_isolated_worker_budget() -> None:
     from rune.agent.request_budget import BudgetExceeded
 

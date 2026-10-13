@@ -25,6 +25,8 @@ class BackgroundTask:
     timeout_seconds: float = 120
     token_budget: int = 50_000
     continuation: str = ""
+    approved_action: dict | None = None
+    file_changes: dict | None = None
 
 
 _current_task: ContextVar[BackgroundTask | None] = ContextVar("background_task", default=None)
@@ -48,14 +50,31 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
     )
     loop = (loop_factory or NativeAgentLoop)(config=cfg)
     blocked: list[str] = []
+    pending = None
+    from rune.agent.execution_journal import (
+        active_journal,
+        recovery_context,
+        recovery_written_files,
+    )
+    from rune.safety.approval_request import current_request, execute_approved_action
+    from rune.safety.execution_environment import execution_config
+
+    journal = active_journal()
 
     async def needs_approval(capability: str, reason: str) -> bool:
+        nonlocal pending
         blocked.append(capability)
+        if pending is None:
+            pending = {"action": current_request(), "reason": reason[:4000],
+                       "environment": execution_config().model_dump(mode="json")}
+        control.stop()
         return False
 
     loop.set_approval_callback(needs_approval)
     run_id = f"{task.source}_{uuid4().hex}"
     control = RunControl(run_id)
+    if journal is not None:
+        journal.approval = needs_approval
     started = time.monotonic()
     result: dict[str, Any] = {
         "run_id": run_id, "source": task.source, "workspace": workspace, "success": False,
@@ -69,8 +88,17 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
                 if task.verification:
                     from rune.agent.goal_validate import make_validate_fn
                     validate = make_validate_fn(cwd=workspace, timeout_s=task.timeout_seconds, auto_root=False)
-                extra = {"extra_system_context": task.continuation} if task.continuation else {}
-                trace = await loop.run(task.goal, context={"workspace_root": workspace}, max_steps=task.max_steps, **extra)
+                if task.approved_action is not None:
+                    if journal is None:
+                        raise ValueError("Approval continuation requires a durable execution journal")
+                    await execute_approved_action(task.approved_action, journal, loop.emit)
+                context = {"workspace_root": workspace}
+                continuation = task.continuation
+                if journal is not None and journal.previous is not None:
+                    context["recovery_written_files"] = recovery_written_files(journal.previous)
+                    continuation = recovery_context({"runId": journal.run_id, "fileChanges": task.file_changes}, journal.previous)
+                extra = {"extra_system_context": continuation} if continuation else {}
+                trace = await loop.run(task.goal, context=context, max_steps=task.max_steps, **extra)
                 outcome = run_outcome(trace)
                 if validate and outcome.success:
                     verification, evidence = await validate(task.verification)
@@ -95,9 +123,10 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
         control.stop()
         result["duration_ms"] = round((time.monotonic() - started) * 1000, 1)
         result["timings"] = getattr(loop, "_last_run_timings", {})
-        if blocked and not result["verified"] and not result.get("execution_unknown"):
+        if blocked and not result.get("execution_unknown"):
             result.update(status="needs_approval", success=False, verified=False,
-                          error="User approval is required to continue.", blocked_tools=sorted(set(blocked)))
+                          error="User approval is required to continue.", blocked_tools=sorted(set(blocked)),
+                          pending_approval=pending)
             if "outcome" in result:
                 result["outcome"].update(completionStatus="incomplete", reason="approval_required")
     return result

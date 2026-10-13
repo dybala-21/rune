@@ -50,13 +50,16 @@ class RoutinePolicy(BaseModel):
         return RoutinePolicy.model_validate({**self.model_dump(), **update.model_dump(exclude_unset=True)}).bind_workspace()
 
 
-def claim_occurrence(job) -> tuple[ExecutionStore, str, str]:
-    store = ExecutionStore(rune_data() / "routine-executions.db")
-    fingerprint = hashlib.sha256(json.dumps([
+def task_fingerprint(job) -> str:
+    return hashlib.sha256(json.dumps([
         job.command, job.goal, job.schedule, job.notify_channel, job.policy.model_dump(mode="json"),
     ], sort_keys=True).encode()).hexdigest()
+
+
+def claim_occurrence(job) -> tuple[ExecutionStore, str, str]:
+    store = ExecutionStore(rune_data() / "routine-executions.db")
     occurrence = f"cron:{job.id}:{int(time.time() // 60)}"
-    decision = store.claim(occurrence, fingerprint, 1000, resource=f"cron:{job.id}")
+    decision = store.claim(occurrence, task_fingerprint(job), 1000, resource=f"cron:{job.id}")
     return store, occurrence, decision
 
 
