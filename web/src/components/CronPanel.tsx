@@ -43,9 +43,8 @@ export function CronPanel({ onClose }: CronPanelProps) {
   const [enabled, setEnabled] = useState(true);
   const [maxRuns, setMaxRuns] = useState('');
 
-  const loadJobs = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const loadJobs = useCallback(async (quiet = false) => {
+    if (!quiet) { setLoading(true); setError(null); }
     try {
       const result = await fetchCronJobs();
       const sorted = result.jobs
@@ -56,12 +55,24 @@ export function CronPanel({ onClose }: CronPanelProps) {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't load cron jobs");
     } finally {
-      setLoading(false);
+      if (!quiet) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     loadJobs();
+  }, [loadJobs]);
+
+  useEffect(() => {
+    let active = true;
+    let timer: ReturnType<typeof setTimeout>;
+    const refresh = async () => {
+      if (!active) return;
+      if (document.visibilityState === 'visible') await loadJobs(true);
+      if (active) timer = setTimeout(refresh, 5000);
+    };
+    timer = setTimeout(refresh, 5000);
+    return () => { active = false; clearTimeout(timer); };
   }, [loadJobs]);
 
   useEffect(() => {
@@ -239,7 +250,7 @@ export function CronPanel({ onClose }: CronPanelProps) {
           </span>
           <div style={{ flex: 1 }} />
           <button
-            onClick={loadJobs}
+            onClick={() => loadJobs()}
             disabled={loading}
             style={secondaryButtonStyle}
           >

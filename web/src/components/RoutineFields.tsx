@@ -1,5 +1,6 @@
-import { useState } from 'react';
-import { reconcileCronJob, type CronJobInfo, type RoutinePolicy } from '../api';
+import { useEffect, useState } from 'react';
+import { inspectRoutineApproval, reconcileCronJob, refreshRoutineApproval, resolveRoutineApproval,
+  type CronJobInfo, type RoutineApprovalInspection, type RoutinePolicy } from '../api';
 
 export function defaultRoutinePolicy(): RoutinePolicy {
   return { workspace: '', max_steps: 30, timeout_seconds: 120, token_budget: 50000,
@@ -62,7 +63,39 @@ export function RoutineHistory({ job, onRefresh }: { job: CronJobInfo; onRefresh
   const [note, setNote] = useState('');
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [inspection, setInspection] = useState<RoutineApprovalInspection | null>(null);
+  const [inspecting, setInspecting] = useState(false);
   const blocked = job.recentRuns?.find(run => run.blocked);
+  const running = blocked?.state === 'running';
+  const awaitingApproval = blocked?.result?.status === 'needs_approval';
+  const pending = awaitingApproval ? blocked?.result?.pending_approval : undefined;
+  const action = pending?.action;
+  const resumable = action && action.tool !== 'harness_check' && !/^(browser_|desktop_)/.test(action.tool);
+  useEffect(() => {
+    let active = true;
+    setInspection(null);
+    setInspecting(false);
+    if (!blocked || !awaitingApproval || !job.enabled) return;
+    setInspecting(true);
+    inspectRoutineApproval(job.id, blocked.id).then(value => { if (active) setInspection(value); })
+      .catch(err => { if (active) setError(err instanceof Error ? err.message : 'Could not check current files'); })
+      .finally(() => { if (active) setInspecting(false); });
+    return () => { active = false; };
+  }, [job.id, blocked?.id, awaitingApproval, job.enabled]);
+  const approve = async (approved: boolean, refresh = false) => {
+    if (!blocked) return;
+    setSaving(true); setError('');
+    try {
+      if (refresh) await refreshRoutineApproval(job.id, blocked.id);
+      else await resolveRoutineApproval(job.id, blocked.id, approved);
+      await onRefresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not resolve approval');
+      try { setInspection(await inspectRoutineApproval(job.id, blocked.id)); }
+      catch { await onRefresh(); }
+    }
+    finally { setSaving(false); }
+  };
   const review = async () => {
     if (!blocked) return;
     setSaving(true); setError('');
@@ -86,10 +119,32 @@ export function RoutineHistory({ job, onRefresh }: { job: CronJobInfo; onRefresh
     <strong>Recent runs</strong>
     {!job.recentRuns?.length && <p style={{ color: 'var(--text-muted)' }}>No runs yet.</p>}
     {job.recentRuns?.map(run => <details key={run.id} style={{ marginTop: 8 }}>
-      <summary style={{ cursor: 'pointer' }}>{new Date(run.started_at * 1000).toLocaleString()} · {run.result?.status.split('_').join(' ') ?? 'Outcome pending'}</summary>
+      <summary style={{ cursor: 'pointer' }}>{new Date(run.started_at * 1000).toLocaleString()} · {(run.state ?? run.result?.status ?? 'outcome_pending').split('_').join(' ')}</summary>
       <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontFamily: 'inherit', color: 'var(--text-secondary)' }}>{run.result?.output || run.result?.error || run.result?.note || 'The worker has not reported a final result.'}</pre>
     </details>)}
-    {blocked && <div style={{ marginTop: 12, display: 'grid', gap: 8 }}>
+    {awaitingApproval && <div style={{ marginTop: 12, display: 'grid', gap: 8 }}>
+      <strong>Approval needed</strong>
+      <p style={{ margin: 0 }}>This task is waiting. Scheduled ticks will not restart it or use more model tokens.</p>
+      {pending?.reason && <p style={{ margin: 0, color: 'var(--text-secondary)' }}>{pending.reason}</p>}
+      {action && <><strong>{action.tool}</strong><pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 240, overflowY: 'auto' }}>{JSON.stringify(action.params, null, 2)}</pre></>}
+      {!resumable && <p style={{ margin: 0 }}>This action needs a fresh interactive review. Dismiss it before continuing in chat.</p>}
+      {!job.enabled && <p style={{ margin: 0 }}>Enable and save the task before approving.</p>}
+      {inspection?.reason && <p role="status" style={{ margin: 0 }}>{inspection.reason}</p>}
+      {inspection?.changed && <ul style={{ margin: 0, paddingLeft: 20 }}>
+        {Object.entries(inspection.changes).flatMap(([group, kinds]) => Object.entries(kinds).flatMap(([kind, paths]) =>
+          paths.map(path => <li key={`${group}:${kind}:${path}`}>{group} · {kind} · {path}</li>)))}
+        {inspection.truncated && <li>More files changed; the task will inspect the full tracked scope.</li>}
+      </ul>}
+      <div style={{ display: 'flex', gap: 8 }}>
+        {resumable && <button style={input} disabled={saving || inspecting || inspection?.changed || !job.enabled || job.budget?.blocked} onClick={() => approve(true)}>{saving ? 'Continuing…' : 'Approve once and continue'}</button>}
+        {resumable && inspection?.changed && inspection.refreshable && <button style={input} disabled={saving || !job.enabled || job.budget?.blocked} onClick={() => approve(false, true)}>Prepare again with current files</button>}
+        <button style={input} disabled={saving} onClick={() => approve(false)}>Dismiss and pause task</button>
+      </div>
+      <span style={{ color: 'var(--text-muted)' }}>Approval covers only the action shown. Continuing uses the remaining task budget and checks the final result again.</span>
+      {inspection?.changed && inspection.refreshable && <span style={{ color: 'var(--text-muted)' }}>Preparing again uses the remaining budget. It does not approve the old action; external actions need a new approval.</span>}
+    </div>}
+    {running && <p role="status">Task running. Its result will update here; do not submit the action again.</p>}
+    {blocked && !awaitingApproval && !running && <div style={{ marginTop: 12, display: 'grid', gap: 8 }}>
       <p style={{ margin: 0 }}>Further runs are blocked until you check whether this run changed files or external systems.</p>
       {job.enabled ? <p style={{ margin: 0, color: 'var(--text-muted)' }}>Pause and save this task before recording your review.</p> : <>
         <label style={field}>What did you check?<textarea style={input} value={note} onChange={e => setNote(e.target.value)} /></label>

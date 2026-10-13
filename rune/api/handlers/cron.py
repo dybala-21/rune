@@ -96,6 +96,15 @@ class ReconcileRequest(BaseModel):
     note: str = Field(min_length=1, max_length=2000)
 
 
+class RoutineOperationRequest(BaseModel):
+    operation_id: str = Field(alias="operationId", min_length=1, max_length=200)
+    model_config = ConfigDict(extra="forbid")
+
+
+class RoutineApprovalRequest(RoutineOperationRequest):
+    approved: bool = Field(strict=True)
+
+
 # Helpers
 
 
@@ -280,3 +289,65 @@ async def delete_cron_job(job_id: str) -> CronDeleteResponse:
 
     log.info("cron_job_deleted", job_id=job_id)
     return CronDeleteResponse(deleted=True)
+
+
+@router.post("/{job_id}/approval", dependencies=[Depends(auth)])
+async def resolve_routine_approval(job_id: str, req: RoutineApprovalRequest) -> dict:
+    return await _resolve_routine(job_id, req.operation_id, approved=req.approved)
+
+
+@router.post("/{job_id}/approval/refresh", dependencies=[Depends(auth)])
+async def refresh_routine_approval(job_id: str, req: RoutineOperationRequest) -> dict:
+    return await _resolve_routine(job_id, req.operation_id, refresh=True)
+
+
+@router.post("/{job_id}/approval/inspect", dependencies=[Depends(auth)])
+async def inspect_routine_approval(job_id: str, req: RoutineOperationRequest) -> dict:
+    from rune.agent.execution_journal import RecoveryBlocked
+    from rune.capabilities.cron import _row_to_cronjob
+    from rune.proactive.execution_store import ExecutionStore
+    from rune.proactive.routine_approval import inspect_approval
+    from rune.utils.paths import rune_data
+
+    row = get_memory_store().get_cron_job(job_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    records = ExecutionStore(rune_data() / "routine-executions.db")
+    try:
+        return await inspect_approval(_row_to_cronjob(row), records, req.operation_id)
+    except (ValueError, RecoveryBlocked) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    finally:
+        records.close()
+
+
+async def _resolve_routine(job_id: str, operation_id: str, *, approved: bool = False, refresh: bool = False) -> dict:
+    from rune.agent.execution_journal import RecoveryBlocked
+    from rune.agent.request_budget import BudgetExceeded
+    from rune.capabilities.cron import _row_to_cronjob, execute_cron_job
+    from rune.proactive.execution_store import ExecutionStore
+    from rune.utils.paths import rune_data
+
+    store = get_memory_store()
+    row = store.get_cron_job(job_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if not operation_id.startswith(f"cron:{job_id}:"):
+        raise HTTPException(status_code=409, detail="The pending action belongs to another task")
+    records = ExecutionStore(rune_data() / "routine-executions.db")
+    try:
+        if approved or refresh:
+            await execute_cron_job(_row_to_cronjob(row), approval_from=operation_id, refresh=refresh)
+            child_id = records.continued(operation_id)
+            return {"operationId": child_id, "status": records.state(child_id) if child_id else "unavailable"}
+        pending = next((run for run in records.recent(f"cron:{job_id}:") if run["id"] == operation_id and run["blocked"]), None)
+        if not pending or (pending["result"] or {}).get("status") != "needs_approval":
+            raise ValueError("This approval is no longer pending")
+        # Pause first so the scheduler cannot reclaim the task.
+        store.update_cron_job(job_id, enabled=False)
+        records.dismiss_approval(f"cron:{job_id}", operation_id)
+        return {"operationId": operation_id, "status": "dismissed"}
+    except (ValueError, RecoveryBlocked, BudgetExceeded) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    finally:
+        records.close()

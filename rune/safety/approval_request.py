@@ -40,3 +40,26 @@ def request_scope(action: dict):
         yield
     finally:
         _request.reset(token)
+
+
+async def execute_approved_action(action: dict, journal, emit) -> list[dict]:
+    """Run the approved action and save its result for continuation."""
+    from rune.agent.execution_journal import RecoveryBlocked, continuation_action
+    from rune.capabilities.registry import get_capability_registry
+    from rune.safety.approval_context import approval_granted
+
+    tool, params = action["tool"], action["params"]
+    check_revisions(action.get("revisions", {}))
+    call_id = action.get("callId") or f"resumed:{uuid4().hex}"
+    await emit("tool_call", {"runId": journal.run_id, "callId": call_id, "toolName": tool, "args": params})
+    with continuation_action(call_id), approval_granted(tool, params, revisions=action.get("revisions", {})):
+        result = await get_capability_registry().execute(tool, params)
+    await emit("tool_result", {"runId": journal.run_id, "callId": call_id, "toolName": tool,
+                                "success": result.success, "result": result.output or result.error or "",
+                                **({"fileChange": result.metadata["fileChange"]}
+                                   if (result.metadata or {}).get("fileChange") else {})})
+    if not result.success:
+        raise RecoveryBlocked(result.error or "The interrupted action could not be completed.")
+    records = journal.store.attempts(journal.run_id)
+    journal.previous = [*(journal.previous or []), *records]
+    return records

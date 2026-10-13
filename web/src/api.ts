@@ -634,7 +634,10 @@ export interface RoutineRun {
   id: string;
   started_at: number;
   blocked: boolean;
-  result: { status: string; output?: string; error?: string; note?: string; verified?: boolean } | null;
+  state?: string;
+  result: { status: string; output?: string; error?: string; note?: string; verified?: boolean;
+    pending_approval?: { reason: string; action: { tool: string; params: Record<string, unknown> } | null };
+  } | null;
 }
 
 export interface CronBuiltinTaskInfo {
@@ -694,6 +697,26 @@ export async function deleteCronJob(jobId: string): Promise<{ jobId: string }> {
 
 export async function reconcileCronJob(jobId: string, operationId: string, note: string): Promise<{ reconciled: boolean }> {
   return rpc('cron.reconcile', { jobId, operationId, note });
+}
+
+export async function resolveRoutineApproval(jobId: string, operationId: string, approved: boolean): Promise<{ operationId: string; status: string }> {
+  return rpc('cron.approval', { jobId, operationId, approved });
+}
+
+export interface RoutineApprovalInspection {
+  changed: boolean;
+  refreshable: boolean;
+  reason: string;
+  changes: Record<string, Record<string, string[]>>;
+  truncated: boolean;
+}
+
+export async function inspectRoutineApproval(jobId: string, operationId: string): Promise<RoutineApprovalInspection> {
+  return rpc('cron.approval.inspect', { jobId, operationId });
+}
+
+export async function refreshRoutineApproval(jobId: string, operationId: string): Promise<{ operationId: string; status: string }> {
+  return rpc('cron.approval.refresh', { jobId, operationId });
 }
 
 // Health API
