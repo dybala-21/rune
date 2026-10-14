@@ -128,6 +128,29 @@ def request_price_known(params: dict) -> bool:
     }, params) is not None
 
 
+def reserve_request_cost(params: dict, input_tokens: int, output_tokens: int) -> float | None:
+    """Reserve input and output costs, allowing for cache writes."""
+    usage = {"input_tokens": input_tokens, "output_tokens": output_tokens, "cache_write_reported": True}
+    uncached = estimate_request_cost(params["model"], usage, params)
+    if uncached is None:
+        return None
+    rates = rates_for(params["model"])
+    if rates is None or rates.write is None:
+        return uncached
+
+    def hourly(value):
+        if isinstance(value, dict):
+            control = value.get("cache_control")
+            return (isinstance(control, dict) and control.get("ttl") == "1h") or any(hourly(v) for v in value.values())
+        return isinstance(value, list) and any(hourly(v) for v in value)
+
+    cached = estimate_request_cost(params["model"], {
+        **usage, "cache_write_tokens": input_tokens,
+        "cache_write_1h_tokens": input_tokens if hourly(params.get("messages", [])) or hourly(params.get("tools", [])) else 0,
+    }, params)
+    return max(uncached, cached) if cached is not None else None
+
+
 def usage_payload(trace: Any) -> dict | None:
     usage = getattr(trace, "timings", {}).get("usage")
     if not usage:

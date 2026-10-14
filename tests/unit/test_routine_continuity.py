@@ -48,7 +48,8 @@ async def call(request):
 
 
 @pytest.mark.parametrize("limit,expected", [
-    ({"total_model_requests": 2}, 2), ({"total_tokens": 220}, 2), ({"total_cost_usd": .000001}, 1),
+    ({"total_model_requests": 2}, 2), ({"total_tokens": 220}, 2), ({"total_cost_usd": .000001}, 0),
+    ({"total_cost_usd": .00026}, 1),
     ({"total_model_requests": 0}, 0), ({"total_cost_usd": 0}, 0),
 ])
 async def test_total_budget_survives_restart_pause_and_edit(routine, monkeypatch, limit, expected):

@@ -1,7 +1,96 @@
 import json
 from unittest.mock import AsyncMock
 
+import pytest
+
 from rune.agent.tool_catalog import ToolCatalog
+
+
+@pytest.mark.parametrize("goal_type,intents,immediate", [
+    ("full", {"document"}, {"file_read"}),
+    ("code_modify", {"coding"}, {"file_read", "code_analyze", "project_map"}),
+    ("artifact", {"document", "table"}, {"file_read", "table_requirements", "table_verify"}),
+    ("full", set(), {"file_read"}),
+])
+async def test_task_guidance_defers_unrelated_schemas_without_removing_tools(goal_type, intents, immediate):
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.agent.tool_catalog import deferred_for_task
+
+    names = ["file_read", "code_analyze", "project_map", "table_requirements", "table_verify"]
+    schemas = [{"type": "function", "function": {"name": name, "parameters": {"type": "object"}}} for name in names]
+    original = json.dumps(schemas)
+    classification = ClassificationResult(goal_type=goal_type, confidence=.9, tier=2, intent_categories=frozenset(intents))
+    catalog = ToolCatalog(schemas, deferred_tools=deferred_for_task(names, classification))
+    assert catalog.loaded == immediate | {"tool_search"}
+    for name in set(names) - immediate:
+        found = json.loads(await catalog.search(name))
+        assert found["tools"][0]["name"] == name and name in catalog.loaded
+    assert json.dumps(schemas) == original
+
+
+def test_agent_keeps_schema_deferral_after_a_tool_update():
+    from rune.agent.litellm_adapter import LiteLLMAgent
+    from rune.agent.tool_adapter import ToolWrapper
+
+    tools = [ToolWrapper(name=name, description="x" * 1600, function=AsyncMock())
+             for name in ["file_read", "code_analyze", *[f"service_{n}" for n in range(30)]]]
+    agent = LiteLLMAgent("openai/gpt-5.4", tools=tools, deferred_tools={"code_analyze"})
+    agent.update_tools(tools[:-1])
+    assert "file_read" in agent._tool_catalog.loaded
+    assert "code_analyze" not in agent._tool_catalog.loaded
+    assert "code_analyze" in agent._tool_catalog.all
+
+
+async def test_browser_guidance_loads_with_browser_tools_and_returns_when_discovery_is_disabled():
+    from rune.agent.litellm_adapter import LiteLLMAgent
+    from rune.agent.prompts import PROMPT_BROWSER
+    from rune.agent.tool_adapter import ToolWrapper
+
+    tools = [ToolWrapper(name=name, description="x" * 1600, function=AsyncMock())
+             for name in ["file_read", "browser_act", "browser_observe", *[f"service_{n}" for n in range(30)]]]
+    prompt = "Core instructions\n" + PROMPT_BROWSER + "\nCurrent task"
+    agent = LiteLLMAgent("openai/gpt-5.4", system_prompt=prompt, tools=tools)
+    assert PROMPT_BROWSER not in agent._system_prompt
+    assert "Core instructions" in agent._system_prompt and "Current task" in agent._system_prompt
+    assert "guidance" not in json.loads(await agent._tool_catalog.search("service_1"))
+    messages = [{"role": "system", "content": agent._system_prompt}, {"role": "user", "content": "Check the page"}]
+    assert agent._tool_catalog.with_guidance(messages) is messages
+    await agent._tool_catalog.search("browser_act")
+    guided = agent._tool_catalog.with_guidance(messages)
+    assert PROMPT_BROWSER in guided[0]["content"] and guided[1] == messages[1]
+    assert PROMPT_BROWSER not in messages[0]["content"]
+    assert agent._tool_catalog.with_guidance(guided) is guided
+    assert "browser_act" in agent._tool_catalog.loaded
+    assert "guidance" not in json.loads(await agent._tool_catalog.search("browser_act"))
+    assert "guidance" not in json.loads(await agent._tool_catalog.search("browser_observe"))
+    agent.update_tools(tools[:2])
+    assert agent._tool_catalog is None and agent._system_prompt == prompt
+
+
+async def test_stream_restores_browser_guidance_before_requesting_recovery_tools(monkeypatch):
+    from rune.agent.prompts import PROMPT_BROWSER
+    from tests.unit.test_live_streaming import _chunk, _make, _usage
+
+    requests = []
+    async def complete(**params):
+        requests.append(params)
+        async def chunks():
+            yield _chunk(content="Ready.", finish="stop")
+            yield _usage()
+        return chunks()
+    monkeypatch.setattr("litellm.acompletion", complete)
+    catalog = ToolCatalog([{"type": "function", "function": {"name": "browser_observe",
+                           "parameters": {"type": "object", "properties": {}}}}])
+    stream = _make("openai/gpt-5.4")
+    stream._tool_catalog = catalog
+    stream._tool_schemas = catalog.schemas
+    stream._tool_recovery = lambda: {"browser_observe"}
+    stream._require_verification = False
+    async for _ in stream.stream_text():
+        pass
+    assert requests
+    assert all(any(m.get("role") == "system" and PROMPT_BROWSER in m.get("content", "")
+                   for m in request["messages"]) for request in requests)
 
 
 async def test_browser_family_includes_input_and_keeps_step_schema_on_vertex():
@@ -132,3 +221,46 @@ async def test_required_reads_are_loaded_and_completion_restores_task_tools(monk
     assert {"file_write", "tool_search"} <= seen[2]
     reads.assert_awaited_once()
     writes.assert_awaited_once()
+
+
+@pytest.mark.parametrize('goal_type,intents,execute', [
+    ('artifact', {'document'}, False), ('full', set(), False),
+    ('code_modify', {'coding'}, False), ('execution', set(), False),
+    ('artifact', {'document'}, True), ('research', {'calculation'}, False),
+])
+async def test_shell_is_loaded_on_demand_unless_the_task_needs_execution(goal_type, intents, execute):
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.agent.tool_catalog import deferred_for_task
+
+    names = ['file_read', 'file_write', 'file_delete', 'think', 'bash_execute']
+    schemas = [{'type': 'function', 'function': {'name': name, 'parameters': {'type': 'object'}}} for name in names]
+    classification = ClassificationResult(goal_type=goal_type, confidence=.9, tier=2,
+                                         intent_categories=frozenset(intents), requires_execution=execute)
+    catalog = ToolCatalog(schemas, deferred_tools=deferred_for_task(names, classification))
+    needs_shell = execute or goal_type in {'code_modify', 'execution'} or 'calculation' in intents
+    assert ('bash_execute' in catalog.loaded) is needs_shell
+    assert {'file_read', 'file_write'} <= catalog.loaded
+    for name in names:
+        await catalog.search(name)
+        assert name in catalog.loaded
+
+
+async def test_table_guidance_follows_discovery_and_is_not_duplicated():
+    from rune.agent.litellm_adapter import LiteLLMAgent
+    from rune.agent.prompts import PROMPT_TABLE
+    from rune.agent.tool_adapter import ToolWrapper
+
+    tools = [ToolWrapper(name=name, description='x' * 1600, function=AsyncMock())
+             for name in ['file_read', 'table_requirements', 'table_verify', *[f'service_{n}' for n in range(30)]]]
+    agent = LiteLLMAgent('openai/gpt-5.4', system_prompt='Core\n' + PROMPT_TABLE,
+                        tools=tools, deferred_tools={'table_requirements', 'table_verify'})
+    assert PROMPT_TABLE not in agent._system_prompt
+    messages = [{'role': 'system', 'content': agent._system_prompt}]
+    assert agent._tool_catalog.with_guidance(messages) is messages
+    await agent._tool_catalog.search('table_requirements')
+    messages = agent._tool_catalog.with_guidance(messages)
+    assert PROMPT_TABLE in messages[0]['content']
+    await agent._tool_catalog.search('table_verify')
+    assert agent._tool_catalog.with_guidance(messages) is messages
+    agent.update_tools(tools[:3])
+    assert PROMPT_TABLE in agent._system_prompt

@@ -64,7 +64,7 @@ from rune.agent.model_traits import (
 )
 from rune.agent.obs_cap import mask_stale_tool_messages
 from rune.agent.run_control import controlled_tool, current_control
-from rune.agent.tool_output import ToolOutput, tool_content
+from rune.agent.tool_output import ReadToolResult, ToolOutput, tool_content
 from rune.capabilities.output_prefixes import BLOCKED_PREFIX, looks_like_failure_output
 from rune.utils.env import env_flag as _env_flag
 from rune.utils.env import env_int as _env_int
@@ -74,30 +74,23 @@ log = get_logger(__name__)
 
 _MAX_TOOL_CALLS_PER_RESPONSE = 32
 
-_BENCH_STOP_BATCH_ON_TOOL_FAILURE_ENV = "RUNE_BENCH_STOP_BATCH_ON_TOOL_FAILURE"
-# Cap writes and commands per response; unset or non-positive disables the cap.
+# Positive values cap writes and commands per response.
 _BENCH_MAX_WRITE_EXEC_PER_TURN_ENV = "RUNE_BENCH_MAX_WRITE_EXEC_PER_TURN"
-_STOP_BATCH_FAILURE_TOOLS = frozenset({
+_WRITE_EXEC_TOOLS = frozenset({
     "bash_execute",
     "file_delete",
     "file_edit",
     "file_write",
 })
-# Tools subject to the per-turn cap — same mutating/executing set as the
-# failure-stop list.
-_WRITE_EXEC_TOOLS = _STOP_BATCH_FAILURE_TOOLS
 
-# Exploration-round budget: too many consecutive no-edit tool rounds first
-# draws a steering nudge, then (near cap exhaustion) a forced file_edit —
-# otherwise a weak model can explore until the cap and end with no edit.
+# Nudge stalled exploration before forcing an edit near the round limit.
 _EDIT_TOOLS: frozenset[str] = frozenset({"file_write", "file_edit", "file_delete"})
-# How many bulk-mutated directories to name in the log line.
+# Limit directory names in bulk-change logs.
 _REOBS_LOG_DIRS = 4
 _EXPLORE_BUDGET_ENV = "RUNE_EXPLORE_BUDGET"  # rounds; 0 disables
 _EXPLORE_FORCE_EDIT_ENV = "RUNE_EXPLORE_FORCE_EDIT"  # "0" disables the forced call
 
-# Nudge at the budget (no later than cap-6); force only at cap-3 — forcing
-# earlier interrupts diagnosis and yields confident wrong patches.
+# Leave time for diagnosis: nudge by cap-6, force edits only at cap-3.
 
 _EXPLORE_NUDGE = (
     "You have spent several tool rounds exploring without editing any file. "
@@ -267,7 +260,7 @@ async def _run_stop_check(
 
 
 def _looks_like_tool_failure(result: str | ToolOutput) -> bool:
-    return looks_like_failure_output(str(result))
+    return not isinstance(result, ReadToolResult) and looks_like_failure_output(str(result))
 
 
 def _redirect_edit_to_write(fn: str, args: dict[str, Any]) -> str:
@@ -326,13 +319,13 @@ class UsageLimits:
 # Tool schema conversion
 
 def tools_to_openai_schema(tools: list[Any]) -> list[dict[str, Any]]:
-    """Convert tool objects to OpenAI tool format. Advisor-type schemas
-    (``advisor_*``) pass through unwrapped."""
+    """Convert tool schemas, leaving native advisor tools unchanged."""
     from rune.agent.advisor.native_tool import is_native_schema
+    from rune.agent.tool_schema import CALL_RATIONALE, compact_parameters
 
     result: list[dict[str, Any]] = []
     for tool in tools:
-        # Passthrough for Anthropic native server-side tools.
+        # Native Anthropic tools use their own schema format.
         if hasattr(tool, "json_schema") and is_native_schema(tool.json_schema):
             result.append(dict(tool.json_schema))
             continue
@@ -341,7 +334,6 @@ def tools_to_openai_schema(tools: list[Any]) -> list[dict[str, Any]]:
         description = ""
         parameters: dict[str, Any] = {"type": "object", "properties": {}}
 
-        # PydanticAI Tool object - extract schema
         if hasattr(tool, "name"):
             name = tool.name
         elif hasattr(tool, "__name__"):
@@ -369,17 +361,13 @@ def tools_to_openai_schema(tools: list[Any]) -> list[dict[str, Any]]:
         if not name:
             continue
 
-        # OpenAI requires tool names to match ^[a-zA-Z0-9_-]+$
-        # MCP tools use dots (mcp.github.list_issues) — convert to double underscore
+        parameters = compact_parameters(parameters)
+        # Replace MCP dots to satisfy OpenAI's tool-name restrictions.
         api_name = name.replace(".", "__")
 
-        # TAFC: add optional 'think' parameter for reasoning before tool call
-        # Improves accuracy on weaker models (arXiv:2601.18282)
-        if "properties" in parameters:
-            parameters["properties"]["think"] = {
-                "type": "string",
-                "description": "Brief reasoning for this call (removed before execution)",
-            }
+        # Keep optional call reasoning for models without native reasoning.
+        if "properties" in parameters and "think" not in parameters["properties"]:
+            parameters["properties"]["think"] = dict(CALL_RATIONALE)
 
         result.append({
             "type": "function",
@@ -959,6 +947,7 @@ class StreamResult:
         await self._close_artifact_roles()
         self._cached_read_counts: dict[str, int] = {}
         self._seen_cached_reads: set[str] = set()
+        self._read_notices: list[str] = []
         self._recovery_rejections = 0
         self._artifact_request = ""
         self._task_blocked = ""
@@ -1034,6 +1023,8 @@ class StreamResult:
                 for name in sorted(recovery_tools - self._tool_catalog.loaded):
                     if name in self._tool_catalog.all:
                         await self._tool_catalog.search(name)
+            if self._tool_catalog is not None:
+                self._messages = self._tool_catalog.with_guidance(self._messages)
             _tools = self._tool_schemas or None
             if desktop is not None and _tools:
                 allowed = desktop.allowed_tools()
@@ -1089,8 +1080,10 @@ class StreamResult:
             _effort = self._reasoning_effort
             if _effort is not None:
                 _acompletion_kwargs["reasoning_effort"] = _effort
-            # Fast mode and deep reasoning pull opposite ways; don't ask for
-            # speed:fast when the user asked for high effort.
+                if _effort != "none" and not self._provider_extra.get("_rune_source_model", "").startswith("ollama/"):
+                    from rune.agent.tool_schema import without_call_rationale
+                    _acompletion_kwargs["tools"] = without_call_rationale(_acompletion_kwargs["tools"])
+            # Preserve an explicit high reasoning setting over fast mode.
             if (_env_flag(_FAST_MODE_ENV) and _traits.speed_param
                     and _effort not in {"high", "xhigh", "max"}):
                 _acompletion_kwargs["speed"] = "fast"
@@ -1693,18 +1686,20 @@ class StreamResult:
         for tc in tc_list:
             name = tc["function"]["name"]
             is_ro = name in self._READ_ONLY_TOOLS
+            if name == "web_fetch":
+                try:
+                    args = json.loads(tc["function"].get("arguments") or "{}")
+                    is_ro = isinstance(args, dict) and str(args.get("method") or "GET").upper() in {"GET", "HEAD"}
+                except (ValueError, TypeError):
+                    is_ro = False
             if batches and batches[-1][0] == is_ro and is_ro:
                 batches[-1][1].append(tc)
             else:
                 batches.append((is_ro, [tc]))
 
-        # Collect nudge messages and append them only after all tool results
-        # for this assistant turn. OpenAI requires every tool_call_id to be
-        # answered by contiguous tool messages before any user/system message.
+        # Answer every tool_call_id before appending nudges, as OpenAI requires.
         deferred_nudges: list[str] = []
-        stop_after_failure = _env_flag(_BENCH_STOP_BATCH_ON_TOOL_FAILURE_ENV)
         batch_failure_seen = False
-        # Per-turn write/execute cap (off by default; None when unset/<=0).
         write_exec_cap = _env_int(_BENCH_MAX_WRITE_EXEC_PER_TURN_ENV)
         write_exec_count = 0
 
@@ -1721,7 +1716,6 @@ class StreamResult:
                 continue
 
             if is_concurrent and len(batch) > 1:
-                # Run read-only tools concurrently
                 async def _run_one(tc_data: dict[str, Any]) -> tuple[str, str, str | ToolOutput]:
                     fn = tc_data["function"]["name"]
                     args_str = tc_data["function"]["arguments"]
@@ -1747,6 +1741,7 @@ class StreamResult:
                     self._messages.append({
                         "role": "tool", "tool_call_id": tc_id, "content": tool_content(res),
                     })
+                    batch_failure_seen |= _looks_like_tool_failure(res)
                     nudge = self._policy.record_tool_call(fn)
                     if nudge:
                         deferred_nudges.append(nudge)
@@ -1860,13 +1855,11 @@ class StreamResult:
                     nudge = self._policy.record_tool_call(fn)
                     if nudge:
                         deferred_nudges.append(nudge)
-                    if (
-                        (fn.startswith(("browser_", "desktop_")) or stop_after_failure and fn in _STOP_BATCH_FAILURE_TOOLS)
-                        and _looks_like_tool_failure(res)
-                    ):
-                        batch_failure_seen = True
+                    batch_failure_seen |= _looks_like_tool_failure(res)
 
-        for nudge_text in deferred_nudges:
+        deferred_nudges.extend(getattr(self, "_read_notices", []))
+        self._read_notices = []
+        for nudge_text in dict.fromkeys(deferred_nudges):
             self._messages.append({"role": "user", "content": nudge_text})
             log.info("policy_tool_loop_nudge")
 
@@ -2164,23 +2157,28 @@ class StreamResult:
             if control is not None:
                 control.check()
             result = await func(**params)
-            from rune.agent.tool_output import CachedToolResult
 
-            if isinstance(result, CachedToolResult):
+            if isinstance(result, ReadToolResult):
                 counts = getattr(self, "_cached_read_counts", {})
                 seen = getattr(self, "_seen_cached_reads", set())
-                if result.cache_key not in seen:
-                    # Only new evidence resets the repeat count.
+                if result.evidence_key not in seen:
+                    # New evidence resets the repeat count.
                     counts.clear()
-                    seen.add(result.cache_key)
+                    seen.add(result.evidence_key)
                 self._seen_cached_reads = seen
-                count = counts[result.cache_key] = counts.get(result.cache_key, 0) + 1
+                count = counts[result.evidence_key] = counts.get(result.evidence_key, 0) + 1
                 self._cached_read_counts = counts
+                if count == 1 and result.raw:
+                    notices = getattr(self, "_read_notices", [])
+                    notices.append("file_read succeeded and returned the complete raw file. Path and line markers were intentionally omitted; an annotated reread is not a verification step.")
+                    self._read_notices = notices
                 if count >= 2:
-                    result = str(result) + (
-                        "\nThis exact read returned unchanged cached evidence again. Reuse that evidence, "
+                    notices = getattr(self, "_read_notices", [])
+                    notices.append(
+                        "This read returned unchanged evidence again. Reuse that evidence, "
                         "read a different file or range if needed, or perform the next action or verification."
                     )
+                    self._read_notices = notices
                 if count >= 4:
                     self._task_blocked = "The model kept requesting unchanged cached results instead of progressing."
             elif not _looks_like_tool_failure(str(result)):
@@ -2196,8 +2194,8 @@ class StreamResult:
             _reverted = self._revert_circumvented_writes()
             if _reverted:
                 result_str += "\n" + _reverted
-            self._record_provenance(name, params, result_str)
-            is_failure = _looks_like_tool_failure(result_str)
+            self._record_provenance(name, params, "" if isinstance(result, ReadToolResult) else result_str)
+            is_failure = not isinstance(result, ReadToolResult) and _looks_like_tool_failure(result_str)
             if is_failure:
                 streak = self._tool_fail_streak.get(name, 0) + 1
                 self._tool_fail_streak[name] = streak
@@ -2216,6 +2214,8 @@ class StreamResult:
                     self._tool_fail_streak.pop("browser_batch", None)
                 if name in {"desktop_observe", "desktop_open"}:
                     self._tool_fail_streak.pop("desktop_act", None)
+            if isinstance(result, ReadToolResult) and not _reverted:
+                return result
             return result.with_text(result_str) if isinstance(result, ToolOutput) else result_str
         except Exception as exc:
             streak = self._tool_fail_streak.get(name, 0) + 1
@@ -2287,9 +2287,11 @@ class LiteLLMAgent:
         tool_call_policy: Any = None,
         extra_headers: dict[str, str] | None = None,
         explore_budget: int = 0,
+        deferred_tools: set[str] | None = None,
     ) -> None:
         self._model, self._provider_extra = _resolve_litellm_model(model)
-        self._system_prompt = system_prompt
+        self._base_system_prompt = system_prompt
+        self._deferred_tools = frozenset(deferred_tools or ())
         self.update_tools(tools or [])
         self._requested_max_tokens = max_tokens
         self._max_tokens = _clamp_max_tokens(self._model, max_tokens)
@@ -2430,7 +2432,11 @@ class LiteLLMAgent:
         self._tool_schemas = tools_to_openai_schema(tools)
         self._tool_lookup = _build_tool_lookup(tools)
         self._tool_catalog = None
+        self._system_prompt = self._base_system_prompt
         if os.environ.get("RUNE_TOOL_SEARCH", "1") != "0" and ToolCatalog.needed(self._tool_schemas):
-            self._tool_catalog = ToolCatalog(self._tool_schemas)
+            from rune.agent.prompts import PROMPT_BROWSER, PROMPT_TABLE
+
+            self._tool_catalog = ToolCatalog(self._tool_schemas, deferred_tools=self._deferred_tools)
             self._tool_schemas = self._tool_catalog.schemas
             self._tool_lookup["tool_search"] = self._tool_catalog.search
+            self._system_prompt = self._system_prompt.replace(PROMPT_BROWSER, "").replace(PROMPT_TABLE, "")

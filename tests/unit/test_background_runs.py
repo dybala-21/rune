@@ -78,6 +78,16 @@ async def test_background_approval_and_timeout_are_not_success():
 
 
 @pytest.mark.asyncio
+async def test_background_reports_the_budget_stop_reason():
+    trace = CompletionTrace(reason="request_budget_exhausted",
+                            completion_check={"requirement": "Model budget", "detail": "The next prompt exceeds the remaining budget."})
+    result = await run_background(BackgroundTask("Report", "test"), loop_factory=lambda **kw: Loop(trace))
+    assert result["status"] == "budget_exhausted"
+    assert result["error"] == trace.completion_check["detail"]
+    assert not result["success"] and not result["verified"]
+
+
+@pytest.mark.asyncio
 async def test_verification_does_not_inherit_approval(monkeypatch):
     from rune.agent.goal_validate import _default_exec
     from rune.safety.verification import CheckResult
@@ -322,3 +332,23 @@ async def test_api_cancel_stops_the_execution_task(monkeypatch):
             if task.get_name() == f"api-run:{response.run_id}":
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_executed_approval_is_preserved_when_followup_budget_runs_out(monkeypatch):
+    from types import SimpleNamespace
+
+    from rune.agent.request_budget import BudgetExceeded
+
+    journal = SimpleNamespace(previous=[], run_id="resume")
+    monkeypatch.setattr("rune.agent.execution_journal.active_journal", lambda: journal)
+    execute = AsyncMock(return_value=[])
+    monkeypatch.setattr("rune.safety.approval_request.execute_approved_action", execute)
+    loop = Loop(CompletionTrace(reason="completed"))
+    loop.emit = AsyncMock()
+    loop.run = AsyncMock(side_effect=BudgetExceeded("No remaining allowance"))
+    result = await run_background(BackgroundTask("Submit draft", "test", approved_action={"tool": "web_fetch"}),
+                                  loop_factory=lambda **kw: loop)
+    execute.assert_awaited_once()
+    assert result["status"] == "budget_exhausted"
+    assert not result["success"] and not result["verified"]
+    assert result["approved_action"] == {"tool": "web_fetch", "status": "executed", "verification": "pending"}

@@ -27,6 +27,7 @@ class BackgroundTask:
     continuation: str = ""
     approved_action: dict | None = None
     file_changes: dict | None = None
+    routing: dict | None = None
 
 
 _current_task: ContextVar[BackgroundTask | None] = ContextVar("background_task", default=None)
@@ -56,6 +57,7 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
         recovery_context,
         recovery_written_files,
     )
+    from rune.agent.request_budget import BudgetExceeded
     from rune.safety.approval_request import current_request, execute_approved_action
     from rune.safety.execution_environment import execution_config
 
@@ -84,6 +86,15 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
     try:
         with control_scope(control), approval_required(), environment_scope(workspace):
             async with asyncio.timeout(task.timeout_seconds):
+                from rune.proactive.routine_routing import restore, routing_key, snapshot
+
+                key = routing_key(task.goal, workspace)
+                classification = restore(task.routing, key, task.goal) if journal is not None and journal.previous is not None else None
+                async def remember_routing(value):
+                    if saved := snapshot(key, value, task.goal):
+                        result["routing"] = saved
+                if on := getattr(loop, "on", None):
+                    on("goal_classified", remember_routing)
                 validate = None
                 if task.verification:
                     from rune.agent.goal_validate import make_validate_fn
@@ -92,12 +103,17 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
                     if journal is None:
                         raise ValueError("Approval continuation requires a durable execution journal")
                     await execute_approved_action(task.approved_action, journal, loop.emit)
+                    result["approved_action"] = {"tool": task.approved_action["tool"],
+                                                 "status": "executed", "verification": "pending"}
                 context = {"workspace_root": workspace}
                 continuation = task.continuation
                 if journal is not None and journal.previous is not None:
                     context["recovery_written_files"] = recovery_written_files(journal.previous)
-                    continuation = recovery_context({"runId": journal.run_id, "fileChanges": task.file_changes}, journal.previous)
+                    continuation = recovery_context({"runId": journal.run_id, "fileChanges": task.file_changes,
+                                                     "completedAction": result.get("approved_action")}, journal.previous)
                 extra = {"extra_system_context": continuation} if continuation else {}
+                if classification is not None:
+                    extra["classification"] = classification
                 trace = await loop.run(task.goal, context=context, max_steps=task.max_steps, **extra)
                 outcome = run_outcome(trace)
                 if validate and outcome.success:
@@ -114,6 +130,13 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
                     output=getattr(trace, "answer", "") or getattr(loop, "_last_answer_text", ""),
                     error=getattr(trace, "error", None),
                 )
+                if outcome.reason == "request_budget_exhausted":
+                    detail = (getattr(trace, "completion_check", None) or {}).get("detail")
+                    result.update(status="budget_exhausted", error=detail or "The model request exceeded the remaining budget.")
+                if result.get("approved_action") and outcome.completion == "completed":
+                    result["approved_action"]["verification"] = outcome.verification
+    except BudgetExceeded as exc:
+        result.update(status="budget_exhausted", error=str(exc))
     except TimeoutError:
         result["error"] = "Time limit reached; inspect external state before retrying."
         result["execution_unknown"] = True

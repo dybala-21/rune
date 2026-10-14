@@ -8,6 +8,30 @@ from types import SimpleNamespace
 from rune.agent.request_budget import BudgetExceeded
 
 
+def check_followup_budget(owner, previous: dict, *, verify_artifacts: bool = False) -> None:
+    """Check that verification and a final reply fit before consuming approval."""
+    saved = (previous.get("timings") or {}).get("followupBudget")
+    if saved is None:
+        return
+    tokens, cost = saved.get("tokens"), saved.get("costUsd")
+    limit = owner._config.cost_budget_usd
+    requests = 2 if verify_artifacts else 1
+    calls = owner._config.model_request_limit
+    if (isinstance(tokens, int) and tokens * requests > owner._token_budget.total
+            or calls is not None and calls < requests
+            or limit is not None and (cost is None or cost * requests > limit)):
+        raise BudgetExceeded("Too little budget remains for a post-action check. The action was not executed; its approval is still pending.")
+
+
+def restore_input_estimates(previous: dict | None) -> dict:
+    saved = ((previous or {}).get("timings") or {}).get("inputEstimates") or {}
+    if not isinstance(saved, dict):
+        return {}
+    return {key: value for key, value in list(saved.items())[-64:]
+            if isinstance(key, str) and len(key) == 24 and isinstance(value, (int, float))
+            and math.isfinite(value) and value >= 1}
+
+
 def recorded_usage(result: dict) -> dict:
     usage = (result.get("timings") or {}).get("usage") or {}
     empty = bool(result.get("reused") or result.get("not_started"))

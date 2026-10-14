@@ -6,6 +6,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import math
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -69,11 +70,23 @@ def _record_usage(run: dict, row: dict, response: Any, *, streaming: bool, reque
     cost = estimate_request_cost(row["model"], counts, request)
     row["costUsd"] = cost
     row["usage"] = counts
+    if row.get("toolCount"):
+        from rune.llm.pricing import reserve_request_cost
+        next_input = max(row.get("reservedInput", 0), math.ceil(counts["input_tokens"] * 1.05))
+        next_output = max(128, counts["output_tokens"])
+        row["followupBudget"] = {"tokens": next_input + next_output,
+                                  "costUsd": reserve_request_cost(request, next_input, next_output)}
     missing_before = previous is not None and not previous["cache_write_reported"]
     missing_after = not counts["cache_write_reported"]
     delta = counts["total_tokens"] - (previous["total_tokens"] if previous else 0)
     updated = set()
     for scope in scopes(run):
+        if row.get("followupBudget"):
+            scope["followup_budget"] = row["followupBudget"]
+        if row.get("inputEstimate", 0) > 0:
+            key = row["estimateKey"]
+            estimates = scope.setdefault("input_estimates", {})
+            estimates[key] = max(estimates.get(key, 1.0), counts["input_tokens"] / row["inputEstimate"])
         for totals in (scope["usage"], scope["usage"]["by_model"][row["model"]]):
             totals["reported_calls"] += int(previous is None)
             totals["cost_usd"] += (cost or 0) - (old_cost or 0)
@@ -90,6 +103,8 @@ def _record_usage(run: dict, row: dict, response: Any, *, streaming: bool, reque
         reservation = row.get("reservation")
         if reservation in scope["reservations"]:
             scope["reservations"][reservation] = max(0, scope["reservations"][reservation] - delta)
+        if reservation in scope.get("cost_reservations", {}) and cost is not None:
+            scope["cost_reservations"][reservation] = max(0, scope["cost_reservations"][reservation] - (cost - (old_cost or 0)))
 
 
 @contextmanager
@@ -141,11 +156,14 @@ def timed(kind: str, *, name_arg: int | None = None):
 @contextmanager
 def capture_timing(owner=None):
     parent = _current.get()
-    if parent is not None and getattr(parent["owner"], "_token_budget", None) is None:
+    if (parent is not None and getattr(parent["owner"], "_token_budget", None) is None
+            and not any(getattr(getattr(parent["owner"], "_config", None), field, None) is not None
+                        for field in ("cost_budget_usd", "model_request_limit"))):
         parent = None
     run = {"started": time.monotonic(), "spans": [], "droppedSpans": 0,
            "owner": owner, "usage": {**_usage_totals(), "by_model": {}},
-           "streamed_tokens": 0, "reservations": {}, "budget_blocked": "", "parent": parent}
+           "streamed_tokens": 0, "reservations": {}, "cost_reservations": {},
+           "input_estimates": getattr(owner, "input_estimates", {}), "budget_blocked": "", "parent": parent}
     token = _current.set(run)
     from rune.llm.context import model_scope
     try:
@@ -179,7 +197,9 @@ def timing_snapshot(run: dict) -> dict:
     return {"totalMs": round((time.monotonic() - run["started"]) * 1000, 1),
             "spans": copy.deepcopy(run["spans"]), "droppedSpans": run["droppedSpans"],
             "remainingBudget": remaining_budget(run),
-            "usage": copy.deepcopy(run["usage"])}
+            "usage": copy.deepcopy(run["usage"]),
+            "inputEstimates": dict(run["input_estimates"]),
+            **({"followupBudget": dict(run["followup_budget"])} if run.get("followup_budget") else {})}
 
 
 def timed_run(fn):
@@ -259,7 +279,9 @@ async def timed_completion(completion, params):
     from rune.agent.request_budget import (
         BudgetExceeded,
         admit,
+        calibrated_input,
         check_request_budget,
+        estimate_key,
         input_estimate,
         settle,
     )
@@ -267,12 +289,14 @@ async def timed_completion(completion, params):
     parents = tuple(scopes(run))
     reservation = 0
     try:
-        # Reject exhausted runs before tokenizing a potentially large prompt.
+        # Check the budget before tokenizing the prompt.
         for scope in parents:
             check_request_budget(scope)
-        estimated = input_estimate(params) if any(getattr(bound_budget(s), "total", None) is not None for s in parents) else 0
+        estimated = input_estimate(params) if any(getattr(bound_budget(s), "total", None) is not None
+            or getattr(getattr(s["owner"], "_config", None), "cost_budget_usd", None) is not None for s in parents) else 0
+        reserved_input = calibrated_input(run, params, estimated)
         for scope in parents:
-            params, allowance = admit(scope, params, estimated)
+            params, allowance = admit(scope, params, reserved_input)
             if allowance:
                 reservation = allowance
     except BudgetExceeded as exc:
@@ -284,12 +308,17 @@ async def timed_completion(completion, params):
                        (params.get("extra_body") or {}).get("reasoning", {}).get("effort"))
     started = time.monotonic()
     row = measurement.__enter__()
+    row.update(inputEstimate=estimated, reservedInput=reserved_input, estimateKey=estimate_key(params))
     if reservation:
         row["reservation"] = id(row)
         for scope in scopes(run):
             scope["reservations"][row["reservation"]] = reservation
+            if getattr(getattr(scope["owner"], "_config", None), "cost_budget_usd", None) is not None:
+                from rune.llm.pricing import reserve_request_cost
+                scope["cost_reservations"][row["reservation"]] = reserve_request_cost(
+                    params, reserved_input, params.get("max_completion_tokens", params.get("max_tokens", 4096)))
     if params.get("tools"):
-        # Fingerprint the catalog without recording its contents.
+        # Store a hash, not the tool definitions.
         catalog = json.dumps(params["tools"], sort_keys=True, separators=(",", ":"), default=str)
         row["toolCatalogHash"] = hashlib.sha256(catalog.encode()).hexdigest()[:16]
         row["toolCount"] = len(params["tools"])

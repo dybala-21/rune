@@ -118,8 +118,8 @@ def test_stream_usage_deduplicates_snapshots_but_counts_separate_rounds():
 
 
 @pytest.mark.asyncio
-async def test_benchmark_batch_stop_skips_remaining_write_tools(monkeypatch):
-    monkeypatch.setenv("RUNE_BENCH_STOP_BATCH_ON_TOOL_FAILURE", "1")
+async def test_batch_failure_skips_remaining_write_tools(monkeypatch):
+    monkeypatch.delenv("RUNE_BENCH_STOP_BATCH_ON_TOOL_FAILURE", raising=False)
     calls: list[str] = []
 
     async def fail_bash(**_: object) -> str:
@@ -158,8 +158,8 @@ async def test_benchmark_batch_stop_skips_remaining_write_tools(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_benchmark_batch_stop_does_not_stop_after_read_only_failure(monkeypatch):
-    monkeypatch.setenv("RUNE_BENCH_STOP_BATCH_ON_TOOL_FAILURE", "1")
+async def test_read_failure_blocks_later_actions_until_the_model_can_review_it(monkeypatch):
+    monkeypatch.delenv("RUNE_BENCH_STOP_BATCH_ON_TOOL_FAILURE", raising=False)
     calls: list[str] = []
 
     async def fail_read(**_: object) -> str:
@@ -188,8 +188,8 @@ async def test_benchmark_batch_stop_does_not_stop_after_read_only_failure(monkey
         ]
     )
 
-    assert calls == ["file_read", "bash_execute"]
-    assert result.all_messages()[-1]["content"] == "fallback ok"
+    assert calls == ["file_read"]
+    assert result.all_messages()[-1]["content"].startswith("[BLOCKED] Skipped this tool")
 
 
 @pytest.mark.asyncio
@@ -274,3 +274,71 @@ async def test_benchmark_write_exec_cap_off_by_default(monkeypatch):
 
     assert calls == ["file_write", "file_write", "file_write"]
     assert len([m for m in result.all_messages() if m.get("role") == "tool"]) == 3
+
+
+@pytest.mark.parametrize("method", ["POST", "post", "DELETE"])
+async def test_network_writes_wait_for_prior_read_and_failure_stops_next_action(method):
+    import asyncio
+
+    calls = []
+    async def fetch(**params):
+        if params.get("method", "GET") == "GET":
+            calls.append("read_started")
+            await asyncio.sleep(.01)
+            calls.append("read_finished")
+            return "source"
+        assert calls[-1] == "read_finished"
+        calls.append("write_failed")
+        return "[ERROR] rejected"
+
+    async def write(**params):
+        calls.append("unexpected_write")
+        return "saved"
+
+    result = _stream_result()
+    result._tool_lookup = {"web_fetch": fetch, "file_write": write}
+    await result._execute_tool_batch([
+        _tool_call("read", "web_fetch", {"url": "https://example.test/source"}),
+        _tool_call("submit", "web_fetch", {"url": "https://example.test/submit", "method": method}),
+        _tool_call("later", "file_write", {"path": "receipt.txt", "content": "sent"}),
+    ])
+    assert calls == ["read_started", "read_finished", "write_failed"]
+    assert [m["tool_call_id"] for m in result.all_messages() if m["role"] == "tool"] == ["read", "submit", "later"]
+    assert result.all_messages()[-1]["content"].startswith("[BLOCKED] Skipped this tool")
+
+
+@pytest.mark.parametrize("failed", [True, False])
+async def test_parallel_read_failure_blocks_later_write_but_raw_error_text_does_not(failed):
+    from rune.agent.tool_output import ReadToolResult
+
+    calls = []
+    async def read(**params):
+        return "[ERROR] missing" if failed else ReadToolResult("[ERROR] example from source", evidence_key="source")
+    async def listing(**params):
+        return "source.txt"
+    async def write(**params):
+        calls.append("write")
+        return "saved"
+    result = _stream_result()
+    result._tool_lookup = {"file_read": read, "file_list": listing, "file_write": write}
+    await result._execute_tool_batch([
+        _tool_call("read", "file_read"), _tool_call("list", "file_list"), _tool_call("write", "file_write"),
+    ])
+    assert calls == ([] if failed else ["write"])
+    assert len([m for m in result.all_messages() if m["role"] == "tool"]) == 3
+
+
+async def test_read_metadata_stays_internal_when_provider_copies_messages():
+    from copy import deepcopy
+
+    from rune.agent.tool_output import ReadToolResult
+
+    async def read(**params):
+        return ReadToolResult('source text', evidence_key='version-1', raw=True)
+    result = _stream_result()
+    result._tool_lookup = {'file_read': read}
+    await result._execute_tool_batch([_tool_call('read', 'file_read')])
+    messages = deepcopy(result.all_messages())
+    assert type(messages[0]['content']) is str
+    assert messages[0]['content'] == 'source text'
+    assert result._cached_read_counts == {'version-1': 1}

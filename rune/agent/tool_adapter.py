@@ -497,7 +497,7 @@ def _build_typed_tool(
                         ))
                     from rune.agent.tool_output import CachedToolResult
 
-                    return CachedToolResult(hit.output, cache_key)
+                    return CachedToolResult(hit.output, cache_key, hit.entry.meta.get("read_evidence", ""))
 
         try:
             normalized_params = (cap_def.parameters_model.model_validate(effective_params).model_dump(mode="json", by_alias=True)

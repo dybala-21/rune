@@ -103,3 +103,13 @@ def test_combining_usage_keeps_partial_accounting_visible(state):
 def test_legacy_usage_does_not_invent_a_request_count():
     combined = combine_usage_payloads({"total": 100, "input": 90, "output": 10})
     assert "modelCalls" not in combined and combined["cost"]["usd"] is None
+
+
+@pytest.mark.parametrize("ttl,input_rate", [("5m", 6.25), ("1h", 10)])
+def test_reservation_includes_cache_creation_and_requested_output(ttl, input_rate):
+    from rune.llm.pricing import reserve_request_cost
+
+    params = {"model": "anthropic/claude-opus-5", "messages": [{"role": "system", "content": [
+        {"type": "text", "text": "cached prompt", "cache_control": {"type": "ephemeral", "ttl": ttl}}]}]}
+    assert reserve_request_cost(params, 1000, 100) == pytest.approx((1000 * input_rate + 100 * 25) / 1e6)
+    assert reserve_request_cost({**params, "api_base": "https://custom.invalid"}, 1000, 100) is None

@@ -246,8 +246,17 @@ class SessionToolCache:
                 self._remove_entry(key)
                 self._miss_count += 1
                 return None
+            if cap_name == "file_read" and entry.meta.get("read_revision"):
+                try:
+                    stat = os.stat(file_path)
+                    revision = [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns]
+                except OSError:
+                    revision = None
+                if revision != entry.meta["read_revision"]:
+                    self._remove_entry(key)
+                    self._miss_count += 1
+                    return None
 
-        # Cache hit
         entry.hit_count += 1
         self._hit_count += 1
         self._tokens_saved += entry.estimated_tokens
@@ -275,6 +284,10 @@ class SessionToolCache:
         preview = self._extract_preview(output_text)
         summary = self._generate_summary(cap_name, params, output_text)
         meta = self._extract_meta(cap_name, params, output_text)
+        evidence = (getattr(result, "metadata", None) or {}).get("read_evidence")
+        if isinstance(evidence, str):
+            meta["read_evidence"] = evidence
+            meta["read_revision"] = (getattr(result, "metadata", None) or {}).get("read_revision")
 
         entry = CacheEntry(
             key=key,

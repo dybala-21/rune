@@ -48,3 +48,44 @@ def test_raw_mcp_schema_is_preserved_without_mutating_registration():
     for invalid in ({}, {'value': 'x'}, {'value': 3}, {'value': 'ok', 'extra': True}):
         assert list(validator.iter_errors(invalid)), invalid
     assert raw == before
+
+
+def test_compaction_preserves_title_fields_values_and_validation():
+    from rune.agent.tool_adapter import ToolWrapper
+
+    schema = {'type': 'object', 'title': 'Document', 'additionalProperties': False,
+              'properties': {
+                  'title': {'type': 'string', 'title': 'Title', 'minLength': 1},
+                  'recipient': {'type': 'string', 'title': 'Account owner'},
+                  'metadata': {'type': 'object', 'default': {'title': 'Saved title'},
+                               'examples': [{'title': 'Example title'}]},
+                  'items': {'type': 'array', 'title': 'Items', 'items': {'$ref': '#/$defs/Entry'}}},
+              '$defs': {'Entry': {'title': 'Entry', 'type': 'integer', 'minimum': 1}},
+              'required': ['title', 'items']}
+    original = deepcopy(schema)
+    tool = ToolWrapper(name='document', json_schema=schema, description='Create a document')
+    compact = tools_to_openai_schema([tool])[0]['function']['parameters']
+    assert schema == original and 'think' not in schema['properties']
+    assert compact['properties']['title'] == {'type': 'string', 'minLength': 1}
+    assert compact['properties']['recipient']['title'] == 'Account owner'
+    assert compact['properties']['metadata'] == schema['properties']['metadata']
+    assert 'title' not in compact['$defs']['Entry']
+    for value in ({'title': 'Report', 'items': [1]}, {'items': []}, {'title': '', 'items': [0]},
+                  {'title': 'Report', 'items': [1], 'extra': True}):
+        assert Draft202012Validator(compact).is_valid(value) == Draft202012Validator(schema).is_valid(value)
+
+
+def test_native_reasoning_omits_only_the_optional_harness_rationale():
+    from rune.agent.tool_schema import CALL_RATIONALE, without_call_rationale
+
+    def tool(properties, required=()):
+        return {'type': 'function', 'function': {'name': 'inspect', 'parameters': {
+            'type': 'object', 'properties': properties, 'required': list(required)}}}
+    schemas = [tool({'path': {'type': 'string'}, 'think': dict(CALL_RATIONALE)}),
+               tool({'think': {'type': 'integer'}}, ['think']),
+               tool({'think': dict(CALL_RATIONALE)}, ['think']), {'type': 'advisor'}]
+    original = deepcopy(schemas)
+    wire = without_call_rationale(schemas)
+    assert schemas == original
+    assert wire[0]['function']['parameters']['properties'] == {'path': {'type': 'string'}}
+    assert wire[1:] == schemas[1:]

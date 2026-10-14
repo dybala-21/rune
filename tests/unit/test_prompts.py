@@ -420,8 +420,26 @@ async def test_web_loop_keeps_lookup_guidance_and_live_state_out_of_the_cached_p
     assert '"status": "closed"' in second_tail and "https://example.test/first" not in second
 
 
+@pytest.mark.asyncio
+async def test_mixed_document_work_does_not_require_deep_research(tmp_path, monkeypatch):
+    from rune.agent.loop import NativeAgentLoop
+
+    monkeypatch.setenv("RUNE_HOME", str(tmp_path))
+    loop = NativeAgentLoop()
+    monkeypatch.setattr(loop, "_build_skill_context", lambda *args: None)
+    classification = ClassificationResult(goal_type="full", confidence=.9, tier=2,
+                                          intent_categories=frozenset({"document"}), output_expectation="file")
+    context = {"workspace_root": str(tmp_path)}
+    prompt = await loop._build_system_prompt("Create a report and submit it through the API", classification, context)
+    assert PROMPT_WEB_DEEP not in prompt and PROMPT_WEB_EFFICIENCY in prompt
+    assert PROMPT_DOCUMENT.replace("{cwd}", str(tmp_path)) in prompt
+    classification.goal_type = "research"
+    research = await loop._build_system_prompt("Compare source documents", classification, context)
+    assert PROMPT_WEB_DEEP in research
+
+
 class TestClassificationResultExtendedFields:
-    """Verify new fields on ClassificationResult."""
+    """Classification defaults and explicit overrides."""
 
     def test_default_values(self):
         cls = ClassificationResult(goal_type="chat", confidence=0.8, tier=1)
