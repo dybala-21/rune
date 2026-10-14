@@ -91,9 +91,9 @@ async def test_execution_tokens_follow_loop_limits_without_resetting_usage(monke
         await timed_completion(request, params)
         loop._token_budget = SimpleNamespace(total=150, used=0)
         with capture_timing(loop):
-            await timed_completion(request, params)
-            assert request.call_args.kwargs["max_tokens"] == 30
-        assert measured["usage"]["total_tokens"] == 220
+            with pytest.raises(BudgetExceeded):
+                await timed_completion(request, params)
+        assert measured["usage"]["total_tokens"] == 110
         with pytest.raises(BudgetExceeded):
             await timed_completion(request, params)
-    assert request.await_count == 2
+    assert request.await_count == 1

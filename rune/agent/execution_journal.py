@@ -228,7 +228,7 @@ def _browser_matches(effect: dict, browser) -> bool:
 def recovery_written_files(records: list[dict[str, Any]]) -> list[str]:
     paths: set[str] = set()
     for record in records:
-        if record["state"] != "done":
+        if record["state"] != "done" or not (record.get("result") or {}).get("success"):
             continue
         effect = record["effect"]
         if effect["kind"] == "file":

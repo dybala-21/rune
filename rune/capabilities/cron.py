@@ -36,6 +36,7 @@ class CronJob:
     continuation: str = field(default="", compare=False)
     approved_action: dict | None = field(default=None, compare=False)
     file_changes: dict | None = field(default=None, compare=False)
+    routing: dict | None = field(default=None, compare=False)
 
 
 def _get_store():
@@ -437,6 +438,7 @@ async def execute_cron_job(job: CronJob, *, approval_from: str | None = None, re
             claims.close()
             raise
         job.approved_action = None if refresh else prior["pending_approval"]["action"]
+        job.routing = prior.get("routing")
         decision = "claimed"
     else:
         claims, occurrence, decision = claim_occurrence(job)
@@ -492,6 +494,8 @@ async def execute_cron_job(job: CronJob, *, approval_from: str | None = None, re
         job.file_changes = changes(observed, progress)
         from rune.utils.paths import user_workspace
         journal = ExecutionJournal(claims, occurrence, job.policy.workspace or str(user_workspace()), previous=history)
+        from rune.proactive.routine_budget import restore_input_estimates
+        owner.input_estimates = restore_input_estimates(prior)
         with capture_timing(owner) as measured, journal_scope(journal):
             try:
                 started = True
@@ -582,6 +586,7 @@ async def _execute_goal_job(job: CronJob) -> dict:
         continuation=job.continuation,
         approved_action=job.approved_action,
         file_changes=job.file_changes,
+        routing=job.routing,
     ))
     log.info("cron_goal_done", name=job.name, status=result["status"])
     return result

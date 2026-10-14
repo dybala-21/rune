@@ -15,13 +15,26 @@ MAX_IMAGE_BYTES = 5 * 1024 * 1024
 _IMAGE_TYPES = {"PNG": "image/png", "JPEG": "image/jpeg", "GIF": "image/gif", "WEBP": "image/webp"}
 
 
-class CachedToolResult(str):
-    """A read served from the run's cache, with its state-aware identity."""
+class ReadToolResult(str):
+    """Read text with an evidence key kept out of model requests."""
+
+    evidence_key: str
+    raw: bool
+
+    def __new__(cls, text: str, evidence_key: str, *, raw: bool = False) -> ReadToolResult:
+        result = super().__new__(cls, text)
+        result.evidence_key = evidence_key
+        result.raw = raw
+        return result
+
+
+class CachedToolResult(ReadToolResult):
+    """Read text retrieved from the run's cache."""
 
     cache_key: str
 
-    def __new__(cls, text: str, cache_key: str) -> CachedToolResult:
-        result = super().__new__(cls, text)
+    def __new__(cls, text: str, cache_key: str, evidence_key: str = "") -> CachedToolResult:
+        result = super().__new__(cls, text, evidence_key or cache_key)
         result.cache_key = cache_key
         return result
 
@@ -72,13 +85,15 @@ class ToolOutput:
 
 
 def tool_content(result: str | ToolOutput) -> str | list[dict[str, Any]]:
-    return result.content() if isinstance(result, ToolOutput) else result
+    return result.content() if isinstance(result, ToolOutput) else str(result)
 
 
 def output_for_model(text: str, name: str, result: CapabilityResult) -> str | ToolOutput:
     if not result.success:
         return text
     metadata = result.metadata or {}
+    if name == "file_read" and isinstance(metadata.get("read_evidence"), str):
+        return ReadToolResult(text, metadata["read_evidence"], raw=metadata.get("raw") is True)
     paths: list[str] = []
     if name == "browser_screenshot":
         path = metadata.get("path")

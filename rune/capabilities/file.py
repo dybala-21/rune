@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 
@@ -124,15 +125,21 @@ async def file_read(params: FileReadParams) -> CapabilityResult:
     try:
         with file_path.open(encoding=params.encoding, newline="") as stream:
             text = stream.read()
+            stat = os.fstat(stream.fileno())
     except UnicodeDecodeError:
         return CapabilityResult(success=False, error=f"Binary or unreadable file: {params.path}")
 
     lines = text.splitlines(keepends=True)
+    offset = 0 if params.raw else (params.offset or 1) - 1
+    end = len(lines) if params.raw else min(len(lines), offset + (params.limit or DEFAULT_MAX_LINE_COUNT))
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    evidence = hashlib.sha256(f"{file_path}\0{params.encoding}\0{digest}\0{offset}:{end}".encode()).hexdigest()
+    revision = [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns]
     if params.raw:
         return CapabilityResult(success=True, output=text,
-                                metadata={"path": str(file_path), "lines": len(lines), "total_size": size, "raw": True})
+                                metadata={"path": str(file_path), "lines": len(lines), "total_size": size,
+                                          "raw": True, "read_evidence": evidence, "read_revision": revision})
 
-    # Apply offset and limit
     offset = (params.offset or 1) - 1  # 1-based to 0-based
     limit = params.limit or DEFAULT_MAX_LINE_COUNT
 
@@ -158,6 +165,7 @@ async def file_read(params: FileReadParams) -> CapabilityResult:
         success=True,
         output=numbered,
         metadata={"path": str(file_path), "lines": len(lines), "total_size": size,
+                  "read_evidence": evidence, "read_revision": revision,
                   **({"table_profile": table_evidence} if table_evidence else {})},
     )
 

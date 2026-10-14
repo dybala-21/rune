@@ -1503,9 +1503,9 @@ class NativeAgentLoop(EventEmitter):
         goal_category = _CATEGORY_MAP.get(classification.goal_type, "full")
 
         goal_type = getattr(classification, "goal_type", "")
-        is_deep = goal_type in ("research", "full") and not classification.intent_categories & {"desktop", "calculation"}
+        is_deep = goal_type == "research" and not classification.intent_categories & {"desktop", "calculation"}
 
-        # Build repo map for code tasks (auto-selects most relevant symbols)
+        # Only coding tasks need repository context.
         repo_map_text: str | None = None
         if is_coding_task(classification):
             try:
@@ -1569,8 +1569,14 @@ class NativeAgentLoop(EventEmitter):
         cache = SessionToolCache(max_entries=COGNITIVE_CACHE_MAX)
         self._cognitive_cache = cache
         evidence = ExecutionEvidenceSnapshot()
+        from rune.agent.execution_journal import active_journal, recovery_written_files
         from rune.agent.file_outcomes import FileOutcomes, may_have_changed
 
+        journal = active_journal()
+        if journal is not None and journal.previous:
+            journal.check()
+            # Restore completed writes; verification still runs against current files.
+            evidence.writes = len(recovery_written_files(journal.previous))
         file_outcomes = FileOutcomes(self._workspace_root)
         from rune.agent.task_evidence import TaskEvidence
         task_evidence = TaskEvidence.for_request(goal, classification)
@@ -1904,13 +1910,11 @@ class NativeAgentLoop(EventEmitter):
         if not supports_vision(model):
             tools = [t for t in tools if t != "browser_screenshot"]
 
-        from rune.agent.execution_journal import active_journal
         from rune.agent.role_decisions import RoleDecisions
         from rune.agent.table_acceptance import TableAcceptance
 
         role_decisions = RoleDecisions(goal, self._workspace_root)
         # Native table tasks use app evidence; file tasks use table checks.
-        journal = active_journal()
         self._table_acceptance = TableAcceptance(
             (context or {}).get("original_goal") or goal,
             required="table" in classification.intent_categories and not _desktop_mode,
@@ -1918,13 +1922,9 @@ class NativeAgentLoop(EventEmitter):
             previous=journal.previous if journal else None,
             workspace=self._workspace_root, input_roles=role_decisions.roles,
         )
-        system_prompt += (
-            "\nFor source-derived aggregate CSV/XLSX deliverables, first call table_requirements with the original "
-            "source. Read referenced input policies before fixing requirements; their snapshots are included by the harness. "
-            "Follow its fixed columns and data conditions, then call table_verify on every delivered table. "
-            "Repair reported differences and recheck after edits. Do not substitute generated data for the source. "
-            "Report unsupported conditions separately; table data checks do not verify prose or visual layout.\n"
-        )
+        from rune.agent.prompts import PROMPT_TABLE
+
+        system_prompt += PROMPT_TABLE
         adapter_opts = ToolAdapterOptions(
             cognitive_cache=cache,
             stall_state=self._stall,
@@ -1984,10 +1984,14 @@ class NativeAgentLoop(EventEmitter):
             repo_fix=_repo_fix,
         )
         _explore_budget = _compute_explore_budget(classification, _repo_fix)
+        from rune.agent.tool_catalog import deferred_for_task
+
+        deferred_tools = deferred_for_task(tools, classification)
         agent = LiteLLMAgent(
             model=model,
             system_prompt=system_prompt,
             tools=list(tool_functions.values()),
+            deferred_tools=deferred_tools,
             max_tool_rounds=_tool_rounds,
             extra_headers=_native_cfg.beta_headers,
             explore_budget=_explore_budget,
@@ -2180,6 +2184,7 @@ class NativeAgentLoop(EventEmitter):
                     model=model,
                     system_prompt=system_prompt,
                     tools=list(tool_functions.values()),
+                    deferred_tools=deferred_tools,
                     max_tool_rounds=_tool_rounds,
                     extra_headers=_native_cfg.beta_headers,
                     explore_budget=_explore_budget,
@@ -2311,6 +2316,7 @@ class NativeAgentLoop(EventEmitter):
                         model=model,
                         system_prompt=system_prompt,
                         tools=list(tool_functions.values()),
+                        deferred_tools=deferred_tools,
                         max_tool_rounds=_tool_rounds,
                         explore_budget=_explore_budget,
                     )
@@ -2327,6 +2333,7 @@ class NativeAgentLoop(EventEmitter):
                         model=model,
                         system_prompt=system_prompt,
                         tools=list(tool_functions.values()),
+                        deferred_tools=deferred_tools,
                         max_tool_rounds=_tool_rounds,
                         explore_budget=_explore_budget,
                     )
@@ -2343,6 +2350,7 @@ class NativeAgentLoop(EventEmitter):
                         model=model,
                         system_prompt=system_prompt,
                         tools=list(tool_functions.values()),
+                        deferred_tools=deferred_tools,
                         max_tool_rounds=_tool_rounds,
                         explore_budget=_explore_budget,
                     )
@@ -3301,6 +3309,7 @@ class NativeAgentLoop(EventEmitter):
                             model=model,
                             system_prompt=system_prompt,
                             tools=list(tool_functions.values()),
+                            deferred_tools=deferred_tools,
                             explore_budget=_explore_budget,
                         )
                         log.info("agent_model_switched", model=model)

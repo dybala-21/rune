@@ -130,3 +130,53 @@ async def test_failed_required_extraction_stops_instead_of_looping_on_blocked_to
         await stream._execute_tool("table_requirements", {"source_path": "source.csv"})
     assert len(calls) == 3
     assert "could not be verified" in stream._task_blocked
+
+
+async def test_raw_and_formatted_reads_share_progress_but_preserve_raw_text(monkeypatch):
+    from rune.agent.tool_output import ReadToolResult
+
+    raw = "a,b\r\n1,2\r\n"
+    results = [ReadToolResult(raw, "same", raw=True), CachedToolResult("numbered text", "cache", "same"),
+               ReadToolResult(raw, "same", raw=True), ReadToolResult(raw, "same", raw=True)]
+    stream, requests = await run_reads(monkeypatch, ["file_read"] * 5, results)
+    assert len(requests) == 4 and stream._task_blocked
+    tools = [m["content"] for m in stream._messages if m.get("role") == "tool"]
+    assert tools[0] == tools[2] == tools[3] == raw
+    assert any(m.get("role") == "user" and "unchanged evidence" in m["content"] for m in stream._messages)
+    assert sum(m.get("role") == "user" and "complete raw file" in m["content"] for m in stream._messages) == 1
+
+
+async def test_file_read_identity_changes_only_with_content_range_or_encoding(tmp_path, monkeypatch):
+    from rune.capabilities.file import FileReadParams, file_read
+
+    monkeypatch.setattr("rune.capabilities.file.get_guardian", lambda: SimpleNamespace(
+        validate_file_read_path=lambda _: SimpleNamespace(allowed=True)))
+    path = tmp_path / "data.txt"
+    path.write_bytes(b"a,b\r\n1,2\r\n")
+    raw = await file_read(FileReadParams(path=str(path), raw=True))
+    formatted = await file_read(FileReadParams(path=str(path)))
+    part = await file_read(FileReadParams(path=str(path), offset=2, limit=1))
+    assert raw.output == "a,b\r\n1,2\r\n"
+    assert raw.metadata["read_evidence"] == formatted.metadata["read_evidence"]
+    assert raw.metadata["read_evidence"] != part.metadata["read_evidence"]
+    path.write_text("different")
+    changed = await file_read(FileReadParams(path=str(path), raw=True))
+    assert raw.metadata["read_evidence"] != changed.metadata["read_evidence"]
+
+
+async def test_external_edit_invalidates_a_cached_file_read(tmp_path, monkeypatch):
+    from rune.agent.cognitive_cache import SessionToolCache
+    from rune.capabilities.file import FileReadParams, file_read
+
+    monkeypatch.setattr("rune.capabilities.file.get_guardian", lambda: SimpleNamespace(
+        validate_file_read_path=lambda _: SimpleNamespace(allowed=True)))
+    path = tmp_path / "source.txt"
+    path.write_text("first")
+    params = {"path": str(path)}
+    result = await file_read(FileReadParams(**params))
+    cache = SessionToolCache()
+    key = cache.generate_key("file_read", params)
+    cache.set(key, "file_read", params, result, 1)
+    assert cache.get(key, "file_read", params) is not None
+    path.write_text("second")
+    assert cache.get(key, "file_read", params) is None

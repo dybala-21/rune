@@ -24,6 +24,30 @@ def test_input_estimate_accepts_schema_fields_named_type():
     assert input_estimate({"messages": [{"content": [{"type": "image_url", "image_url": {"url": "data:private"}}]}]}) > 4000
 
 
+@pytest.mark.parametrize("model", ["gemini/gemini-3.1-pro-preview", "vertex_ai/gemini-3.1-pro-preview"])
+def test_gemini_estimate_counts_the_signature_once_without_changing_the_request(model):
+    from copy import deepcopy
+
+    from rune.agent.request_budget import input_estimate
+
+    call_id = "call_1__thought__" + "signature" * 1000
+    params = {"model": model, "messages": [
+        {"role": "assistant", "tool_calls": [{"id": call_id, "type": "function",
+            "function": {"name": "file_read", "arguments": '{"path":"source.txt"}'}}]},
+        {"role": "tool", "tool_call_id": call_id, "content": "Full result"}]}
+    original = deepcopy(params)
+    response_id_only = deepcopy(params)
+    response_id_only["messages"][1]["tool_call_id"] = "call_1"
+    assert input_estimate(params) == input_estimate(response_id_only)
+    assert params == original
+    assert input_estimate(params) > 1000
+    assert input_estimate({**params, "model": "openai/gpt-5.4"}) > input_estimate(params) + 900
+    orphan = {"model": model, "messages": [params["messages"][1]]}
+    assert input_estimate(orphan) > 1000
+    text = {"model": model, "messages": [{"role": "user", "content": call_id}]}
+    assert input_estimate(text) > 1000
+
+
 async def test_stream_rounds_stop_before_the_next_request(monkeypatch):
     async def completion(**kwargs):
         async def chunks():
@@ -334,3 +358,149 @@ async def test_isolated_workers_cannot_bypass_parent_budget(monkeypatch, wave):
         assert measured["budget_blocked"]
     create.assert_not_called()
     spawn.assert_not_called()
+
+
+async def test_cost_only_parallel_requests_reserve_and_release(monkeypatch):
+    from rune.llm.pricing import reserve_request_cost
+
+    monkeypatch.setattr("rune.agent.request_budget.input_estimate", lambda _: 100)
+    params = {"model": "xai/grok-4.6", "messages": [], "max_tokens": 200}
+    cap = reserve_request_cost(params, 100, 200)
+    runner = owner(cost=cap)
+    runner._token_budget = None
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def completion(**kwargs):
+        started.set()
+        await release.wait()
+        return {"usage": {"prompt_tokens": 100, "completion_tokens": 1}}
+
+    with capture_timing(runner) as measured:
+        first = asyncio.create_task(timed_completion(completion, params))
+        await started.wait()
+        assert sum(measured["cost_reservations"].values()) <= cap
+        with pytest.raises(BudgetExceeded):
+            await timed_completion(completion, params)
+        release.set()
+        await first
+        assert measured["cost_reservations"] == {}
+
+
+async def test_estimated_cost_caps_output_before_sending(monkeypatch):
+    from rune.llm.pricing import reserve_request_cost
+
+    monkeypatch.setattr("rune.agent.request_budget.input_estimate", lambda _: 100)
+    params = {"model": "xai/grok-4.6", "messages": [], "max_tokens": 1000}
+    cap = reserve_request_cost(params, 100, 50)
+    request = AsyncMock(return_value={"usage": {"prompt_tokens": 100, "completion_tokens": 10}})
+    with capture_timing(owner(tokens=10000, cost=cap)):
+        await timed_completion(request, params)
+    assert 49 <= request.call_args.kwargs["max_tokens"] <= 50
+
+
+async def test_observed_input_underestimate_applies_only_to_same_model_catalog(monkeypatch):
+    monkeypatch.setattr("rune.agent.request_budget.input_estimate", lambda _: 100)
+    request = AsyncMock(return_value={"usage": {"prompt_tokens": 180, "completion_tokens": 10}})
+    runner = owner(tokens=500)
+    params = {"model": "xai/grok-4.6", "messages": [], "max_tokens": 150}
+    with capture_timing(runner) as measured:
+        await timed_completion(request, params)
+        from rune.agent.request_budget import calibrated_input
+        assert calibrated_input(measured, params, 100) == 189
+        assert calibrated_input(measured, {**params, "model": "anthropic/claude-opus-5"}, 100) == 100
+        await timed_completion(request, params)
+    assert request.call_args.kwargs["max_tokens"] == 121
+
+
+async def test_rejected_request_releases_cost_reservation(monkeypatch):
+    import httpx
+
+    monkeypatch.setattr("rune.agent.request_budget.input_estimate", lambda _: 100)
+    request = AsyncMock(side_effect=httpx.ConnectTimeout("offline"))
+    with capture_timing(owner(cost=.1)) as measured:
+        with pytest.raises(httpx.ConnectTimeout):
+            await timed_completion(request, {"model": "xai/grok-4.6", "messages": [], "max_tokens": 100})
+        assert measured["cost_reservations"] == {}
+
+
+async def test_unknown_usage_retains_cost_reservation(monkeypatch):
+    monkeypatch.setattr("rune.agent.request_budget.input_estimate", lambda _: 100)
+    request = AsyncMock(return_value={})
+    with capture_timing(owner(cost=.1)) as measured:
+        await timed_completion(request, {"model": "xai/grok-4.6", "messages": [], "max_tokens": 100})
+        assert sum(measured["cost_reservations"].values()) > 0
+        with pytest.raises(BudgetExceeded, match="cost"):
+            await timed_completion(request, {"model": "xai/grok-4.6", "messages": []})
+
+
+async def test_nested_request_carries_followup_budget_to_durable_routine_snapshot(monkeypatch):
+    from rune.agent.timing import timing_snapshot
+    from rune.proactive.routine_budget import check_followup_budget
+
+    monkeypatch.setattr("rune.agent.request_budget.input_estimate", lambda _: 100)
+    request = AsyncMock(return_value={"usage": {"prompt_tokens": 100, "completion_tokens": 10}})
+    with capture_timing(owner()) as routine:
+        with capture_timing(owner()):
+            await timed_completion(request, {"model": "xai/grok-4.6", "messages": [], "max_tokens": 200,
+                "tools": [{"type": "function", "function": {"name": "file_read"}}]})
+        saved = timing_snapshot(routine)
+    assert saved["followupBudget"]["tokens"] == 233
+    assert saved["followupBudget"]["costUsd"] > 0
+    with pytest.raises(BudgetExceeded, match="post-action check"):
+        check_followup_budget(owner(tokens=232), {"timings": saved})
+    check_followup_budget(owner(tokens=233), {"timings": saved})
+    with pytest.raises(BudgetExceeded, match="post-action check"):
+        check_followup_budget(owner(tokens=465), {"timings": saved}, verify_artifacts=True)
+    with pytest.raises(BudgetExceeded, match="post-action check"):
+        check_followup_budget(owner(calls=1), {"timings": saved}, verify_artifacts=True)
+    check_followup_budget(owner(tokens=466, calls=2), {"timings": saved}, verify_artifacts=True)
+
+
+def test_structured_output_schema_is_counted_and_has_separate_calibration():
+    from copy import deepcopy
+
+    from rune.agent.request_budget import estimate_key, input_estimate
+
+    params = {"model": "anthropic/claude-opus-5", "messages": [{"role": "user", "content": "Classify"}]}
+    structured = {**params, "response_format": {"type": "json_schema", "json_schema": {"schema": {
+        "type": "object", "properties": {"decision": {"type": "string", "description": "reason " * 100}}}}}}
+    original = deepcopy(structured)
+    assert input_estimate(structured) > input_estimate(params) + 100
+    assert estimate_key(structured) != estimate_key(params)
+    assert structured == original
+
+
+def test_native_structured_output_counts_toward_input_and_calibration():
+    from rune.agent.request_budget import estimate_key, input_estimate
+
+    request = {"model": "anthropic/claude-opus-5", "messages": [{"role": "user", "content": "Classify"}]}
+    schema = {"type": "json_schema", "schema": {"type": "object", "properties": {
+        "label": {"type": "string", "enum": ["option_" + str(n) for n in range(50)]},
+    }}}
+    structured = {**request, "output_config": {"format": schema, "effort": "low"}}
+    assert input_estimate(structured) > input_estimate(request) + 100
+    assert estimate_key(structured) != estimate_key(request)
+    assert estimate_key(structured) == estimate_key({**structured, "output_config": {"format": schema, "effort": "high"}})
+
+
+@pytest.mark.parametrize('local', [False, True])
+async def test_native_reasoning_does_not_duplicate_tool_rationales_but_local_keeps_them(monkeypatch, local):
+    from rune.agent.tool_schema import CALL_RATIONALE
+
+    requests = []
+    async def complete(**params):
+        requests.append(params)
+        async def chunks():
+            yield _chunk(content='Done', finish='stop')
+        return chunks()
+    monkeypatch.setattr('litellm.acompletion', complete)
+    stream = _make('xai/grok-4.7')
+    stream._reasoning_effort = 'low'
+    stream._provider_extra['_rune_source_model'] = 'ollama/local' if local else 'xai/grok-4.7'
+    stream._tool_schemas = [{'type': 'function', 'function': {'name': 'file_read', 'parameters': {
+        'type': 'object', 'properties': {'path': {'type': 'string'}, 'think': dict(CALL_RATIONALE)}}}}]
+    stream._require_verification = False
+    async for _ in stream.stream_text():
+        pass
+    assert ('think' in requests[0]['tools'][0]['function']['parameters']['properties']) is local
+    assert 'think' in stream._tool_schemas[0]['function']['parameters']['properties']

@@ -47,3 +47,50 @@ def test_refreshing_read_revisions_does_not_allow_overwriting_changed_outputs(tm
     output.write_text('edited by user')
     with pytest.raises(RecoveryBlocked):
         reconcile(records, refresh_reads=True)
+
+
+def test_only_successful_completed_writes_count_as_recovery_evidence():
+    from rune.agent.execution_journal import recovery_written_files
+
+    records = [{"state": state, "tool": "file_write", "effect": {"kind": "file", "path": path},
+                "result": {"success": success}}
+               for state, success, path in [("done", True, "/saved"), ("done", False, "/failed"),
+                                             ("unknown", True, "/uncertain"), ("started", True, "/started")]]
+    assert recovery_written_files(records) == ["/saved"]
+
+
+def test_recovery_distinguishes_changed_sources_outputs_and_completed_actions():
+    from rune.agent.recovery_context import _task_state
+
+    def record(tool, kind, path, *, stale=False, success=True):
+        return {"tool": tool, "state": "done", "params": {},
+                "effect": {"kind": kind, "path": path, "stale": stale},
+                "result": {"success": success, "output": "receipt-42"}}
+    records = [record("file_read", "read", "source.txt", stale=True),
+               record("file_write", "file", "draft.txt"), record("file_write", "file", "failed.txt", success=False),
+               record("file_read", "read", "source.txt"), record("web_fetch", "opaque", None)]
+    state = _task_state({}, records)
+    assert state["outputsToReview"] == state["outputsToVerify"] == ["draft.txt"]
+    assert state["completedExternalActions"] == [{"tool": "web_fetch", "receipt": "receipt-42"}]
+    records.append(record("file_write", "file", "draft.txt"))
+    assert _task_state({}, records)["outputsToReview"] == []
+    records.append(record("file_read", "read", "source.txt"))
+    assert _task_state({}, records)["outputsToReview"] == []
+    assert _task_state({}, records)["staleReadPaths"] == []
+    assert _task_state({"fileChanges": {"inputs": {"modified": ["source.txt"]}}}, records)["outputsToReview"] == ["draft.txt"]
+    context = recovery_context({"runId": "resume"}, records)
+    assert '"success":false' in context and '"outputsToVerify":["draft.txt"]' in context
+
+
+def test_completed_approval_is_identified_as_current_execution_not_a_pending_action():
+    import json
+
+    run = {'runId': 'resume', 'completedAction': {'tool': 'web_fetch', 'status': 'executed', 'verification': 'pending'}}
+    records = [{'tool': 'web_fetch', 'params': {'method': 'POST'}, 'state': 'done',
+                'effect': {'kind': 'opaque'}, 'result': {'success': True, 'output': 'receipt-42'}}]
+    text = recovery_context(run, records)
+    assert 'just succeeded in this run' in text and 'Do not resubmit' in text
+    payload = json.loads(text[text.index('{'):])
+    assert payload['completedAction']['verification'] == 'pending'
+    assert 'receipt-42' in text
+    assert 'just succeeded in this run' not in recovery_context({'runId': 'pending'}, records)

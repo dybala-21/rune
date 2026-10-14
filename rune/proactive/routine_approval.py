@@ -6,9 +6,14 @@ import asyncio
 from pathlib import Path
 from uuid import uuid4
 
-from rune.agent.execution_journal import RecoveryBlocked, changed_read_paths, reconcile
+from rune.agent.execution_journal import (
+    RecoveryBlocked,
+    changed_read_paths,
+    reconcile,
+    recovery_written_files,
+)
 from rune.proactive.routine import task_fingerprint
-from rune.proactive.routine_budget import budget_owner
+from rune.proactive.routine_budget import budget_owner, check_followup_budget
 from rune.proactive.routine_observation import changes, observe
 from rune.safety.approval_request import check_revisions
 from rune.safety.execution_environment import execution_config
@@ -86,7 +91,9 @@ async def prepare_continuation(job, store, operation_id: str, *, refresh: bool =
     check_revisions(action.get("revisions", {}))
     history = await asyncio.to_thread(reconcile, store.history(operation_id), refresh_reads=refresh)
     prefix = f"cron:{job.id}:"
-    budget_owner(job.policy, store.usage(prefix))
+    owner = budget_owner(job.policy, store.usage(prefix))
+    if not refresh and job.goal:
+        check_followup_budget(owner, previous, verify_artifacts=bool(recovery_written_files(history)))
     child_id = prefix + "resume:" + uuid4().hex
     store.continue_approval(f"cron:{job.id}", operation_id, child_id, task_fingerprint(job))
     return child_id, previous, history

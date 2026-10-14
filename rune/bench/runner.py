@@ -651,7 +651,6 @@ async def _run_agent(options: BenchRunOptions, attempt_dir: Path) -> None:
     old_capture_failed_tool_output = os.environ.get("RUNE_BENCH_CAPTURE_FAILED_TOOL_OUTPUT")
     old_strict_status_markers = os.environ.get("RUNE_BENCH_STRICT_STATUS_MARKERS")
     old_bash_timeout_cap = os.environ.get("RUNE_BENCH_BASH_TIMEOUT_CAP_MS")
-    old_stop_batch_on_tool_failure = os.environ.get("RUNE_BENCH_STOP_BATCH_ON_TOOL_FAILURE")
     old_max_write_exec_per_turn = os.environ.get("RUNE_BENCH_MAX_WRITE_EXEC_PER_TURN")
     old_evidence_gate = os.environ.get("RUNE_BENCH_EVIDENCE_GATE")
     old_cwd = Path.cwd()
@@ -665,7 +664,6 @@ async def _run_agent(options: BenchRunOptions, attempt_dir: Path) -> None:
     os.environ.setdefault("RUNE_BENCH_CAPTURE_FAILED_TOOL_OUTPUT", "1")
     os.environ.setdefault("RUNE_BENCH_STRICT_STATUS_MARKERS", "1")
     os.environ.setdefault("RUNE_BENCH_BASH_TIMEOUT_CAP_MS", "120000")
-    os.environ.setdefault("RUNE_BENCH_STOP_BATCH_ON_TOOL_FAILURE", "1")
     options.rune_home.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -884,10 +882,6 @@ async def _run_agent(options: BenchRunOptions, attempt_dir: Path) -> None:
             os.environ.pop("RUNE_BENCH_BASH_TIMEOUT_CAP_MS", None)
         else:
             os.environ["RUNE_BENCH_BASH_TIMEOUT_CAP_MS"] = old_bash_timeout_cap
-        if old_stop_batch_on_tool_failure is None:
-            os.environ.pop("RUNE_BENCH_STOP_BATCH_ON_TOOL_FAILURE", None)
-        else:
-            os.environ["RUNE_BENCH_STOP_BATCH_ON_TOOL_FAILURE"] = old_stop_batch_on_tool_failure
         if old_max_write_exec_per_turn is None:
             os.environ.pop("RUNE_BENCH_MAX_WRITE_EXEC_PER_TURN", None)
         else:

@@ -23,6 +23,63 @@ from rune.proactive.routine import RoutinePolicy
 from rune.types import CapabilityResult, CompletionTrace
 
 
+async def test_resumed_document_finishes_after_fresh_read_without_rewriting(tmp_path, monkeypatch):
+    import json
+
+    from rune.agent.execution_journal import (
+        ExecutionJournal,
+        journal_scope,
+        reconcile,
+        recovery_written_files,
+    )
+    from rune.agent.failover import LLMProfile
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.agent.loop import NativeAgentLoop
+    from rune.types import AgentConfig
+    from tests.unit.test_live_streaming import _chunk, _tc, _usage
+
+    monkeypatch.setenv("RUNE_HOME", str(tmp_path / "state"))
+    monkeypatch.setenv("RUNE_WORKSPACE", str(tmp_path))
+    monkeypatch.setenv("RUNE_APPROVAL_MODE", "standard")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("rune.agent.failover.build_profiles_from_config",
+                        lambda: [LLMProfile(name="test", provider="openai", model="gpt-5.4")])
+    records = ExecutionStore(tmp_path / "executions.db")
+    draft = tmp_path / "draft.txt"
+    async def write():
+        draft.write_text("Approved document")
+        return CapabilityResult(success=True, output="Saved draft.txt")
+    first = ExecutionJournal(records, "first", str(tmp_path))
+    await first.execute("file_write", {"path": str(draft), "content": "Approved document"}, write)
+    previous = reconcile(records.attempts("first"))
+    requests = []
+
+    async def complete(**params):
+        requests.append(params)
+        async def chunks():
+            if len(requests) == 1:
+                yield _chunk(tool_calls=_tc("file_read", json.dumps({"path": str(draft), "raw": True})), finish="tool_calls")
+            else:
+                yield _chunk(content="Checked draft.txt: Approved document.", finish="stop")
+            yield _usage()
+        return chunks()
+    monkeypatch.setattr("litellm.acompletion", complete)
+    agent = NativeAgentLoop(AgentConfig(max_iterations=2))
+    agent._auto_skill = False
+    journal = ExecutionJournal(records, "next", str(tmp_path), previous=previous)
+    try:
+        with journal_scope(journal):
+            trace = await agent.run("Save the document to draft.txt and check it.", max_steps=2,
+                classification=ClassificationResult(goal_type="artifact", confidence=.9, tier=2,
+                    intent_categories=frozenset({"document"}), output_expectation="file"),
+                context={"workspace_root": str(tmp_path), "recovery_written_files": recovery_written_files(previous)})
+        assert trace.reason == "completed", agent._completion_check
+        assert len([request for request in requests if request.get("tools")]) == 2
+        assert [record["tool"] for record in records.attempts("next")] == ["file_read"]
+    finally:
+        records.close()
+
+
 @pytest.fixture
 def task(tmp_path, monkeypatch):
     monkeypatch.setenv("RUNE_HOME", str(tmp_path / "state"))
@@ -136,7 +193,7 @@ async def test_waiting_ticks_and_restart_spend_nothing_then_approval_continues_o
     assert not any(r["blocked"] for r in state.recent(f"cron:{job_id}:"))
     assert state.history(response["operationId"]) == []
     assert state.get(original["id"])[1]["status"] == "continued"
-    assert "not repeat their side effects" in task.contexts[-1]["extra_system_context"]
+    assert "Do not repeat completed side effects" in task.contexts[-1]["extra_system_context"]
     assert task.contexts[-1]["context"]["recovery_written_files"] == [str(task.root / "draft.txt")]
     state.close()
 
@@ -436,3 +493,28 @@ async def test_simultaneous_approvals_share_the_same_continuation(task):
     responses = await asyncio.gather(decide(job_id, operation), decide(job_id, operation))
     assert responses[0]['operationId'] == responses[1]['operationId']
     assert task.send.await_count == 1
+
+
+async def test_insufficient_followup_budget_keeps_approval_pending(task, monkeypatch):
+    from rune.agent.request_budget import BudgetExceeded
+
+    job_id = create(task)
+    await tick(task, job_id)
+    original = pending(task, job_id)
+    import rune.proactive.routine_approval as approval
+    original_pending = approval.pending_run
+
+    def pending_with_estimate(*args):
+        result = original_pending(*args)
+        result["timings"]["followupBudget"] = {"tokens": 100000, "costUsd": 1}
+        return result
+    monkeypatch.setattr(approval, "pending_run", pending_with_estimate)
+    state = records(task)
+    try:
+        with pytest.raises(BudgetExceeded, match="post-action check"):
+            await approval.prepare_continuation(cron._row_to_cronjob(task.store.get_cron_job(job_id)), state, original["id"])
+        assert not state.continued(original["id"])
+        assert state.get(original["id"])[1]["status"] == "needs_approval"
+    finally:
+        state.close()
+    task.send.assert_not_awaited()
