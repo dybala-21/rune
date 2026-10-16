@@ -46,8 +46,10 @@ interface ChatPanelProps {
   onRespondQuestion: (answer: string, selectedIndex?: number) => Promise<void>;
   pendingApproval: PendingApproval | null;
   onRespondApproval: (decision: 'approve_once' | 'approve_always' | 'deny', userGuidance?: string) => Promise<void>;
-  /** Sends an empty-state suggestion; omit to render suggestions disabled. */
+  /** Sends a follow-up from a result card. */
   onSuggest?: (text: string) => void;
+  /** Prefills the composer without starting a run. */
+  onDraft?: (text: string) => void;
   /** Extra content rendered inside the scroll area, after the messages. */
   streamFooter?: ReactNode;
 }
@@ -69,6 +71,7 @@ export function ChatPanel({
   pendingApproval,
   onRespondApproval,
   onSuggest,
+  onDraft,
   streamFooter,
 }: ChatPanelProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -105,7 +108,7 @@ export function ChatPanel({
 
   const timeline = useMemo<TimelineItem[]>(() => [
     ...messages
-      .filter(m => m.content?.trim() || m.trust || m.suggestion || m.attachments?.length)
+      .filter(m => !m.suggestion && (m.content?.trim() || m.trust || m.attachments?.length))
   // Keep the streaming answer below its tool calls to avoid reordering on completion.
       .map(m => ({
         type: 'message' as const,
@@ -128,6 +131,7 @@ export function ChatPanel({
   [messages, toolCalls, thinkingBlocks, delegateEvents, compactionEvents, streamingAnswerId]);
 
   const grouped = useMemo(() => groupConsecutiveTools(timeline), [timeline]);
+  const suggestions = messages.filter(message => message.suggestion);
 
   const latestToolId = useMemo(() => {
     if (!isRunning || toolCalls.length === 0) return null;
@@ -200,7 +204,13 @@ export function ChatPanel({
         flexDirection: 'column',
         gap: 2,
       }}>
-        {isEmpty && <WelcomePanel onSuggest={onSuggest} />}
+        {suggestions.length > 0 && <details className="suggestion-inbox">
+          <summary>Suggestions <span>{suggestions.length}</span></summary>
+          <div className="suggestion-inbox-items">
+            {suggestions.map(message => <ProactiveCard key={message.id} suggestion={message.suggestion!} />)}
+          </div>
+        </details>}
+        {isEmpty && <WelcomePanel onSuggest={onDraft} />}
 
         {hiddenCount > 0 && (
           <button
@@ -235,13 +245,6 @@ export function ChatPanel({
                     onRetry={item.item.id === turn.retryAnchor?.id ? retry : undefined}
                     onEscalate={item.item.id === turn.retryAnchor?.id && retry && onSuggest ? () => onSuggest('/escalate') : undefined}
                   />
-                </div>
-              );
-            }
-            if (item.item.suggestion) {
-              return (
-                <div key={item.item.id} style={{ marginTop: needsGap ? 12 : 0 }}>
-                  <ProactiveCard suggestion={item.item.suggestion} />
                 </div>
               );
             }
@@ -1117,7 +1120,7 @@ function InlineApprovalCard({
                 style={{
                   padding: '9px 18px',
                   background: 'var(--danger)',
-                  color: 'white',
+                  color: 'var(--text-on-danger)',
                   border: 'none',
                   borderRadius: 'var(--radius-md)',
                   fontWeight: 600,

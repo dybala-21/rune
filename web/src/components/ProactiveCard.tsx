@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { respondToSuggestion } from '../api';
 import type { ProactiveSuggestion } from '../types';
 import { proactiveStatus } from '../utils/proactive';
-import { SparkIcon } from './icons';
+import { RuneMark } from './RuneMark';
 
 interface ProactiveCardProps {
   suggestion: ProactiveSuggestion;
@@ -18,7 +18,7 @@ export function ProactiveCard({ suggestion }: ProactiveCardProps) {
     ? { ...state, response: acknowledged } : state);
   const output = state?.result.output || state?.result.error || '';
   const isIntervene = suggestion.intensity === 'intervene';
-  const accentColor = isIntervene ? '#61AFEF' : '#56B6C2';
+  const accentColor = isIntervene ? 'var(--accent)' : 'var(--text-secondary)';
   const timeAgo = formatTimeAgo(suggestion.timestamp);
 
   async function respond(value: 'accept' | 'dismiss') {
@@ -61,7 +61,7 @@ export function ProactiveCard({ suggestion }: ProactiveCardProps) {
             fontWeight: 600,
             color: accentColor,
           }}>
-            <SparkIcon size={12} />
+            <RuneMark size={14} />
             rune
           </span>
           <span style={{

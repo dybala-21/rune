@@ -106,10 +106,23 @@ async def classify_request(system: str, content: str) -> RoutingDecision:
 
     request = json.loads(content).get("request_to_classify", "")
     roles = artifact_roles.matching_roles(request) if artifact_roles is not None else {}
-    values = await contract.request_classification(
-        get_llm_client(), system, content, selected=selected, deadline=deadline,
-        file_roles=roles,
-    )
+    try:
+        values = await contract.request_classification(
+            get_llm_client(), system, content, selected=selected, deadline=deadline,
+            file_roles=roles,
+        )
+    except Exception as exc:
+        if not reason:
+            raise
+        from rune.agent.request_budget import BudgetExceeded
+        from rune.llm.failures import request_failure
+        from rune.llm.target import ModelCompatibilityError
+
+        detail = str(exc) if isinstance(exc, (BudgetExceeded, contract.InvalidClassification, ModelCompatibilityError)) else request_failure(exc).kind
+        raise contract.RoutingUnavailable(
+            f"Jev routing unavailable ({reason}); connected fallback stopped: {detail}",
+            fallback_reason=reason, diagnostics=diagnostics,
+        ) from exc
     if roles:
         artifact_roles = ArtifactRoleHints.for_request(request, roles)
     return RoutingDecision(values, "connected", selected.model, reason, artifact_roles, diagnostics)

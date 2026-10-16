@@ -509,13 +509,13 @@ def evaluate_completion_gate(inp: CompletionGateInput) -> CompletionGateResult:
         missing.append(r13.id)
 
     # R14: Grounding Requirement
-    r14_ok = (not inp.grounding_requirement) or (ev.web_searches > 0 or ev.web_fetches > 0)
+    r14_ok = (not inp.grounding_requirement) or (ev.web_searches > 0 or ev.web_fetches > 0 or ev.browser_reads > 0)
     r14 = RequirementTraceItem(
         id=REQUIREMENT_IDS["GROUNDING"],
         description="Grounding via web evidence",
         required=inp.grounding_requirement,
         status="done" if r14_ok else "blocked",
-        evidence=f"web_searches={ev.web_searches}, web_fetches={ev.web_fetches}",
+        evidence=f"web_searches={ev.web_searches}, web_fetches={ev.web_fetches}, browser_reads={ev.browser_reads}",
         failure_reason="" if r14_ok else "Grounding required but no web evidence",
     )
     requirements.append(r14)

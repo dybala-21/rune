@@ -41,6 +41,48 @@ def test_agent_keeps_schema_deferral_after_a_tool_update():
     assert "code_analyze" in agent._tool_catalog.all
 
 
+async def test_small_lookup_catalog_keeps_rendering_tools_available_on_demand():
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.agent.litellm_adapter import LiteLLMAgent
+    from rune.agent.tool_adapter import ToolWrapper
+    from rune.agent.tool_catalog import deferred_for_task
+
+    names = ["web_search", "web_fetch", "task_blocked", "file_read", "browser_observe", "browser_navigate"]
+    tools = [ToolWrapper(name=name, description="x" * 1000, function=AsyncMock()) for name in names]
+    classification = ClassificationResult(goal_type="web", confidence=.99, tier=2, needs_web_evidence=True, lookup_only=True)
+    deferred = deferred_for_task(names, classification)
+    full = LiteLLMAgent("openai/gpt-5.4", tools=tools, deferred_tools=deferred)
+    agent = LiteLLMAgent("openai/gpt-5.4", tools=tools, deferred_tools=deferred, compact_tools=True)
+    assert agent._tool_catalog.loaded == {"web_search", "web_fetch", "task_blocked", "tool_search"}
+    assert len(json.dumps(agent._tool_schemas)) < len(json.dumps(full._tool_schemas))
+    await agent._tool_catalog.search("browser_observe")
+    assert "browser_observe" in agent._tool_catalog.loaded
+    assert set(agent._tool_lookup) == set(names) | {"tool_search"}
+
+
+@pytest.mark.parametrize("compact,count", [(False, 1), (True, 1), (False, 30)])
+async def test_native_tools_pass_through_with_or_without_discovery(compact, count):
+    from rune.agent.advisor.native_tool import NativeAdvisorConfig, build_native_tool_wrapper
+    from rune.agent.litellm_adapter import LiteLLMAgent, tools_to_openai_schema
+    from rune.agent.tool_adapter import ToolWrapper
+
+    advisor = build_native_tool_wrapper(NativeAdvisorConfig(enabled=True, advisor_model="claude-opus-4-6", max_uses=3))
+    native_schema = tools_to_openai_schema([advisor])[0]
+    tools = [ToolWrapper(name=name, description="x" * 1600, function=AsyncMock())
+             for name in ["web_fetch", *[f"service_{n}" for n in range(count)]]]
+    agent = LiteLLMAgent("anthropic/claude-sonnet-4-6", tools=[*tools, advisor],
+                        deferred_tools={"service_0", "advisor"}, compact_tools=compact)
+    assert [tool for tool in agent._tool_schemas if tool.get("type") != "function"] == [native_schema]
+    if compact or count > 24:
+        assert "advisor" not in agent._tool_catalog.all
+        assert "service_0" not in agent._tool_catalog.loaded
+        await agent._tool_catalog.search("service_0")
+        assert "service_0" in agent._tool_catalog.loaded
+        assert agent._tool_schemas.count(native_schema) == 1
+    else:
+        assert agent._tool_catalog is None
+
+
 async def test_browser_guidance_loads_with_browser_tools_and_returns_when_discovery_is_disabled():
     from rune.agent.litellm_adapter import LiteLLMAgent
     from rune.agent.prompts import PROMPT_BROWSER

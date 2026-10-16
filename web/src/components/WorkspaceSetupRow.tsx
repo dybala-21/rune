@@ -8,13 +8,6 @@ function basename(p: string): string {
   return parts[parts.length - 1] || p;
 }
 
-/**
- * Workspace row on the home screen, matching the suggestion rows above it.
- *
- * The titlebar chip was the only way in, and with nothing pinned it is a small
- * muted control in a crowded bar — easy to miss before the first message, which
- * is exactly when the folder matters.
- */
 export function WorkspaceSetupRow() {
   const [path, setPath] = useState('');
   const [open, setOpen] = useState(false);
@@ -60,7 +53,7 @@ export function WorkspaceSetupRow() {
       <button
         type="button"
         onClick={() => setOpen(o => !o)}
-        title={path || 'Choose the folder the agent works in'}
+        title={path || 'Choose the folder to work in'}
         style={{
           display: 'flex',
           alignItems: 'center',
@@ -69,24 +62,22 @@ export function WorkspaceSetupRow() {
           padding: '11px 4px',
           background: 'none',
           border: 'none',
-          borderTop: '1px solid var(--border-subtle)',
           color: path ? 'var(--text-secondary)' : 'var(--text-primary)',
           fontSize: 14,
           textAlign: 'left',
           cursor: 'pointer',
           borderRadius: 0,
         }}
-        onMouseEnter={e => { e.currentTarget.style.paddingLeft = '10px'; }}
-        onMouseLeave={e => { e.currentTarget.style.paddingLeft = '4px'; }}
+        aria-expanded={open}
       >
         <span style={{ color: 'var(--accent)', display: 'flex' }}>
           <FolderIcon size={16} />
         </span>
         <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {path ? `Working in ${basename(path)}` : 'Choose a working folder'}
+          {path ? `Working folder · ${basename(path)}` : 'Working folder'}
         </span>
         <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>
-          {path ? 'Change' : 'Set'}
+          {path ? 'Change' : 'Choose'}
         </span>
       </button>
 
@@ -99,7 +90,7 @@ export function WorkspaceSetupRow() {
               fontFamily: 'var(--font-mono)', overflow: 'hidden',
               textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             }}>
-              Current: {path}
+              Current folder: {path}
             </div>
           )}
           {error && (

@@ -43,6 +43,32 @@ def remaining_tokens() -> int | None:
     return min(values) if values else None
 
 
+def needs_answer_reserve(params: dict, tokens_left: int) -> bool:
+    """Reserve enough budget for a final answer."""
+    from rune.agent.request_budget import calibrated_input, input_estimate
+    from rune.llm.pricing import reserve_request_cost
+
+    run = _current.get()
+    estimate = input_estimate(params)
+    if run is not None:
+        estimate = calibrated_input(run, params, estimate)
+    output = params.get("max_completion_tokens", params.get("max_tokens", 4096))
+    required = 2 * (estimate + output)
+    if tokens_left <= required:
+        return True
+    for scope in scopes(run):
+        budget = remaining_budget(scope)
+        if budget is None:
+            continue
+        if budget["tokens"] <= required or budget["modelRequests"] is not None and budget["modelRequests"] <= 1:
+            return True
+        if budget["costUsd"] is not None:
+            cost = reserve_request_cost(params, estimate, output)
+            if cost is None or budget["costUsd"] <= 2 * cost:
+                return True
+    return False
+
+
 def check_isolated_worker_budget() -> None:
     from rune.agent.request_budget import BudgetExceeded
 
@@ -302,10 +328,13 @@ async def timed_completion(completion, params):
     except BudgetExceeded as exc:
         scope["budget_blocked"] = run["budget_blocked"] = str(exc)
         raise
+    controls = {**params, **(params.get("extra_body") or {})}
+    thinking = controls.get("thinkingConfig") or {}
     measurement = span("model", model=params.get("model"),
-                       reasoningEffort=params.get("reasoning_effort") or
-                       (params.get("extra_body") or {}).get("reasoning_effort") or
-                       (params.get("extra_body") or {}).get("reasoning", {}).get("effort"))
+                       reasoningEffort=controls.get("reasoning_effort") or
+                       (controls.get("reasoning") or {}).get("effort") or
+                       (controls.get("output_config") or {}).get("effort") or thinking.get("thinkingLevel"),
+                       thinkingBudget=thinking.get("thinkingBudget", (controls.get("thinking") or {}).get("budget_tokens")))
     started = time.monotonic()
     row = measurement.__enter__()
     row.update(inputEstimate=estimated, reservedInput=reserved_input, estimateKey=estimate_key(params))

@@ -29,6 +29,8 @@ def setup(monkeypatch):
     monkeypatch.setattr(decision_router, "_verified_key", None)
     monkeypatch.setenv("TYPESAFE_API_KEY", "test-only-key")
     values = {"goal_type": "chat", "confidence": .95, "reason": "explanation",
+              "needs_web_evidence": False, "needs_current_source": False,
+              "lookup_only": False,
               "requires_execution": False, "intent_categories": [], "requires_desktop_input": False,
               "is_related_to_previous": False, "table_output": "none", "calculation_expression": ""}
     client = SimpleNamespace(completion=AsyncMock(return_value={
@@ -46,6 +48,109 @@ def payload(questions, **picks):
         answers[name] = {"type": "choice", "choice": choice, "confidence": .99,
                          "probabilities": {key: float(key == choice) for key in question["criteria"]}}
     return {"model": jev.MODEL, "answers": answers, "usage": {"input_tokens": 2000, "output_tokens": 200}}
+
+
+@pytest.mark.parametrize("confidence,choice,expected", [(.99, "yes", True), (.6, "yes", False), (.99, "unknown", False)])
+async def test_uncertain_lookup_scope_keeps_normal_reasoning_without_another_call(setup, monkeypatch, confidence, choice, expected):
+    cfg, client = setup
+    cfg.llm.decision_routing.backend = "jev"
+
+    async def request(**kwargs):
+        data = payload(kwargs["questions"], needs_web_evidence="yes", lookup_only=choice)
+        data["answers"]["lookup_only"]["confidence"] = confidence
+        return data
+
+    monkeypatch.setattr(jev, "_request", request)
+    result = await classify_goal("A current factual lookup")
+    assert result.available and result.decision_backend == "jev"
+    assert result.lookup_only is expected
+    client.completion.assert_not_called()
+
+
+@pytest.mark.parametrize("confidence,choice,needs_web,expected", [
+    (.99, "yes", True, True), (.99, "no", True, False),
+    (.6, "no", True, True), (.99, "unknown", True, True),
+    (.6, "no", False, False), (.99, "no", False, False),
+])
+async def test_uncertain_source_scope_requires_a_page_without_reclassification(setup, monkeypatch, confidence, choice, needs_web, expected):
+    cfg, client = setup
+    cfg.llm.decision_routing.backend = "jev"
+
+    async def request(**kwargs):
+        data = payload(kwargs["questions"], needs_web_evidence="yes" if needs_web else "no", needs_current_source=choice)
+        data["answers"]["needs_current_source"]["confidence"] = confidence
+        return data
+
+    monkeypatch.setattr(jev, "_request", request)
+    result = await classify_goal("A factual request")
+    assert result.available and result.decision_backend == "jev"
+    assert result.needs_current_source is expected
+    client.completion.assert_not_called()
+
+
+@pytest.mark.parametrize("backend", ["connected", "jev", "fallback"])
+@pytest.mark.parametrize("needed", [True, False])
+async def test_source_need_survives_chat_routing_without_extra_calls(setup, monkeypatch, backend, needed):
+    from rune.agent.goal_classifier import from_wire, to_wire
+    from rune.agent.intent_engine import resolve_intent_contract
+    from rune.agent.loop import NativeAgentLoop
+    from tests.unit.test_goal_classifier import response, verdict
+
+    cfg, client = setup
+    cfg.llm.decision_routing.backend = "connected" if backend == "connected" else "jev"
+    client.completion.return_value = response(verdict(goal_type="chat", needs_web_evidence=needed))
+
+    async def request(**kwargs):
+        return payload(kwargs["questions"], goal_type="unknown" if backend == "fallback" else "chat",
+                       needs_web_evidence="yes" if needed else "no")
+
+    external = AsyncMock(side_effect=request)
+    monkeypatch.setattr(jev, "_request", external)
+    result = await classify_goal("A current concern" if needed else "Just listen")
+    assert result.available and result.goal_type == "chat"
+    assert from_wire(to_wire(result)).needs_web_evidence is needed
+    contract = resolve_intent_contract(result, result.confidence)
+    assert contract.grounding_requirement == ("required" if needed else "none")
+    tools = NativeAgentLoop._select_base_tools(None, result)
+    assert {"web_search", "web_fetch"} <= set(tools)
+    assert not any(name.startswith("browser_") or name == "bash_execute" for name in tools)
+    assert external.await_count == int(backend != "connected")
+    assert client.completion.await_count == int(backend != "jev")
+
+
+@pytest.mark.parametrize("backend", ["connected", "jev", "fallback"])
+async def test_current_source_requirement_survives_routing(setup, monkeypatch, backend):
+    from rune.agent.goal_classifier import from_wire, to_wire
+    from tests.unit.test_goal_classifier import response, verdict
+
+    cfg, client = setup
+    cfg.llm.decision_routing.backend = "connected" if backend == "connected" else "jev"
+    client.completion.return_value = response(verdict(goal_type="web", needs_web_evidence=True, needs_current_source=True))
+
+    async def request(**kwargs):
+        return payload(kwargs["questions"], goal_type="unknown" if backend == "fallback" else "web",
+                       needs_web_evidence="yes", needs_current_source="yes")
+
+    external = AsyncMock(side_effect=request)
+    monkeypatch.setattr(jev, "_request", external)
+    result = await classify_goal("Read the current service status")
+    assert result.available and from_wire(to_wire(result)).needs_current_source
+    assert external.await_count == int(backend != "connected")
+    assert client.completion.await_count == int(backend != "jev")
+
+
+async def test_budget_blocked_fallback_preserves_the_cause(setup, monkeypatch):
+    from rune.agent.request_budget import BudgetExceeded
+
+    cfg, client = setup
+    cfg.llm.decision_routing.backend = "jev"
+    monkeypatch.setattr(jev, "_request", AsyncMock(side_effect=jev.JevUnavailable("timeout")))
+    client.completion.side_effect = BudgetExceeded("Model cost could not be determined; the configured cost limit cannot be checked.")
+    result = await classify_goal("Read the current service status")
+    assert not result.available and result.fallback_reason == "timeout"
+    assert "Jev routing unavailable (timeout)" in result.reason
+    assert "configured cost limit cannot be checked" in result.reason
+    assert client.completion.await_count == 1
 
 
 @pytest.mark.parametrize("uncertain_routing", [False, True])
@@ -195,6 +300,8 @@ async def test_multiturn_office_code_browser_routes_do_not_leak(setup, monkeypat
     loop = NativeAgentLoop()
     for request, route, intents, execute, related in cases:
         values = {"goal_type": route, "confidence": .99, "reason": "requested outcome",
+                  "needs_web_evidence": route == "web", "needs_current_source": False,
+                  "lookup_only": False,
                   "intent_categories": intents, "requires_execution": execute, "requires_desktop_input": False,
                   "is_related_to_previous": related, "table_output": "none", "calculation_expression": ""}
         client.completion.return_value = {"choices": [{"message": {"content": json.dumps(values)}}]}

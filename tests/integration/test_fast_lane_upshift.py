@@ -108,11 +108,13 @@ ANSWER = "샌디스크 주가는 오늘 11% 하락한 45.2달러에 거래를 �
 
 
 @pytest.mark.asyncio
-async def test_gate_pressure_upshifts_to_primary(anthropic_lane) -> None:
+async def test_gate_pressure_upshifts_to_primary(anthropic_lane, monkeypatch) -> None:
     """Two empty steps block the gate twice -> primary model restored."""
     # Steps 1-2: no text, no tools -> full gate blocks (intent unresolved,
     # web evidence missing). Step 3: a real answer -> completes.
-    factory = _FakeAgentFactory(step_texts=["", "", ANSWER])
+    factory = _SearchingAgentFactory(step_texts=["", "", ANSWER], search_step=2)
+    from rune.capabilities.registry import get_capability_registry
+    monkeypatch.setattr(get_capability_registry(), "execute", _fake_execute)
     loop = _loop()
 
     with patch("rune.agent.loop.LiteLLMAgent", factory):
@@ -137,9 +139,11 @@ async def test_gate_pressure_upshifts_to_primary(anthropic_lane) -> None:
 
 
 @pytest.mark.asyncio
-async def test_clean_run_never_upshifts(anthropic_lane) -> None:
+async def test_clean_run_never_upshifts(anthropic_lane, monkeypatch) -> None:
     """An immediate good answer stays on the lane model end to end."""
-    factory = _FakeAgentFactory(step_texts=[ANSWER])
+    factory = _SearchingAgentFactory(step_texts=[ANSWER])
+    from rune.capabilities.registry import get_capability_registry
+    monkeypatch.setattr(get_capability_registry(), "execute", _fake_execute)
     loop = _loop()
 
     with patch("rune.agent.loop.LiteLLMAgent", factory):
@@ -162,7 +166,9 @@ async def test_light_primary_upshift_still_lifts_round_cap(anthropic_lane, monke
     but it must still lift the 3-round cap."""
     cfg = get_config()
     monkeypatch.setattr(cfg.llm.models.anthropic, "best", cfg.llm.models.anthropic.fast)
-    factory = _FakeAgentFactory(step_texts=["", "", ANSWER])
+    factory = _SearchingAgentFactory(step_texts=["", "", ANSWER], search_step=2)
+    from rune.capabilities.registry import get_capability_registry
+    monkeypatch.setattr(get_capability_registry(), "execute", _fake_execute)
     loop = _loop()
 
     with patch("rune.agent.loop.LiteLLMAgent", factory):
@@ -188,6 +194,10 @@ class _SearchingAgentFactory(_FakeAgentFactory):
     (through the adapter, so evidence counters update) before each step's
     text. Requires the capability registry to be patched."""
 
+    def __init__(self, step_texts: list[str], search_step: int = 0) -> None:
+        super().__init__(step_texts)
+        self.search_step = search_step
+
     def __call__(self, model: str, **kwargs: Any) -> Any:
         self.constructions.append({"model": model, **kwargs})
         factory = self
@@ -205,7 +215,7 @@ class _SearchingAgentFactory(_FakeAgentFactory):
         class _FakeAgent:
             @asynccontextmanager
             async def run_stream(self, goal: str, **kw: Any):
-                if factory._step == 0:
+                if factory._step == factory.search_step:
                     await search(query="샌디스크 주가")
                 text = (
                     factory._step_texts[factory._step]
@@ -228,10 +238,10 @@ async def _fake_execute(cap_name: str, params: dict[str, Any]) -> Any:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("lane_on", [True, False])
-async def test_search_only_answer_passes_gate_only_on_the_lane(
+async def test_sufficient_search_does_not_require_a_redundant_fetch(
     anthropic_lane, monkeypatch, lane_on
 ) -> None:
-    """Allow search-only answers in the fast lane; require fetched evidence otherwise."""
+    """Non-current lookups accept search evidence on either lane."""
     cfg = get_config()
     monkeypatch.setattr(cfg.llm, "route_simple_queries", lane_on)
     factory = _SearchingAgentFactory(step_texts=["45.20달러입니다."])
@@ -249,12 +259,8 @@ async def test_search_only_answer_passes_gate_only_on_the_lane(
             classification=_web_classification(),
         )
 
-    if lane_on:
-        assert trace.reason == "completed"
-        assert trace.final_step == 1
-    else:
-        # Without the lane the same run must not sail through at step 1.
-        assert not (trace.reason == "completed" and trace.final_step == 1)
+    assert trace.reason == "completed"
+    assert trace.final_step == 1
 
 
 @pytest.mark.asyncio

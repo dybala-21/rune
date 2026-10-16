@@ -21,6 +21,7 @@ ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 MIN_CONFIDENCE = 0.8
 # File roles affect missing-input checks; borderline answers use the fallback.
 MIN_ROLE_CONFIDENCE = 0.9
+_CONSERVATIVE_FIELDS = {"lookup_only", "needs_current_source"}
 
 
 @dataclass(frozen=True)
@@ -56,8 +57,8 @@ def build_questions(state: dict) -> tuple[dict, dict[str, str]]:
         expression_candidates(state["request_to_classify"]))}
     questions = {
         "goal_type": _choice("Choose the requested outcome, following routing_rules.", {
-            "chat": "Conversation or a general question, including direct arithmetic answers.",
-            "web": "Online lookup or reading a URL, without interacting with webpage controls.",
+            "chat": "Conversation, emotional reactions, casual concerns, general questions or direct arithmetic. A current concern stays chat; needs_web_evidence separately decides whether to retrieve facts.",
+            "web": "Explicitly requested online lookup or URL reading, without interacting with webpage controls.",
             "research": "Read-only analysis of files, data, code or a project, including data sums and counts.",
             "code_modify": "Implement or modify software, including related reports and tests.",
             "artifact": "Create or revise non-code files, documents, reports, spreadsheets or presentations, including source reads and saved-file checks.",
@@ -69,6 +70,18 @@ def build_questions(state: dict) -> tuple[dict, dict[str, str]]:
             "none": "No native app access. Creating, saving or rereading DOCX/PDF/PPTX/XLSX files uses document/file tools. File formats, direct arithmetic, and webpage interaction alone do not require a native app.",
             "read": "Open or inspect a native app or its unsaved state, without editing or navigating inside it.",
             "input": "Edit, save, navigate, enter input, or calculate inside a native app. Honor an explicit request to use an app.",
+        }),
+        "needs_web_evidence": _choice("First honor an explicit request only to listen or not browse: choose no. Otherwise decide whether helping needs missing public facts, independently of goal_type.", {
+            "yes": "A lookup is requested, or current public facts help with a concrete concern: a named stock's recent fall or feared further loss, tomorrow's weather, a transport disruption. Check current conditions even when the future outcome is uncertain. Emotional wording does not remove this need.",
+            "no": "The user only wants listening/no browsing, stable knowledge, calculations from supplied data, or support for personal feelings without a concrete external situation.",
+        }),
+        "lookup_only": _choice("Can the current chat/web request be answered with a few sourced observations? This only enables lighter default reasoning; choose no if unsure.", {
+            "yes": "Current status, a few recent values, or another narrow factual lookup. A casual concern can be answered by checking current conditions without making a prediction.",
+            "no": "Causal analysis, requested predictions, recommendations, medical/legal/financial advice, broad comparisons, other work or uncertain scope.",
+        }),
+        "needs_current_source": _choice("Does the answer need current or recent observations from a source page or API, rather than indexed search excerpts?", {
+            "yes": "Current prices, weather, service status, availability, schedules, news or recent changes needed to answer the request or ground a concrete concern. Also requires needs_web_evidence=yes.",
+            "no": "Link discovery, stable explanations, supplied facts, or an explicit request only to listen or not browse.",
         }),
         "requires_execution": _choice("Does correctness require running code, scripts, commands, or tests?", {
             "yes": "The user requests code/tests/commands to run, or executing them is required for correctness.",
@@ -94,9 +107,10 @@ def build_questions(state: dict) -> tuple[dict, dict[str, str]]:
         "calculation": _choice(
             "First check exclusions: if the request includes a saved deliverable, requested code/test execution, "
             "or native app interaction, choose none even if the final response also reports numbers. "
-            "Otherwise choose data for results derived from supplied data/files, or choose the complete literal expression to evaluate.", {
-            "data": "A numeric answer derived from supplied data or file contents, such as sums or counts. None of the exclusions applies.",
-            "none": "An exclusion applies, or no numeric answer is requested. Identifiers, dates and quoted examples not to evaluate also use none.",
+            "Reading or copying an observed price, date, measurement or status is not calculation: choose none. "
+            "Otherwise choose data for computing an aggregate from supplied data/files, or choose the complete literal expression to evaluate.", {
+            "data": "Compute an aggregate from supplied data or file contents, such as sums, counts or averages. Copying an existing numeric value is not aggregation. None of the exclusions applies.",
+            "none": "No computation is requested, or an exclusion applies. Reading or copying values (including prices and dates), identifiers and quoted examples not to evaluate all use none.",
             "unavailable": "A literal numeric expression must be evaluated, but its complete verbatim text is missing from the candidates. File-derived values use data instead. None of the exclusions applies.",
             **{key: f"The complete requested expression is exactly: {value}" for key, value in expressions.items()},
         }),
@@ -138,8 +152,9 @@ def _validated_choices(payload: Any, questions: dict) -> tuple[dict[str, str], d
 
 
 def _routing_values(picked: dict[str, str], confidences: dict[str, float], expressions: dict[str, str]) -> dict:
+    routing_fields = {name: choice for name, choice in picked.items() if name not in _CONSERVATIVE_FIELDS}
     if any(choice == "unknown" or confidences[name] < MIN_CONFIDENCE
-           for name, choice in picked.items()):
+           for name, choice in routing_fields.items()):
         raise DecisionAbstained("uncertain")
 
     if picked["calculation"] == "unavailable":
@@ -161,8 +176,15 @@ def _routing_values(picked: dict[str, str], confidences: dict[str, float], expre
     values = {
         "goal_type": picked["goal_type"],
         # Distribution confidence is not comparable to the connected model's score.
-        "confidence": min(confidences.values()), "reason": "Structured routing decision",
+        "confidence": min(confidences[name] for name in routing_fields), "reason": "Structured routing decision",
         "requires_execution": picked["requires_execution"] == "yes",
+        "needs_web_evidence": picked["needs_web_evidence"] == "yes",
+        # Require a page read when the freshness requirement is uncertain.
+        "needs_current_source": (picked["needs_current_source"] == "yes" or picked["needs_web_evidence"] == "yes"
+                                 and (picked["needs_current_source"] == "unknown" or confidences["needs_current_source"] < MIN_CONFIDENCE)),
+        "lookup_only": (picked.get("lookup_only") == "yes" and confidences.get("lookup_only", 0) >= MIN_CONFIDENCE
+                        and picked["needs_web_evidence"] == "yes" and picked["goal_type"] in {"chat", "web"}
+                        and not intents and picked["requires_execution"] == "no"),
         "intent_categories": intents, "requires_desktop_input": picked["desktop"] == "input",
         "is_related_to_previous": picked.get("is_related_to_previous") == "yes",
         "table_output": picked["table_output"],
@@ -229,7 +251,7 @@ async def classify(system: str, content: str, *, timeout: float, api_key: str | 
     diagnostics = {
         "confidence_by_field": {name: confidences[name] for name in routing_names},
         "uncertain_fields": [name for name in routing_names
-                             if picked[name] == "unknown" or confidences[name] < MIN_CONFIDENCE],
+                             if name not in _CONSERVATIVE_FIELDS and (picked[name] == "unknown" or confidences[name] < MIN_CONFIDENCE)],
         "role_questions": len(file_questions), "reused_file_roles": len(roles),
     }
     try:

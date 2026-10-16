@@ -28,6 +28,7 @@ def cli_run(tmp_path, monkeypatch):
     monkeypatch.setattr(cfg.llm.decision_routing, "backend", "connected")
     decision = dict(goal_type="chat", confidence=.99, reason="Simple answer", requires_execution=False,
         intent_categories=[], requires_desktop_input=False, is_related_to_previous=False,
+        needs_web_evidence=False, needs_current_source=False, lookup_only=False,
         table_output="none", calculation_expression="")
     request = AsyncMock(return_value={"choices": [{"message": {"content": json.dumps(decision)}, "finish_reason": "stop"}],
         "usage": {"prompt_tokens": 100, "completion_tokens": 10}})

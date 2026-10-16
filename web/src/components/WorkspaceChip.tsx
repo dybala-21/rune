@@ -8,11 +8,7 @@ function basename(p: string): string {
   return parts[parts.length - 1] || p;
 }
 
-/**
- * Titlebar chip showing the conversation's pinned workspace.
- * Click → recents + manual path entry. The agent runs in this directory;
- * the workbench Diff/Files tabs read from it.
- */
+// The selected folder is shared by chat, files, and diff.
 export function WorkspaceChip() {
   const [path, setPath] = useState('');
   const [open, setOpen] = useState(false);
@@ -57,14 +53,14 @@ export function WorkspaceChip() {
   };
 
   return (
-    <div ref={rootRef} style={{ position: 'relative' }}>
+    <div ref={rootRef} onKeyDown={event => { if (event.key === 'Escape') { setOpen(false); event.stopPropagation(); } }} style={{ position: 'relative' }}>
       <button
         type="button"
         className="toolbar-button workspace-trigger"
         aria-label={path ? `Workspace: ${basename(path)}` : 'Choose workspace'}
         aria-expanded={open}
         onClick={() => setOpen(o => !o)}
-        title={path ? `Workspace: ${path}` : 'Choose the folder the agent works in'}
+        title={path ? `Workspace: ${path}` : 'Choose the folder to work in'}
         style={{
           display: 'flex', alignItems: 'center', gap: 6,
           background: 'var(--bg-tertiary)',
@@ -90,7 +86,7 @@ export function WorkspaceChip() {
           boxShadow: 'var(--shadow-lg)', padding: 10,
         }}>
           <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>
-            Agent works in this folder. Type to browse subfolders.
+            Choose the folder Rune can read and edit.
           </div>
           <DirectoryCombobox recents={recents} onChoose={pick} />
           {path && (
@@ -99,7 +95,7 @@ export function WorkspaceChip() {
               fontFamily: 'var(--font-mono)', overflow: 'hidden',
               textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             }}>
-              Current: {path}
+              Current folder: {path}
             </div>
           )}
           {error && (

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import json
 import os
 import re
 import time
@@ -192,19 +193,24 @@ class SessionToolCache:
                 return f"project_map:{path}:g{gen}"
 
             case "web_search":
-                query = params.get("query", "")
-                h = hashlib.md5(query.encode(), usedforsecurity=False).hexdigest()[:12]
+                fields = {
+                    "query": params.get("query", ""), "language": params.get("language", "en"),
+                    "freshness": params.get("freshness", ""), "site": params.get("site", ""),
+                    "maxResults": params.get("maxResults", params.get("max_results", 10)),
+                }
+                h = hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()[:24]
                 return f"web_search:{h}"
 
             case "web_fetch":
                 if str(params.get("method") or "GET").upper() != "GET":
                     return None
-                # Key by selector and length so partial fetches cannot satisfy full requests.
-                url = params.get("url", "")
-                selector = params.get("selector") or ""
-                h = hashlib.md5(
-                    f"{url}|{selector}".encode(), usedforsecurity=False
-                ).hexdigest()[:12]
+                fields = {
+                    "url": params.get("url", ""), "selector": params.get("selector") or "",
+                    "jsonFilter": params.get("jsonFilter", params.get("json_filter")) or "",
+                    "body": params.get("body"),
+                    "contentType": params.get("contentType", params.get("content_type")),
+                }
+                h = hashlib.sha256(json.dumps(fields, sort_keys=True).encode()).hexdigest()[:24]
                 raw_max = params.get("maxLength", params.get("max_length"))
                 maxlen = (
                     int(raw_max) if raw_max is not None else WEB_FETCH_DEFAULT_MAX_LENGTH

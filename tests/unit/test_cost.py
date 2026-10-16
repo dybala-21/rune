@@ -18,6 +18,7 @@ def counts(input_tokens=1000, output_tokens=1000, **extra):
     ("claude-opus-5", .030), ("anthropic/claude-opus-4-6", .030),
     ("xai/grok-4.7", .008), ("xai/grok-4.6", .008), ("vertex_ai/gemini-2.5-flash", .0028),
     ("openai/responses/gpt-6-astra", .060), ("gpt-4o", .0125),
+    ("gpt-5.6-sol", .024), ("gpt-5.6", .024), ("openai/responses/gpt-5.3-codex", .01575),
     ("ollama/llama3:70b", 0),
 ])
 def test_published_standard_rates(model, expected):
@@ -46,6 +47,7 @@ def test_cache_reads_and_both_anthropic_write_durations():
     ("xai/grok-4.6", 199999, (2, 6), (4, 12)),
     ("xai/grok-4.7", 199999, (2, 6), (4, 12)),
     ("gpt-6-astra", 272000, (10, 50), (20, 75)),
+    ("gpt-5.6-sol", 272000, (4, 20), (8, 30)),
     ("gemini/gemini-2.5-pro", 200000, (1.25, 10), (2.5, 15)),
 ])
 def test_long_context_boundary(model, threshold, normal, large):

@@ -126,7 +126,7 @@ export function TerminalPane({ active = true, onConnectionChange }: { active?: b
             type="button"
             onClick={connect}
             style={{
-              background: 'var(--accent)', color: '#0A1319', border: 'none',
+              background: 'var(--accent)', color: 'var(--text-on-accent)', border: 'none',
               borderRadius: 'var(--radius-sm)', padding: '8px 16px',
               fontSize: 12.5, fontWeight: 600, cursor: 'pointer',
             }}

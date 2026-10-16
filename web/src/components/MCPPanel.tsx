@@ -139,7 +139,7 @@ export function MCPPanel({ onClose }: MCPPanelProps) {
             <button
               onClick={() => setViewMode('add')}
               style={{
-                background: 'var(--accent, #61afef)', color: '#fff',
+                background: 'var(--accent, #61afef)', color: 'var(--text-on-accent)',
                 border: 'none', borderRadius: 6, padding: '6px 14px',
                 cursor: 'pointer', fontSize: 13, fontWeight: 500,
               }}
@@ -288,7 +288,7 @@ export function MCPPanel({ onClose }: MCPPanelProps) {
               disabled={saving || !formName.trim()}
               style={{
                 background: saving ? 'var(--text-muted, #888)' : 'var(--accent, #61afef)',
-                color: '#fff', border: 'none', borderRadius: 6,
+                color: 'var(--text-on-accent)', border: 'none', borderRadius: 6,
                 padding: '10px 16px', cursor: saving ? 'default' : 'pointer',
                 fontSize: 14, fontWeight: 500, marginTop: 8,
               }}

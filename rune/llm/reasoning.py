@@ -27,10 +27,12 @@ class ReasoningControl:
 # Exact model IDs; a newer sibling does not inherit another model's API contract.
 # https://developers.openai.com/api/docs/models/gpt-6-astra
 # https://developers.openai.com/api/docs/models/gpt-5.6-sol
+# https://developers.openai.com/api/docs/models/gpt-5.3-codex
 _OPENAI = {
     "gpt-6-astra": ReasoningControl(_EXTENDED, "responses"),
     "gpt-5.6-sol": ReasoningControl(("none", *_EXTENDED), "responses"),
     "gpt-5.6": ReasoningControl(("none", *_EXTENDED), "responses"),
+    "gpt-5.3-codex": ReasoningControl((*_BASIC, "xhigh"), "responses"),
 }
 
 # https://platform.claude.com/docs/en/build-with-claude/effort

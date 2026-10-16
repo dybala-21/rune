@@ -181,6 +181,7 @@ class ToolAdapterOptions:
     budget_percent: float = 0.0  # current budget consumption ratio (0.0-1.0)
     # Callable, not a bool: the in-run upshift turns the lane off mid-run.
     fast_lane_active: Callable[[], bool] | None = None
+    web_fetch_default_max_length: int | None = None
     table_acceptance: Any = None
 
 
@@ -444,51 +445,69 @@ def _build_typed_tool(
                             total_lines=total_lines,
                         )
 
-        if (
-            cap_name == "web_fetch"
-            and opts.fast_lane_active is not None
-            and opts.fast_lane_active()
-        ):
-            effective_params = _cap_fast_lane_fetch(effective_params)
+        try:
+            if cap_name == "web_fetch":
+                requested_max = _read_fetch_max(effective_params)
+                fetch_max = requested_max if requested_max is not None else opts.web_fetch_default_max_length
+                if fetch_max is not None:
+                    _write_fetch_max(effective_params, fetch_max)
 
-        # Feature 2: Budget-aware web.fetch maxLength scaling
-        if cap_name == "web_fetch" and opts.budget_percent > 0.4:
-            # Scale absent maxLength from the capability default.
-            current_max = _read_fetch_max(effective_params)
-            if current_max is None:
-                current_max = WEB_FETCH_DEFAULT_MAX_LENGTH
-            bp = opts.budget_percent
-            if bp >= 0.85:
-                scale = 0.25
-            elif bp >= 0.75:
-                scale = 0.4
-            elif bp >= 0.6:
-                scale = 0.6
-            else:
-                scale = 1.0
-            adaptive_max = max(3000, round(current_max * scale))
-            if adaptive_max < current_max:
-                _write_fetch_max(effective_params, adaptive_max)
+            if (
+                cap_name == "web_fetch"
+                and opts.fast_lane_active is not None
+                and opts.fast_lane_active()
+            ):
+                effective_params = _cap_fast_lane_fetch(effective_params)
 
-        if cap_name == _BASH_CAPABILITY:
-            effective_params = _cap_benchmark_bash_timeout(effective_params)
+            # Trim fetched text as the token budget runs down.
+            if cap_name == "web_fetch" and opts.budget_percent > 0.4:
+                current_max = _read_fetch_max(effective_params)
+                if current_max is None:
+                    current_max = WEB_FETCH_DEFAULT_MAX_LENGTH
+                bp = opts.budget_percent
+                if bp >= 0.85:
+                    scale = 0.25
+                elif bp >= 0.75:
+                    scale = 0.4
+                elif bp >= 0.6:
+                    scale = 0.6
+                else:
+                    scale = 1.0
+                adaptive_max = max(3000, round(current_max * scale))
+                if adaptive_max < current_max:
+                    _write_fetch_max(effective_params, adaptive_max)
+
+            if cap_name == _BASH_CAPABILITY:
+                effective_params = _cap_benchmark_bash_timeout(effective_params)
+
+            normalized_params = (cap_def.parameters_model.model_validate(effective_params).model_dump(mode="json", by_alias=True)
+                                 if cap_def.parameters_model is not None else deepcopy(effective_params))
+        except (ValidationError, ValueError, TypeError) as exc:
+            details = "; ".join(
+                f"{'.'.join(map(str, error['loc']))}: {error['msg']}"
+                for error in exc.errors(include_input=False, include_url=False)[:3]
+            ) if isinstance(exc, ValidationError) else "Invalid argument type or value."
+            result = CapabilityResult(success=False, error=f"Invalid arguments for {cap_name}: {details[:1000]}",
+                                      metadata={"action_status": "not_executed"})
+            if opts.on_tool_end is not None:
+                await opts.on_tool_end(cap_name, result)
+            return f"{ERROR_PREFIX} {result.error}"
 
         from rune.agent.execution_journal import active_journal
         journal = active_journal()
         if journal is not None and journal.previous is not None and reg.is_allowed(cap_name):
-            normalized = (cap_def.parameters_model.model_validate(effective_params).model_dump(mode="json", by_alias=True)
-                          if cap_def.parameters_model is not None else effective_params)
-            recorded = await journal.replay_completed(cap_name, normalized)
+            recorded = await journal.replay_completed(cap_name, normalized_params)
             if recorded is not None:
                 if opts.on_tool_end is not None:
                     await opts.on_tool_end(cap_name, recorded)
                 return "[RECORDED RESULT — not executed again; not a fresh verification]\n" + (recorded.output or recorded.error or "")
 
+        cache_params = normalized_params if cap_name in {"web_search", "web_fetch"} else effective_params
         # 1. Cognitive cache check
         if cache is not None:
-            cache_key = cache.generate_key(cap_name, effective_params)
+            cache_key = cache.generate_key(cap_name, cache_params)
             if cache_key is not None:
-                hit = cache.get(cache_key, cap_name, effective_params)
+                hit = cache.get(cache_key, cap_name, cache_params)
                 if hit is not None:
                     log.debug("cache_hit", capability=cap_name, key=cache_key)
                     if opts.on_tool_end is not None:
@@ -498,20 +517,6 @@ def _build_typed_tool(
                     from rune.agent.tool_output import CachedToolResult
 
                     return CachedToolResult(hit.output, cache_key, hit.entry.meta.get("read_evidence", ""))
-
-        try:
-            normalized_params = (cap_def.parameters_model.model_validate(effective_params).model_dump(mode="json", by_alias=True)
-                                 if cap_def.parameters_model is not None else deepcopy(effective_params))
-        except ValidationError as exc:
-            details = "; ".join(
-                f"{'.'.join(map(str, error['loc']))}: {error['msg']}"
-                for error in exc.errors(include_input=False, include_url=False)[:3]
-            )
-            result = CapabilityResult(success=False, error=f"Invalid arguments for {cap_name}: {details[:1000]}",
-                                      metadata={"action_status": "not_executed"})
-            if opts.on_tool_end is not None:
-                await opts.on_tool_end(cap_name, result)
-            return f"{ERROR_PREFIX} {result.error}"
 
         approved_revisions = {}
 
@@ -743,9 +748,9 @@ def _build_typed_tool(
 
         # 4. Cache store
         if cache is not None and result.success and not isinstance(output, ToolOutput):
-            cache_key = cache.generate_key(cap_name, effective_params)
+            cache_key = cache.generate_key(cap_name, cache_params)
             if cache_key is not None:
-                cache.set(cache_key, cap_name, effective_params, result, current_step)
+                cache.set(cache_key, cap_name, cache_params, result, current_step)
 
         # 5. Cache invalidation
         if cache is not None:
@@ -802,6 +807,9 @@ def _build_typed_tool(
         # MCP tools provide raw JSON schema without Pydantic model
         schema = deepcopy(cap_def.raw_json_schema)
 
+    if cap_name == "web_fetch" and opts.web_fetch_default_max_length is not None:
+        schema["properties"]["maxLength"]["default"] = opts.web_fetch_default_max_length
+
     return ToolWrapper(
         name=cap_name,
         description=cap_def.description,
@@ -844,6 +852,8 @@ def _format_tool_output(
             if _src.strip():
                 parts.append(f"[SOURCE_URL: {_src}]")
         parts.append(result.output or "(success, no output)")
+        if cap_name == "web_fetch" and result.metadata.get("truncated"):
+            parts.append("[Page excerpt truncated. Use selector/jsonFilter or a larger maxLength to read missing content.]")
         # file_read: end anchor to prevent lost-in-the-middle
         if cap_name == "file_read":
             path = str(params.get("file_path") or params.get("path", ""))

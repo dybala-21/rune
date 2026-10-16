@@ -10,7 +10,7 @@ import asyncio
 from typing import Any
 from urllib.parse import quote as url_quote
 
-from rune.capabilities.search.duckduckgo import parse_ddg_lite_results
+from rune.capabilities.search.duckduckgo import _FRESHNESS_MAP, parse_ddg_lite_results
 from rune.capabilities.search.provider import SearchOptions, SearchProvider, SearchResult
 from rune.utils.logger import get_logger
 
@@ -61,6 +61,8 @@ class BrowserSearchProvider(SearchProvider):
         try:
             page = await self._pool.acquire()
             url = f"https://lite.duckduckgo.com/lite/?q={url_quote(effective_query)}"
+            if options.freshness:
+                url += f"&df={_FRESHNESS_MAP[options.freshness]}"
 
             response = await page.goto(url, wait_until="domcontentloaded", timeout=10_000)
             html: str = await page.content()

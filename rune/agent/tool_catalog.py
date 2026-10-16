@@ -9,8 +9,10 @@ _BROWSER = ("browser_observe", "browser_act", "browser_navigate", "browser_extra
 
 
 def deferred_for_task(names: list[str], classification) -> set[str]:
-    from rune.agent.goal_classifier import is_coding_task
+    from rune.agent.goal_classifier import is_coding_task, is_simple_lookup
 
+    if is_simple_lookup(classification):
+        return set(names) - {"web_search", "web_fetch", "ask_user", "task_blocked"}
     intents = classification.intent_categories
     coding = is_coding_task(classification)
     execution = coding or classification.requires_execution or classification.goal_type == "execution" or "calculation" in intents
@@ -23,11 +25,13 @@ def deferred_for_task(names: list[str], classification) -> set[str]:
 
 class ToolCatalog:
     def __init__(self, schemas: list[dict], *, deferred_tools: Collection[str] | None = None) -> None:
-        self.all = {tool["function"]["name"]: tool for tool in schemas}
-        self.schemas = [tool for tool in schemas if tool["function"]["name"] not in (deferred_tools or ())
+        self.all = {tool["function"]["name"]: tool for tool in schemas if tool.get("type") == "function"}
+        # Provider-native tools stay in the request without passing through discovery.
+        self.schemas = [tool for tool in schemas if tool.get("type") != "function"
+                        or tool["function"]["name"] not in (deferred_tools or ())
                         and (tool["function"]["name"] in _CORE
                              or tool["function"]["name"].startswith(("file_", "code_", "web_", "desktop_")))]
-        self.loaded = {tool["function"]["name"] for tool in self.schemas}
+        self.loaded = {tool["function"]["name"] for tool in self.schemas if tool.get("type") == "function"}
         self.groups = sorted({re.split(r"[_.]", name)[0] for name in self.all if name not in self.loaded})
         self.schemas.append({"type": "function", "function": {
             "name": "tool_search",

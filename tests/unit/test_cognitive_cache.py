@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from rune.agent.cognitive_cache import (
     KnowledgeInventory,
     SessionToolCache,
@@ -10,6 +12,27 @@ from rune.agent.cognitive_cache import (
 
 
 class TestSessionToolCache:
+    @pytest.mark.parametrize("tool,base,change", [
+        ("web_search", {"query": "status"}, {"freshness": "day"}),
+        ("web_search", {"query": "status"}, {"site": "example.org"}),
+        ("web_search", {"query": "status"}, {"language": "ko"}),
+        ("web_search", {"query": "status"}, {"maxResults": 3}),
+        ("web_fetch", {"url": "https://example.org"}, {"jsonFilter": "item-b"}),
+        ("web_fetch", {"url": "https://example.org"}, {"selector": "main"}),
+        ("web_fetch", {"url": "https://example.org"}, {"maxLength": 8000}),
+    ])
+    def test_web_cache_separates_result_options(self, tool, base, change):
+        cache = SessionToolCache()
+        assert cache.generate_key(tool, base) != cache.generate_key(tool, base | change)
+
+    @pytest.mark.parametrize("tool,base,defaults,alias", [
+        ("web_search", {"query": "status"}, {"language": "en", "freshness": "", "site": "", "maxResults": 10}, {"max_results": 10}),
+        ("web_fetch", {"url": "https://example.org"}, {"method": "GET", "selector": None, "maxLength": 50000, "jsonFilter": None}, {"max_length": 50000, "json_filter": ""}),
+    ])
+    def test_web_cache_shares_default_and_alias_forms(self, tool, base, defaults, alias):
+        cache = SessionToolCache()
+        assert cache.generate_key(tool, base) == cache.generate_key(tool, base | defaults) == cache.generate_key(tool, base | alias)
+
     def test_generate_key_file_read(self):
         cache = SessionToolCache()
         key = cache.generate_key("file_read", {"file_path": "/tmp/foo.py"})

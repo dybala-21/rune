@@ -48,6 +48,163 @@ def test_gemini_estimate_counts_the_signature_once_without_changing_the_request(
     assert input_estimate(text) > 1000
 
 
+@pytest.mark.parametrize("limits,expected", [
+    ({"tokens": 10000, "calls": 10}, False),
+    ({"tokens": 500, "calls": 10}, True),
+    ({"tokens": 10000, "calls": 1}, True),
+    ({"tokens": 10000, "cost": .0001}, True),
+])
+def test_lookup_keeps_room_for_an_answer(monkeypatch, limits, expected):
+    from rune.agent.timing import needs_answer_reserve
+
+    monkeypatch.setattr("rune.agent.request_budget.input_estimate", lambda _: 100)
+    params = {"model": "xai/grok-4.6", "messages": [], "max_tokens": 200}
+    with capture_timing(owner(**limits)) as run:
+        assert needs_answer_reserve(params, 10000) is expected
+        assert run["usage"]["calls"] == 0
+        assert not run["budget_blocked"]
+
+
+def test_answer_reserve_uses_parent_budget_and_calibrated_input(monkeypatch):
+    from rune.agent.request_budget import estimate_key
+    from rune.agent.timing import needs_answer_reserve
+
+    monkeypatch.setattr("rune.agent.request_budget.input_estimate", lambda _: 100)
+    params = {"model": "xai/grok-4.6", "messages": [], "max_tokens": 100}
+    with capture_timing(owner(tokens=700)) as parent, capture_timing(owner(tokens=10000)):
+        assert not needs_answer_reserve(params, 10000)
+        parent["input_estimates"][estimate_key(params)] = 3
+        assert needs_answer_reserve(params, 10000)
+
+
+@pytest.mark.parametrize("model", ["openai/gpt-5.4", "xai/grok-4.7", "gemini/gemini-3.1-pro-preview",
+                                   "anthropic/claude-sonnet-4-5", "ollama/qwen3"])
+@pytest.mark.parametrize("trigger", ["rounds", "tokens", "calls", "deadline"])
+async def test_lookup_finishes_with_sources_before_the_limit(monkeypatch, model, trigger):
+    import json
+
+    requests = []
+    stream = _make(model)
+    stream._reserve_answer = True
+    stream._max_tool_rounds = 1 if trigger == "rounds" else 10
+    stream._guided = model.startswith("ollama/")
+    stream._live_stream = not stream._guided
+    stream._request_tokens_limit = 1000 if trigger == "tokens" else 100000
+    clock = [0.0]
+    if trigger == "deadline":
+        stream._request_deadline = 60.0
+        monkeypatch.setattr("rune.agent.litellm_adapter.time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr("rune.agent.request_budget.input_estimate", lambda _: 400)
+
+    async def completion(**kwargs):
+        requests.append(kwargs)
+        assert len(requests) <= 2
+        if len(requests) == 1:
+            chunks = [_chunk(tool_calls=_tc(), finish="tool_calls")]
+        else:
+            assert not kwargs.get("tools") and not kwargs.get("tool_choice")
+            assert "retrieved value: 120" in str(kwargs["messages"])
+            answer = "The retrieved value is 120; its date is unverified."
+            chunks = [_chunk(json.dumps({"final": answer}) if stream._guided else answer, finish="stop")]
+
+        async def response():
+            for chunk in chunks:
+                yield chunk
+            yield SimpleNamespace(choices=[], usage={"prompt_tokens": 400, "completion_tokens": 30})
+        return response()
+
+    async def execute(calls):
+        stream._messages.append({"role": "tool", "tool_call_id": calls[0]["id"], "content": "retrieved value: 120"})
+        clock[0] = 45.0
+
+    monkeypatch.setattr("litellm.acompletion", completion)
+    monkeypatch.setattr(stream, "_execute_tool_batch", execute)
+    with capture_timing(owner(tokens=10000, calls=2 if trigger == "calls" else 10)):
+        async for _ in stream.stream_text():
+            pass
+    assert len(requests) == 2
+    assert await stream.get_output() == "The retrieved value is 120; its date is unverified."
+    assert not stream.tool_budget_exhausted
+
+
+@pytest.mark.parametrize("reply", ["tool", "text_tool", "empty", "truncated"])
+async def test_answer_reserve_cannot_restart_tools_or_claim_truncated_completion(monkeypatch, reply):
+    calls = []
+    stream = _make("openai/gpt-5.4")
+    stream._reserve_answer = True
+    stream._max_tool_rounds = 1
+    execute = AsyncMock()
+    monkeypatch.setattr(stream, "_execute_tool_batch", execute)
+
+    async def completion(**kwargs):
+        calls.append(kwargs)
+        assert len(calls) <= 2
+
+        async def response():
+            if len(calls) == 1 or reply == "tool":
+                yield _chunk(tool_calls=_tc(), finish="tool_calls")
+            elif reply == "text_tool":
+                yield _chunk('{"tool": "noop", "arguments": {}}', finish="stop")
+            else:
+                yield _chunk("Partial" if reply == "truncated" else "", finish="length" if reply == "truncated" else "stop")
+        return response()
+
+    monkeypatch.setattr("litellm.acompletion", completion)
+    async for _ in stream.stream_text():
+        pass
+    assert len(calls) == 2
+    execute.assert_awaited_once()
+    assert stream.tool_budget_exhausted
+
+
+@pytest.mark.parametrize("guided", [False, True])
+async def test_reserved_answer_can_report_missing_facts_without_another_call(monkeypatch, guided):
+    import json
+
+    from rune.capabilities.blocked import TaskBlockedParams, consume_block, task_blocked
+
+    consume_block()
+    stream = _make("openai/gpt-5.4")
+    stream._reserve_answer = True
+    stream._max_tool_rounds = 1
+    stream._guided = guided
+    stream._live_stream = not guided
+    stream._tool_schemas = list(stream._tool_schemas)
+    stream._tool_schemas.append({"type": "function", "function": {"name": "task_blocked",
+        "description": "Report missing facts", "parameters": {"type": "object", "properties": {"reason": {"type": "string"}}}}})
+
+    async def report(**kwargs):
+        return await task_blocked(TaskBlockedParams(**kwargs))
+
+    stream._tool_lookup["task_blocked"] = report
+    requests = []
+
+    async def completion(**kwargs):
+        requests.append(kwargs)
+        assert len(requests) <= 2
+        if len(requests) == 1:
+            chunks = [_chunk(tool_calls=_tc(), finish="tool_calls")]
+        else:
+            if not guided:
+                assert [tool["function"]["name"] for tool in kwargs["tools"]] == ["task_blocked"]
+            args = {"reason": "The source has no current value or observation time."}
+            chunks = [_chunk(json.dumps({"tool": "task_blocked", "arguments": args}), finish="stop")] if guided else [
+                _chunk(tool_calls=_tc("task_blocked", json.dumps(args)), finish="tool_calls")]
+
+        async def response():
+            for chunk in chunks:
+                yield chunk
+        return response()
+
+    monkeypatch.setattr("litellm.acompletion", completion)
+    async for _ in stream.stream_text():
+        pass
+    assert len(requests) == 2 and stream._task_blocked
+    assert "no current value" in await stream.get_output()
+    assert not stream.tool_budget_exhausted
+    consume_block()
+
+
 async def test_stream_rounds_stop_before_the_next_request(monkeypatch):
     async def completion(**kwargs):
         async def chunks():

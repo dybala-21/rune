@@ -48,7 +48,7 @@ export function ModelPicker({ active }: { active: ActiveModel }) {
     {close => <>
       <div className="picker-heading">
         <strong>Choose a model</strong>
-        <span>For your next conversation turn</span>
+        <span>Applies to your next message</span>
       </div>
       {selProvider && <button type="button" role="menuitem" tabIndex={-1}
         className="picker-back" onClick={() => setSelProvider('')} disabled={busy}>

@@ -39,6 +39,9 @@ class ClassificationResult:
     is_multi_task: bool = False
     requires_code: bool = False
     requires_execution: bool = False
+    needs_web_evidence: bool = False
+    needs_current_source: bool = False
+    lookup_only: bool = False
     requires_desktop_input: bool = False
     complexity: str = "simple"  # simple / moderate / complex
     output_expectation: str = "text"  # text / file / either
@@ -51,6 +54,16 @@ class ClassificationResult:
     fallback_reason: str = ""
     artifact_roles: ArtifactRoleHints | None = None
     decision_details: dict = field(default_factory=dict)
+
+
+def is_simple_lookup(classification: ClassificationResult | None) -> bool:
+    return bool(
+        classification is not None and getattr(classification, "lookup_only", False) is True
+        and classification.goal_type in {"chat", "web"} and classification.needs_web_evidence
+        and classification.complexity == "simple" and not classification.is_multi_task
+        and not classification.intent_categories and not classification.requires_execution
+        and not classification.requires_code and classification.output_expectation == "text"
+    )
 
 
 def is_coding_task(classification: ClassificationResult) -> bool:
@@ -74,6 +87,9 @@ def to_wire(c: ClassificationResult) -> str:
         "is_complex_coding": c.is_complex_coding,
         "is_multi_task": c.is_multi_task, "requires_code": c.requires_code,
         "requires_execution": c.requires_execution,
+        "needs_web_evidence": c.needs_web_evidence,
+        "needs_current_source": c.needs_current_source,
+        "lookup_only": c.lookup_only,
         "requires_desktop_input": c.requires_desktop_input,
         "complexity": c.complexity,
         "output_expectation": c.output_expectation,
@@ -120,6 +136,27 @@ Using browser_observe/find/extract to READ a page is still web, not browser.
 For example, reading the first product's price on an open page is web;
 changing its quantity control or adding it to a cart is browser.
 
+Assess needs_web_evidence separately from goal_type. First honor "only listen" or
+"do not browse": false. Otherwise, missing current public facts needed to help
+(prices, weather, schedules, news, availability) or a requested lookup: true.
+Greetings, stable explanations, supplied-data calculations and personal feelings
+without a concrete external situation: false. A topic mention alone is not enough.
+An emotional reaction or conversational concern stays chat; needs_web_evidence
+can still be true. Worry about a named stock's recent fall or tomorrow's weather
+uses chat with true. "Just listen" uses chat with false even if it mentions prices.
+For worry about a future public event, current conditions may still help: inability
+to predict the outcome does not remove the need to check those conditions.
+Use web for an explicit lookup or URL reading. Other outcomes can also need sources.
+Set needs_current_source when the answer depends on current or recent observations:
+prices, weather, service status, availability, schedules or recent changes. These need
+a source page or API, not indexed search excerpts. Link discovery, stable explanations,
+supplied facts and no-browsing requests use false; true also requires needs_web_evidence.
+Set lookup_only only when a few sourced observations answer the current chat/web
+request. A casual concern can use current facts without predicting the future.
+Expressing a worry is not itself a request for prediction or advice.
+Leave it false for requested causal analysis, predictions, recommendations, advice,
+broad comparisons or unclear scope; never set it without needs_web_evidence.
+
 Intent flags may overlap; otherwise use [].
 coding: the requested outcome concerns software implementation, debugging, tests,
 or code analysis. Creating Office documents, tables or prose is not coding, even
@@ -129,6 +166,7 @@ calculation: compute an answer from numbers or supplied data, without a requeste
 command/test run, native app interaction, or saved deliverable. File sums and counts
 use research with calculation. file_read returns code-computed CSV counts and sums;
 these do not require separate command execution. More complex calculations can use code.
+Reading or copying a price, date, measurement or other observed value is not calculation.
 email: work on email itself (inbox, message, draft, reply).
 document: produce a standalone report, proposal or formal document, excluding code.
 table: save a CSV/XLSX aggregation of existing data, or revise that deliverable.
@@ -198,6 +236,9 @@ async def classify_tier2(
             is_complex_coding="coding" in intents and data["goal_type"] in {"code_modify", "full"},
             requires_code="coding" in intents and data["goal_type"] in {"code_modify", "full"},
             requires_execution=data["requires_execution"],
+            needs_web_evidence=data["needs_web_evidence"],
+            needs_current_source=data["needs_current_source"],
+            lookup_only=data["lookup_only"],
             output_expectation="file" if data["goal_type"] in {"code_modify", "artifact"} or intents & {"document", "table"} else "text",
             requires_desktop_input="desktop" in intents and data["requires_desktop_input"],
             intent_categories=frozenset(intents),
@@ -208,16 +249,19 @@ async def classify_tier2(
             decision_details=decision.diagnostics,
         )
     except Exception as exc:
-        from rune.agent.classification_response import InvalidClassification
+        from rune.agent.classification_response import InvalidClassification, RoutingUnavailable
+        from rune.agent.request_budget import BudgetExceeded
         from rune.llm.failures import request_failure
         from rune.llm.target import ModelCompatibilityError
         failure = request_failure(exc)
-        reason = str(exc) if isinstance(exc, (InvalidClassification, ModelCompatibilityError)) else failure.kind
+        reason = str(exc) if isinstance(exc, (InvalidClassification, ModelCompatibilityError, RoutingUnavailable, BudgetExceeded)) else failure.kind
         get_logger(__name__).warning("classification_unavailable", reason=reason, **failure.to_dict())
         return ClassificationResult(
             goal_type="full", confidence=0.5, tier=2,
             reason=f"Classification unavailable: {reason}",
             intent_categories=_KNOWN_INTENT_CATEGORIES, available=False,
+            fallback_reason=exc.fallback_reason if isinstance(exc, RoutingUnavailable) else "",
+            decision_details=exc.diagnostics if isinstance(exc, RoutingUnavailable) else {},
         )
 
 
