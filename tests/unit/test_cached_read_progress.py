@@ -9,6 +9,29 @@ from rune.agent.litellm_adapter import StreamResult
 from rune.agent.tool_output import CachedToolResult
 
 
+@pytest.mark.parametrize("name,failed,corrected", [
+    ("web_fetch", {"url": "https://example.org/down"}, {"url": "https://example.org/ready"}),
+    ("web_fetch", {"url": "https://example.org", "selector": "#missing"}, {"url": "https://example.org", "selector": "#data"}),
+    ("web_fetch", {"url": "https://example.org", "jsonFilter": "wrong"}, {"url": "https://example.org", "jsonFilter": "ACME"}),
+    ("web_search", {"query": "unavailable source"}, {"query": "alternative source"}),
+])
+async def test_retrieval_failures_leave_alternative_requests_available(monkeypatch, name, failed, corrected):
+    monkeypatch.setenv("RUNE_ARTIFACT_PROVENANCE", "0")
+    calls = []
+
+    async def retrieve(**params):
+        calls.append(params)
+        return "[ERROR] Missing records" if params == failed else "Observed value: 120"
+
+    stream = StreamResult(model="openai/gpt-5.6", messages=[], tool_schemas=[], tool_lookup={name: retrieve},
+                          max_tokens=1000, temperature=0, request_tokens_limit=20000, response_tokens_limit=1000)
+    for _ in range(3):
+        assert "[ERROR]" in await stream._execute_tool(name, failed.copy())
+    assert "[BLOCKED]" in await stream._execute_tool(name, failed.copy())
+    assert "120" in await stream._execute_tool(name, corrected.copy())
+    assert len(calls) == 4
+
+
 async def run_reads(monkeypatch, actions, results, *, model="gemini/gemini-2.5-flash",
                     recovery=None):
     import rune.agent.litellm_adapter as adapter

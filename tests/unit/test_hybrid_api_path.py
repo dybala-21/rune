@@ -151,6 +151,19 @@ def test_discover_read_body_returns_pruned_json():
         assert res.success
         assert "19:30" in res.output and "송도" not in res.output
 
+        unmatched = asyncio.run(browser_discover_apis(
+            BrowserDiscoverApisParams(readBody="schedulePage", jsonFilter="missing")
+        ))
+        assert not unmatched.success and unmatched.metadata["filter_no_match"]
+
+        m.get_discovered_apis()[0].response_body = '{"name":"' + "x" * 30_000 + '"}'
+        oversized = asyncio.run(browser_discover_apis(BrowserDiscoverApisParams(readBody="schedulePage")))
+        assert not oversized.success and oversized.metadata["delivery_truncated"]
+
+        m.get_discovered_apis()[0].response_body = '{"value":120'
+        incomplete = asyncio.run(browser_discover_apis(BrowserDiscoverApisParams(readBody="schedulePage")))
+        assert not incomplete.success and incomplete.metadata["invalid_json"]
+
         missing = asyncio.run(browser_discover_apis(
             BrowserDiscoverApisParams(readBody="nosuch")
         ))

@@ -1,14 +1,11 @@
-"""Web capabilities for RUNE.
-
-Ported from src/capabilities/web.ts - web search and fetch with
-pluggable search providers (DuckDuckGo default, Brave opt-in) and
-HTML-to-text conversion.
-"""
+"""Search the web and fetch page content or API responses."""
 
 from __future__ import annotations
 
+import json
 import os
 import re
+from datetime import UTC, datetime
 from html import unescape
 from typing import Any, Literal
 
@@ -143,9 +140,8 @@ class WebSearchParams(BaseModel):
 class WebFetchParams(BaseModel):
     url: str = Field(description="URL to fetch")
     selector: str | None = Field(default=None, description="CSS selector; defaults to main content when available. Use body for the full page.")
-    max_length: int = Field(default=50_000, alias="maxLength")
-    # Replay support for APIs discovered via browser network monitoring —
-    # data-loading endpoints on dynamic sites are frequently POST.
+    max_length: int = Field(default=50_000, alias="maxLength", ge=1)
+    # Some discovered APIs use POST to load data.
     method: str = Field(default="GET", description="HTTP method (GET or POST)")
     body: str | None = Field(
         default=None,
@@ -339,36 +335,57 @@ def _is_path_wipe_redirect(original_url: str, final_url: str) -> bool:
     return True
 
 
+MAX_JSON_OUTPUT_CHARS = 29_000
+
+
+class _JSONNumber(str):
+    """Keep a JSON number's original precision and notation."""
+
+
+def _dump_json(node: Any) -> str:
+    if isinstance(node, _JSONNumber):
+        return str(node)
+    if isinstance(node, dict):
+        return "{" + ",".join(json.dumps(k, ensure_ascii=False) + ":" + _dump_json(v) for k, v in node.items()) + "}"
+    if isinstance(node, list):
+        return "[" + ",".join(_dump_json(v) for v in node) + "]"
+    return json.dumps(node, ensure_ascii=False)
+
+
 def _json_contains(node: Any, term: str) -> bool:
     if isinstance(node, dict):
-        return any(_json_contains(v, term) for v in node.values())
+        return any(term in k.casefold() or _json_contains(v, term) for k, v in node.items())
     if isinstance(node, list):
         return any(_json_contains(x, term) for x in node)
-    return term in str(node).lower()
+    return term in str(node).casefold()
 
 
 def _prune_json_by_term(text: str, term: str) -> str | None:
-    """Keep only the JSON subtrees containing *term* (case-insensitive).
-
-    List elements that match are kept WHOLE — the point is preserving all
-    fields of the matching records (e.g. a branch's showtimes), not just the
-    matching strings. Returns None when the text isn't valid JSON.
-    """
-    import json as _json
-
+    """Keep matching records intact; return "" for no match or None for invalid JSON."""
     try:
-        data = _json.loads(text)
-    except Exception:
+        data = json.loads(text, parse_float=_JSONNumber, parse_int=_JSONNumber)
+    except (ValueError, RecursionError):
         return None
-    t = term.lower()
+    t = term.casefold().strip()
+    if not t:
+        return text
+    if not _json_contains(data, t):
+        return ""
 
     def prune(node: Any) -> Any:
         if isinstance(node, list):
             return [x for x in node if _json_contains(x, t)]
         if isinstance(node, dict):
+            # Keep nested values and context when the record itself matches.
+            if any(not isinstance(v, (dict, list)) and _json_contains(v, t) for v in node.values()):
+                return node
             out: dict[str, Any] = {}
             for k, v in node.items():
-                if isinstance(v, (dict, list)):
+                if t in k.casefold():
+                    out[k] = v
+                elif isinstance(v, dict):
+                    out[k] = prune(v) if _json_contains(v, t) else v
+                elif isinstance(v, list):
                     if _json_contains(v, t):
                         out[k] = prune(v)
                 else:
@@ -376,7 +393,7 @@ def _prune_json_by_term(text: str, term: str) -> str | None:
             return out
         return node
 
-    return _json.dumps(prune(data), ensure_ascii=False)
+    return _dump_json(prune(data))
 
 
 async def web_fetch(params: WebFetchParams) -> CapabilityResult:
@@ -429,6 +446,9 @@ async def web_fetch(params: WebFetchParams) -> CapabilityResult:
         content_type = resp.headers.get("content-type", "")
         html = resp.text
         final_url = str(resp.url)
+        source = {"url": params.url, "final_url": final_url,
+                  "retrieved_at": datetime.now(UTC).isoformat(), "status_code": resp.status_code,
+                  "content_type": content_type}
 
         # A redirect to the homepage or search page can return 200 without the requested content.
         if _is_path_wipe_redirect(params.url, final_url):
@@ -473,26 +493,40 @@ async def web_fetch(params: WebFetchParams) -> CapabilityResult:
                 metadata={"status_code": resp.status_code, "empty_content": True},
             )
 
-        # Large JSON: blind truncation drops the relevant records (a schedule
-        # API can return every branch in one 500KB payload). Prune to the
-        # subtrees matching the caller's keyword before truncating.
+        if "json" in content_type.lower():
+            try:
+                json.loads(text)
+            except (ValueError, RecursionError):
+                return CapabilityResult(success=False, error="The response is not valid JSON.",
+                                        metadata={**source, "invalid_json": True})
         filter_note = ""
         if params.json_filter and "json" in content_type.lower():
             pruned = _prune_json_by_term(text, params.json_filter)
-            if pruned is not None:
-                text = pruned
-                filter_note = f"[filtered by '{params.json_filter}'] "
+            if not pruned:
+                return CapabilityResult(
+                    success=False,
+                    error=("The JSON filter matched no records. Change jsonFilter or read the unfiltered response."
+                           if pruned == "" else "The response is not valid JSON; the filter could not be applied."),
+                    metadata={**source, "filter_no_match": pruned == "", "invalid_json": pruned is None},
+                )
+            text = pruned
+            filter_note = f"[filtered by '{params.json_filter}'] "
 
-        # Truncate if too long
         truncated = False
-        if len(text) > params.max_length:
+        if "json" in content_type.lower():
+            required_length = len(text) + len(filter_note)
+            if required_length > min(params.max_length, MAX_JSON_OUTPUT_CHARS):
+                hint = ("Narrow jsonFilter to retrieve complete records."
+                        if required_length > MAX_JSON_OUTPUT_CHARS else
+                        f"Use jsonFilter or increase maxLength to at least {required_length}.")
+                return CapabilityResult(
+                    success=False,
+                    error=f"The JSON response needs {required_length} characters. {hint}",
+                    metadata={**source, "truncated": True, "required_length": required_length},
+                )
+        elif len(text) > params.max_length:
             text = text[: params.max_length]
             truncated = True
-            if "json" in content_type.lower() and not params.json_filter:
-                text += (
-                    "\n\n[TRUNCATED JSON — retry with "
-                    'jsonFilter="<keyword>" to keep only the relevant records]'
-                )
         if filter_note:
             text = filter_note + text
 
@@ -503,14 +537,11 @@ async def web_fetch(params: WebFetchParams) -> CapabilityResult:
             success=True,
             output=text,
             metadata={
-                "url": params.url,
-                "final_url": final_url,
+                **source,
                 "redirected": final_url != params.url,
-                "content_type": content_type,
                 "extraction": extraction,
                 "length": len(text),
                 "truncated": truncated,
-                "status_code": resp.status_code,
             },
         )
 

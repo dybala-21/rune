@@ -44,6 +44,7 @@ def workflow(live_model, live_report, monkeypatch, tmp_path, request):
     cfg.llm.reasoning_efforts = {}
     cfg.llm.route_simple_queries = False
     provider, model = live_model
+    limits = {"max_iterations": 16, "timeout_seconds": 180, **getattr(request, "param", {})}
     original_loop = loop.NativeAgentLoop
     decisions = []
 
@@ -51,7 +52,7 @@ def workflow(live_model, live_report, monkeypatch, tmp_path, request):
         from rune.agent.goal_classifier import to_wire
 
         agent = original_loop(config or AgentConfig(
-            provider=provider, model=model, max_iterations=16, timeout_seconds=180, _overridden=True))
+            provider=provider, model=model, **limits, _overridden=True))
 
         async def classified(value):
             decisions.append({"classification": json.loads(to_wire(value)), "tools": agent._select_tools(value)})
@@ -70,6 +71,7 @@ def workflow(live_model, live_report, monkeypatch, tmp_path, request):
         result.reporter = live_report
         result.decision_backend = cfg.llm.decision_routing.backend
         result.decisions = decisions
+        result.settings = limits
         yield result
         outcome = "passed" if getattr(request.node, "live_passed", False) else "failed"
         result.write_report(outcome)

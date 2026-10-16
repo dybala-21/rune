@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
@@ -11,8 +13,85 @@ from rune.capabilities.web import (
     _extract_by_selector,
     _html_to_text,
     _is_path_wipe_redirect,
+    _prune_json_by_term,
     web_fetch,
 )
+
+
+@pytest.mark.parametrize("records", [
+    {"symbol": "ACME", "quote": {"value": 120, "unit": "USD", "observed_at": "2026-10-16T09:00:00Z"}},
+    {"ACME": {"value": 120, "unit": "USD", "observed_at": "2026-10-16T09:00:00Z"}},
+    [{"symbol": "ACME", "quote": {"value": 120, "unit": "USD", "observed_at": "2026-10-16T09:00:00Z"}}],
+])
+def test_json_filter_preserves_record_identity_and_nested_observation(records):
+    assert json.loads(_prune_json_by_term(json.dumps(records), "acme")) == records
+    assert _prune_json_by_term(json.dumps(records), "missing") == ""
+
+
+def test_json_filter_retains_parent_scope_without_other_records():
+    record = {"symbol": "ACME", "value": 120, "observed_at": "2026-10-16T09:00:00Z"}
+    payload = {"unit": "USD", "metadata": {"venue": "X", "timezone": "UTC"},
+               "data": [record, {"symbol": "OTHER", "value": 999}]}
+    assert json.loads(_prune_json_by_term(json.dumps(payload), "ACME")) == {**payload, "data": [record]}
+
+
+def test_json_filter_does_not_round_numbers_or_change_numeric_strings():
+    text = '{"symbol":"ACME","value":0.123456789012345678901,"count":12345678901234567890,"rate":1.20e-9,"code":"005930"}'
+    assert _prune_json_by_term(text, "ACME") == text
+
+
+@pytest.mark.parametrize("body,kwargs,flag", [
+    ('{"symbol":"OTHER","value":999}', {"jsonFilter": "ACME"}, "filter_no_match"),
+    ('[{"symbol":"OTHER","value":999}]', {"jsonFilter": "ACME"}, "filter_no_match"),
+    ('{"symbol":"ACME","value":120,"unit":"USD","observed_at":"2020-01-01"}', {"maxLength": 40}, "truncated"),
+    ('{"value":120', {}, "invalid_json"),
+])
+async def test_missing_or_incomplete_json_is_not_source_evidence(monkeypatch, body, kwargs, flag):
+    client = httpx.AsyncClient
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, text=body, headers={"content-type": "application/json"}))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client(transport=transport, **kw))
+    result = await web_fetch(WebFetchParams(url="https://example.org/quotes", **kwargs))
+    assert not result.success and result.metadata[flag]
+    assert not result.output
+    from rune.agent.web_grounding import WebGrounding
+
+    check = WebGrounding(required=True, requires_page=True)
+    assert not check.observe("web_fetch", {}, result)
+    assert check.blocker()
+
+
+@pytest.mark.parametrize("body", ['[]', '{}', 'null', '0', 'false'])
+async def test_valid_empty_or_zero_json_is_returned_without_inventing_a_failure(monkeypatch, body):
+    client = httpx.AsyncClient
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, text=body, headers={"content-type": "application/json"}))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client(transport=transport, **kw))
+    result = await web_fetch(WebFetchParams(url="https://example.org/data"))
+    assert result.success and result.output == body
+
+
+async def test_filter_recovery_keeps_the_observation_time_separate_from_fetch_time(monkeypatch):
+    client = httpx.AsyncClient
+    payload = {"symbol": "ACME", "value": 120, "unit": "USD", "observed_at": "2020-01-01"}
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json=payload))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client(transport=transport, **kw))
+    failed = await web_fetch(WebFetchParams(url="https://example.org/quotes", jsonFilter="missing"))
+    result = await web_fetch(WebFetchParams(url="https://example.org/quotes", jsonFilter="ACME"))
+    assert not failed.success and result.success
+    assert '"observed_at":"2020-01-01"' in result.output
+    assert result.metadata["retrieved_at"] != payload["observed_at"]
+
+
+async def test_large_json_points_to_filtering_when_a_larger_limit_cannot_help(monkeypatch):
+    client = httpx.AsyncClient
+    payload = {"unit": "celsius", "records": [{"station": "Other", "data": "x" * 30_000},
+                                              {"station": "North", "value": 17.125}]}
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json=payload))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client(transport=transport, **kw))
+    for limit in (8000, 100_000):
+        result = await web_fetch(WebFetchParams(url="https://example.org/data", maxLength=limit))
+        assert not result.success and "jsonFilter" in result.error and "increase maxLength" not in result.error
+    filtered = await web_fetch(WebFetchParams(url="https://example.org/data", maxLength=8000, jsonFilter="North"))
+    assert filtered.success and '"value":17.125' in filtered.output and '"unit":"celsius"' in filtered.output
 
 
 def test_html_to_text():

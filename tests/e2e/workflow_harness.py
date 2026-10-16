@@ -95,7 +95,8 @@ class Workflow:
                   "runs": self.runs, "decisions": self.decisions, "artifacts": artifacts,
                   "metrics": metrics(self.runs)}
         path = self.reporter(report, settings={"max_iterations": 16, "timeout_seconds": 180,
-                                             "cross_provider_failover": False, "browser_profile": "managed"})
+                                             "cross_provider_failover": False, "browser_profile": "managed",
+                                             **getattr(self, "settings", {})})
         costs = [(r["snapshot"].get("usage") or {}).get("cost", {}).get("usd") for r in self.runs]
         print(json.dumps({"provider": self.provider, "report": str(path) if path else None, "outcome": outcome,
                           "seconds": sum(r["seconds"] for r in self.runs),

@@ -87,7 +87,7 @@ def metrics(runs: list[dict]) -> dict:
         "seconds": sum(r["seconds"] for r in runs),
         "tokens": sum(tokens) if tokens and all(t is not None for t in tokens) and usage_complete else None,
         "known_tokens": sum(t or 0 for t in tokens),
-        "usd": sum(costs) if costs and all(c is not None for c in costs) else None,
+        "usd": sum(costs) if costs and all(c is not None for c in costs) and usage_complete else None,
         "known_usd": sum((u.get("cost") or {}).get("usd") if (u.get("cost") or {}).get("usd") is not None
                          else (u.get("cost") or {}).get("knownUsd") or 0 for u in usage),
         "model_calls": len(spans), "failed_model_calls": sum(s.get("status") == "interrupted" for s in spans),
@@ -111,6 +111,7 @@ def summarize(reports: list[dict]) -> list[dict]:
         passed = sum(t.get("outcome") == "passed" for t in trials)
         costs = [v["usd"] for v in values]
         total = sum(costs) if all(c is not None for c in costs) else None
+        failed_costs = [v["usd"] for t, v in zip(trials, values, strict=True) if t.get("outcome") != "passed"]
         phase_names = {phase for value in values for phase in value["model_seconds_by_phase"]}
         rows.append({"provider": provider, "model": model, "decision_backend": backend,
                      "comparison_key": comparison, "source": trials[0].get("evaluation", {}).get("source"),
@@ -119,6 +120,8 @@ def summarize(reports: list[dict]) -> list[dict]:
                      "trials": len(trials), "passed": passed, "success_rate": passed / len(trials),
                      "median_seconds": statistics.median(seconds), "min_seconds": min(seconds), "max_seconds": max(seconds),
                      "total_usd": total, "usd_per_success": total / passed if total is not None and passed else None,
+                     "seconds_per_success": sum(seconds) / passed if passed else None,
+                     "failed_usd": sum(failed_costs) if all(c is not None for c in failed_costs) else None,
                      "known_usd": sum(v["known_usd"] for v in values),
                      "unpriced_trials": sum(c is None for c in costs),
                      "model_calls": sum(v["model_calls"] for v in values),

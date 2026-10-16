@@ -512,7 +512,8 @@ def _build_typed_tool(
                     log.debug("cache_hit", capability=cap_name, key=cache_key)
                     if opts.on_tool_end is not None:
                         await opts.on_tool_end(cap_name, CapabilityResult(
-                            success=True, output=hit.output, metadata={"cached": True},
+                            success=True, output=hit.output,
+                            metadata={**deepcopy(hit.entry.result_metadata), "cached": True},
                         ))
                     from rune.agent.tool_output import CachedToolResult
 
@@ -827,6 +828,14 @@ def _format_tool_output(
 ) -> str:
     """Format tool output with structured prefixes consumed by the execution loop."""
     parts: list[str] = []
+
+    if (cap_name == "web_fetch" and result.success
+            and "json" in result.metadata.get("content_type", "").lower()
+            and len(result.output or "") > MAX_TOOL_OUTPUT_CHARS - 1000):
+        result.success = False
+        result.error = "The JSON records exceed the tool output limit. Narrow jsonFilter to retrieve complete records."
+        result.output = ""
+        result.metadata = {**result.metadata, "delivery_truncated": True}
 
     if result.success:
         if cap_name == "file_read" and result.metadata.get("raw") is True:

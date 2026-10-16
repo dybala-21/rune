@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -1142,8 +1143,10 @@ class StreamResult:
                     _answer_only = True
                     self.answer_budget_reserved = True
                     report_tools = [tool for tool in _tools or [] if (tool.get("function") or {}).get("name") == "task_blocked"]
+                    limit = "time" if time_to_answer else "tool rounds" if _tool_round >= _max_tool_rounds else "budget"
+                    limit_note = f"Rune runtime limit ({limit}): the tool phase has ended. Attribute unfinished work to this run limit. "
                     note = (
-                        "Finish this reply now using the retrieved evidence. No more tools are available for this turn. "
+                        limit_note + "Finish this reply now using the retrieved evidence. No more tools are available for this turn. "
                         "Give the useful verified facts with source links and clearly state what remains unverified. "
                         "Do not invent missing values or claim the whole request was verified."
                     )
@@ -1152,7 +1155,7 @@ class StreamResult:
                     _acompletion_kwargs.pop("tool_choice", None)
                     if report_tools:
                         note = (
-                            "Finish this reply now. No more tools may retrieve data or perform work. "
+                            limit_note + "Finish this reply now. No more tools may retrieve data or perform work. "
                             "If any required fact remains unavailable, use task_blocked to report the missing facts and sources tried; "
                             "this ends the run without another model call. Otherwise answer from verified evidence only."
                         )
@@ -2153,6 +2156,11 @@ class StreamResult:
         _group = "" if name.startswith("browser_") else self._TOOL_GROUPS.get(name, "")
 
         _MAX_FAILS = 3
+        failure_key = name
+        if name == "web_search" or (name == "web_fetch" and str(params.get("method", "GET")).upper() == "GET"):
+            # Count failures per request so other sources and filters remain available.
+            encoded = json.dumps(params, sort_keys=True, ensure_ascii=False, default=str).encode()
+            failure_key += ":" + hashlib.sha256(encoded).hexdigest()[:24]
 
         if _group and _group in self._blocked_groups:
             return (
@@ -2160,7 +2168,7 @@ class StreamResult:
                     f"Use web_search or web_fetch instead."
             )
 
-        if self._tool_fail_streak.get(name, 0) >= _MAX_FAILS:
+        if self._tool_fail_streak.get(failure_key, 0) >= _MAX_FAILS:
             recovery = self._tool_recovery() if self._tool_recovery else None
             if recovery and name in recovery and name == "table_requirements":
                 self._task_blocked = f"The required {name} check repeatedly failed. The result could not be verified."
@@ -2172,8 +2180,8 @@ class StreamResult:
                     f"All {_group} tools disabled. Use web_search instead."
                 )
             return (
-                f"[BLOCKED] {name} failed {_MAX_FAILS} times. "
-                f"Try a different approach."
+                f"[BLOCKED] This {name} request failed {_MAX_FAILS} times. "
+                "Change the source or arguments, or report the unresolved requirement."
             )
 
         func = self._tool_lookup.get(name)
@@ -2244,8 +2252,8 @@ class StreamResult:
             self._record_provenance(name, params, "" if isinstance(result, ReadToolResult) else result_str)
             is_failure = not isinstance(result, ReadToolResult) and _looks_like_tool_failure(result_str)
             if is_failure:
-                streak = self._tool_fail_streak.get(name, 0) + 1
-                self._tool_fail_streak[name] = streak
+                streak = self._tool_fail_streak.get(failure_key, 0) + 1
+                self._tool_fail_streak[failure_key] = streak
                 if streak == 2 and name == "browser_act":
                     result_str += (
                         "\n\nRead the current page before another action. "
@@ -2255,7 +2263,7 @@ class StreamResult:
                 if streak >= _MAX_FAILS and _group:
                     self._blocked_groups.add(_group)
             else:
-                self._tool_fail_streak[name] = 0
+                self._tool_fail_streak.pop(failure_key, None)
                 if name in {"browser_observe", "browser_navigate", "browser_open"}:
                     self._tool_fail_streak.pop("browser_act", None)
                     self._tool_fail_streak.pop("browser_batch", None)
@@ -2265,8 +2273,8 @@ class StreamResult:
                 return result
             return result.with_text(result_str) if isinstance(result, ToolOutput) else result_str
         except Exception as exc:
-            streak = self._tool_fail_streak.get(name, 0) + 1
-            self._tool_fail_streak[name] = streak
+            streak = self._tool_fail_streak.get(failure_key, 0) + 1
+            self._tool_fail_streak[failure_key] = streak
             if streak >= _MAX_FAILS and _group:
                 self._blocked_groups.add(_group)
             return f"Error executing {name}: {exc}"
