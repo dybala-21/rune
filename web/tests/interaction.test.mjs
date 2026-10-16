@@ -5,7 +5,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createServer } from 'vite';
 
-let server, latestTurn, retryAttachments, attachmentMime, ChatPanel, InputArea, retryRequestId, updateDelivery;
+let server, latestTurn, retryAttachments, attachmentMime, ChatPanel, InputArea, retryRequestId, updateDelivery, pickerPlacement;
 before(async () => {
   server = await createServer({
     root: fileURLToPath(new URL('..', import.meta.url)),
@@ -17,6 +17,7 @@ before(async () => {
   ({ attachmentMime } = await server.ssrLoadModule('/src/utils/attachments.ts'));
   ({ ChatPanel } = await server.ssrLoadModule('/src/components/ChatPanel.tsx'));
   ({ InputArea } = await server.ssrLoadModule('/src/components/InputArea.tsx'));
+  ({ pickerPlacement } = await server.ssrLoadModule('/src/components/PickerPopover.tsx'));
 });
 after(async () => { await server?.close(); });
 const message = (id, role, extra = {}) => ({ id, role, content: id, timestamp: Number(id), ...extra });
@@ -93,4 +94,34 @@ test('a late receipt removes only the delivery warning for its own request', () 
   const restored = updateDelivery(messages, 'accepted', 'accepted');
   assert.deepEqual(restored.map(m => m.id), ['user', 'delivery-other']);
   assert.equal(restored[0].delivery, 'accepted');
+});
+
+
+test('composer pickers open above the input and stay inside narrow viewports', () => {
+  const bottom = pickerPlacement({ top: 740, bottom: 774, left: 500 }, { width: 720, height: 800 });
+  assert.equal(bottom.transform, 'translateY(-100%)');
+  assert.ok(bottom.top - bottom.maxHeight >= 12);
+  assert.ok(bottom.left + bottom.width <= 708);
+  const narrow = pickerPlacement({ top: 360, bottom: 394, left: 210 }, { width: 320, height: 430 });
+  assert.equal(narrow.width, 296);
+  assert.equal(narrow.left, 12);
+  assert.ok(narrow.top - narrow.maxHeight >= 12);
+  const toolbar = pickerPlacement({ top: 12, bottom: 46, left: 20 }, { width: 1440, height: 960 });
+  assert.equal(toolbar.transform, undefined);
+  assert.equal(toolbar.top, 54);
+  assert.ok(toolbar.top + toolbar.maxHeight <= 948);
+});
+
+test('restored proposals stay collapsed beside the welcome screen without hiding chat', () => {
+  const suggestion = message('proposal', 'system', { suggestion: {
+    id: 'report', headline: '검토할 보고서', body: 'Inspect report', timestamp: 0,
+    state: { response: 'pending', result: {} },
+  } });
+  const empty = chat([suggestion]);
+  assert.match(empty, /<details class="suggestion-inbox">/);
+  assert.match(empty, /What’s next/);
+  assert.match(empty, /Inspect report/);
+  const ongoing = chat([message('1', 'user', { content: 'Keep this question' }), suggestion]);
+  assert.match(ongoing, /Keep this question/);
+  assert.doesNotMatch(ongoing, /welcome-title/);
 });

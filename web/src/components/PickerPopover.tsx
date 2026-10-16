@@ -11,9 +11,23 @@ interface PickerPopoverProps {
   busy?: boolean;
 }
 
+export function pickerPlacement(anchor: Pick<DOMRect, 'top' | 'bottom' | 'left'>, viewport: { width: number; height: number }) {
+  const width = Math.min(320, Math.max(0, viewport.width - 24));
+  const below = viewport.height - anchor.bottom - 20;
+  const above = anchor.top - 20;
+  const opensUp = below < Math.min(320, above);
+  return {
+    top: opensUp ? anchor.top - 8 : anchor.bottom + 8,
+    left: Math.max(12, Math.min(anchor.left, viewport.width - width - 12)),
+    width,
+    maxHeight: Math.max(0, Math.min(480, opensUp ? above : below)),
+    transform: opensUp ? 'translateY(-100%)' : undefined,
+  };
+}
+
 export function PickerPopover({ label, trigger, children, onOpen, menuKey, className = '', busy }: PickerPopoverProps) {
   const [open, setOpen] = useState(false);
-  const [position, setPosition] = useState({ top: 0, left: 0, width: 320, maxHeight: 480 });
+  const [position, setPosition] = useState<ReturnType<typeof pickerPlacement>>({ top: 0, left: 0, width: 320, maxHeight: 480, transform: undefined });
   const buttonRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const enterFromEnd = useRef(false);
@@ -33,13 +47,7 @@ export function PickerPopover({ label, trigger, children, onOpen, menuKey, class
     const place = () => {
       const anchor = buttonRef.current?.getBoundingClientRect();
       if (!anchor) return;
-      const width = Math.min(320, window.innerWidth - 24);
-      const top = anchor.bottom + 8;
-      setPosition({
-        top, width,
-        left: Math.max(12, Math.min(anchor.left, window.innerWidth - width - 12)),
-        maxHeight: Math.max(0, Math.min(480, window.innerHeight - top - 12)),
-      });
+      setPosition(pickerPlacement(anchor, { width: window.innerWidth, height: window.innerHeight }));
     };
     place();
     window.addEventListener('resize', place);

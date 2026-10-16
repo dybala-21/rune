@@ -250,7 +250,7 @@ export function SkillsPanel({ onClose, initialSkillName }: SkillsPanelProps) {
             style={{
               padding: '6px 14px',
               background: 'var(--accent)',
-              color: 'white',
+              color: 'var(--text-on-accent)',
               border: 'none',
               borderRadius: 'var(--radius-md)',
               fontSize: 12,
@@ -550,7 +550,7 @@ export function SkillsPanel({ onClose, initialSkillName }: SkillsPanelProps) {
                     background: 'var(--danger)',
                     border: 'none',
                     borderRadius: 'var(--radius-md)',
-                    color: 'white',
+                    color: 'var(--text-on-danger)',
                     fontSize: 12,
                     fontWeight: 600,
                     cursor: 'pointer',

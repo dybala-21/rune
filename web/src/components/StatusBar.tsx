@@ -1,7 +1,4 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { ModelPicker } from './ModelPicker';
-import { ReasoningPicker } from './ReasoningPicker';
-import type { ReasoningEffort } from '../api';
 import { ThemeToggle } from './ThemeToggle';
 import type { AgentState, StepInfo, TokenUsage as TokenUsageType } from '../types';
 import { TokenUsage } from './TokenUsage';
@@ -21,16 +18,12 @@ interface StatusBarProps {
   attentionLabel?: string;
   approvalMode?: string;
   activeModel?: { provider: string; model: string; source: 'active' | 'default' } | null;
-  reasoningSupported?: boolean;
-  reasoningEffort?: ReasoningEffort | null;
-  reasoningOptions?: ReasoningEffort[];
-  reasoningBudgets?: Partial<Record<ReasoningEffort, number>>;
   lastRunSuccess?: boolean | null;
   onOpenPalette?: () => void;
 }
 
 const STATE_LABELS: Record<AgentState, string> = {
-  idle: 'Ready', submitting: 'Sending…', running: 'Running', stopping: 'Stopping…', waiting_approval: 'Awaiting approval', waiting_question: 'Awaiting answer',
+  idle: 'Ready', submitting: 'Sending…', running: 'Working', stopping: 'Stopping…', waiting_approval: 'Waiting for approval', waiting_question: 'Waiting for your answer',
 };
 
 function formatTokensCompact(n: number): string {
@@ -41,8 +34,8 @@ function formatTokensCompact(n: number): string {
 
 export function StatusBar({
   trailing, connected, state, sidebarOpen, onToggleSidebar, tokenUsage,
-  currentStepInfo, currentActivity, attentionLabel, activeModel, reasoningSupported, reasoningEffort,
-  reasoningOptions, reasoningBudgets, approvalMode, lastRunSuccess = null, onOpenPalette, onToggleWorkbench, workbenchOpen,
+  currentStepInfo, currentActivity, attentionLabel, activeModel,
+  approvalMode, lastRunSuccess = null, onOpenPalette, onToggleWorkbench, workbenchOpen,
 }: StatusBarProps) {
   const [showTokens, setShowTokens] = useState(false);
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -61,26 +54,19 @@ export function StatusBar({
   return <header className="app-toolbar">
     <div className="toolbar-brand">
       {onToggleSidebar && <button className="toolbar-icon" onClick={onToggleSidebar}
-        aria-label={sidebarOpen ? 'Hide sessions' : 'Show sessions'} aria-expanded={sidebarOpen}>
+        aria-label={sidebarOpen ? 'Hide tasks' : 'Show tasks'} aria-expanded={sidebarOpen}>
         <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true">
           <rect x="2" y="3" width="14" height="12" rx="2" /><path d="M7 3v12" />
         </svg>
       </button>}
-      <RuneMark state={markState} size={24} title={connected ? `RUNE (${attentionLabel || STATE_LABELS[state]})` : 'RUNE — engine unreachable'} />
-      <span className="toolbar-wordmark">RUNE</span>
-    </div>
-
-    <div className="toolbar-models" aria-label="Model settings">
-      {activeModel && <ModelPicker active={activeModel} />}
-      {activeModel && reasoningSupported && !!reasoningOptions?.length && <ReasoningPicker
-        key={`${activeModel.provider}/${activeModel.model}`} model={activeModel}
-        effort={reasoningEffort ?? null} options={reasoningOptions} budgets={reasoningBudgets} />}
+      <div className="toolbar-logo"><RuneMark state={markState} size={32} title="Rune" /><span className="toolbar-wordmark">rune</span></div>
+      <span className="toolbar-section">My tasks</span>
     </div>
 
     <div className="toolbar-actions">
       <div className="toolbar-workspace">{trailing}</div>
       {onToggleWorkbench && <button className="toolbar-button work-toggle" onClick={onToggleWorkbench}
-        title="Show or hide work panel (⌘J)" aria-label={workbenchOpen ? 'Hide work panel' : 'Show work panel'} aria-expanded={workbenchOpen}>
+        title="Toggle work panel (⌘J)" aria-label={workbenchOpen ? 'Hide work panel' : 'Show work panel'} aria-expanded={workbenchOpen}>
         <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true">
           <rect x="2" y="3" width="12" height="10" rx="2" /><path d="M9 3v10" />
         </svg><span>Work</span>
@@ -92,7 +78,7 @@ export function StatusBar({
           <circle cx="8.5" cy="8.5" r="5.5" /><path d="m13 13 4 4" strokeLinecap="round" />
         </svg>
       </button>}
-      <span title={connected ? 'Connected' : 'Disconnected'}
+      <span role="img" aria-label={connected ? 'Connected' : 'Disconnected'} title={connected ? 'Connected' : 'Disconnected'}
         className={`toolbar-connection status-dot ${connected ? 'status-dot--success' : 'status-dot--danger'}`} />
     </div>
 
@@ -101,12 +87,12 @@ export function StatusBar({
         <span className={`status-dot ${attentionLabel ? 'status-dot--warning' : 'status-dot--pulse'}`} />
         <span>{attentionLabel || STATE_LABELS[state]}</span>
         {state === 'running' && !attentionLabel && currentStepInfo && <span className="toolbar-step">
-          Step {currentStepInfo.stepNumber}{currentStepInfo.tokens > 0 && ` · ${formatTokensCompact(currentStepInfo.tokens)}`}
+          Step {currentStepInfo.stepNumber}
         </span>}
         {state === 'running' && !attentionLabel && currentActivity && <span className="toolbar-current">{currentActivity}</span>}
       </div>}
       {approvalMode === 'bypass' && <span className="approval-mode-badge"
-        title="RUNE will not ask before risky commands, MCP writes, or network writes">Approvals off</span>}
+        title="Rune will not ask before risky commands, MCP writes, or network writes">Approvals off</span>}
       {tokenUsage && <div ref={popoverRef} className="toolbar-tokens">
         <button className="toolbar-button" aria-label="Token usage" aria-expanded={showTokens}
           onClick={() => setShowTokens(!showTokens)}>{formatTokensCompact(tokenUsage.total)} tokens</button>

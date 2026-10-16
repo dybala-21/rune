@@ -9,8 +9,9 @@ import { SessionSidebar } from './components/SessionSidebar';
 import { SettingsSidebar } from './components/SettingsSidebar';
 import { StatusBar } from './components/StatusBar';
 import { InputArea, type InputAreaHandle } from './components/InputArea';
-// Config panels are overlays, closed on first paint. Loading them on open
-// keeps their code (and MCP/Skills/Cron weight) out of the initial bundle.
+import { ModelControls } from './components/ModelControls';
+import { useFocusTrap } from './hooks/useFocusTrap';
+// Load settings panels on demand to keep the initial bundle small.
 const SkillsPanel = lazy(() => import('./components/SkillsPanel').then(m => ({ default: m.SkillsPanel })));
 const EnvPanel = lazy(() => import('./components/EnvPanel').then(m => ({ default: m.EnvPanel })));
 const CronPanel = lazy(() => import('./components/CronPanel').then(m => ({ default: m.CronPanel })));
@@ -36,7 +37,8 @@ function isWorkspaceTool(name: string): boolean {
 export function App() {
   const agent = useAgent();
   const history = useSessionHistory();
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [compact, setCompact] = useState(() => window.matchMedia('(max-width: 820px)').matches);
+  const [sidebarOpen, setSidebarOpen] = useState(() => !window.matchMedia('(max-width: 820px)').matches);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('chats');
   const [skillsPanelOpen, setSkillsPanelOpen] = useState(false);
   const [skillsPanelInitial, setSkillsPanelInitial] = useState<string | undefined>();
@@ -44,6 +46,8 @@ export function App() {
   const [cronPanelOpen, setCronPanelOpen] = useState(false);
   const [mcpPanelOpen, setMcpPanelOpen] = useState(false);
   const [markdownPanelOpen, setMarkdownPanelOpen] = useState(false);
+  const sidebarRef = useFocusTrap<HTMLDivElement>(compact && sidebarOpen
+    && !skillsPanelOpen && !envPanelOpen && !cronPanelOpen && !mcpPanelOpen && !markdownPanelOpen);
   const [configInfo, setConfigInfo] = useState<ConfigInfo | null>(null);
   const liveWorkbench = useWorkbenchState(getLiveSessionId());
   const historyWorkbench = useWorkbenchState(history.viewingSessionId);
@@ -66,7 +70,14 @@ export function App() {
     setWorkbenchOpen(true);
   }, [isViewingHistory, setComputerRequest, setWorkbenchTab, setWorkbenchDismissed, setWorkbenchOpen]);
   const desktopWait = desktopAttention(agent.toolCalls, !isViewingHistory && agent.state === 'running');
-  const attentionLabel = desktopWait === 'connection' ? 'Waiting for app access' : desktopWait === 'action' ? 'Review app action' : undefined;
+  const attentionLabel = desktopWait === 'connection' ? 'Waiting for app access' : desktopWait === 'action' ? 'Action needs review' : undefined;
+
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 820px)');
+    const resize = () => { setCompact(media.matches); if (media.matches) setSidebarOpen(false); };
+    media.addEventListener('change', resize);
+    return () => media.removeEventListener('change', resize);
+  }, []);
 
   const touchedWorkspace = useMemo(
     () => agent.toolCalls.some(tc => isWorkspaceTool(normalizeToolName(tc.toolName))),
@@ -92,6 +103,8 @@ export function App() {
     return name;
   }, [agent.state, agent.toolCalls]);
   const displayMessages = isViewingHistory ? (history.historyState?.messages ?? []) : agent.messages;
+  const taskTitle = displayMessages.find(message => message.role === 'user')?.content?.trim().split('\n')[0];
+  const liveTitle = agent.messages.find(message => message.role === 'user')?.content?.trim().split('\n')[0];
   const displayToolCalls = isViewingHistory ? (history.historyState?.toolCalls ?? []) : agent.toolCalls;
   const displayThinkingBlocks = isViewingHistory ? (history.historyState?.thinkingBlocks ?? []) : agent.thinkingBlocks;
   const displayActivitySummary = isViewingHistory ? (history.historyState?.activitySummary ?? null) : agent.activitySummary;
@@ -228,7 +241,7 @@ export function App() {
   };
 
   const paletteCommands: Command[] = [
-    { id: 'new', label: 'New chat', run: handleNewChat },
+    { id: 'new', label: 'New task', run: handleNewChat },
   ];
   if (!isViewingHistory) {
     paletteCommands.push({ id: 'computer', label: 'Open Computer', hint: '⌘⇧B', run: openComputer });
@@ -239,7 +252,7 @@ export function App() {
       run: () => { setWorkbenchDismissed(workbenchOpen); setWorkbenchOpen(o => !o); },
     });
   } else {
-    paletteCommands.push({ id: 'live', label: 'Back to live', run: () => handleSelectSession(null) });
+    paletteCommands.push({ id: 'live', label: 'Back to current task', run: () => handleSelectSession(null) });
   }
   paletteCommands.push(
     { id: 'skills', label: 'Open Skills', run: () => handleOpenSkillPanel() },
@@ -259,7 +272,7 @@ export function App() {
   }
 
   return (
-    <div style={{
+    <div className="app-root" style={{
       display: 'flex',
       flexDirection: 'column',
       height: '100dvh',
@@ -275,19 +288,15 @@ export function App() {
         currentActivity={currentActivity}
         attentionLabel={attentionLabel}
         activeModel={configInfo?.activeModel ?? null}
-        reasoningSupported={configInfo?.reasoningSupported}
-        reasoningEffort={configInfo?.reasoningEffort ?? null}
-        reasoningOptions={configInfo?.reasoningOptions}
-        reasoningBudgets={configInfo?.reasoningBudgets}
         approvalMode={configInfo?.approvalMode}
         lastRunSuccess={runVerdict}
         onOpenPalette={() => setPaletteOpen(true)}
         trailing={!isViewingHistory ? <WorkspaceChip /> : null}
         workbenchOpen={workbenchOpen}
-        onToggleWorkbench={!isViewingHistory ? () => {
+        onToggleWorkbench={() => {
           setWorkbenchDismissed(workbenchOpen);
           setWorkbenchOpen(o => !o);
-        } : undefined}
+        }}
       />
 
       {!agent.connected && (
@@ -310,19 +319,21 @@ export function App() {
         </div>
       )}
 
-      <div className="app-body" style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-        {sidebarOpen && <button type="button" className="sidebar-backdrop" aria-label="Close sessions"
+      <div className="app-body" data-sidebar={sidebarOpen} style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+        {sidebarOpen && <button type="button" className="sidebar-backdrop" aria-label="Hide tasks" tabIndex={-1}
           onClick={() => setSidebarOpen(false)} />}
-        {/* Sidebar with slide animation */}
-        <div className="app-sidebar" inert={!sidebarOpen} aria-hidden={!sidebarOpen} style={{
-          width: sidebarOpen ? 260 : 0,
+        <div ref={sidebarRef} className="app-sidebar" data-section={sidebarTab}
+          role={compact && sidebarOpen ? 'dialog' : undefined} aria-modal={compact && sidebarOpen || undefined}
+          aria-label="Tasks" inert={!sidebarOpen} aria-hidden={!sidebarOpen}
+          onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setSidebarOpen(false); } }} style={{
+          width: sidebarOpen ? 'var(--sidebar-width)' : 0,
           flexShrink: 0,
           overflow: 'hidden',
           transition: 'width 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
           borderRight: sidebarOpen ? '1px solid var(--border)' : 'none',
         }}>
-          <div style={{ width: 260, height: '100%', display: 'flex', flexDirection: 'column' }}>
-            {/* Tab navigation */}
+          <div style={{ width: 'var(--sidebar-width)', height: '100%', display: 'flex', flexDirection: 'column' }}>
+            {compact && <button type="button" className="sidebar-close" onClick={() => setSidebarOpen(false)}>Close tasks <span aria-hidden="true">×</span></button>}
             <div style={{
               display: 'flex',
               borderBottom: '1px solid var(--border)',
@@ -336,7 +347,7 @@ export function App() {
                     <path d="M2 3a1 1 0 011-1h8a1 1 0 011 1v6a1 1 0 01-1 1H5l-2 2V10H3a1 1 0 01-1-1V3z" />
                   </svg>
                 }
-                label="Chats"
+                label="Tasks"
               />
               <SidebarTabButton
                 active={sidebarTab === 'settings'}
@@ -358,6 +369,8 @@ export function App() {
                   currentSessionId={history.viewingSessionId}
                   onSelectSession={handleSelectSession}
                   onNewChat={handleNewChat}
+                  liveTitle={liveTitle}
+                  onOpenSchedule={() => setCronPanelOpen(true)}
                 />
               )}
               {sidebarTab === 'settings' && (
@@ -373,8 +386,7 @@ export function App() {
           </div>
         </div>
 
-        {/* Main content area */}
-        <div style={{
+        <div className="task-space" style={{
           flex: 1,
           display: 'flex',
           flexDirection: 'column',
@@ -382,6 +394,10 @@ export function App() {
           minWidth: 0,
           position: 'relative',
         }}>
+          {taskTitle && <header className="task-heading">
+            <span className="task-eyebrow">{isViewingHistory ? 'Past task' : 'Current task'}</span>
+            <h1 title={taskTitle}>{taskTitle}</h1>
+          </header>}
           {/* History banner */}
           {isViewingHistory && (
             <div className="fade-in" style={{
@@ -403,7 +419,7 @@ export function App() {
                 flexShrink: 0,
               }} />
               <span style={{ flex: 1, minWidth: 130 }}>
-                Viewing past session
+                Viewing a past task
                 {history.loading && ' ...'}
               </span>
               <div className="notice-actions">
@@ -420,21 +436,21 @@ export function App() {
                     fontWeight: 600,
                   }}
                 >
-                  {agent.loadingConversation ? 'Opening chat…' : 'Continue this chat'}
+                  {agent.loadingConversation ? 'Opening task…' : 'Continue this task'}
                 </button>
                 <button
                   onClick={() => handleSelectSession(null)}
                   style={{
                     padding: '5px 14px',
                     background: 'var(--accent)',
-                    color: 'white',
+                    color: 'var(--text-on-accent)',
                     border: 'none',
                     borderRadius: 'var(--radius-md)',
                     fontSize: 12,
                     fontWeight: 600,
                   }}
                 >
-                  Back to live
+                  Back to current task
                 </button>
               </div>
             </div>
@@ -467,11 +483,10 @@ export function App() {
                 flexShrink: 0,
               }} />
               <span style={{ fontSize: 13, color: 'var(--text-secondary)', flex: 1, minWidth: 150 }}>
-                Saved draft
+                Saved conversation
                 {' · '}
-                {agent.savedDraft.messageCount} messages
-                {' · '}
-                {agent.savedDraft.toolCallCount} tools
+                {agent.savedDraft.messageCount} {agent.savedDraft.messageCount === 1 ? 'message' : 'messages'}
+                {agent.savedDraft.toolCallCount > 0 && ` · ${agent.savedDraft.toolCallCount} tool ${agent.savedDraft.toolCallCount === 1 ? 'call' : 'calls'}`}
               </span>
               <div className="notice-actions">
                 <button
@@ -479,7 +494,7 @@ export function App() {
                   style={{
                     padding: '5px 12px',
                     background: 'var(--accent)',
-                    color: 'white',
+                    color: 'var(--text-on-accent)',
                     border: 'none',
                     borderRadius: 'var(--radius-md)',
                     fontSize: 12,
@@ -500,7 +515,7 @@ export function App() {
                     fontWeight: 500,
                   }}
                 >
-                  Dismiss
+                  Discard
                 </button>
               </div>
             </div>
@@ -597,6 +612,7 @@ export function App() {
                     ? agent.sendMessage
                     : undefined
                 }
+                onDraft={!isViewingHistory && agent.connected ? text => inputAreaRef.current?.setDraft(text) : undefined}
                 streamFooter={
                   /* First coding activity with no pinned workspace → ask in
                      the stream. The picker self-hides once a folder is set. */
@@ -647,11 +663,12 @@ export function App() {
                     color: 'var(--text-muted)',
                     fontSize: 12,
                   }}>
-                    Past conversation — type to pick up where you left off
+                    Send a message to continue this task
                   </div>
                 </div>
               ) : null}
               <InputArea
+                settings={<ModelControls config={configInfo} />}
                 conversationKey={history.viewingSessionId ?? getLiveSessionId()}
                 ref={inputAreaRef}
                 onSend={isViewingHistory ? continueHistory : agent.sendMessage}
@@ -659,7 +676,7 @@ export function App() {
                 isRunning={!isViewingHistory && agent.state !== 'idle'}
                 isStopping={agent.state === 'stopping' || agent.state === 'submitting'}
                 attentionLabel={agent.state === 'submitting' ? 'Sending…' : agent.state === 'stopping' ? 'Stopping…' : attentionLabel}
-                sendBlockedReason={isViewingHistory && agent.state !== 'idle' ? 'Your live task is still running. Go Back to live to view or stop it.' : agent.loadingConversation ? 'Opening conversation…' : undefined}
+                sendBlockedReason={isViewingHistory && agent.state !== 'idle' ? 'Your current task is still running. Return to it to view or stop it.' : agent.loadingConversation ? 'Opening conversation…' : undefined}
                 disabled={!agent.connected}
               />
             </div>

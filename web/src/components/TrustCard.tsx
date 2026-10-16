@@ -95,7 +95,7 @@ export function TrustCard({ trust, onRetry, onEscalate }: TrustCardProps) {
                       type="button"
                       onClick={() => { setConfirmCloud(false); onEscalate?.(); }}
                       style={{
-                        background: 'var(--warning)', color: '#0A1319', border: 'none',
+                        background: 'var(--warning)', color: 'var(--text-on-accent)', border: 'none',
                         borderRadius: 'var(--radius-sm)', padding: '5px 12px',
                         fontSize: 12, fontWeight: 600, cursor: 'pointer',
                       }}
@@ -122,7 +122,7 @@ export function TrustCard({ trust, onRetry, onEscalate }: TrustCardProps) {
                       type="button"
                       onClick={() => { if (esc.isCloud) setConfirmCloud(true); else onEscalate(); }}
                       style={{
-                        background: 'var(--accent)', color: '#0A1319', border: 'none',
+                        background: 'var(--accent)', color: 'var(--text-on-accent)', border: 'none',
                         borderRadius: 'var(--radius-sm)', padding: '5px 12px',
                         fontSize: 12, fontWeight: 600, cursor: 'pointer',
                       }}
@@ -150,7 +150,7 @@ export function TrustCard({ trust, onRetry, onEscalate }: TrustCardProps) {
                     }
                   }}
                   style={{
-                    background: 'var(--accent)', color: '#0A1319', border: 'none',
+                    background: 'var(--accent)', color: 'var(--text-on-accent)', border: 'none',
                     borderRadius: 'var(--radius-sm)', padding: '5px 12px',
                     fontSize: 12, fontWeight: 600, cursor: 'pointer',
                   }}

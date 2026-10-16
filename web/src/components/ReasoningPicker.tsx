@@ -75,7 +75,7 @@ export function ReasoningPicker({ effort, options, model, budgets = {} }: {
         </span>
         {selected === level && <SelectedCheck />}
       </button>)}
-      <div className="picker-footer">Saved for this model. Higher levels can take longer.</div>
+      <div className="picker-footer">Saved for this model. Deeper reasoning can take longer.</div>
     </>}
   </PickerPopover>;
 }

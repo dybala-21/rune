@@ -526,7 +526,7 @@ const primaryButtonStyle: React.CSSProperties = {
   borderRadius: 'var(--radius-md)',
   border: '1px solid var(--accent)',
   background: 'var(--accent)',
-  color: 'white',
+  color: 'var(--text-on-accent)',
   fontSize: 12,
   fontWeight: 600,
   cursor: 'pointer',

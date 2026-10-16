@@ -1,217 +1,94 @@
 import { useEffect, useState } from 'react';
-import { fetchSessions, type SessionInfo } from '../api';
+import { fetchSessions, getLiveSessionId, type SessionInfo } from '../api';
 
 interface SessionSidebarProps {
   currentSessionId: string | null;
   onSelectSession: (sessionId: string | null) => void;
   onNewChat?: () => void;
+  liveTitle?: string;
+  onOpenSchedule?: () => void;
 }
 
-type DateGroup = 'Today' | 'Yesterday' | 'Previous 7 days' | 'Older';
+type DateGroup = 'Today' | 'Yesterday' | 'Previous 7 days' | 'Earlier';
+const GROUPS: DateGroup[] = ['Today', 'Yesterday', 'Previous 7 days', 'Earlier'];
 
-function getDateGroup(iso: string): DateGroup {
-  const d = new Date(iso);
-  const now = new Date();
-  const diff = now.getTime() - d.getTime();
-  const days = diff / 86400000;
-
-  if (days < 1 && d.getDate() === now.getDate()) return 'Today';
-  if (days < 2 && d.getDate() === new Date(now.getTime() - 86400000).getDate()) return 'Yesterday';
-  if (days < 7) return 'Previous 7 days';
-  return 'Older';
+function dateGroup(iso: string): DateGroup {
+  const date = new Date(iso), now = new Date();
+  if (date.toDateString() === now.toDateString()) return 'Today';
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (date.toDateString() === yesterday.toDateString()) return 'Yesterday';
+  return now.getTime() - date.getTime() < 7 * 86400000 ? 'Previous 7 days' : 'Earlier';
 }
 
-function formatTime(iso: string): string {
-  const d = new Date(iso);
-  const now = new Date();
-  const diff = now.getTime() - d.getTime();
-  if (diff < 60000) return 'just now';
-  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
-  if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
-  return d.toLocaleDateString();
+function dateLabel(iso: string): string {
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return '';
+  return new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric' }).format(date);
 }
 
-export function SessionSidebar({ currentSessionId, onSelectSession, onNewChat }: SessionSidebarProps) {
+export function SessionSidebar({ currentSessionId, onSelectSession, onNewChat, liveTitle, onOpenSchedule }: SessionSidebarProps) {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+  const [retry, setRetry] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
       try {
         const result = await fetchSessions({ limit: 50 });
-        if (!cancelled) setSessions(result.sessions);
+        if (!cancelled) { setSessions(result.sessions); setError(false); }
       } catch {
-        // keep empty
+        if (!cancelled) setError(true);
       } finally {
         if (!cancelled) setLoading(false);
       }
     };
-    load();
+    void load();
     const timer = setInterval(load, 30000);
     return () => { cancelled = true; clearInterval(timer); };
-  }, []);
+  }, [retry]);
 
-  // Group sessions by date
-  const groups = new Map<DateGroup, SessionInfo[]>();
-  for (const s of sessions) {
-    const group = getDateGroup(s.updatedAt);
-    if (!groups.has(group)) groups.set(group, []);
-    groups.get(group)!.push(s);
-  }
-
-  const groupOrder: DateGroup[] = ['Today', 'Yesterday', 'Previous 7 days', 'Older'];
-
-  return (
-    <div className="session-sidebar" style={{
-      display: 'flex',
-      flexDirection: 'column',
-      height: '100%',
-    }}>
-      {/* Header + New Chat */}
-      <div style={{ padding: '14px 14px 10px' }}>
-        <button
-          onClick={() => {
-            if (onNewChat) {
-              onNewChat();
-              return;
-            }
-            onSelectSession(null);
-          }}
-          style={{
-            width: '100%',
-            padding: '9px 14px',
-            background: 'var(--accent-subtle)',
-            color: 'var(--accent)',
-            border: '1px solid transparent',
-            borderRadius: 'var(--radius-md)',
-            fontSize: 13,
-            fontWeight: 600,
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            transition: 'all 0.15s',
-          }}
-        >
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-            <line x1="8" y1="3" x2="8" y2="13" />
-            <line x1="3" y1="8" x2="13" y2="8" />
-          </svg>
-          New Chat
-        </button>
-      </div>
-
-      {/* Live session */}
-      <button
-        onClick={() => onSelectSession(null)}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          margin: '0 8px',
-          padding: '9px 12px',
-          background: currentSessionId === null ? 'var(--bg-tertiary)' : 'transparent',
-          border: 'none',
-          borderRadius: 'var(--radius-md)',
-          color: 'var(--text-primary)',
-          fontSize: 13,
-          cursor: 'pointer',
-          textAlign: 'left',
-          width: 'calc(100% - 16px)',
-          transition: 'background 0.15s',
-          borderLeft: currentSessionId === null ? '2px solid var(--accent)' : '2px solid transparent',
-        }}
-      >
-        <span className="status-dot status-dot--success" style={{ width: 6, height: 6 }} />
-        <span style={{ fontWeight: 500 }}>Live</span>
+  const liveSessionId = getLiveSessionId();
+  const saved = sessions.filter(session => session.id !== liveSessionId);
+  return <nav className="session-sidebar" aria-label="Task list">
+    <div className="session-create">
+      <button type="button" className="new-task-button" onClick={() => onNewChat ? onNewChat() : onSelectSession(null)}>
+        <span aria-hidden="true">＋</span> New task
       </button>
-
-      {/* Session list */}
-      <div style={{ flex: 1, overflowY: 'auto', paddingTop: 8 }}>
-        {loading ? (
-          <div style={{ padding: '8px', display: 'flex', flexDirection: 'column', gap: 10 }} aria-label="Loading sessions" aria-busy="true">
-            {[0, 1, 2, 3].map(i => (
-              <div key={i} style={{ padding: '0 4px', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                <div className="skeleton" style={{ height: 12, width: `${85 - i * 8}%` }} />
-                <div className="skeleton" style={{ height: 9, width: '40%', opacity: 0.6 }} />
-              </div>
-            ))}
-          </div>
-        ) : sessions.length === 0 ? (
-          <div style={{ padding: '24px 14px', color: 'var(--text-muted)', fontSize: 12, textAlign: 'center' }}>
-            No past sessions
-          </div>
-        ) : (
-          groupOrder.map(groupName => {
-            const items = groups.get(groupName);
-            if (!items || items.length === 0) return null;
-            return (
-              <div key={groupName}>
-                <div style={{
-                  padding: '12px 14px 5px',
-                  fontFamily: 'var(--font-mono)',
-                  fontSize: 10,
-                  fontWeight: 600,
-                  color: 'var(--text-muted)',
-                  letterSpacing: '0.16em',
-                  textTransform: 'uppercase',
-                }}>
-                  {groupName}
-                </div>
-                {items.map(s => (
-                  <button
-                    className="session-item"
-                    key={s.id}
-                    onClick={() => onSelectSession(s.id)}
-                    style={{
-                      display: 'block',
-                      width: 'calc(100% - 16px)',
-                      margin: '0 8px',
-                      padding: '9px 12px',
-                      background: currentSessionId === s.id ? 'var(--bg-tertiary)' : 'transparent',
-                      border: 'none',
-                      borderRadius: 'var(--radius-md)',
-                      cursor: 'pointer',
-                      textAlign: 'left',
-                      borderLeft: currentSessionId === s.id ? '2px solid var(--accent)' : '2px solid transparent',
-                      transition: 'background 0.15s',
-                    }}
-                    onMouseEnter={e => {
-                      if (currentSessionId !== s.id) e.currentTarget.style.background = 'var(--bg-hover)';
-                    }}
-                    onMouseLeave={e => {
-                      if (currentSessionId !== s.id) e.currentTarget.style.background = 'transparent';
-                    }}
-                  >
-                    <div style={{
-                      fontSize: 13,
-                      color: 'var(--text-primary)',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      display: '-webkit-box',
-                      WebkitLineClamp: 2,
-                      WebkitBoxOrient: 'vertical',
-                      lineHeight: 1.4,
-                    }}>
-                      {s.title || 'Untitled'}
-                    </div>
-                    <div style={{
-                      fontSize: 11,
-                      color: 'var(--text-muted)',
-                      marginTop: 3,
-                      display: 'flex',
-                      gap: 8,
-                    }}>
-                      <span>{s.turnCount} turns</span>
-                      <span>{formatTime(s.updatedAt)}</span>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            );
-          })
-        )}
-      </div>
     </div>
-  );
+    <div className="session-current">
+      <p className="session-group-label">Current</p>
+      <button type="button" className="session-item" aria-current={currentSessionId === null ? 'page' : undefined}
+        onClick={() => onSelectSession(null)} title={liveTitle || 'New task'}>
+        <span className="session-title">{liveTitle || 'New task'}</span>
+        <span className="session-meta"><span className="session-current-dot" /> Current conversation</span>
+      </button>
+    </div>
+    <div className="session-list">
+      {error && <div className="session-error" role="status">Couldn’t load tasks.
+        <button type="button" onClick={() => setRetry(value => value + 1)}>Try again</button>
+      </div>}
+      {loading ? <div className="session-loading" aria-label="Loading tasks" aria-busy="true">
+        {[0, 1, 2].map(index => <div key={index} className="skeleton" />)}
+      </div> : !saved.length && !error ? <p className="session-empty">Your past tasks will appear here.</p> : GROUPS.map(group => {
+        const items = saved.filter(session => dateGroup(session.updatedAt) === group);
+        if (!items.length) return null;
+        return <section key={group}>
+          <h2 className="session-group-label">{group}</h2>
+          {items.map(session => <button type="button" className="session-item" key={session.id}
+            aria-current={currentSessionId === session.id ? 'page' : undefined}
+            onClick={() => onSelectSession(session.id)} title={session.title || 'Untitled task'}>
+            <span className="session-title">{session.title || 'Untitled task'}</span>
+            <span className="session-meta"><span>{session.turnCount} {session.turnCount === 1 ? 'message' : 'messages'}</span><time dateTime={session.updatedAt}>{dateLabel(session.updatedAt)}</time></span>
+          </button>)}
+        </section>;
+      })}
+    </div>
+    {onOpenSchedule && <div className="session-footer"><button type="button" onClick={onOpenSchedule}>
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4m10-4v4M3 11h18"/></svg>
+      Scheduled tasks
+    </button></div>}
+  </nav>;
 }

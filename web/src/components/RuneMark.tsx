@@ -1,85 +1,17 @@
-/**
- * RUNE's mark: three concentric arcs with staggered gaps and one bright
- * leading segment. Same geometry as desktop/build/icon.png.
- */
-export type MarkState =
-  | 'idle'
-  | 'thinking'
-  | 'working'
-  | 'passed'
-  | 'failed'
-  | 'warning';
-
-// Only the leading segment takes the state colour — the arcs stay fixed so the
-// silhouette doesn't change.
-const LEAD_COLOR: Record<MarkState, string> = {
-  idle: 'var(--rune-idle)',
-  thinking: 'var(--rune-idle)',
-  working: 'var(--rune-working)',
-  passed: 'var(--rune-passed)',
-  failed: 'var(--danger)',
-  warning: 'var(--danger)',
-};
-
-const STRUCT = '#2C7E9B';
-
-/** Dash pattern drawing `count` arcs of `arcDeg`, evenly spaced around radius `r`. */
-function dashes(r: number, arcDeg: number, count: number): string {
-  const circumference = 2 * Math.PI * r;
-  const step = circumference / count;
-  const on = circumference * (arcDeg / 360);
-  return `${on} ${step - on}`;
-}
+export type MarkState = 'idle' | 'thinking' | 'working' | 'passed' | 'failed' | 'warning';
 
 interface RuneMarkProps {
   state?: MarkState;
-  /** Rendered box in px (the mark is square). */
   size?: number;
   title?: string;
 }
 
-export function RuneMark({ state = 'idle', size = 24, title }: RuneMarkProps) {
-  // viewBox is 32x32, centred on 16,16.
-  const r1 = 13.2;
-  const r2 = 9.9;
-  const r3 = 6.6;
-  const w = 1.7;
-  const lead = LEAD_COLOR[state];
-  const c1 = 2 * Math.PI * r1;
-
+export function RuneMark({ state = 'idle', size = 24, title = 'Rune' }: RuneMarkProps) {
   return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 32 32"
-      fill="none"
-      role="img"
-      aria-label={title ?? 'RUNE'}
-      style={{ display: 'block', flexShrink: 0 }}
-    >
-      {title && <title>{title}</title>}
-
-      {/* Gaps are offset per ring so they never line up */}
-      <circle
-        cx="16" cy="16" r={r1} stroke={STRUCT} strokeWidth={w} strokeLinecap="butt"
-        strokeDasharray={dashes(r1, 72, 2)} transform="rotate(-70 16 16)"
-      />
-      <circle
-        cx="16" cy="16" r={r2} stroke={STRUCT} strokeWidth={w} strokeLinecap="butt"
-        strokeDasharray={dashes(r2, 61, 2)} transform="rotate(64 16 16)"
-      />
-      <circle
-        cx="16" cy="16" r={r3} stroke={STRUCT} strokeWidth={w} strokeLinecap="butt"
-        strokeDasharray={dashes(r3, 54, 2)} transform="rotate(-160 16 16)"
-      />
-
-      {/* Leading segment */}
-      <circle
-        cx="16" cy="16" r={r1} stroke={lead} strokeWidth={w} strokeLinecap="butt"
-        strokeDasharray={`${c1 * (62 / 360)} ${c1}`} transform="rotate(-70 16 16)"
-      />
-
-      <circle cx="16" cy="16" r="2.6" fill={lead} />
+    <svg width={size} height={size} viewBox="0 0 32 32" fill="currentColor"
+      className="rune-mark" data-state={state} role="img" aria-label={title}>
+      <path d="M4.5 9.2 20.8 1.6a4 4 0 0 1 3.2-.1l4.1 1.7a2 2 0 0 1 1.2 1.8v4.3a2 2 0 0 1-1.2 1.8L17.2 16 4.5 9.2Z" />
+      <path d="M3.7 10.3c-.8 1.2-1 2.5-1 4V29a1.1 1.1 0 0 0 1.6 1l8.5-3.8a2 2 0 0 0 1.2-1.8v-6.7c0-1-.4-1.8-1.1-2.5l-9.2-4.9Z" />
     </svg>
   );
 }

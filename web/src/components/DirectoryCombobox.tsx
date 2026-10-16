@@ -153,7 +153,7 @@ export function DirectoryCombobox({ recents = [], onChoose, autoFocus, placehold
                   title="Choose this folder"
                   onMouseDown={e => { e.preventDefault(); e.stopPropagation(); onChoose(row.path); }}
                   style={{
-                    marginLeft: 'auto', background: 'var(--accent)', color: '#0A1319',
+                    marginLeft: 'auto', background: 'var(--accent)', color: 'var(--text-on-accent)',
                     border: 'none', borderRadius: 'var(--radius-sm)', padding: '2px 8px',
                     fontSize: 11, fontWeight: 600, cursor: 'pointer',
                   }}

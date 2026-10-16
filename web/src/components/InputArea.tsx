@@ -1,4 +1,4 @@
-import { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef } from 'react';
+import { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, type ReactNode } from 'react';
 import { CommandPalette } from './CommandPalette';
 import { transcribeAudio } from '../api';
 import type { PendingAttachment } from '../types';
@@ -8,9 +8,11 @@ import { attachmentMime, ATTACHMENT_ACCEPT, ATTACHMENT_HELP, MAX_ATTACHMENT_BYTE
 export interface InputAreaHandle {
   /** Attach files dropped elsewhere (e.g. the chat area). */
   addFiles: (files: FileList | File[]) => void;
+  setDraft: (text: string) => void;
 }
 
 interface InputAreaProps {
+  settings?: ReactNode;
   conversationKey?: string;
   onSend: (text: string, attachments?: PendingAttachment[]) => void | boolean | Promise<void | boolean>;
   onAbort: () => void;
@@ -22,7 +24,7 @@ interface InputAreaProps {
 }
 
 export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function InputArea(
-  { conversationKey = 'live', onSend, onAbort, isRunning, isStopping, disabled, attentionLabel, sendBlockedReason }: InputAreaProps,
+  { conversationKey = 'live', onSend, onAbort, isRunning, isStopping, disabled, attentionLabel, sendBlockedReason, settings }: InputAreaProps,
   ref,
 ) {
   const draftRevision = useRef(0);
@@ -197,7 +199,14 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     setAttachNotice(rejected.join(' · '));
   }, []);
 
-  useImperativeHandle(ref, () => ({ addFiles: processFiles }), [processFiles]);
+  useImperativeHandle(ref, () => ({
+    addFiles: processFiles,
+    setDraft(text) {
+      const previous = textareaRef.current?.value ?? '';
+      setValue(previous.trim() ? `${previous}\n${text}` : text);
+      textareaRef.current?.focus();
+    },
+  }), [processFiles]);
 
   const removeAttachment = useCallback((id: string) => {
     const att = attachmentsRef.current.find(a => a.id === id);
@@ -399,7 +408,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         style={{
           maxWidth: 800,
           margin: '0 auto',
-          borderRadius: 'var(--radius-xl)',
+          borderRadius: 'var(--radius-md)',
           border: isDragOver ? '2px solid var(--accent)' : '1px solid var(--border)',
           pointerEvents: 'auto',
           overflow: showCommands ? 'visible' : 'hidden',
@@ -557,12 +566,12 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             rows={1}
             placeholder={
               isDragOver
-                ? 'Drop files here...'
+                ? 'Drop files here'
                 : disabled
-                  ? 'Connecting...'
+                  ? 'Connecting…'
                   : isRunning
                     ? 'Draft your next message…'
-                    : 'Message RUNE...'
+                    : 'Message Rune…'
             }
             disabled={disabled}
             aria-disabled={disabled}
@@ -596,7 +605,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               aria-label="Stop generation"
               style={{
                 width: 36, height: 36, borderRadius: '50%',
-                background: 'var(--danger)', color: 'white',
+                background: 'var(--danger)', color: 'var(--text-on-danger)',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                 flexShrink: 0, fontSize: 14, marginBottom: 4,
               }}
@@ -612,8 +621,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               aria-label="Send message"
               style={{
                 width: 36, height: 36, borderRadius: '50%',
-                background: disabled ? 'var(--bg-tertiary)' : 'var(--accent)',
-                color: disabled ? 'var(--text-muted)' : '#0A1319',
+                background: disabled ? 'var(--bg-tertiary)' : 'var(--button-primary)',
+                color: disabled ? 'var(--text-muted)' : 'var(--button-foreground)',
                 fontWeight: 700,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                 flexShrink: 0, fontSize: 16, marginBottom: 4,
@@ -623,6 +632,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             </button>
           )}
         </div>
+        {settings && <div className="composer-settings">{settings}</div>}
         <div className="composer-hint" style={{
           fontSize: 11,
           color: 'var(--text-muted)',
@@ -633,7 +643,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             : disabled ? ''
             : isDragOver
               ? 'Drop to attach'
-              : 'Enter to send \u00B7 Shift+Enter for newline \u00B7 \u2191 recall')}
+              : 'Enter to send · Shift+Enter for a new line')}
         </div>
       </div>
     </div>

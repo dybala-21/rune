@@ -1,21 +1,20 @@
-import { RuneMark } from './RuneMark';
 import { WorkspaceSetupRow } from './WorkspaceSetupRow';
 
 const SUGGESTIONS = [
-  { label: 'Build & fix', description: 'Find and fix a failing test', path: 'M9 8l-5 4 5 4M15 8l5 4-5 4' },
-  { label: 'Make sense of it', description: 'Summarize this project', path: 'M7 3h8l4 4v14H7z M14 3v5h5 M10 12h6 M10 16h6' },
-  { label: 'Explore & research', description: "What's new with AI agents?", path: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0 M3 12h18 M12 3c3 3 3 15 0 18 M12 3c-3 3-3 15 0 18' },
+  { label: 'Review a document', description: 'Summarize the decisions and next steps in these meeting notes.', path: 'M7 3h8l4 4v14H7z M14 3v5h5 M10 12h6 M10 16h6' },
+  { label: 'Explore a codebase', description: 'Review this project’s structure and suggest improvements.', path: 'M9 8l-5 4 5 4M15 8l5 4-5 4' },
+  { label: 'Compare files', description: 'Compare the attached files and flag differences worth checking.', path: 'M4 5h6v14H4z M14 5h6v14h-6z M7 9h0 M17 9h0' },
 ];
 
 export function WelcomePanel({ onSuggest }: { onSuggest?: (text: string) => void }) {
   return <section className="welcome-panel" aria-labelledby="welcome-title">
-    <div className="welcome-brand"><RuneMark state="idle" size={38} title="RUNE" /><span>Your personal workspace</span></div>
-    <h1 id="welcome-title">What’s on your mind?</h1>
-    <p className="welcome-description">A question, a rough idea, a task to finish.<br />Let’s work through it.</p>
+    <p className="welcome-eyebrow">New task</p>
+    <h1 id="welcome-title">What’s next?</h1>
+    <p className="welcome-description">Pick up where you left off, or bring something new.</p>
     <div className="welcome-suggestions">
       {SUGGESTIONS.map(item => <button key={item.label} type="button" className="welcome-suggestion"
         onClick={onSuggest ? () => onSuggest(item.description) : undefined} disabled={!onSuggest}>
-        <span className="welcome-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none"
+        <span className="welcome-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none"
           stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
           <path d={item.path} />
         </svg></span>

@@ -218,7 +218,7 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
             style={{
               padding: '6px 14px',
               background: 'var(--accent)',
-              color: 'white',
+              color: 'var(--text-on-accent)',
               border: 'none',
               borderRadius: 'var(--radius-md)',
               fontSize: 12,
@@ -525,7 +525,7 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
                     background: 'var(--danger)',
                     border: 'none',
                     borderRadius: 'var(--radius-md)',
-                    color: 'white',
+                    color: 'var(--text-on-danger)',
                     fontSize: 12,
                     fontWeight: 600,
                     cursor: 'pointer',
