@@ -44,7 +44,12 @@ from rune.agent.completion_gate import (
     evaluate_completion_gate,
 )
 from rune.agent.failover import FailoverManager, classify_error
-from rune.agent.goal_classifier import ClassificationResult, classify_goal, is_coding_task
+from rune.agent.goal_classifier import (
+    ClassificationResult,
+    classify_goal,
+    is_coding_task,
+    is_simple_lookup,
+)
 from rune.agent.intent_engine import resolve_intent_contract
 from rune.agent.litellm_adapter import LiteLLMAgent, UsageLimits
 from rune.agent.output_integrity import (
@@ -1121,6 +1126,7 @@ class NativeAgentLoop(EventEmitter):
                 is_domain_change=classification.is_domain_change,
                 intent_categories=sorted(classification.intent_categories),
                 requires_desktop_input=classification.requires_desktop_input,
+                needs_web_evidence=classification.needs_web_evidence,
             )
             if "desktop" in classification.intent_categories:
                 from rune.computer.session import require_desktop
@@ -1326,6 +1332,8 @@ class NativeAgentLoop(EventEmitter):
         from rune.connectors.client import broker_available
 
         tools = self._select_base_tools(classification)
+        if classification.needs_web_evidence:
+            tools = list(dict.fromkeys([*tools, "web_search", "web_fetch", "task_blocked"]))
         kind = resolve_intent_contract(classification, classification.confidence).kind
         if self._auto_skill and classification.goal_type != "chat" and kind != "calculation":
             tools = list(dict.fromkeys([*tools, "skill_search", "skill_load"]))
@@ -1346,7 +1354,7 @@ class NativeAgentLoop(EventEmitter):
         match classification.goal_type:
             case "chat":
                 if not classification.intent_categories:
-                    return ["think", "ask_user", "memory_search", "memory_save"]
+                    return ["think", "ask_user", "task_blocked", "memory_search", "memory_save", "web_search", "web_fetch"]
                 return TOOLS_CHAT
             case "web":
                 return TOOLS_WEB
@@ -1580,6 +1588,23 @@ class NativeAgentLoop(EventEmitter):
         file_outcomes = FileOutcomes(self._workspace_root)
         from rune.agent.task_evidence import TaskEvidence
         task_evidence = TaskEvidence.for_request(goal, classification)
+        from rune.agent.web_grounding import WebGrounding
+        web_grounding = WebGrounding(
+            required=resolve_intent_contract(classification, classification.confidence).grounding_requirement == "required",
+            require_on_lookup=classification.goal_type == "chat",
+            requires_page=classification.needs_current_source,
+        )
+        if web_grounding.required:
+            system_prompt += "\nThis turn needs external source evidence. Retrieve it before answering factual claims; memory is not a current source."
+        if web_grounding.requires_page:
+            system_prompt += (
+                "\nOpen a relevant source page or API before answering this current lookup. Search excerpts are indexed snapshots. "
+                "Check that the retrieved content contains the requested observations and their dates; a page shell is not evidence. "
+                "Keep each observation with its own timestamp, units and scope (such as venue or location); do not mix records. "
+                "If they are missing, try a relevant alternative already found before ending the lookup; do not ask the user "
+                "to provide its URL. If required values or observation times remain unavailable, call task_blocked with the "
+                "missing facts and attempted sources. An inability explanation alone does not complete this lookup."
+            )
 
         # Initialize rehydration subsystem
         try:
@@ -1760,22 +1785,24 @@ class NativeAgentLoop(EventEmitter):
                     status = "fail" if any(c.status == "fail" for c in checks) else "pass" if all(c.status == "pass" for c in checks) else "inconclusive"
                     result.metadata = {**(result.metadata or {}), "check_status": status}
             elif cap_name == "web_search":
-                evidence.web_searches += int(result.success)
+                evidence.web_searches += int(web_grounding.observe(cap_name, _last_tool_params, result))
                 self._stall.web_search_count += 1
             elif cap_name == "web_fetch":
-                evidence.web_fetches += int(result.success)
+                evidence.web_fetches += int(web_grounding.observe(cap_name, _last_tool_params, result))
                 self._stall.web_fetch_count += 1
             elif cap_name == "connector_request":
                 if _last_tool_params.get("method", "GET") == "GET":
                     evidence.reads += int(result.success)
-                    evidence.web_fetches += int(result.success)
+                    evidence.web_fetches += int(web_grounding.observe(cap_name, _last_tool_params, result))
                 else:
                     evidence.executions += int(result.success)
             elif cap_name == "browser_extract":
                 evidence.reads += int(result.success)
                 evidence.browser_reads += int(result.success)
+                web_grounding.observe(cap_name, _last_tool_params, result)
             elif cap_name.startswith("browser_"):
                 evidence.browser_reads += int(result.success)
+                web_grounding.observe(cap_name, _last_tool_params, result)
 
             # Predictions use the same fresh-check evidence as completion.
             if not _ephemeral:
@@ -1934,6 +1961,7 @@ class NativeAgentLoop(EventEmitter):
             on_tool_end=_on_tool_end,
             approval_callback=self._approval_callback,
             fast_lane_active=lambda: _fast_lane_active,
+            web_fetch_default_max_length=8000 if classification.goal_type == "chat" else None,
             workspace_root=(context or {}).get("workspace_root", ""),
             table_acceptance=self._table_acceptance,
         )
@@ -1984,6 +2012,10 @@ class NativeAgentLoop(EventEmitter):
             repo_fix=_repo_fix,
         )
         _explore_budget = _compute_explore_budget(classification, _repo_fix)
+        simple_lookup = is_simple_lookup(classification)
+        reserve_answer = simple_lookup or classification.goal_type == "chat" and set(tools) <= {
+            "think", "ask_user", "task_blocked", "memory_search", "memory_save", "web_search", "web_fetch",
+        }
         from rune.agent.tool_catalog import deferred_for_task
 
         deferred_tools = deferred_for_task(tools, classification)
@@ -1992,9 +2024,12 @@ class NativeAgentLoop(EventEmitter):
             system_prompt=system_prompt,
             tools=list(tool_functions.values()),
             deferred_tools=deferred_tools,
+            compact_tools=simple_lookup,
             max_tool_rounds=_tool_rounds,
             extra_headers=_native_cfg.beta_headers,
             explore_budget=_explore_budget,
+            reserve_answer=reserve_answer,
+            default_reasoning_effort="low" if simple_lookup else None,
         )
 
         messages: list[Any] = []
@@ -2761,6 +2796,16 @@ class NativeAgentLoop(EventEmitter):
                     continue
 
                 intent_contract = resolve_intent_contract(classification, classification.confidence)
+                if output_text and output_text.strip() and (blocker := web_grounding.blocker(output_text, goal)):
+                    self._record_completion_block("Source retrieval", blocker)
+                    if web_grounding.repairs >= 1 or getattr(result, "answer_budget_reserved", False):
+                        trace.reason = "completed_gate_warnings"
+                        trace.final_step = self._step
+                        trace.completion_check = self._completion_check
+                        break
+                    web_grounding.repairs += 1
+                    messages = self._inject_system_message(messages, "[Source check] " + blocker)
+                    continue
                 if output_text and output_text.strip() and (blocker := task_evidence.blocker(intent_contract, evidence.executions)):
                     self._record_completion_block("Task outcome", blocker)
                     _gate_blocked_count += 1
@@ -2790,8 +2835,7 @@ class NativeAgentLoop(EventEmitter):
                     )
                     continue
                 # Finalize a returned answer once its execution and source checks pass.
-                source_ready = (classification.goal_type != "web" or _fast_lane_active
-                                or evidence.web_fetches > 0 or evidence.browser_reads > 0)
+                source_ready = web_grounding.blocker() is None
                 if output_text and output_text.strip() and total_evidence > 0 and source_ready:
                     if (
                         verify_freshness_enabled
@@ -2904,7 +2948,7 @@ class NativeAgentLoop(EventEmitter):
                 )
 
                 # Accept a tool-free answer when the intent contract permits completion.
-                if total_evidence == 0 and output_text and output_text.strip():
+                if total_evidence == 0 and output_text and output_text.strip() and not requires_grounding:
                     blocker = await self._benchmark_completion_blocker()
                     if blocker:
                         log.info("benchmark_failed_tool_text_only_block", step=self._step)
@@ -2952,8 +2996,6 @@ class NativeAgentLoop(EventEmitter):
 
                 # Calculate analysis depth minimums based on goal type
                 analysis_min_reads = 0
-                min_web_searches = 0
-                min_web_fetches = 0
                 if classification.goal_type in ("research",):
                     # Complex research needs deeper analysis; simple lookups need less
                     if getattr(classification, "is_multi_task", False) or getattr(
@@ -2964,10 +3006,6 @@ class NativeAgentLoop(EventEmitter):
                         analysis_min_reads = 1
                 elif classification.goal_type in ("code_modify", "execution"):
                     analysis_min_reads = 1
-                if intent_contract.grounding_requirement == "required":
-                    min_web_searches = 1
-                    # A fresh search satisfies fast-lane grounding.
-                    min_web_fetches = 0 if _fast_lane_active else 1
 
                 gate_input = CompletionGateInput(
                     intent_resolved=bool(output_text),
@@ -2986,9 +3024,6 @@ class NativeAgentLoop(EventEmitter):
                     grounding_requirement=requires_grounding,
                     # Analysis depth
                     analysis_depth_min_reads=analysis_min_reads,
-                    # Web evidence
-                    min_web_searches=min_web_searches,
-                    min_web_fetches=min_web_fetches,
                     # R19: verification freshness (opt-in via env var)
                     verify_freshness_enabled=verify_freshness_enabled,
                     last_code_write_step=self._verification.last_write,

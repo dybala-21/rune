@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from rune.agent.goal_classifier import (
@@ -128,6 +128,17 @@ def is_explicit_recall_intent(
 # resolveIntentContract
 
 def resolve_intent_contract(
+    classification: ClassificationResult,
+    tier1_confidence: float,
+) -> IntentContract:
+    contract = _resolve_intent_contract(classification, tier1_confidence)
+    if getattr(classification, "needs_web_evidence", False):
+        return replace(contract, grounding_requirement="required",
+                       tool_requirement="read" if contract.tool_requirement == "none" else contract.tool_requirement)
+    return contract
+
+
+def _resolve_intent_contract(
     classification: ClassificationResult,
     tier1_confidence: float,
 ) -> IntentContract:

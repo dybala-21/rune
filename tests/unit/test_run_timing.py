@@ -9,6 +9,27 @@ from rune.agent.timing import timed_completion, timed_run, timing_phase
 from rune.types import CompletionTrace
 
 
+@pytest.mark.parametrize("controls,effort,budget", [
+    ({"reasoning_effort": "low"}, "low", None),
+    ({"extra_body": {"reasoning": {"effort": "max"}}}, "max", None),
+    ({"output_config": {"effort": "high"}}, "high", None),
+    ({"thinkingConfig": {"thinkingLevel": "low"}}, "low", None),
+    ({"thinkingConfig": {"thinkingBudget": 0}}, None, 0),
+    ({"thinking": {"budget_tokens": 1024}}, None, 1024),
+])
+async def test_native_reasoning_controls_are_recorded(controls, effort, budget):
+    from rune.agent.timing import capture_timing, timing_snapshot
+
+    async def complete(**kwargs):
+        return {"usage": {"prompt_tokens": 10, "completion_tokens": 1}}
+
+    with capture_timing() as run:
+        await timed_completion(complete, {"model": "test", **controls})
+    row, = timing_snapshot(run)["spans"]
+    assert row.get("reasoningEffort") == effort
+    assert row.get("thinkingBudget") == budget
+
+
 async def test_catalog_fingerprint_detects_changes_without_recording_definitions():
     from rune.agent.timing import capture_timing, timing_snapshot
 

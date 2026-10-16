@@ -809,12 +809,18 @@ class StreamResult:
         require_verification: bool = True,
         request_deadline: float | None = None,
         tool_catalog: Any = None,
+        reserve_answer: bool = False,
+        default_reasoning_effort: str | None = None,
     ) -> None:
         self._model = model
         self._request_deadline = request_deadline
         self._tool_catalog = tool_catalog
-        from rune.llm.reasoning import configured_reasoning_effort
+        self._reserve_answer = reserve_answer
+        from rune.llm.reasoning import configured_reasoning_effort, reasoning_control
         self._reasoning_effort = configured_reasoning_effort(model)
+        if (self._reasoning_effort is None and default_reasoning_effort is not None
+                and default_reasoning_effort in reasoning_control(model).efforts):
+            self._reasoning_effort = default_reasoning_effort
         self._verification_callback = verification_callback
         self._verification_state = verification_state
         self._tool_recovery = tool_recovery
@@ -930,8 +936,14 @@ class StreamResult:
         _oversized_batches = 0
         # The loop reports this limit because no final model response follows.
         self.tool_budget_exhausted = False
+        self.answer_budget_reserved = False
         _force_tool = False
         _output_recovery_count = 0
+        _answer_only = False
+        _answer_deadline = None
+        if self._reserve_answer and self._request_deadline is not None:
+            available = max(0.0, self._request_deadline - time.monotonic())
+            _answer_deadline = self._request_deadline - min(30.0, available / 3)
         _MAX_OUTPUT_RECOVERY = 2
         # Exploration stages: 0 = none, 1 = nudged, 2 = forced edit.
         _explore_rounds = 0
@@ -1122,6 +1134,36 @@ class StreamResult:
                     "json_schema": {"name": "rune_action", "schema": _gschema},
                 }
 
+            if self._reserve_answer and _tool_round and not verification_pending and not recovery_tools:
+                from rune.agent.timing import needs_answer_reserve
+
+                time_to_answer = _answer_deadline is not None and time.monotonic() >= _answer_deadline
+                if time_to_answer or _tool_round >= _max_tool_rounds or needs_answer_reserve(_acompletion_kwargs, remaining_tokens):
+                    _answer_only = True
+                    self.answer_budget_reserved = True
+                    report_tools = [tool for tool in _tools or [] if (tool.get("function") or {}).get("name") == "task_blocked"]
+                    note = (
+                        "Finish this reply now using the retrieved evidence. No more tools are available for this turn. "
+                        "Give the useful verified facts with source links and clearly state what remains unverified. "
+                        "Do not invent missing values or claim the whole request was verified."
+                    )
+                    _acompletion_kwargs["messages"] = [*_acompletion_kwargs["messages"], {"role": "user", "content": note}]
+                    _acompletion_kwargs.pop("tools", None)
+                    _acompletion_kwargs.pop("tool_choice", None)
+                    if report_tools:
+                        note = (
+                            "Finish this reply now. No more tools may retrieve data or perform work. "
+                            "If any required fact remains unavailable, use task_blocked to report the missing facts and sources tried; "
+                            "this ends the run without another model call. Otherwise answer from verified evidence only."
+                        )
+                        _acompletion_kwargs["messages"][-1] = {"role": "user", "content": note}
+                        _acompletion_kwargs["tools"] = report_tools
+                        _acompletion_kwargs["tool_choice"] = "auto"
+                    if self._guided:
+                        _acompletion_kwargs.pop("tools", None)
+                        _acompletion_kwargs.pop("tool_choice", None)
+                        _acompletion_kwargs["response_format"]["json_schema"]["schema"] = _build_action_schema(report_tools, allow_final=True)
+
             _ll = _litellm()
             from rune.llm.request_params import compatible_completion
 
@@ -1214,14 +1256,10 @@ class StreamResult:
                 cache_write=self._usage.cache_write_tokens,
             )
 
-            # Local-model fallback: if there were no native tool_calls but the
-            # text is a JSON tool call naming a known tool, recover it. Small
-            # ollama models degrade to text tool-calls under the full tool set +
-            # streaming; models that emit native tool_calls never reach here.
+            # Some local models emit tool calls as JSON text instead of native calls.
+            _recovered = []
             if not tool_calls_by_index and text_this_turn.strip():
-                # Guided mode emits the final answer as {"final": "..."}; unwrap
-                # it to clean text so the loop finalizes with the answer, not raw
-                # JSON. A {"tool", "arguments"} object falls through to recovery.
+                # Unwrap guided answers; tool-call objects fall through to recovery.
                 if self._guided:
                     import json as _json
                     try:
@@ -1229,8 +1267,8 @@ class StreamResult:
                     except (ValueError, TypeError):
                         _obj = None
                     if isinstance(_obj, dict) and isinstance(_obj.get("final"), str):
-                        if not self._action_ok and self._final_blocks < 2:
-                            # Bailing without doing the work; force another round.
+                        if not _answer_only and not self._action_ok and self._final_blocks < 2:
+                            # Allow a final answer only after the required action.
                             self._final_blocks += 1
                             log.info("guided_final_blocked", n=self._final_blocks)
                             self._messages.append(
@@ -1252,12 +1290,23 @@ class StreamResult:
                 }
                 _known.discard(None)
                 _recovered = _extract_text_tool_calls(text_this_turn, _known)
-                if _recovered:
+                if _recovered and (not _answer_only or len(_recovered) == 1
+                        and _recovered[0]["function"]["name"] == "task_blocked" and "task_blocked" in self._tool_lookup):
                     log.info("text_tool_call_recovered", count=len(_recovered),
                              names=[c["function"]["name"] for c in _recovered])
                     for _i, _c in enumerate(_recovered):
                         tool_calls_by_index[_i] = _c
                     text_this_turn = ""  # Parsed as a tool call, so do not display it.
+
+            reports_blocker = (len(tool_calls_by_index) == 1 and "task_blocked" in self._tool_lookup
+                               and next(iter(tool_calls_by_index.values()))["function"]["name"] == "task_blocked")
+            if _answer_only and (tool_calls_by_index or _recovered) and not reports_blocker:
+                self._collected_text = ""
+                self.tool_budget_exhausted = True
+                break
+
+            if _answer_only and not reports_blocker and (_finish_reason == "length" or not text_this_turn.strip()):
+                self.tool_budget_exhausted = True
 
             if _batch_overflow or len(tool_calls_by_index) > _MAX_TOOL_CALLS_PER_RESPONSE:
                 # Reject the whole response before any tool can change state.
@@ -1344,13 +1393,10 @@ class StreamResult:
                     self._collected_text = ""
                     continue
 
-            # No tool calls - check continuation paths before yielding
             if not tool_calls_by_index:
-                # force_tool_on_empty: only retry when the model produced
-                # NO text at all (empty response).  If text was generated,
-                # the model decided tools weren't needed — respect that.
-                # Change A already handles text+tools (hallucination).
+                # Retry empty responses, but keep answers that do not need tools.
                 if (not text_this_turn.strip()
+                        and not _answer_only
                         and self._tool_schemas
                         and self._policy.should_force_tool(
                             has_tool_calls=False, has_text=False)):
@@ -1363,6 +1409,7 @@ class StreamResult:
                 # Output truncation recovery
                 if (
                     _finish_reason == "length"
+                    and not _answer_only
                     and text_this_turn
                     and _output_recovery_count < _MAX_OUTPUT_RECOVERY
                 ):
@@ -1548,7 +1595,7 @@ class StreamResult:
                 _force_last_round = True
 
             # Max tool rounds guard
-            _tool_round += 1
+            _tool_round += int(not (_answer_only and reports_blocker))
             _is_last_round = (
                 _force_last_round
                 or _tool_round > _max_tool_rounds
@@ -2288,10 +2335,14 @@ class LiteLLMAgent:
         extra_headers: dict[str, str] | None = None,
         explore_budget: int = 0,
         deferred_tools: set[str] | None = None,
+        compact_tools: bool = False,
+        reserve_answer: bool = False,
+        default_reasoning_effort: str | None = None,
     ) -> None:
         self._model, self._provider_extra = _resolve_litellm_model(model)
         self._base_system_prompt = system_prompt
         self._deferred_tools = frozenset(deferred_tools or ())
+        self._compact_tools = compact_tools
         self.update_tools(tools or [])
         self._requested_max_tokens = max_tokens
         self._max_tokens = _clamp_max_tokens(self._model, max_tokens)
@@ -2305,6 +2356,8 @@ class LiteLLMAgent:
         self._temperature = temperature
         self._max_tool_rounds = max_tool_rounds
         self._explore_budget = explore_budget
+        self._reserve_answer = reserve_answer
+        self._default_reasoning_effort = default_reasoning_effort
         self._extra_headers: dict[str, str] = dict(extra_headers or {})
         self._last_stream_result: StreamResult | None = None
         if tool_call_policy is None:
@@ -2399,6 +2452,8 @@ class LiteLLMAgent:
             require_verification=require_verification,
             request_deadline=request_deadline,
             tool_catalog=self._tool_catalog,
+            reserve_answer=self._reserve_answer,
+            default_reasoning_effort=self._default_reasoning_effort,
         )
         self._last_stream_result = stream_result
 
@@ -2433,7 +2488,9 @@ class LiteLLMAgent:
         self._tool_lookup = _build_tool_lookup(tools)
         self._tool_catalog = None
         self._system_prompt = self._base_system_prompt
-        if os.environ.get("RUNE_TOOL_SEARCH", "1") != "0" and ToolCatalog.needed(self._tool_schemas):
+        has_deferred = any(tool.get("type") == "function" and tool["function"]["name"] in self._deferred_tools
+                           for tool in self._tool_schemas)
+        if os.environ.get("RUNE_TOOL_SEARCH", "1") != "0" and (ToolCatalog.needed(self._tool_schemas) or self._compact_tools and has_deferred):
             from rune.agent.prompts import PROMPT_BROWSER, PROMPT_TABLE
 
             self._tool_catalog = ToolCatalog(self._tool_schemas, deferred_tools=self._deferred_tools)

@@ -39,7 +39,7 @@ class BraveSearchProvider(SearchProvider):
             "count": min(options.max_results, 20),
         }
         if options.freshness:
-            params["freshness"] = options.freshness
+            params["freshness"] = {"day": "pd", "week": "pw", "month": "pm", "year": "py"}[options.freshness]
 
         headers = {
             "Accept": "application/json",

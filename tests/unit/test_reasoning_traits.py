@@ -24,6 +24,7 @@ def clear_metadata_cache():
     ('openai/responses/gpt-6-astra', ('low', 'medium', 'high', 'xhigh', 'max')),
     ('gpt-5.6-sol', ('none', 'low', 'medium', 'high', 'xhigh', 'max')),
     ('gpt-5.6', ('none', 'low', 'medium', 'high', 'xhigh', 'max')),
+    ('openai/responses/gpt-5.3-codex', ('low', 'medium', 'high', 'xhigh')),
     ('anthropic/claude-opus-5', ('low', 'medium', 'high', 'xhigh', 'max')),
     ('anthropic/claude-opus-4-6', ('low', 'medium', 'high', 'max')),
     ('anthropic/claude-opus-4-5-20251101', ('low', 'medium', 'high')),
@@ -121,6 +122,28 @@ async def test_preferences_survive_model_switches_and_restarts(preferences):
     await set_reasoning_effort('max', provider='openai', model='gpt-6-astra')
     load_config(force=True)
     assert configured_reasoning_effort('gpt-6-astra') == 'max'
+
+
+@pytest.mark.parametrize("model,expected", [
+    ("xai/grok-4.7", "low"), ("gpt-6-astra", "low"),
+    ("anthropic/claude-opus-5", "low"), ("gemini/gemini-3.1-pro-preview", "low"),
+    ("ollama/private-model", None),
+])
+@pytest.mark.parametrize("preference", [None, "high"])
+async def test_lookup_default_preserves_preferences_and_supported_controls(monkeypatch, model, expected, preference):
+    from rune.agent.litellm_adapter import LiteLLMAgent
+    from rune.llm.reasoning import ReasoningControl
+
+    monkeypatch.setattr("rune.llm.reasoning.configured_reasoning_effort", lambda _: preference)
+    monkeypatch.setattr("rune.llm.target.vertex_active", lambda: False)
+    if expected is None:
+        monkeypatch.setattr("rune.llm.reasoning.reasoning_control", lambda _: ReasoningControl())
+    agent = LiteLLMAgent(model=model, default_reasoning_effort="low")
+    async with agent.run_stream("Read the current value") as result:
+        assert result._reasoning_effort == (preference or expected)
+    ordinary = LiteLLMAgent(model=model)
+    async with ordinary.run_stream("Analyze the problem") as result:
+        assert result._reasoning_effort == preference
 
 
 @pytest.mark.parametrize('effort, model', [('none', 'gpt-6-astra'), ('max', 'gpt-5.6-sol'), (None, 'gpt-6-astra')])

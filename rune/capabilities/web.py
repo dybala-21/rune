@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any
+from html import unescape
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -135,13 +136,13 @@ class WebSearchParams(BaseModel):
     query: str = Field(description="Search query string")
     max_results: int = Field(default=10, alias="maxResults")
     language: str = Field(default="en")
-    freshness: str = Field(default="", description="Time filter: day, week, month, year")
+    freshness: Literal["", "day", "week", "month", "year"] = Field(default="", description="Filter publication dates: day, week, month, year. Omit when finding live data pages; check their observation times instead.")
     site: str = Field(default="", description="Restrict search to a specific site/domain")
 
 
 class WebFetchParams(BaseModel):
     url: str = Field(description="URL to fetch")
-    selector: str | None = Field(default=None, description="CSS selector to extract")
+    selector: str | None = Field(default=None, description="CSS selector; defaults to main content when available. Use body for the full page.")
     max_length: int = Field(default=50_000, alias="maxLength")
     # Replay support for APIs discovered via browser network monitoring —
     # data-loading endpoints on dynamic sites are frequently POST.
@@ -193,8 +194,11 @@ def _html_to_text(html: str) -> str:
     text = re.sub(r'<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>', r"[\2](\1)", text, flags=re.DOTALL)
     text = re.sub(r"<br\s*/?>", "\n", text)
     text = re.sub(r"<p[^>]*>", "\n", text)
+    text = re.sub(r"</t[dh]>", " | ", text, flags=re.IGNORECASE)
+    text = re.sub(r"</tr>", "\n", text, flags=re.IGNORECASE)
     # Strip remaining tags
     text = _TAG_RE.sub(" ", text)
+    text = unescape(text)
     text = _WS_RE.sub(" ", text)
     lines = [line.strip() for line in text.splitlines()]
     text = "\n".join(line for line in lines if line)
@@ -222,6 +226,42 @@ def _extract_by_selector(html: str, selector: str) -> str:
     ))
 
 
+def _extract_page_content(html: str) -> tuple[str, str]:
+    """Prefer main content so navigation does not fill the text limit."""
+    from lxml import etree
+    from lxml import html as document
+
+    if not html.strip():
+        return "", "body"
+    try:
+        tree = document.document_fromstring(
+            html.encode("utf-8"), parser=document.HTMLParser(encoding="utf-8", no_network=True),
+        )
+    except etree.ParserError:
+        return _html_to_text(html), "body"
+    for node in tree.xpath('//head | //script | //style | //noscript | //template | //*[@hidden or @aria-hidden="true"]'):
+        if node.getparent() is not None:
+            node.drop_tree()
+    main_nodes = set(tree.xpath('//main | //*[@role="main"]'))
+    mode = "main"
+    if not main_nodes:
+        main_nodes = set(tree.xpath('//article[not(ancestor::article)]'))
+        mode = "article"
+    roots = [node for node in tree.iter() if node in main_nodes and not any(
+        ancestor in main_nodes for ancestor in node.iterancestors()
+    )]
+    if roots:
+        text = _html_to_text("\n".join(
+            document.tostring(node, encoding="unicode", with_tail=False) for node in roots
+        ))
+        if text:
+            return text, mode
+    for node in tree.xpath('//nav | //header | //footer | //aside'):
+        if node.getparent() is not None:
+            node.drop_tree()
+    return _html_to_text(document.tostring(tree, encoding="unicode")), "body"
+
+
 # Capability implementations
 
 async def web_search(params: WebSearchParams) -> CapabilityResult:
@@ -245,10 +285,15 @@ async def web_search(params: WebSearchParams) -> CapabilityResult:
             metadata={"query": params.query, "count": 0},
         )
 
-    lines: list[str] = []
+    lines = [
+        "Search excerpts are indexed snapshots, not live readings. Confirm current values "
+        "and their observation time on the source page or API.", "",
+    ]
     for i, r in enumerate(results, 1):
         lines.append(f"{i}. {r.title}")
         lines.append(f"   {r.url}")
+        if r.age:
+            lines.append(f"   Page date reported by search: {r.age} (not necessarily the date of the facts)")
         if r.description:
             lines.append(f"   {r.description}")
         lines.append("")
@@ -256,7 +301,10 @@ async def web_search(params: WebSearchParams) -> CapabilityResult:
     return CapabilityResult(
         success=True,
         output="\n".join(lines).strip(),
-        metadata={"query": params.query, "count": len(results)},
+        metadata={
+            "query": params.query, "count": len(results), "freshness": params.freshness,
+            "source_kind": "search_excerpt",
+        },
     )
 
 
@@ -399,7 +447,7 @@ async def web_fetch(params: WebFetchParams) -> CapabilityResult:
                 },
             )
 
-        # Extract by selector if provided
+        extraction = "selector"
         if params.selector:
             try:
                 text = _extract_by_selector(html, params.selector)
@@ -411,8 +459,12 @@ async def web_fetch(params: WebFetchParams) -> CapabilityResult:
                     error=f"{exc} Adjust the selector or omit it to read the full page.",
                     metadata={"status_code": resp.status_code, "selector_error": True},
                 )
+        elif "html" in content_type.lower() or (
+            not content_type and html.lstrip().startswith("<")
+        ):
+            text, extraction = _extract_page_content(html)
         else:
-            text = _html_to_text(html)
+            text, extraction = html, "text"
 
         if not text.strip():
             return CapabilityResult(
@@ -455,6 +507,7 @@ async def web_fetch(params: WebFetchParams) -> CapabilityResult:
                 "final_url": final_url,
                 "redirected": final_url != params.url,
                 "content_type": content_type,
+                "extraction": extraction,
                 "length": len(text),
                 "truncated": truncated,
                 "status_code": resp.status_code,

@@ -25,6 +25,18 @@ _PROPERTIES = {
         "type": "boolean",
         "description": "True only for required code, script, shell or test execution. False for native app input, including calculations in Calculator, unless the user also requests code/tests to run.",
     },
+    "needs_web_evidence": {
+        "type": "boolean",
+        "description": "External facts must be retrieved to help with this request, even when phrased casually or emotionally. False for stable knowledge, supplied facts, or an explicit request only to listen/not browse.",
+    },
+    "needs_current_source": {
+        "type": "boolean",
+        "description": "True when the answer needs current or recent observations, such as prices, weather, service status, availability or schedules. Requires opening a source page/API; indexed search excerpts are insufficient. False for link discovery, stable explanations, supplied facts or no-browsing requests.",
+    },
+    "lookup_only": {
+        "type": "boolean",
+        "description": "True when a few sourced observations answer a chat/web request, including a casual worry grounded by checking current conditions. Expressing a worry is not asking for a prediction. False when the user requests causal analysis, predictions, recommendations, professional advice, broad comparisons, or scope is unclear. Controls lighter default reasoning, not verification.",
+    },
     "intent_categories": {"type": "array", "items": {"type": "string", "enum": ["coding", "email", "document", "table", "desktop", "calculation"]},
                           "description": "coding requires software work as an outcome, not helper code for a document. desktop requires native app features or unsaved state. Office/PDF files alone use document/file tools."},
     "requires_desktop_input": {"type": "boolean", "description": "True only for input in a native app required by the request. Saving or checking a file through document tools is false."},
@@ -52,6 +64,11 @@ class InvalidClassification(ValueError):
 
 class RoutingUnavailable(RuntimeError):
     """A routing request failed before any task tools were selected."""
+
+    def __init__(self, detail: str, *, fallback_reason: str = "", diagnostics: dict | None = None):
+        super().__init__(detail)
+        self.fallback_reason = fallback_reason
+        self.diagnostics = diagnostics or {}
 
 
 ROUTING_TIMEOUT = 35.0
@@ -101,7 +118,7 @@ def validate_decision(data: dict[str, Any]) -> dict[str, Any]:
         raise InvalidClassification("invalid_confidence")
     if not isinstance(data["reason"], str):
         raise InvalidClassification("invalid_reason")
-    for key in ("requires_execution", "requires_desktop_input", "is_related_to_previous"):
+    for key in ("requires_execution", "needs_web_evidence", "needs_current_source", "lookup_only", "requires_desktop_input", "is_related_to_previous"):
         if type(data[key]) is not bool:
             raise InvalidClassification("invalid_" + key)
     if not isinstance(data["intent_categories"], list) or any(
@@ -113,6 +130,12 @@ def validate_decision(data: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(data["calculation_expression"], str):
         raise InvalidClassification("invalid_calculation_expression")
     desktop = "desktop" in data["intent_categories"]
+    if data["needs_current_source"] and not data["needs_web_evidence"]:
+        raise InvalidClassification("inconsistent_source_requirement")
+    if data["lookup_only"] and (not data["needs_web_evidence"] or data["goal_type"] not in {"chat", "web"}
+                                or data["requires_execution"] or data["intent_categories"]):
+        log.debug("lookup_reasoning_disabled", goal_type=data["goal_type"])
+        data = {**data, "lookup_only": False}
     if data["goal_type"] == "artifact" and "coding" in data["intent_categories"]:
         raise InvalidClassification("inconsistent_artifact_route")
     if data["requires_desktop_input"] and not desktop:

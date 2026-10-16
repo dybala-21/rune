@@ -19,6 +19,8 @@ class Rates:
 
 # USD per million tokens. Unknown models stay unpriced.
 # https://developers.openai.com/api/docs/models/gpt-6-astra
+# https://developers.openai.com/api/docs/models/gpt-5.6-sol
+# https://developers.openai.com/api/docs/models/gpt-5.3-codex
 # https://developers.openai.com/api/docs/models/gpt-5.4-mini
 # https://developers.openai.com/api/docs/models/gpt-4o
 # https://docs.x.ai/developers/pricing
@@ -29,6 +31,9 @@ class Rates:
 _RATES = {
     "typesafe/jev-1.13.0": Rates(.042, 0, 0),
     "openai/gpt-6-astra": Rates(10, 50, 1, 12.5, 272000, 1.5),
+    "openai/gpt-5.6-sol": Rates(4, 20, .4, 5, 272000, 1.5),
+    "openai/gpt-5.6": Rates(4, 20, .4, 5, 272000, 1.5),
+    "openai/gpt-5.3-codex": Rates(1.75, 14, .175),
     "openai/gpt-5.4-mini": Rates(.75, 4.5, .075),
     "openai/gpt-4o": Rates(2.5, 10, 1.25),
     "xai/grok-4.7": Rates(2, 6, .5, long_above=199999),

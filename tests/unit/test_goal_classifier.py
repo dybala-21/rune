@@ -13,6 +13,8 @@ from rune.agent.goal_classifier import classify_goal, from_wire, to_wire
 def verdict(**changes):
     return {"goal_type": "full", "confidence": 0.9, "reason": "requested work",
             "requires_execution": False, "intent_categories": [],
+            "needs_web_evidence": False, "needs_current_source": False,
+            "lookup_only": False,
             "requires_desktop_input": False, "is_related_to_previous": False,
             "table_output": "none", "calculation_expression": "", **changes}
 
@@ -37,6 +39,49 @@ async def test_valid_routing_needs_one_constrained_call(monkeypatch):
     assert stub.completion.await_count == 1
     assert stub.completion.call_args.kwargs["response_format"] == RESPONSE_FORMAT
     assert from_wire(to_wire(result)) == result
+
+
+@pytest.mark.parametrize("lookup_only", [True, False])
+async def test_lookup_scope_reuses_the_existing_classification(monkeypatch, lookup_only):
+    stub = client(monkeypatch, response(verdict(goal_type="chat", needs_web_evidence=True, lookup_only=lookup_only)))
+    result = await classify_goal("Help with this current concern")
+    assert result.available and result.lookup_only is lookup_only
+    assert from_wire(to_wire(result)).lookup_only is lookup_only
+    assert stub.completion.await_count == 1
+
+
+@pytest.mark.parametrize("changes", [{"needs_web_evidence": False}, {"goal_type": "code_modify"},
+                                     {"requires_execution": True}, {"intent_categories": ["document"]}])
+def test_lookup_optimization_cannot_change_the_task_scope(changes):
+    from rune.agent.classification_response import validate_decision
+
+    values = validate_decision(verdict(goal_type="chat", needs_web_evidence=True, lookup_only=True) | changes)
+    assert values["lookup_only"] is False
+    assert all(values[key] == value for key, value in changes.items())
+
+
+def test_current_source_cannot_bypass_the_source_requirement():
+    from rune.agent.classification_response import InvalidClassification, validate_decision
+
+    with pytest.raises(InvalidClassification, match="inconsistent_source_requirement"):
+        validate_decision(verdict(needs_current_source=True))
+
+
+@pytest.mark.parametrize("route,requirement", [("chat", "read"), ("artifact", "write"),
+                                               ("code_modify", "write"), ("execution", "execute")])
+async def test_source_requirement_preserves_the_requested_outcome(monkeypatch, route, requirement):
+    from rune.agent.intent_engine import resolve_intent_contract
+    from rune.agent.loop import NativeAgentLoop
+
+    stub = client(monkeypatch, response(verdict(goal_type=route, needs_web_evidence=True)))
+    result = await classify_goal("Complete the request using current sources")
+    assert result.available and stub.completion.await_count == 1
+    contract = resolve_intent_contract(result, result.confidence)
+    assert contract.tool_requirement == requirement
+    assert contract.grounding_requirement == "required"
+    loop = NativeAgentLoop()
+    loop._auto_skill = False
+    assert {"web_search", "web_fetch", "task_blocked"} <= set(loop._select_tools(result))
 
 
 @pytest.mark.parametrize("route,intents,software,write", [

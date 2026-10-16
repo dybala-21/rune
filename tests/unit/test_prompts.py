@@ -140,6 +140,22 @@ class TestBuildSystemPrompt:
         assert "Escalation path" in prompt
         assert "Step Efficiency" in prompt
 
+    @pytest.mark.parametrize("deep", [False, True])
+    def test_small_lookup_keeps_sources_and_browser_fallback_without_research_overhead(self, deep):
+        from rune.agent.prompts import PROMPT_CHAT
+
+        classification = ClassificationResult(goal_type="web", confidence=.99, tier=2,
+                                             needs_web_evidence=True, lookup_only=True)
+        prompt = build_system_prompt(goal="Read the current value", classification=classification,
+                                     goal_category="web", is_deep_research=deep)
+        if deep:
+            assert PROMPT_CORE in prompt and PROMPT_WEB_DEEP in prompt
+        else:
+            assert PROMPT_CHAT in prompt and PROMPT_CORE not in prompt
+            assert "Use browser reading tools" in prompt
+            assert "observation time" in prompt and "clickable source link" in prompt
+            assert "exact-output constraints" in prompt
+
     def test_web_category_excludes_code(self):
         prompt = build_system_prompt(goal="search news", goal_category="web")
         assert "Code Intelligence" not in prompt
@@ -316,6 +332,16 @@ class TestBuildSystemPrompt:
         )
         prompt = build_system_prompt(goal="계속해", classification=cls)
         assert "Follow-up Task Scope Control" in prompt
+
+    @pytest.mark.parametrize("goal_type", ["chat", "web", "artifact"])
+    def test_non_coding_followup_does_not_resume_a_software_project(self, goal_type):
+        from rune.agent.prompts import PROMPT_CONTINUATION, PROMPT_FOLLOWUP
+
+        cls = ClassificationResult(goal_type=goal_type, confidence=.99, tier=2, is_continuation=True)
+        prompt = build_system_prompt(goal="What about today?", goal_category=goal_type, classification=cls)
+        assert PROMPT_FOLLOWUP in prompt
+        assert PROMPT_CONTINUATION not in prompt
+        assert "Code Intelligence" not in prompt
 
     def test_multi_phase_prompt_injection(self):
         cls = ClassificationResult(

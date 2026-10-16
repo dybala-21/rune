@@ -81,6 +81,69 @@ async def test_short_valid_response_does_not_require_a_browser(monkeypatch, cont
     assert not result.metadata.get("js_rendered")
 
 
+async def test_empty_main_does_not_return_navigation_as_source_content(monkeypatch):
+    client = httpx.AsyncClient
+    page = '<nav>Home Quotes Help</nav><main><script>loadQuotes()</script></main><footer>Privacy</footer>'
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, text=page, headers={"content-type": "text/html"}))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client(transport=transport, **kw))
+    result = await web_fetch(WebFetchParams(url="https://example.org/quotes"))
+    assert not result.success and result.metadata.get("empty_content")
+
+
+@pytest.mark.parametrize("element", ["main", 'div role="main"', "article"])
+async def test_main_content_survives_a_small_fetch_limit(monkeypatch, element):
+    page = ('<html><head><title>Quote</title></head><body><nav>' + 'Menu ' * 2000
+            + f'</nav><{element}><h1>Example</h1><p>213,000 KRW at 09:02 GMT+9</p>'
+            + '<table><tr><td>2026-10-15</td><td>210,000</td></tr>'
+            + '<tr><td>2026-10-16</td><td>213,000</td></tr></table>'
+            + f'</{element.split()[0]}></body></html>')
+    client = httpx.AsyncClient
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, text=page, headers={"content-type": "text/html"}))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client(transport=transport, **kw))
+    result = await web_fetch(WebFetchParams(url="https://example.org/quote", maxLength=300))
+    assert result.success and result.metadata["extraction"] == ("article" if element == "article" else "main")
+    assert "213,000 KRW at 09:02 GMT+9" in result.output
+    assert "2026-10-15 | 210,000 |\n" in result.output
+    assert not result.metadata["truncated"] and "Menu" not in result.output
+    full = await web_fetch(WebFetchParams(url="https://example.org/quote", selector="body"))
+    assert "Menu" in full.output and "213,000" in full.output
+
+
+@pytest.mark.parametrize("body", ["", '<div id="root"></div><script>loadData()</script>'])
+async def test_title_only_html_does_not_count_as_readable_content(monkeypatch, body):
+    client = httpx.AsyncClient
+    transport = httpx.MockTransport(lambda req: httpx.Response(
+        200, text=f"<html><head><title>Finance</title></head><body>{body}</body></html>",
+        headers={"content-type": "text/html"},
+    ))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client(transport=transport, **kw))
+    result = await web_fetch(WebFetchParams(url="https://example.org/quote"))
+    assert not result.success and result.metadata["empty_content"]
+
+
+@pytest.mark.parametrize("content_type,body", [
+    ("application/json", '{"comparison": "a < b > c", "html": "<p>2</p>"}'),
+    ("text/plain", "a < b > c\n  keep spacing &amp; symbols"),
+])
+async def test_non_html_responses_are_preserved(monkeypatch, content_type, body):
+    client = httpx.AsyncClient
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, text=body, headers={"content-type": content_type}))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client(transport=transport, **kw))
+    result = await web_fetch(WebFetchParams(url="https://example.org/data"))
+    assert result.success and result.output == body
+
+
+def test_nested_main_is_not_duplicated_and_entities_are_readable():
+    from rune.capabilities.web import _extract_page_content
+
+    text, mode = _extract_page_content('<div role="main"><main><p>A &amp; B &lt; 3</p></main></div>')
+    assert mode == "main" and text == "A & B < 3"
+    text, mode = _extract_page_content('<main></main><p>Available: 2</p>')
+    assert mode == "body" and text == "Available: 2"
+    text, mode = _extract_page_content('<main hidden>Old value</main><main>Current value</main>')
+    assert mode == "main" and text == "Current value"
+
+
 async def test_failed_page_does_not_block_other_pages_or_later_recovery(monkeypatch):
     client = httpx.AsyncClient
     responses = iter([503, 503, 200, 200])
