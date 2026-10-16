@@ -62,6 +62,22 @@ class TestSessionToolCache:
         assert hit is None
         assert cache.miss_count == 1
 
+    @pytest.mark.parametrize("structured", [False, True])
+    def test_savings_count_only_the_reduction_in_returned_content(self, structured):
+        from rune.types import CapabilityResult
+
+        cache = SessionToolCache()
+        text = "\n".join(f'{{"value":{i},"unit":"celsius"}}' for i in range(100))
+        result = CapabilityResult(success=True, output=text,
+                                  metadata={"content_type": "application/json"} if structured else {})
+        cache.set("key", "web_fetch", {}, result, step_number=1)
+        hit = cache.get("key", "web_fetch", {})
+        assert cache.tokens_saved == max(0, len(text) // 4 - len(hit.output) // 4)
+        if structured:
+            assert text in hit.output and cache.tokens_saved == 0
+        else:
+            assert cache.tokens_saved > 0
+
     def test_lru_eviction(self):
         cache = SessionToolCache(max_entries=50)
         # Fill beyond MAX_CACHE_ENTRIES

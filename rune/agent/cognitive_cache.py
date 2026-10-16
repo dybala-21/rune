@@ -8,6 +8,7 @@ import json
 import os
 import re
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -23,10 +24,10 @@ MAX_CACHEABLE_OUTPUT_CHARS = 100_000
 # Must match WebFetchParams.max_length; a regression test checks this.
 WEB_FETCH_DEFAULT_MAX_LENGTH = 50_000
 
-# Retry hints change the cache key so a repeated call can reach the tool.
+# Changed arguments bypass the cached result.
 _CACHE_HIT_RETRY_HINTS = {
     "file_read": "a different offset/limit",
-    "web_fetch": "a larger maxLength or a CSS selector",
+    "web_fetch": "jsonFilter, a CSS selector or a larger maxLength",
     "web_search": "a different query",
 }
 PREVIEW_HEAD_LINES = 3
@@ -84,6 +85,7 @@ class CacheEntry:
     hit_count: int = 0
     summary: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
+    result_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -265,10 +267,10 @@ class SessionToolCache:
 
         entry.hit_count += 1
         self._hit_count += 1
-        self._tokens_saved += entry.estimated_tokens
         self._touch_access_order(key)
 
         output = self._format_cache_hit_output(entry)
+        self._tokens_saved += max(0, entry.estimated_tokens - max(1, len(output) // 4))
         return CacheHitResult(output=output, entry=entry)
 
     def set(
@@ -288,6 +290,8 @@ class SessionToolCache:
         char_count = len(output_text)
         estimated_tokens = max(1, char_count // 4)
         preview = self._extract_preview(output_text)
+        if cap_name == "web_fetch" and "json" in (getattr(result, "metadata", None) or {}).get("content_type", "").lower():
+            preview = output_text
         summary = self._generate_summary(cap_name, params, output_text)
         meta = self._extract_meta(cap_name, params, output_text)
         evidence = (getattr(result, "metadata", None) or {}).get("read_evidence")
@@ -306,6 +310,7 @@ class SessionToolCache:
             cached_at=time.monotonic(),
             summary=summary,
             meta=meta,
+            result_metadata=deepcopy(getattr(result, "metadata", None) or {}),
         )
 
         # Track file generation
@@ -511,11 +516,7 @@ class SessionToolCache:
         else:
             guard = "Do not repeat the identical call — work from this result."
         parts = [
-            f"[CACHE HIT — step {entry.cached_at_step}, "
-            f"hits: {entry.hit_count}, "
-            f"~{entry.estimated_tokens} tokens saved]",
-            "You already ran this exact call this session; this is its cached "
-            "summary/preview. " + guard,
+            "[CACHE HIT] This call already ran in this session. " + guard,
         ]
         if entry.summary:
             parts.append(f"Summary: {entry.summary}")

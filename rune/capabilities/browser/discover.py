@@ -1,10 +1,4 @@
-"""API discovery over the CDP network log.
-
-Split from capabilities.py, which this tool's arrival had pushed past the
-project's module-size line. Everything here is about one job: after a page
-loads, list the XHR/fetch calls it made and read their captured bodies, so
-data can come off the wire instead of out of the UI.
-"""
+"""List captured API requests and read their response bodies."""
 
 from __future__ import annotations
 
@@ -43,12 +37,7 @@ class BrowserDiscoverApisParams(BaseModel):
 
 @browser_operation
 async def browser_discover_apis(params: BrowserDiscoverApisParams) -> CapabilityResult:
-    """List API endpoints discovered via CDP network monitoring.
-
-    After browser_navigate loads a page, this tool shows the XHR/fetch
-    requests the site made. Use web_fetch to call these APIs directly
-    instead of clicking through the UI.
-    """
+    """List API requests captured after navigation or read a captured response."""
     from rune.capabilities.browser.network import get_network_monitor
 
     monitor = get_network_monitor()
@@ -61,9 +50,7 @@ async def browser_discover_apis(params: BrowserDiscoverApisParams) -> Capability
 
     from rune.capabilities.browser.network import format_api_recipe, hybrid_api_enabled
 
-    # Read a captured response body — the highest-value path: the site's own
-    # click flow already supplied the parameters, so there is nothing to
-    # reconstruct or replay (network-level scraping).
+    # Reuse the captured response without replaying the request.
     if params.read_body and hybrid_api_enabled():
         matches = [
             a for a in monitor.get_discovered_apis(params.read_body)
@@ -80,15 +67,22 @@ async def browser_discover_apis(params: BrowserDiscoverApisParams) -> Capability
             )
         api = matches[-1]  # newest matching call
         body = api.response_body
-        if params.json_filter:
-            from rune.capabilities.web import _prune_json_by_term
+        from rune.capabilities.web import MAX_JSON_OUTPUT_CHARS, _prune_json_by_term
 
-            pruned = _prune_json_by_term(body, params.json_filter)
-            if pruned is not None:
-                body = f"[filtered by '{params.json_filter}'] {pruned}"
+        pruned = _prune_json_by_term(body, params.json_filter)
+        if not pruned:
+            return CapabilityResult(success=False,
+                                    error="No complete JSON records matched. Change jsonFilter or inspect another captured response.",
+                                    metadata={"url": api.url, "filter_no_match": pruned == "", "invalid_json": pruned is None})
+        if params.json_filter:
+            body = f"[filtered by '{params.json_filter}'] {pruned}"
+        output = f"{api.method} {api.url} [{api.status}]\n{body}"
+        if len(output) > MAX_JSON_OUTPUT_CHARS:
+            return CapabilityResult(success=False, error="The captured response is too large. Narrow jsonFilter to read complete records.",
+                                    metadata={"url": api.url, "delivery_truncated": True})
         return CapabilityResult(
             success=True,
-            output=f"{api.method} {api.url} [{api.status}]\n{body[:30_000]}",
+            output=output,
             metadata={"url": api.url, "chars": len(body)},
         )
 
@@ -101,8 +95,7 @@ async def browser_discover_apis(params: BrowserDiscoverApisParams) -> Capability
             metadata={"count": 0},
         )
 
-    # Data-carrying calls first: JSON responses, then POSTs (booking/schedule
-    # endpoints), then the rest — bounded so the recipe list stays cheap.
+    # Show up to eight requests, prioritizing JSON responses and POSTs.
     ranked = sorted(
         apis, key=lambda a: (not a.has_json_response, a.method == "GET"),
     )[:8]
@@ -132,5 +125,3 @@ async def browser_discover_apis(params: BrowserDiscoverApisParams) -> Capability
         output="\n".join(lines),
         metadata={"count": len(apis)},
     )
-
-# Registration

@@ -13,8 +13,10 @@ def test_failed_trials_count_toward_cost_and_unknown_cost_stays_unknown():
         ]}
     row = summarize([trial("passed", 1), trial("failed", 3)])[0]
     assert row["success_rate"] == .5 and row["usd_per_success"] == 4
+    assert row["failed_usd"] == 3 and row["seconds_per_success"] == 20
     row = summarize([trial("passed", 1), trial("failed", None)])[0]
     assert row["total_usd"] is None and row["usd_per_success"] is None and row["unpriced_trials"] == 1
+    assert row["failed_usd"] is None
 
 
 def test_known_cost_includes_complete_and_partial_bills():
@@ -95,3 +97,10 @@ def test_interrupted_calls_keep_partial_usage_separate_from_totals(report):
     row = summarize([report])[0]
     assert row["total_tokens"] is None and row["known_tokens"] == 10
     assert row["total_usd"] is None and row["known_usd"] == .1
+
+
+def test_missing_call_usage_cannot_be_reported_as_a_complete_bill(report):
+    report["runs"][0]["snapshot"]["timings"] = {"usage": {"calls": 2, "reported_calls": 1}}
+    row = summarize([report])[0]
+    assert row["total_usd"] is None and row["usd_per_success"] is None
+    assert row["known_usd"] == .1

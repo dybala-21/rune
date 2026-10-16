@@ -26,15 +26,21 @@ class WebGrounding:
     def observe(self, name: str, params: dict, result: CapabilityResult) -> bool:
         if name not in _READS and not (name == "connector_request" and params.get("method", "GET").upper() == "GET"):
             return False
+        if name == "web_fetch" and params.get("method", "GET").upper() != "GET":
+            return False
         self.attempts += 1
         if self.require_on_lookup and name in {"web_search", "web_fetch"}:
             self.required = True
         metadata = result.metadata or {}
+        # Cached reads do not add fresh evidence.
+        if metadata.get("cached") or metadata.get("replayed"):
+            return False
         if name == "web_search" and (params.get("freshness") or metadata.get("freshness")):
             self.requires_page = True
         if not result.success or not (result.output or "").strip():
             return False
-        if metadata.get("count") == 0 or metadata.get("empty_content") or metadata.get("observation_failed"):
+        if (metadata.get("count") == 0 or metadata.get("empty_content") or metadata.get("observation_failed")
+                or metadata.get("filter_no_match") or metadata.get("invalid_json") or metadata.get("delivery_truncated")):
             return False
         status = metadata.get("status_code", metadata.get("status"))
         if isinstance(status, int) and (status == 0 or status >= 400):

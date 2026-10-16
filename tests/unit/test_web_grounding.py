@@ -39,6 +39,67 @@ def test_empty_content_and_connector_writes_are_not_reads():
     assert check.blocker()
 
 
+@pytest.mark.parametrize("name,metadata", [
+    ("web_search", {"count": 0}),
+    ("web_fetch", {"empty_content": True}),
+    ("web_fetch", {"truncated": True, "content_type": "application/json", "url": "https://example.org/data"}),
+])
+async def test_cached_reads_preserve_source_metadata_without_adding_evidence(name, metadata):
+    from rune.agent.cognitive_cache import SessionToolCache
+    from rune.agent.tool_adapter import ToolAdapterOptions, build_tool_set
+    from rune.capabilities.registry import CapabilityRegistry
+    from rune.capabilities.types import CapabilityDefinition
+    from rune.capabilities.web import WebFetchParams, WebSearchParams
+
+    calls, results = [], []
+    check = WebGrounding(required=True, requires_page=True)
+
+    async def retrieve(params):
+        calls.append(params)
+        return CapabilityResult(success=True, output="No available records; 999", metadata=metadata.copy())
+
+    async def observe(tool, result):
+        results.append(result)
+        check.observe(tool, {}, result)
+
+    registry = CapabilityRegistry()
+    registry.register(CapabilityDefinition(name=name, description="Read source", execute=retrieve,
+                                          parameters_model=WebFetchParams if name == "web_fetch" else WebSearchParams))
+    tool = build_tool_set(ToolAdapterOptions(enable_guardian=False, cognitive_cache=SessionToolCache(), on_tool_end=observe), registry=registry)[name]
+    params = {"url": "https://example.org/data"} if name == "web_fetch" else {"query": "example"}
+    await tool.function(**params)
+    before = check.sources, check.pages, check.page_values.copy()
+    results[0].metadata["count"] = 999
+    await tool.function(**params)
+    assert len(calls) == 1 and results[-1].metadata["cached"]
+    assert all(results[-1].metadata[key] == value for key, value in metadata.items())
+    assert (check.sources, check.pages, check.page_values) == before
+
+
+def test_cache_annotations_cannot_verify_a_search_number():
+    check = WebGrounding(required=True, requires_page=True)
+    check.observe("web_search", {}, CapabilityResult(success=True, output="Indexed price: 120"))
+    check.observe("web_fetch", {}, CapabilityResult(success=True, output="Unavailable"))
+    check.observe("web_fetch", {}, CapabilityResult(success=True, output="CACHE HIT: 120 tokens saved", metadata={"cached": True}))
+    assert check.blocker("Price: 120")
+
+
+def test_post_response_is_not_a_source_read():
+    check = WebGrounding(required=True)
+    assert not check.observe("web_fetch", {"method": "POST"}, CapabilityResult(success=True, output="Submitted"))
+    assert check.blocker()
+
+
+def test_tool_output_limit_never_cuts_json_into_an_apparent_record():
+    from rune.agent.tool_adapter import _format_tool_output
+
+    result = CapabilityResult(success=True, output='{"value":120,"padding":"' + "x" * 31000 + '","unit":"USD"}',
+                              metadata={"content_type": "application/json"})
+    output = _format_tool_output("web_fetch", {}, result)
+    assert not result.success and result.metadata["delivery_truncated"]
+    assert "120" not in output and "jsonFilter" in output
+
+
 def test_optional_lookup_failure_cannot_silently_complete_as_chat():
     check = WebGrounding()
     assert check.blocker() is None

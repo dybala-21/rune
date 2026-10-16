@@ -103,6 +103,7 @@ async def test_lookup_finishes_with_sources_before_the_limit(monkeypatch, model,
             chunks = [_chunk(tool_calls=_tc(), finish="tool_calls")]
         else:
             assert not kwargs.get("tools") and not kwargs.get("tool_choice")
+            assert "Rune runtime limit" in kwargs["messages"][-1]["content"]
             assert "retrieved value: 120" in str(kwargs["messages"])
             answer = "The retrieved value is 120; its date is unverified."
             chunks = [_chunk(json.dumps({"final": answer}) if stream._guided else answer, finish="stop")]
@@ -187,6 +188,7 @@ async def test_reserved_answer_can_report_missing_facts_without_another_call(mon
         else:
             if not guided:
                 assert [tool["function"]["name"] for tool in kwargs["tools"]] == ["task_blocked"]
+            assert "Rune runtime limit (tool rounds)" in kwargs["messages"][-1]["content"]
             args = {"reason": "The source has no current value or observation time."}
             chunks = [_chunk(json.dumps({"tool": "task_blocked", "arguments": args}), finish="stop")] if guided else [
                 _chunk(tool_calls=_tc("task_blocked", json.dumps(args)), finish="tool_calls")]
