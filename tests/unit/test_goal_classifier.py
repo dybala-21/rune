@@ -14,7 +14,7 @@ def verdict(**changes):
     return {"goal_type": "full", "confidence": 0.9, "reason": "requested work",
             "requires_execution": False, "intent_categories": [],
             "needs_web_evidence": False, "needs_current_source": False,
-            "lookup_only": False,
+            "lookup_only": False, "source_output": "none", "browser_effect": "change", "calculation_operation": "other",
             "requires_desktop_input": False, "is_related_to_previous": False,
             "table_output": "none", "calculation_expression": "", **changes}
 
@@ -41,6 +41,41 @@ async def test_valid_routing_needs_one_constrained_call(monkeypatch):
     assert from_wire(to_wire(result)) == result
 
 
+async def test_browser_requirements_share_the_routing_call(monkeypatch):
+    from rune.agent.browser_requirements import request_key
+    goal = "Adults to 3 and Children to 3"
+    requirements = {"complete": True, "items": [
+        {"requirement": "Adults to 3", "expected": "3", "kind": "value"},
+        {"requirement": "Children to 3", "expected": "3", "kind": "value"},
+    ]}
+    stub = client(monkeypatch, response(verdict(goal_type="browser", browser_requirements=requirements)))
+    result = await classify_goal(goal)
+    assert result.available and result.browser_requirements == requirements
+    assert result.browser_requirements_key == request_key((goal,))
+    assert stub.completion.await_count == 1
+    assert from_wire(to_wire(result)) == result
+
+
+async def test_resume_task_must_be_one_of_the_supplied_records(monkeypatch):
+    stub = client(monkeypatch, response(verdict(resume_task="ffffffffffff")), response(verdict(resume_task="ffffffffffff")))
+    result = await classify_goal("Continue that task", saved_tasks=[{"id":"aabbccddeeff", "request":"Update report"}])
+    assert not result.available and stub.completion.await_count == 2
+    assert "invalid_resume_task" in result.reason
+
+
+async def test_file_roles_do_not_replace_the_saved_task_schema(monkeypatch):
+    from rune.agent.classification_response import request_classification
+
+    stub = client(monkeypatch, response(verdict(resume_task="aabbccddeeff", file_roles=[{"name":"report.csv", "role":"input"}])))
+    roles = {}
+    values = await request_classification(stub, "Route", json.dumps({
+        "request_to_classify":"Continue editing report.csv", "saved_tasks":[{"id":"aabbccddeeff", "request":"Edit report.csv"}],
+    }), file_roles=roles)
+    properties = stub.completion.call_args.kwargs["response_format"]["json_schema"]["schema"]["properties"]
+    assert "resume_task" in properties and "file_roles" in properties
+    assert values["resume_task"] == "aabbccddeeff" and roles == {"report.csv":"input"}
+
+
 @pytest.mark.parametrize("lookup_only", [True, False])
 async def test_lookup_scope_reuses_the_existing_classification(monkeypatch, lookup_only):
     stub = client(monkeypatch, response(verdict(goal_type="chat", needs_web_evidence=True, lookup_only=lookup_only)))
@@ -61,10 +96,23 @@ def test_lookup_optimization_cannot_change_the_task_scope(changes):
 
 
 def test_current_source_cannot_bypass_the_source_requirement():
-    from rune.agent.classification_response import InvalidClassification, validate_decision
+    from rune.agent.classification_response import validate_decision
 
-    with pytest.raises(InvalidClassification, match="inconsistent_source_requirement"):
-        validate_decision(verdict(needs_current_source=True))
+    values = validate_decision(verdict(needs_current_source=True))
+    assert values["needs_current_source"] and values["needs_web_evidence"]
+
+
+@pytest.mark.parametrize("items", [
+    [{"requirement": "Change people to three", "expected": "three"}],
+    [{"requirement": "confirm it", "kind": "result", "confirms": "missing"}],
+])
+async def test_invalid_optional_browser_plan_defers_to_executor_without_rerouting(monkeypatch, items):
+    stub = client(monkeypatch, response(verdict(goal_type="browser",
+        browser_requirements={"complete": True, "items": items})))
+    result = await classify_goal("Set people to 3, save and confirm it")
+    assert result.available and result.goal_type == "browser"
+    assert result.browser_requirements is None
+    assert stub.completion.await_count == 1
 
 
 @pytest.mark.parametrize("route,requirement", [("chat", "read"), ("artifact", "write"),
@@ -154,6 +202,8 @@ async def test_calculation_extraction_reuses_the_routing_call(monkeypatch):
     assert '"result": "0.3"' in calculation_context("Evaluate 0.1 + 0.2", result)
     assert stub.completion.await_count == 1
     assert from_wire(to_wire(result)) == result
+    schema = stub.completion.call_args.kwargs["response_format"]["json_schema"]["schema"]
+    assert "verbatim" in schema["properties"]["calculation_expression"]["description"]
 
 
 async def test_extra_prose_is_rejected_and_retried_once(monkeypatch):

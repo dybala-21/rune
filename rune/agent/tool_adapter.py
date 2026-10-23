@@ -176,8 +176,11 @@ class ToolAdapterOptions:
     step_counter: Callable[[], int] | None = None
     allowed_tools: list[str] | None = None
     on_tool_start: Callable[[str, dict[str, Any]], Coroutine[Any, Any, None]] | None = None
+    prepare_tool: Callable[[str, dict[str, Any]], None] | None = None
     on_tool_end: Callable[[str, CapabilityResult], Coroutine[Any, Any, None]] | None = None
     approval_callback: Callable[[str, str], Awaitable[bool]] | None = None  # (capability, reason) -> approved
+    approval_denied: bool = False
+    approval_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     budget_percent: float = 0.0  # current budget consumption ratio (0.0-1.0)
     # Callable, not a bool: the in-run upshift turns the lane off mid-run.
     fast_lane_active: Callable[[], bool] | None = None
@@ -378,9 +381,6 @@ def _build_typed_tool(
     """Wrap a capability and its parameter schema for tools_to_openai_schema()."""
     cap_name = cap_def.name
 
-    # Shared with the tool closure to count consecutive denials.
-    _consecutive_denials: list[int] = [0]
-
     # Cache read approvals for this run. Recheck every write.
     _approved_network: set[str] = set()
 
@@ -480,18 +480,32 @@ def _build_typed_tool(
             if cap_name == _BASH_CAPABILITY:
                 effective_params = _cap_benchmark_bash_timeout(effective_params)
 
+            if opts.prepare_tool is not None:
+                if cap_def.parameters_model is not None:
+                    validated = cap_def.parameters_model.model_validate(effective_params)
+                    if cap_name in {"browser_act", "browser_batch"}:
+                        requirements = {key: effective_params[key] for key in ("taskRequirements",) if key in effective_params}
+                        effective_params = validated.model_dump(mode="json", by_alias=True, exclude_unset=True)
+                        effective_params.update(requirements)
+                opts.prepare_tool(cap_name, effective_params)
             normalized_params = (cap_def.parameters_model.model_validate(effective_params).model_dump(mode="json", by_alias=True)
                                  if cap_def.parameters_model is not None else deepcopy(effective_params))
         except (ValidationError, ValueError, TypeError) as exc:
-            details = "; ".join(
-                f"{'.'.join(map(str, error['loc']))}: {error['msg']}"
-                for error in exc.errors(include_input=False, include_url=False)[:3]
-            ) if isinstance(exc, ValidationError) else "Invalid argument type or value."
+            from rune.agent.tool_errors import ToolPreparationError, validation_details
+
+            details = validation_details(exc) if isinstance(exc, ValidationError) else str(exc) if isinstance(exc, ToolPreparationError) else "Invalid argument type or value."
+            hint = getattr(cap_def.parameters_model, "validation_hint", "")
+            if isinstance(exc, ValidationError) and hint:
+                details = details[:500] + " " + hint
             result = CapabilityResult(success=False, error=f"Invalid arguments for {cap_name}: {details[:1000]}",
-                                      metadata={"action_status": "not_executed"})
+                                      metadata={"action_status": "not_executed", **(
+                                          {"validation_error": exc.details} if isinstance(exc, ToolPreparationError) else {})})
             if opts.on_tool_end is not None:
                 await opts.on_tool_end(cap_name, result)
-            return f"{ERROR_PREFIX} {result.error}"
+            from rune.agent.tool_output import RejectedToolResult
+
+            return RejectedToolResult(f"{ERROR_PREFIX} {result.error}",
+                                      exc.details["code"] if isinstance(exc, ToolPreparationError) else "invalid_arguments")
 
         from rune.agent.execution_journal import active_journal
         journal = active_journal()
@@ -525,12 +539,17 @@ def _build_typed_tool(
             nonlocal approved_revisions
             from rune.safety.approval_request import action_request, request_scope
 
-            action = action_request(cap_name, normalized_params)
-            with request_scope(action):
-                accepted = await opts.approval_callback(command, reason)
-            if accepted:
-                approved_revisions = action["revisions"]
-            return accepted
+            async with opts.approval_lock:
+                if opts.approval_denied:
+                    return False
+                action = action_request(cap_name, normalized_params)
+                with request_scope(action):
+                    accepted = await opts.approval_callback(command, reason)
+                if accepted:
+                    approved_revisions = action["revisions"]
+                else:
+                    opts.approval_denied = True
+                return accepted
 
         # 2. Guardian validation
         approval_cleared = False
@@ -550,30 +569,12 @@ def _build_typed_tool(
                 if opts.approval_callback is not None:
                     approved = await request_approval(cap_name, guard_result.reason)
                     if not approved:
-                        # Feature 1: Denial escalation
-                        _consecutive_denials[0] += 1
-                        if _consecutive_denials[0] >= 2:
-                            deny_hint = (
-                                "\n\n[SYSTEM STOP] This command has been denied multiple times. "
-                                "Do NOT retry similar commands. Either use ask_user to explain "
-                                "why you need this command, or find a completely different "
-                                "approach that does not require this operation."
-                            )
-                        else:
-                            deny_hint = (
-                                "\n\n[Recovery Guidance]\n"
-                                "This command was denied by the user. Do NOT retry the same or similar command.\n"
-                                "  1. Try a fundamentally different approach\n"
-                                "  2. Use ask_user to explain why you need this operation\n"
-                                "  3. If this is a prerequisite for the task, report the blocker to the user"
-                            )
+                        deny_hint = " Do not retry or ask for approval again in this run. Report what remains unexecuted."
                         err = CapabilityResult(success=False, error=guard_result.reason,
-                                               metadata={"action_status": "not_executed"})
+                                               metadata={"action_status": "not_executed", "approval_decision": "denied"})
                         if opts.on_tool_end is not None:
                             await opts.on_tool_end(cap_name, err)
                         return f"{DENIED_PREFIX} {guard_result.reason}{deny_hint}"
-                    # Approved, reset denial counter
-                    _consecutive_denials[0] = 0
                     approval_cleared = True
                 else:
                     err = CapabilityResult(success=False, error=guard_result.reason,
@@ -607,13 +608,13 @@ def _build_typed_tool(
                     err = CapabilityResult(
                         success=False,
                         error="User declined the network operation.",
-                        metadata={"action_status": "not_executed"},
+                        metadata={"action_status": "not_executed", "approval_decision": "denied"},
                     )
                     if opts.on_tool_end is not None:
                         await opts.on_tool_end(cap_name, err)
                     return (
                         f"{DENIED_PREFIX} User declined: {net_request.display}. "
-                        "Do NOT retry it; find another source or report the blocker."
+                        "Do not retry or ask for approval again in this run. Report what remains unexecuted."
                     )
                 if not net_request.is_write and not net_request.single_use:
                     _approved_network.add(net_request.cache_key)
@@ -645,11 +646,11 @@ def _build_typed_tool(
                     err = CapabilityResult(
                         success=False,
                         error="User declined the service operation.",
-                        metadata={"action_status": "not_executed"},
+                        metadata={"action_status": "not_executed", "approval_decision": "denied"},
                     )
                     if opts.on_tool_end is not None:
                         await opts.on_tool_end(cap_name, err)
-                    return f"{DENIED_PREFIX} User declined the service operation."
+                    return f"{DENIED_PREFIX} User declined the service operation. Do not retry or ask for approval again in this run."
                 approval_cleared = True
 
         # 2.5 Edit-loop circuit breaker — blocks at tool dispatch level
@@ -713,7 +714,6 @@ def _build_typed_tool(
                 )
 
             if granted:
-                _consecutive_denials[0] = 0
                 try:
                     with acceptance_scope(opts.table_acceptance), approval_granted(cap_name, normalized_params, revisions=approved_revisions):
                         result = await reg.execute(cap_name, effective_params)
@@ -724,21 +724,18 @@ def _build_typed_tool(
                         success=False, error=f"Execution error: {exc}"
                     )
             elif opts.approval_callback is not None:
-                _consecutive_denials[0] += 1
                 result = CapabilityResult(success=False, error=f"Denied: {reason}",
-                                          metadata={"action_status": "not_executed"})
+                                          metadata={"action_status": "not_executed", "approval_decision": "denied"})
 
         elapsed_ms = (time.monotonic() - start_time) * 1000
+        if (result.metadata or {}).get("approval_decision") == "denied":
+            opts.approval_denied = True
         if (result.metadata or {}).get("replayed"):
             if opts.on_tool_end is not None:
                 await opts.on_tool_end(cap_name, result)
             return "[RECORDED RESULT — not executed again; not a fresh verification]\n" + (result.output or result.error or "")
         if cap_name == _BASH_CAPABILITY:
             result = _enforce_benchmark_status_markers(result)
-
-        # Feature 1: Reset denials on successful bash execution
-        if cap_name == _BASH_CAPABILITY and result.success:
-            _consecutive_denials[0] = 0
 
         try:
             output = output_for_model(_format_tool_output(cap_name, effective_params, result), cap_name, result)
@@ -770,6 +767,19 @@ def _build_typed_tool(
         if opts.on_tool_end is not None:
             await opts.on_tool_end(cap_name, result)
 
+        evidence_note = (result.metadata or {}).get("browser_evidence_note")
+        if evidence_note and cap_name.startswith("browser_"):
+            output = output.with_text(output.text + "\n" + evidence_note) if isinstance(output, ToolOutput) else output + "\n" + evidence_note
+
+        missing = (result.metadata or {}).get("remaining_browser_requirements")
+        if missing and cap_name.startswith("browser_"):
+            note = ("\nRemaining task checks: " + json.dumps(missing, ensure_ascii=False)
+                    + ". Use one requirement ID per check and separate evidence for each result. "
+                    "Read the results; do not repeat completed input or saves.")
+            if isinstance(output, ToolOutput):
+                output = output.with_text(output.text + note)
+            else:
+                output += note
         return output
 
     # Wrapper that receives **kwargs from LiteLLMAgent's tool executor

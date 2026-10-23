@@ -15,6 +15,15 @@ MAX_IMAGE_BYTES = 5 * 1024 * 1024
 _IMAGE_TYPES = {"PNG": "image/png", "JPEG": "image/jpeg", "GIF": "image/gif", "WEBP": "image/webp"}
 
 
+class RejectedToolResult(str):
+    """A rejected call that never reached the tool."""
+
+    def __new__(cls, text: str, code: str) -> RejectedToolResult:
+        result = super().__new__(cls, text)
+        result.code = code
+        return result
+
+
 class ReadToolResult(str):
     """Read text with an evidence key kept out of model requests."""
 

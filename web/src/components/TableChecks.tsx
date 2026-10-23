@@ -2,7 +2,7 @@ import type { TableAcceptanceInfo } from '../types';
 
 const statusText = {
   pass: 'Passed', fail: 'Differences found', inconclusive: 'Could not confirm',
-  unverified: 'Not checked', stale: 'Changed since check',
+  unverified: 'Not checked', stale: 'Changed since check', unavailable: 'Check unavailable',
 };
 const checkText: Record<string, string> = {
   columns: 'Column mismatch', missing_or_incorrect_rows: 'Missing or incorrect rows',
@@ -36,7 +36,13 @@ export function TableChecks({ data }: { data?: TableAcceptanceInfo | null }) {
         {issue.examples?.map((row, j) => <div key={j} style={{ fontFamily: 'var(--font-mono)' }}>{row.join(' · ')}</div>)}
       </div>)}
     </div>)}
-    <div style={{ color: 'var(--text-muted)', marginTop: 4 }}>Checks cover table data; prose and layout are not checked.</div>
+    {data.reports?.map(report => <div key={report.path} style={{ marginTop: 6 }}>
+      <div>{filename(report.path)} · {statusText[report.status]}</div>
+      {report.issues.map((issue, i) => <div key={i}>{issue}</div>)}
+    </div>)}
+    <div style={{ color: 'var(--text-muted)', marginTop: 4 }}>{data.reports?.length
+      ? 'Checks cover table data and source totals quoted in reports. Other prose and layout are not checked.'
+      : 'Checks cover table data; prose and layout are not checked.'}</div>
     {data.unverified.length > 0 && <div>
       <div style={{ fontWeight: 600 }}>Not verified</div>
       <ul style={{ margin: '4px 0', paddingLeft: 18 }}>{data.unverified.map((item, i) => <li key={i}>{item}</li>)}</ul>

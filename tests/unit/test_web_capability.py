@@ -18,6 +18,69 @@ from rune.capabilities.web import (
 )
 
 
+@pytest.mark.parametrize("case", ["timeout", "invalid_json", "accepted", "redirect", "disabled"])
+async def test_write_response_failures_keep_dispatch_status(monkeypatch, case):
+    monkeypatch.setenv("RUNE_HYBRID_API", "0" if case == "disabled" else "1")
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        if case == "timeout":
+            raise httpx.ReadTimeout("Response lost", request=request)
+        if case == "redirect":
+            return httpx.Response(307, headers={"location": "https://example.org/other"})
+        if case == "accepted":
+            return httpx.Response(202, json={"queued": True})
+        return httpx.Response(200, text='{"broken":', headers={"content-type": "application/json"})
+
+    client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: client(transport=httpx.MockTransport(respond), **kwargs))
+    result = await web_fetch(WebFetchParams(url="https://example.org/orders", method="POST", body="{}"))
+    assert not result.success
+    assert result.metadata["action_status"] == ("not_executed" if case == "disabled" else "unknown")
+    assert len(calls) == (0 if case == "disabled" else 1)
+
+
+async def test_record_query_selects_latest_before_delivery_limit(monkeypatch):
+    payload = {"unit": "USD", "rows": [{"entity": "ACME", "value": i, "time": f"2026-10-{i:02d}"} for i in range(1, 17)]}
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json=payload))
+    client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client(transport=transport, **kw))
+    result = await web_fetch(WebFetchParams(url="https://example.org/records", maxLength=300,
+        recordQuery={"path": "/rows", "operation": "latest", "field": "time", "where": {"entity": "ACME"}}))
+    assert result.success, result.error
+    assert json.loads(result.output[result.metadata["body_offset"]:]) == {"unit": "USD", **payload["rows"][-1]}
+    assert result.metadata["record_query"]["matched"] == 16
+    assert "pagination not checked" in result.output
+
+
+async def test_record_query_rejects_pre_filtered_inputs_and_cannot_claim_a_partial_sum(monkeypatch):
+    reads = []
+    def respond(req):
+        reads.append(req)
+        return httpx.Response(200, json=[{"v": 1}, {}])
+    transport = httpx.MockTransport(respond)
+    client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client(transport=transport, **kw))
+    query = {"operation": "sum", "field": "v"}
+    result = await web_fetch(WebFetchParams(url="https://example.org/records", recordQuery=query))
+    assert not result.success and result.metadata["record_query_failed"]
+    result = await web_fetch(WebFetchParams(url="https://example.org/records", jsonFilter="1", recordQuery=query))
+    assert not result.success and "cannot be combined" in result.error
+    assert len(reads) == 1
+
+
+async def test_large_json_and_wrong_path_return_structure_for_recovery(monkeypatch):
+    payload = {"observations": [{"station": "North", "value": 17.125}] * 1000}
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, json=payload))
+    client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client(transport=transport, **kw))
+    for options in ({}, {"recordQuery": {"operation":"sum", "field":"value"}}):
+        result = await web_fetch(WebFetchParams(url="https://example.org/data", **options))
+        assert not result.success and '"path":"/observations"' in result.error
+        assert '"sampleFields":["station","value"]' in result.error and "17.125" not in result.error
+
+
 @pytest.mark.parametrize("records", [
     {"symbol": "ACME", "quote": {"value": 120, "unit": "USD", "observed_at": "2026-10-16T09:00:00Z"}},
     {"ACME": {"value": 120, "unit": "USD", "observed_at": "2026-10-16T09:00:00Z"}},

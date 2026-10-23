@@ -126,6 +126,52 @@ PROTECTED_PATHS = [
     "/private/etc", "/private/var",
 ]
 
+_USER_TEMP_PATTERN = re.compile(r"/private/var/folders/[^/]+/[^/]+/T")
+# The only protected entries relaxed for the per-user temp tree.
+_TEMP_PARENTS = frozenset({"/var", "/private/var"})
+
+
+def _darwin_user_temp() -> str | None:
+    """Ask the OS for this user's temp directory; TMPDIR or a .env file cannot redirect it."""
+    import ctypes
+    import ctypes.util
+    import sys
+
+    if sys.platform != "darwin":
+        return None
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c"))
+        buffer = ctypes.create_string_buffer(1024)
+        if not 0 < libc.confstr(65537, buffer, len(buffer)) <= len(buffer):  # _CS_DARWIN_USER_TEMP_DIR
+            return None
+        root = Path(buffer.value.decode()).resolve()
+        if not _USER_TEMP_PATTERN.fullmatch(str(root)) or root.stat().st_uid != os.getuid():
+            return None
+        return str(root)
+    except (OSError, AttributeError, UnicodeError) as exc:
+        log.debug("guardian_user_temp_unavailable", error=str(exc))
+        return None
+
+
+_USER_TEMP = _darwin_user_temp()
+
+
+def _fold_path(path: str) -> str:
+    """Comparison key for a path: case-folded on macOS, whose default volumes ignore case."""
+    import sys
+
+    return path.casefold() if sys.platform == "darwin" else path
+
+
+def _inside(path: str, root: str) -> bool:
+    return path == root or path.startswith(root + "/")
+
+
+def _user_temp_root() -> str | None:
+    """The user's macOS temp tree, resolved once at startup."""
+    return _USER_TEMP
+
+
 # Protect these paths and their ancestors from writes and deletions.
 _CRITICAL_ROOT_PATHS = [
     "/",
@@ -177,12 +223,56 @@ def _is_standalone_path_match(input_str: str, protected_path: str) -> bool:
         idx = input_str.find(protected_path, search_from)
         if idx == -1:
             return False
-        if idx == 0:
-            return True
-        if _PATH_BOUNDARY.match(input_str[idx - 1]):
+        after = input_str[idx + len(protected_path):idx + len(protected_path) + 1]
+        # "/various" is not "/var", but "/etc/passwd.bak" still matches "/etc/passwd".
+        continues_name = bool(after) and (after.isalnum() or after in "_-")
+        if (idx == 0 or _PATH_BOUNDARY.match(input_str[idx - 1])) and not continues_name:
             return True
         search_from = idx + 1
     return False
+
+
+_TOOL_BIN = re.compile(r"/opt/(?:homebrew/(?:opt/[^/\s]+/)?bin|local/bin)/[^/\s;|&<>()'\"`]+")
+
+
+def _without_tool_programs(command: str) -> str:
+    """Blank out a Homebrew or MacPorts executable when it is the program a segment runs.
+
+    Any other /opt path in the command is still checked.
+    """
+    def program(match: re.Match) -> str:
+        before = command[:match.start()].rstrip()
+        # Program position: after a separator and any env assignments.
+        tokens = re.split(r"\s+", re.split(r"&&|\|\||[;|&(]", before)[-1].strip()) if before else []
+        leading = all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=\S*", token) for token in tokens if token)
+        return "TOOLPROGRAM" if leading else match.group(0)
+
+    return _TOOL_BIN.sub(program, command)
+
+
+_SHELL_PATH_END = re.compile(r"""[\s"'`;|&<>()]""")
+
+
+def _without_user_temp_paths(command: str) -> str:
+    """Blank out paths strictly inside the user's macOS temp tree, so /var protection still sees the rest."""
+    root = _user_temp_root()
+    if root is None:
+        return command
+    spellings = (root, root.removeprefix("/private")) if root.startswith("/private/") else (root,)
+    out, index = [], 0
+    while index < len(command):
+        found = [(command.find(prefix + "/", index), prefix) for prefix in spellings]
+        found = [(at, prefix) for at, prefix in found if at != -1]
+        if not found:
+            break
+        at, prefix = min(found)
+        stop = _SHELL_PATH_END.search(command, at)
+        end = stop.start() if stop else len(command)
+        token = command[at:end]
+        inside = os.path.normpath(token).startswith(prefix + "/")
+        out.append(command[index:at] + ("TMPPATH" if inside else token))
+        index = end
+    return "".join(out) + command[index:]
 
 
 # Risk conversion
@@ -269,6 +359,16 @@ class Guardian:
                 )
             if not base.allowed:
                 return base
+        from rune.safety.package_installs import install_scope
+        from rune.safety.tool_policy import approval_mode
+
+        install = install_scope(command, cwd or os.getcwd())
+        if install is not None and (install.outside_workspace or approval_mode() == "strict"):
+            # Software installed outside the workspace outlives the task and runs code the agent picked.
+            base = ValidationResult(
+                allowed=True, risk_level=max((base.risk_level, "high"), key=risk_to_number),
+                reason=install.reason or f"Strict approval: `{install.tool}` installs packages.", requires_approval=True,
+            )
         if targets.uncertain:
             return ValidationResult(
                 allowed=True,
@@ -373,6 +473,11 @@ class Guardian:
         for pp in PROTECTED_PATHS + READ_BLOCKED_PATHS:
             expanded_pp = self._expand(pp)
             for cmd in (command, normalized) if normalized != command else (command,):
+                if pp in _TEMP_PARENTS:
+                    # Isolated worktrees live in the per-user temp tree; only that tree is exempt.
+                    cmd = _without_user_temp_paths(cmd)
+                if pp == "/opt":
+                    cmd = _without_tool_programs(cmd)
                 if _is_standalone_path_match(cmd, expanded_pp):
                     return ValidationResult(
                         allowed=False,
@@ -494,10 +599,13 @@ class Guardian:
             log.debug("guardian_symlink_unresolvable", path=normalized,
                       error=str(exc))
 
+        # macOS volumes are case-insensitive by default; on case-sensitive ones folding only blocks more.
+        fold = _fold_path
+        normalized_key, real_key = fold(normalized), fold(real_path)
+
         from rune.cloud.store import cloud_home
         from rune.connectors.store import broker_home
-        target = Path(real_path)
-        if any(target.is_relative_to(root.resolve()) or root.resolve().is_relative_to(target)
+        if any(_inside(real_key, fold(str(root.resolve()))) or _inside(fold(str(root.resolve())), real_key)
                for root in (broker_home(), cloud_home())):
             return ValidationResult(allowed=False, risk_level="critical",
                                     reason="Broker and hosting state may only be changed by their management commands")
@@ -505,8 +613,8 @@ class Guardian:
         # critical root paths
         for crp in _CRITICAL_ROOT_PATHS:
             expanded_crp = self._expand(crp)
-            norm_crp = str(Path(expanded_crp).resolve())
-            if normalized == norm_crp or real_path == norm_crp:
+            norm_crp = fold(str(Path(expanded_crp).resolve()))
+            if normalized_key == norm_crp or real_key == norm_crp:
                 return ValidationResult(
                     allowed=False,
                     risk_level="critical",
@@ -522,17 +630,18 @@ class Guardian:
             )
 
         # protected path containment (both directions)
+        user_temp = _user_temp_root()
+        # Both requested and resolved paths must be inside, so a symlink cannot escape.
+        in_user_temp = user_temp is not None and all(
+            candidate.startswith(fold(user_temp) + "/") for candidate in (normalized_key, real_key))
         for pp in PROTECTED_PATHS:
+            if in_user_temp and pp in _TEMP_PARENTS:
+                continue
             expanded_pp = self._expand(pp)
-            norm_pp = str(Path(expanded_pp).resolve())
+            norm_pp = fold(str(Path(expanded_pp).resolve()))
 
             # (a) requested path is inside (or equal to) a protected path
-            if (
-                normalized == norm_pp
-                or normalized.startswith(norm_pp + "/")
-                or real_path == norm_pp
-                or real_path.startswith(norm_pp + "/")
-            ):
+            if _inside(normalized_key, norm_pp) or _inside(real_key, norm_pp):
                 return ValidationResult(
                     allowed=False,
                     risk_level="high",
@@ -540,10 +649,7 @@ class Guardian:
                 )
 
             # Reject ancestors of protected paths, such as /usr when /usr/bin is protected.
-            if (
-                norm_pp.startswith(normalized + "/")
-                or norm_pp.startswith(real_path + "/")
-            ):
+            if norm_pp.startswith(normalized_key + "/") or norm_pp.startswith(real_key + "/"):
                 return ValidationResult(
                     allowed=False,
                     risk_level="critical",
@@ -553,8 +659,8 @@ class Guardian:
         # Config file approval gate
         for cp in CONFIG_APPROVAL_PATHS:
             expanded_cp = self._expand(cp)
-            norm_cp = str(Path(expanded_cp).resolve())
-            if real_path == norm_cp:
+            norm_cp = fold(str(Path(expanded_cp).resolve()))
+            if real_key == norm_cp:
                 return ValidationResult(
                     allowed=True,
                     risk_level="high",
@@ -637,10 +743,11 @@ class Guardian:
                 return ValidationResult(allowed=False, risk_level="high", reason="Cannot resolve file read path")
             if hosted_mode and (boundary is None or not target.is_relative_to(boundary)):
                 return ValidationResult(allowed=False, risk_level="high", reason="Hosted file access is restricted to the owner's workspace")
-            if target.name.startswith(".env") and target.parent == private:
+            key = _fold_path(str(target))
+            if target.name.casefold().startswith(".env") and _fold_path(str(target.parent)) == _fold_path(str(private)):
                 return ValidationResult(allowed=False, risk_level="high", reason="Reading RUNE's credential store is not permitted")
             for root in roots:
-                if target.is_relative_to(root):
+                if _inside(key, _fold_path(str(root))):
                     return ValidationResult(allowed=False, risk_level="high", reason=f"Reading sensitive path blocked: {root}")
             return ValidationResult(allowed=True, risk_level="safe")
 

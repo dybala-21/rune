@@ -65,6 +65,7 @@ def _mcp_tool_to_capability(
     The ``execute`` function delegates to ``MCPClientManager.call_tool()``.
     """
     capability_name = f"mcp.{server_name}.{tool.name}"
+    read_only = (getattr(tool, "annotations", None) or {}).get("readOnlyHint") is True
     description = tool.description or f"[MCP:{server_name}] {tool.name}"
 
     async def _execute(params: Any) -> CapabilityResult:
@@ -95,10 +96,12 @@ def _mcp_tool_to_capability(
             )
 
             if result.is_error:
+                # The server answered and refused the call.
                 return CapabilityResult(
                     success=False,
                     output=output,
                     error=f"MCP tool error: {output}",
+                    metadata={"mcp_server": server_name, "mcp_tool": tool.name, "mcp_error": True, "mcp_read_only": read_only},
                 )
 
             return CapabilityResult(
@@ -107,16 +110,20 @@ def _mcp_tool_to_capability(
                 metadata={
                     "mcp_server": server_name,
                     "mcp_tool": tool.name,
+                    "mcp_read_only": read_only,
                     "content_types": [c.get("type", "") for c in result.content],
                 },
             )
 
         except Exception as exc:
             msg = str(exc)
+            # The call may have reached the server before the transport failed.
             return CapabilityResult(
                 success=False,
                 output="",
                 error=f"MCP call failed ({server_name}/{tool.name}): {msg}",
+                metadata={"mcp_server": server_name, "mcp_tool": tool.name, "action_status": "unknown",
+                          "mcp_read_only": read_only},
             )
 
     return CapabilityDefinition(

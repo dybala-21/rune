@@ -15,7 +15,7 @@ import typer
 from rich.console import Console
 
 from rune import __version__
-from rune.agent.run_outcome import run_outcome
+from rune.agent.run_outcome import explanation_warning, run_outcome
 
 # App
 
@@ -441,10 +441,6 @@ def _handle_non_interactive(
             # Reuse classification only if sanitizing and path expansion left the goal unchanged.
             classification=classification if ctx.goal == message else None,
         )
-        if measured["budget_blocked"]:
-            trace.reason = "request_budget_exhausted"
-            trace.completion_check = {"requirement": "Model budget", "detail": measured["budget_blocked"]}
-
         if conv_manager is not None and conv_id:
             from rune.api import conversation_wiring as conv_wiring
 
@@ -455,6 +451,8 @@ def _handle_non_interactive(
 
         if output_parts:
             print()
+        if note := explanation_warning(trace):
+            console.print(f"[yellow]⚠ {note}[/yellow]")
         if not run_outcome(trace).success:
             from rune.agent.escalation import (
                 escalation_hint,
@@ -481,6 +479,11 @@ def _handle_non_interactive(
             try:
                 _learned = await post_process_agent_result(PostProcessInput(
                     verification=getattr(trace, "verification", None),
+                    table_acceptance=getattr(trace, "table_acceptance", None),
+                    requirement_acceptance=getattr(trace, "requirement_acceptance", None),
+                    tests_passed_after_edit=getattr(trace, "tests_passed_after_edit", None),
+                    tool_budget_exhausted=getattr(trace, "tool_budget_exhausted", False),
+                    explanation_review=getattr(trace, "explanation_review", None),
                     context=ctx,
                     success=(run_outcome(trace).success),
                     answer="".join(output_parts),
@@ -528,9 +531,7 @@ def _handle_non_interactive(
                              "remainingBudget": snapshot["remainingBudget"]}
             trace.total_tokens_used = snapshot["usage"]["total_tokens"]
             loop._last_run_timings = trace.timings
-        # Return nonzero when the last mechanical check failed.
-        if trace is not None and getattr(trace, "reason", "") == "checks_failed":
-            _exit_code = 1
+        _exit_code = run_exit_code(trace)
 
     try:
         asyncio.run(_run_and_grade())
@@ -538,6 +539,25 @@ def _handle_non_interactive(
         console.print("\n[yellow]Cancelled.[/yellow]")
     if _exit_code:
         raise typer.Exit(_exit_code)
+
+
+# Exit codes for a --message run; they match the trust card verdict.
+EXIT_UNCONFIRMED = 3
+
+
+def run_exit_code(trace: Any) -> int:
+    """0 = completed or verified; 1 = a check failed or the run errored; 3 = completion not confirmed."""
+    if trace is None:
+        return 1
+    from rune.agent.run_outcome import run_outcome
+
+    outcome = run_outcome(trace)
+    reason = getattr(trace, "reason", "") or ""
+    if reason == "checks_failed" or outcome.completion == "failed" or outcome.verification == "failed":
+        return 1
+    if outcome.success:
+        return 0
+    return EXIT_UNCONFIRMED
 
 
 # Interactive REPL
@@ -702,11 +722,18 @@ def _simple_repl(model: str | None = None, provider: str | None = None) -> None:
         if collected_text:
             print()
         console.print(f"[dim]({trace.reason}, step {trace.final_step or '?'})[/dim]\n")
+        if note := explanation_warning(trace):
+            console.print(f"[yellow]⚠ {note}[/yellow]")
 
         with contextlib.suppress(Exception):
             await post_process_agent_result(PostProcessInput(
                 classification_hint=getattr(run_loop, "_last_goal_type", "") or None,
                 verification=getattr(trace, "verification", None),
+                table_acceptance=getattr(trace, "table_acceptance", None),
+                requirement_acceptance=getattr(trace, "requirement_acceptance", None),
+                tests_passed_after_edit=getattr(trace, "tests_passed_after_edit", None),
+                tool_budget_exhausted=getattr(trace, "tool_budget_exhausted", False),
+                explanation_review=getattr(trace, "explanation_review", None),
                 context=ctx,
                 success=(run_outcome(trace).success),
                 answer=answer,

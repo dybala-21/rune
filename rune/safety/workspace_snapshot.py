@@ -210,3 +210,35 @@ def missing_since_snapshot(workspace: str | Path) -> list[str]:
             if len(gone) >= 200:
                 break
     return gone
+
+
+def changes_since(snapshot: Path, workspace: str | Path, started: float, limit: int = 200) -> dict[str, list[str]]:
+    """Files a command created, modified or removed, judged against the snapshot taken before it.
+
+    Uses ctime as well as mtime, since `touch -r` can restore an old mtime.
+    """
+    ws = Path(workspace).expanduser().resolve()
+    created: list[str] = []
+    modified: list[str] = []
+    for root, dirs, files in os.walk(ws):
+        dirs[:] = [d for d in dirs if d not in (".git", ".rune-trash")]
+        for name in files:
+            path = Path(root) / name
+            rel = path.relative_to(ws)
+            try:
+                stat = path.lstat()
+                changed_at = max(stat.st_mtime, stat.st_ctime)
+            except OSError as exc:
+                log.debug("snapshot_change_unreadable", path=str(rel), error=str(exc))
+                continue
+            before = snapshot / rel
+            if not before.exists() and not before.is_symlink():
+                created.append(str(rel))
+            elif changed_at >= started:
+                modified.append(str(rel))
+            if len(created) + len(modified) >= limit:
+                break
+        if len(created) + len(modified) >= limit:
+            break
+    return {"created": created, "modified": modified, "removed": missing_since_snapshot(ws)}
+

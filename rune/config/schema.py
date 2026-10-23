@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 from rune.llm.reasoning import ReasoningEffort, reasoning_model_key
 
@@ -287,7 +287,8 @@ class VoiceConfig(BaseModel):
 # General Configuration
 
 class GeneralConfig(BaseModel):
-    locale: str = "en"
+    # Legacy configs wrote general.language; both names set the reply locale.
+    locale: str = Field(default="en", validation_alias=AliasChoices("locale", "language"))
     theme: str = "auto"
     telemetry: bool = False
     update_check: bool = True

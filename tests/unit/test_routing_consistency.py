@@ -15,7 +15,7 @@ from tests.unit.test_goal_classifier import response, verdict
     {"goal_type": "full", "requires_desktop_input": True},
     {"goal_type": "chat", "table_output": "csv"},
     {"goal_type": "web", "table_output": "xlsx"},
-    {"goal_type": "code_modify", "calculation_expression": "1 + 2"},
+    {"goal_type": "chat", "requires_execution": True, "calculation_expression": "1 + 2"},
 ])
 def test_contradictory_requirements_are_not_accepted(changes):
     with pytest.raises(InvalidClassification, match="inconsistent"):
@@ -34,6 +34,14 @@ def test_contradictory_requirements_are_not_accepted(changes):
 def test_legitimate_mixed_requirements_remain_valid(changes):
     data = verdict(**changes)
     assert validate_decision(data) == data
+
+
+@pytest.mark.parametrize("filler", ["1 + 2", "none", "count of .o files in build/"])
+def test_an_expression_on_a_route_that_never_reads_it_is_dropped_not_fatal(filler):
+    """Small local models fill every string field; the route itself is still coherent."""
+    data = validate_decision(verdict(goal_type="code_modify", intent_categories=["coding"],
+                                     requires_execution=True, calculation_expression=filler))
+    assert data["goal_type"] == "code_modify" and data["calculation_expression"] == ""
 
 
 async def test_connected_model_can_correct_conflicting_fields_once(monkeypatch):

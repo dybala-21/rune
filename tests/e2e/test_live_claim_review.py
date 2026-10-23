@@ -31,7 +31,7 @@ def review_case(tmp_path):
     source = tmp_path / "mean.py"
     source.write_text(CODE)
     (tmp_path / "test_mean.py").write_text(TESTS)
-    state, gate = VerificationState(), ClaimGate()
+    state, gate = VerificationState(), ClaimGate(model_review=True)
     for path, text in (("mean.py", CODE), ("test_mean.py", TESTS)):
         gate.observe("file_read", {"path": path}, CapabilityResult(success=True, output=text))
     for index in range(2):

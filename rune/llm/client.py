@@ -322,7 +322,9 @@ class LLMClient:
         if response_format is not None:
             from rune.llm.structured import native_output_config, supported_format
             native_format = native_output_config(resolved_model, response_format)
-            selected_format = supported_format(resolved_model, response_format)
+            # Ollama is reached through its OpenAI-compatible route; judge support by the source model.
+            format_model = target.key if target.key.startswith("ollama/") else resolved_model
+            selected_format = supported_format(format_model, response_format)
             if native_format is not None:
                 kwargs["output_config"] = native_format
             elif selected_format is not None:

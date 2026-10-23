@@ -99,7 +99,9 @@ class CapabilityRegistry:
                 f"{'.'.join(map(str, error['loc']))}: {error['msg']}"
                 for error in exc.errors(include_input=False, include_url=False)[:3]
             )
-            return CapabilityResult(success=False, error=f"Invalid arguments for {name}: {details[:1000]}",
+            hint = getattr(cap.parameters_model, "validation_hint", "")
+            recovery = f"\n{hint}" if isinstance(hint, str) and hint else ""
+            return CapabilityResult(success=False, error=f"Invalid arguments for {name}: {details[:1000]}{recovery}",
                                     metadata={"action_status": "not_executed"})
         except Exception as exc:
             return CapabilityResult(success=False, error=f"Capability '{name}' failed before execution: {exc}",
@@ -222,6 +224,7 @@ def _register_all_capabilities(registry: CapabilityRegistry) -> None:
     from rune.capabilities.document import register_document_capability
     from rune.capabilities.document_bundle import register_document_bundle_capability
     from rune.capabilities.file import register_file_capabilities
+    from rune.capabilities.file_query import register_file_query
     from rune.capabilities.memory_capability import register_memory_capabilities
     from rune.capabilities.project import register_project_capabilities
     from rune.capabilities.safety_cap import register_safety_capabilities
@@ -234,6 +237,7 @@ def _register_all_capabilities(registry: CapabilityRegistry) -> None:
     from rune.computer.capabilities import register_desktop_capabilities
 
     register_file_capabilities(registry)
+    register_file_query(registry)
     register_document_capability(registry)
     register_document_bundle_capability(registry)
     register_table_checks(registry)

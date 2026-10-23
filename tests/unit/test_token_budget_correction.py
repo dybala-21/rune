@@ -53,7 +53,7 @@ class TestTheEvidenceBasedUpgrade:
 
     @pytest.mark.parametrize(
         ("writes", "expected"),
-        [(0, 200_000), (2, 200_000), (3, 1_000_000), (9, 1_000_000)],
+        [(0, _BUDGET_BY_INTENT["code_modify"]), (2, _BUDGET_BY_INTENT["code_modify"]), (3, 1_000_000), (9, 1_000_000)],
     )
     def test_it_fires_only_once_the_run_has_written_code(self, writes, expected):
         loop = _Loop(_BUDGET_BY_INTENT["code_modify"], writes=writes)
@@ -86,9 +86,9 @@ class TestTheEvidenceBasedUpgrade:
     def test_the_hard_stop_moves_with_the_budget(self):
         """The run died at 97% of the small budget; the same usage is now early."""
         loop = _Loop(_BUDGET_BY_INTENT["code_modify"], writes=3)
-        loop._token_budget.used = 201_076
+        loop._token_budget.used = int(_BUDGET_BY_INTENT["code_modify"] * 0.98)
         assert loop._token_budget.fraction > 0.97   # would have hard-stopped
 
         loop._maybe_upgrade_budget_for_code_work()
 
-        assert loop._token_budget.fraction < 0.25   # room to keep fixing
+        assert loop._token_budget.fraction < 0.5    # room to keep fixing

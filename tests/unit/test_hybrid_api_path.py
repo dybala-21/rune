@@ -150,6 +150,18 @@ def test_discover_read_body_returns_pruned_json():
         ))
         assert res.success
         assert "19:30" in res.output and "송도" not in res.output
+        assert res.metadata["captured_body"] and res.metadata["status_code"] == 200
+        assert res.output[res.metadata["body_offset"]:] == '{"movieFormList":[{"brchNm":"코엑스","time":"19:30"}]}'
+
+        api = m.get_discovered_apis()[0]
+        api.status = 503
+        failed = asyncio.run(browser_discover_apis(BrowserDiscoverApisParams(readBody="schedulePage")))
+        assert not failed.success and failed.metadata["status_code"] == 503
+        api.status = 200
+        api.response_truncated = True
+        truncated = asyncio.run(browser_discover_apis(BrowserDiscoverApisParams(readBody="schedulePage")))
+        assert not truncated.success and truncated.metadata["delivery_truncated"]
+        api.response_truncated = False
 
         unmatched = asyncio.run(browser_discover_apis(
             BrowserDiscoverApisParams(readBody="schedulePage", jsonFilter="missing")

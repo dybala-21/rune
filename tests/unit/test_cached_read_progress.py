@@ -131,7 +131,7 @@ async def test_alternating_old_cached_reads_still_stops(monkeypatch):
 async def test_rejected_verification_bypass_cannot_loop_or_execute(monkeypatch):
     stream, _ = await run_reads(monkeypatch, ["file_list"] * 5, [],
                                 model="anthropic/claude-opus-5", recovery=lambda: {"file_read"})
-    assert "skipped required verification" in stream._task_blocked
+    assert "skipped required recovery" in stream._task_blocked
     results = [m["content"] for m in stream._messages if m.get("role") == "tool"]
     assert len(results) == 3
     assert all(r.startswith("[BLOCKED]") for r in results)

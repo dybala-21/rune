@@ -45,6 +45,9 @@ def escalation_hint(reason: str) -> str | None:
 
 # Stop messages are shown even when no escalation profile is configured.
 _HONEST_STOP_NOTES = {
+    "verification_unavailable": "The result checker was unavailable. Review the observed actions before retrying; a completed action must not be repeated.",
+    "verification_inconclusive": "The available evidence does not confirm every requested result. Check the remaining conditions before repeating an action.",
+    "task_incomplete": "A requested action did not finish. Review the recorded failure before continuing.",
     "desktop_blocked": (
         "The desktop task stopped before its result could be confirmed. Review the app or connection error before retrying."
     ),

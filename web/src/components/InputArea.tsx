@@ -2,6 +2,7 @@ import { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativ
 import { CommandPalette } from './CommandPalette';
 import { transcribeAudio } from '../api';
 import type { PendingAttachment } from '../types';
+import { installMobileDraft } from '../utils/mobileDraft';
 
 import { attachmentMime, ATTACHMENT_ACCEPT, ATTACHMENT_HELP, MAX_ATTACHMENT_BYTES, MAX_TOTAL_BYTES, MAX_ATTACHMENTS } from '../utils/attachments';
 
@@ -226,6 +227,14 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
     el.style.height = Math.min(el.scrollHeight, 160) + 'px';
     el.selectionStart = el.selectionEnd = v.length;
   };
+
+  useEffect(() => {
+    if (disabled || sending) return;
+    return installMobileDraft(window, () => textareaRef.current?.value ?? '', (text) => {
+      setValue(text);
+      textareaRef.current?.focus();
+    });
+  }, [disabled, sending, conversationKey]);
 
   const handleSubmit = async () => {
     if (isRunning || disabled || readingFiles || sendingRef.current || sendBlockedReason) return;

@@ -149,3 +149,42 @@ class TestRecoveryAcrossSnapshots:
             ws.take(workspace)
         assert not ws.restore(workspace, "old.txt")
 
+
+
+@pytest.mark.asyncio
+async def test_shell_changes_are_reported_as_observed_receipts(workspace, monkeypatch):
+    """A shell command bypasses the file tools, so its changes are read off the disk instead."""
+    from rune.agent.action_receipts import ReceiptLedger
+    from rune.capabilities.bash import BashParams, bash_execute
+
+    monkeypatch.delenv("RUNE_SHELL_SNAPSHOT", raising=False)
+    command = "printf 'y = 2\\n' > pkg/new.py && printf 'x = 3\\n' > pkg/mod.py && rm notes.md"
+    res = await bash_execute(BashParams(command=command, cwd=str(workspace), timeout=30))
+    assert res.metadata["shell_changes"] == {"created": ["pkg/new.py"], "modified": ["pkg/mod.py"], "removed": ["notes.md"]}
+
+    ledger = ReceiptLedger()
+    ledger.record("bash_execute", {"cwd": str(workspace)}, res)
+    receipts = {r["target"]: r for r in ledger.finalize(None)}
+    assert set(receipts) == {str(workspace.resolve() / p) for p in ("pkg/new.py", "pkg/mod.py", "notes.md")}
+    assert {r["tier"] for r in receipts.values()} == {"observed"}
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_workspace_reports_no_shell_changes(workspace, monkeypatch):
+    from rune.capabilities.bash import BashParams, bash_execute
+
+    monkeypatch.delenv("RUNE_SHELL_SNAPSHOT", raising=False)
+    res = await bash_execute(BashParams(command="mkdir -p pkg", cwd=str(workspace), timeout=30))
+    assert res.metadata["shell_changes"] == {"created": [], "modified": [], "removed": []}
+
+
+@pytest.mark.asyncio
+async def test_an_edit_that_restores_the_old_mtime_is_still_reported(workspace, monkeypatch):
+    """A restored mtime is still caught because ctime cannot be set back."""
+    from rune.capabilities.bash import BashParams, bash_execute
+
+    monkeypatch.delenv("RUNE_SHELL_SNAPSHOT", raising=False)
+    command = "touch -t 202001010000 notes.md && cp -p notes.md ../mtime-ref && printf 'changed\\n' > notes.md && touch -r ../mtime-ref notes.md"
+    res = await bash_execute(BashParams(command=command, cwd=str(workspace), timeout=30))
+    assert (workspace / "notes.md").read_text() == "changed\n"
+    assert res.metadata["shell_changes"]["modified"] == ["notes.md"]

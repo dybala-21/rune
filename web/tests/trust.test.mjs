@@ -13,6 +13,51 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const home = mkdtempSync(resolve(tmpdir(), 'rune-trust-contract-'));
 const gate = last_verdict => ({ has_check: true, last_verdict, verdict_counts: { pass: 1 }, last_evidence: 'check output' });
 const cases = [
+  { name: 'completed work survives an exhausted explanation budget', trace: {
+    timings: { budgetBlocked: 'No further model request was sent.' },
+    requirement_acceptance: { required: true, status: 'pass', method: 'page_readback',
+      independentReadback: { status: 'pass', scope: 'http_document' } },
+  }, title: 'Retrieved fields checked', tone: 'neutral', ok: true, card: true },
+  { name: 'separate fetched fields retain their evidence scope', trace: { requirement_acceptance: {
+    required: true, status: 'pass', method: 'page_readback',
+    readback: { status: 'pass', scope: 'observed_page_state' },
+    independentReadback: { status: 'pass', scope: 'http_document' },
+  } }, title: 'Retrieved fields checked', tone: 'neutral', ok: true, card: true },
+  { name: 'unavailable result readback cannot be hidden by a passing page', trace: { reason: 'verification_unavailable', requirement_acceptance: {
+    required: true, status: 'unavailable', method: 'page_readback',
+    readback: { status: 'pass', scope: 'observed_page_state' },
+    independentReadback: { status: 'unavailable', scope: 'http_document' },
+  } }, title: 'Result unconfirmed', tone: 'neutral', ok: null, card: true, escalate: false },
+  { name: 'fetched field mismatch is not a successful page check', trace: { reason: 'task_incomplete', requirement_acceptance: {
+    required: true, status: 'fail', method: 'page_readback',
+    readback: { status: 'pass', scope: 'observed_page_state' },
+    independentReadback: { status: 'fail', scope: 'http_document' },
+  } }, title: 'Checks failed', tone: 'warning', ok: false, card: true },
+  { name: 'page confirmation is not independent storage verification', trace: { reason: 'completed', requirement_acceptance: {
+    required: true, status: 'pass', method: 'page_readback', readback: { status: 'pass', scope: 'observed_page_state' },
+  } }, title: 'Page checked', tone: 'neutral', ok: true, card: true, escalate: false },
+  { name: 'a server-accepted save completes without claiming a stored-record check', trace: { reason: 'completed', requirement_acceptance: {
+    required: true, status: 'acknowledged', method: 'page_readback',
+    writeReceipt: { status: 'accepted', requests: [{ method: 'POST', url: 'https://example.test/save', status: 200 }] },
+  } }, title: 'Saved · server accepted', tone: 'neutral', ok: true, card: true, escalate: false },
+  { name: 'passing page checks do not attest an unbound outcome', trace: { reason: 'verification_inconclusive', requirement_acceptance: {
+    required: true, status: 'inconclusive', method: 'page_readback', readback: { status: 'pass', scope: 'observed_page_state' },
+  } }, title: 'Page checked · scope unconfirmed', tone: 'neutral', ok: null, card: true, escalate: false },
+  { name: 'a budget stop preserves scoped page evidence', trace: { reason: 'request_budget_exhausted', requirement_acceptance: {
+    required: true, status: 'inconclusive', method: 'page_readback', readback: { status: 'pass', scope: 'observed_page_state' },
+  } }, title: 'Page checked · run stopped', tone: 'neutral', ok: null, card: true, escalate: false },
+  { name: 'passing page checks do not hide a blocked action', trace: { reason: 'task_blocked', requirement_acceptance: {
+    required: true, status: 'inconclusive', method: 'page_readback', readback: { status: 'pass', scope: 'observed_page_state' },
+  } }, title: 'Incomplete', tone: 'warning', ok: false, card: true, escalate: false },
+  { name: 'a failed check takes priority over other passing observations', trace: { reason: 'verification_inconclusive', requirement_acceptance: {
+    required: true, status: 'fail', method: 'combined', components: [
+      { required: true, status: 'inconclusive', readback: { status: 'pass', scope: 'observed_page_state' } },
+      { required: true, status: 'fail', method: 'model_review' },
+    ],
+  } }, title: 'Checks failed', tone: 'warning', ok: false, card: true },
+  { name: 'browser checker outage does not claim execution failed', trace: { reason: 'verification_unavailable', requirement_acceptance: { required: true, status: 'unavailable', method: 'page_readback' } }, title: 'Verification unavailable', tone: 'warning', ok: false, card: true },
+  { name: 'missing browser evidence does not trigger a stronger model retry', trace: { reason: 'verification_inconclusive', requirement_acceptance: { required: true, status: 'inconclusive', method: 'page_readback' } }, title: 'Result unconfirmed', tone: 'warning', ok: false, card: true },
+  { name: 'report reviewer outage is distinct from a mismatch', trace: { reason: 'max_gate_blocked', table_acceptance: { required: true, status: 'unavailable', contracts: [], results: [], unverified: [] } }, title: 'Verification unavailable', tone: 'warning', ok: false, card: true },
   { name: 'missing document evidence overrides passing mechanical checks', trace: { mech_check: 'pass', requirement_acceptance: { required: true, status: 'inconclusive', requirements: ['check page layout'], detail: 'Page layout was not inspected.', method: 'model_review' } }, title: 'Verification inconclusive', tone: 'warning', ok: false, card: true },
   { name: 'a model review alone is not a mechanical verification', trace: { requirement_acceptance: { required: true, status: 'pass', requirements: ['two bullets'], method: 'model_review' } }, title: 'Completed', tone: 'neutral', ok: true, card: false },
   { name: 'native connection loss preserves its cause without model escalation', trace: { reason: 'desktop_blocked', completion_check: { name: 'Desktop outcome', detail: 'Rune Computer disconnected. Reconnect the selected apps before continuing.' } }, title: 'Desktop task stopped', tone: 'warning', ok: false, card: true },
@@ -42,6 +87,10 @@ const cases = [
     reason: 'max_gate_blocked', verification: { required: true, status: 'pass' }, tests_passed_after_edit: true,
     explanation_review: { status: 'contradicted' }, completion_check: { name: 'Test result claims' },
   }, title: 'Incomplete', tone: 'warning', ok: false, card: true, escalate: true },
+  { name: 'unavailable explanation review preserves completed execution', trace: {
+    verification: { required: true, status: 'pass' }, tests_passed_after_edit: true,
+    explanation_review: { status: 'unavailable', detail: 'Review timed out.' },
+  }, title: 'Completed · summary unchecked', tone: 'warning', ok: true, card: true, escalate: false },
   { name: 'advisor abort allows escalation', trace: { reason: 'advisor_abort' }, title: 'Incomplete', tone: 'warning', ok: false, card: true, escalate: true },
   { name: 'unresolved output checks do not imply a missing response or a saved file', trace: { reason: 'completed_gate_warnings' }, title: 'Review needed', tone: 'warning', ok: false, card: true },
   { name: 'unresolved requirement includes the concrete blocker', trace: { reason: 'completed_gate_warnings', completion_check: { name: 'Output requirements', detail: 'Comparison table is missing.' } }, title: 'Review needed', tone: 'warning', ok: false, card: true },
@@ -178,10 +227,12 @@ test('table evidence shows fixed requirements, data differences and unverified s
         stats: { source_rows: 5, filtered_rows: 1, duplicates_removed: 1, output_rows: 2 },
         issues: [{ check: 'missing_or_incorrect_rows', count: 1, examples: [['B', '5.01']] }] }],
       unverified: ['Report layout'],
+      reports: [{ path: '/work/report.docx', status: 'unavailable', issues: ['The report review timed out.'] }],
     },
   } }));
   for (const text of ['Table data checks', '취소 주문 제외', 'Filtered out 1', 'Duplicates removed 1',
-    'Missing or incorrect rows: 1', 'B · 5.01', 'Not verified', 'Report layout']) {
+    'Missing or incorrect rows: 1', 'B · 5.01', 'Not verified', 'Report layout',
+    'report.docx', 'Check unavailable', 'The report review timed out.', 'Other prose and layout are not checked.']) {
     assert.ok(html.includes(text), text);
   }
 });

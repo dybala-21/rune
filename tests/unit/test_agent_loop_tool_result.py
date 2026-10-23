@@ -175,6 +175,52 @@ async def test_finalize_runs_requirement_gate_for_non_execution_task(
     assert loop._completion_check == {"name": "Output requirements", "detail": "[Requirement Gate] unmet: X"}
 
 
+@pytest.mark.parametrize("review", ["unavailable", "contradicted", "inconclusive"])
+@pytest.mark.parametrize("execution", ["passed", "failed", "stale", "none"])
+async def test_explanation_review_does_not_replace_execution_evidence(monkeypatch, review, execution):
+    from unittest.mock import AsyncMock
+
+    monkeypatch.delenv("RUNE_OUTPUT_INTEGRITY", raising=False)
+    monkeypatch.setenv("RUNE_REQUIREMENT_GATE", "1")
+    loop = NativeAgentLoop()
+    loop._requires_execution = True
+    if execution != "none":
+        loop._verification.changed()
+        failed = execution == "failed"
+        loop._verification.observe_command("python3 -m unittest", not failed,
+                                          "Ran 1 test in 0s\nFAILED (failures=1)" if failed else "Ran 1 test in 0s\nOK", "/fixture")
+        if execution == "stale":
+            loop._verification.changed()
+    loop._test_claim_gate.status = review
+    loop._test_claim_gate.attempts = 2
+    monkeypatch.setattr(loop._test_claim_gate, "review", AsyncMock(return_value="Review unresolved"))
+    ok, _, count = await loop._finalize_gates([], 0)
+    assert ok is (review == "unavailable" and execution == "passed")
+    assert count == (0 if ok else 5)
+    assert loop._test_claim_gate.snapshot()["status"] == review
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_explanation_review_requires_the_existing_review_option(monkeypatch, enabled):
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("RUNE_REQUIREMENT_GATE", "1" if enabled else "0")
+    monkeypatch.delenv("RUNE_OUTPUT_INTEGRITY", raising=False)
+    client = AsyncMock()
+    client.completion.return_value = {"choices": [{"message": {"content": '{"claims": [], "explanation_issues": []}'}}]}
+    monkeypatch.setattr("rune.llm.client.get_llm_client", lambda: client)
+    loop = NativeAgentLoop()
+    loop._requires_execution = True
+    loop._last_answer_text = "Corrected the implementation."
+    loop._verification.observe_command("python -m unittest", False, "Ran 1 test in 0s\nFAILED (failures=1)")
+    loop._verification.changed()
+    loop._verification.observe_command("python -m unittest", True, "Ran 1 test in 0s\nOK")
+    ok, _, count = await loop._finalize_gates([], 0)
+    assert ok and count == 0 and loop._verification.passed
+    assert client.completion.await_count == int(enabled)
+    assert loop._test_claim_gate.status == ("pass" if enabled else "not_checked")
+
+
 def test_wind_down_phase_final_at_90pct_then_forces_write() -> None:
     # The full N1 chain: budget at >=90% -> phase "final" -> force-write injects.
     loop = NativeAgentLoop()
@@ -293,3 +339,48 @@ def test_long_successful_process_keeps_failed_check_summary_in_preview():
     assert "test_first ... FAIL" in payload["output_head"]
     assert "FAILED (failures=5)" in payload["output_head"]
     assert len(payload["output_head"]) <= 2000
+
+
+@pytest.mark.parametrize('interrupted', ['cancelled', 'error'])
+async def test_interrupted_run_finalizes_save_evidence_before_returning(monkeypatch, tmp_path, interrupted):
+    import asyncio
+
+    from rune.agent.browser_requirements import validated
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.agent.task_evidence import TaskEvidence
+
+    monkeypatch.setenv('RUNE_HOME', str(tmp_path))
+    loop = NativeAgentLoop()
+    async def execute(*args, **kwargs):
+        loop._task_evidence = TaskEvidence(browser_actions=1, coverage_required=True, requirements=validated(
+            {'complete': True, 'items': [{'requirement': 'save', 'kind': 'result'}]}, ('save',)))
+        loop._last_answer_text = 'Saved successfully.'
+        if interrupted == 'cancelled':
+            raise asyncio.CancelledError()
+        raise RuntimeError('connection closed')
+    monkeypatch.setattr(loop, '_execute_loop', execute)
+    trace = await loop.run('save', classification=ClassificationResult('browser', .99, 2))
+    assert trace.reason == ('cancelled' if interrupted == 'cancelled' else 'error: connection closed')
+    assert trace.requirement_acceptance['status'] != 'pass'
+    assert 'Saved successfully.' not in loop._last_answer_text
+    assert 'unconfirmed' in loop._last_answer_text
+
+
+@pytest.mark.parametrize('interrupted', ['cancelled', 'error'])
+async def test_interrupted_run_reports_changes_already_made(monkeypatch, tmp_path, interrupted):
+    import asyncio
+
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.types import CapabilityResult
+
+    monkeypatch.setenv('RUNE_HOME', str(tmp_path))
+    loop = NativeAgentLoop()
+    async def execute(*args, **kwargs):
+        loop._change_receipts.record('web_fetch', {'url': 'https://api.test/orders', 'method': 'POST'},
+                                     CapabilityResult(success=True, metadata={'status_code': 201}))
+        if interrupted == 'cancelled':
+            raise asyncio.CancelledError()
+        raise RuntimeError('connection closed')
+    monkeypatch.setattr(loop, '_execute_loop', execute)
+    trace = await loop.run('create the order', classification=ClassificationResult('full', .99, 2))
+    assert [(r['target'], r['tier']) for r in trace.change_receipts] == [('POST https://api.test/orders', 'acknowledged')]

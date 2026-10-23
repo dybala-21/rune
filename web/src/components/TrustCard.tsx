@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { fetchEscalationStatus, setEscalation, type EscalationStatus } from '../api';
-import type { TrustInfo } from '../types';
+import type { ChangeReceipt, TrustInfo } from '../types';
 import { TableChecks } from './TableChecks';
 import { checkEvidence, checkSummary, describeTrust, trustColors } from '../utils/trust';
 
@@ -192,6 +192,16 @@ export function TrustCard({ trust, onRetry, onEscalate }: TrustCardProps) {
         </div>
       ))}
 
+      <ChangeReceipts receipts={trust.changeReceipts} />
+      {trust.requirementAcceptance?.uncheckedCriteria?.length ? (
+        <div style={{ marginTop: 8, fontSize: 12, lineHeight: 1.6 }}>
+          <div style={{ fontWeight: 600 }}>Not checked automatically</div>
+          {trust.requirementAcceptance.uncheckedCriteria.map(criterion => (
+            <div key={criterion} style={{ display: 'flex', gap: 6 }}><span aria-hidden="true">○</span><span>{criterion}</span></div>
+          ))}
+        </div>
+      ) : null}
+
       {showEvidence && evidence && (
         <pre style={{
           marginTop: 8, padding: '8px 10px', background: 'var(--bg-primary)',
@@ -201,6 +211,34 @@ export function TrustCard({ trust, onRetry, onEscalate }: TrustCardProps) {
           maxHeight: 160, overflow: 'auto',
         }}>{evidence}</pre>
       )}
+    </div>
+  );
+}
+
+const RECEIPT_TIERS: Record<ChangeReceipt['tier'], { glyph: string; label: string }> = {
+  verified: { glyph: '✓', label: 'Verified' },
+  acknowledged: { glyph: '◐', label: 'Accepted, not re-read' },
+  observed: { glyph: '◐', label: 'Changed by a command' },
+  rejected: { glyph: '✗', label: 'Rejected' },
+  unknown: { glyph: '○', label: 'Outcome unknown' },
+};
+
+function ChangeReceipts({ receipts }: { receipts?: ChangeReceipt[] }) {
+  if (!receipts?.length) return null;
+  return (
+    <div style={{ marginTop: 8, fontSize: 12, lineHeight: 1.6 }}>
+      <div style={{ fontWeight: 600 }}>Changes</div>
+      {receipts.map(receipt => {
+        const tier = RECEIPT_TIERS[receipt.tier] ?? RECEIPT_TIERS.unknown;
+        return (
+          <div key={`${receipt.tool}:${receipt.target}`} title={receipt.evidence}
+            style={{ display: 'flex', gap: 6, minWidth: 0 }}>
+            <span aria-hidden="true">{tier.glyph}</span>
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{receipt.target}</span>
+            <span style={{ color: 'var(--text-muted)', flexShrink: 0 }}>{tier.label}</span>
+          </div>
+        );
+      })}
     </div>
   );
 }

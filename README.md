@@ -48,6 +48,10 @@ uv run rune web
 
 The app opens at **http://127.0.0.1:18789/**. Choose a model from the header and a working folder from **Workspace**. Open **Work** to inspect progress, changes, files, or the computer. The [desktop shell](desktop/README.md) uses this same web UI and engine.
 
+### iPhone and iPad
+
+The [iOS client](ios/README.md) includes a SwiftUI/WKWebView Xcode project that connects to your authenticated HTTPS Rune gateway and imports text files into a chat draft. The engine runs on your Mac or server. Native iOS builds require Xcode and remain unverified in the current development environment. See the [app integration research](ios/RESEARCH.ko.md) for Baemin, KakaoTalk, and Yanolja/NOL capabilities and limits.
+
 ### Terminal installation
 
 ```bash
@@ -199,6 +203,15 @@ rune memory search "query"                # Search stored memory
 rune self status                         # Installation information
 rune --help                              # All commands and options
 ```
+
+A single `--message` run exits with its verdict, so scripts can trust `&&`:
+
+| Exit | Meaning |
+|---|---|
+| 0 | Completed (verified, or accepted without a re-read) |
+| 1 | A check failed or the run errored |
+| 2 | Invalid command-line usage |
+| 3 | Not confirmed done (unverified, incomplete, blocked, or out of budget) |
 
 ## Development
 

@@ -1,14 +1,9 @@
-"""Tool calling policy — adjusts LLM parameters based on runtime behavior.
-
-Handles two failure modes common in weaker models:
-1. Model generates text but never calls tools → retry with tool_choice="required"
-2. Model calls the same tool in a loop → nudge, then block
-
-Configurable via config.yaml under `tool_policy:`.
-"""
+"""Nudge empty responses and stop repeated calls with identical arguments."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -30,8 +25,7 @@ class ToolCallPolicy:
         force_tool_on_empty: Retry with tool_choice="required" when model
             produces text without calling any tool.
         max_force_retries: Maximum number of forced retries per round (default 1).
-        max_consecutive_same_tool: Trigger a nudge after this many consecutive
-            calls to the same tool.
+        max_consecutive_same_tool: Nudge after this many identical calls.
         disable_parallel: Set parallel_tool_calls=false (OpenAI-compatible only).
     """
 
@@ -42,12 +36,30 @@ class ToolCallPolicy:
 
     # Reset at the start of each stream.
     _force_count: int = field(default=0, repr=False)
-    _tool_history: list[str] = field(default_factory=list, repr=False)
+    _tool_history: list[tuple[str, str]] = field(default_factory=list, repr=False)
+    _rejected_rounds: int = field(default=0, repr=False)
 
     def reset(self) -> None:
         """Reset per-round state. Call at the start of each stream_text() round."""
         self._force_count = 0
         self._tool_history.clear()
+        self._rejected_rounds = 0
+
+    def record_result(self, name: str, result: Any) -> str | None:
+        """Bound rejected rounds without stopping executed checks that failed."""
+        from rune.agent.tool_output import RejectedToolResult
+
+        if not isinstance(result, RejectedToolResult):
+            self._rejected_rounds = 0
+            return None
+        self._rejected_rounds += 1
+        from rune.utils.logger import get_logger
+
+        get_logger(__name__).info("tool_call_rejected", tool=name, code=result.code, consecutive=self._rejected_rounds)
+        if self._rejected_rounds >= 3:
+            return (f"Stopped after {self._rejected_rounds} consecutive rounds of rejected tool calls. "
+                    f"Last rejection: {name} ({result.code}). These calls made no changes; the task remains unfinished.")
+        return None
 
     def should_force_tool(self, *, has_tool_calls: bool, has_text: bool) -> bool:
         """Should we retry with tool_choice='required'?
@@ -64,36 +76,33 @@ class ToolCallPolicy:
         self._force_count += 1
         return True
 
-    def record_tool_call(self, name: str) -> str | None:
-        """Record a tool call and return a nudge message if looping.
+    @staticmethod
+    def _call_key(name: str, args: dict[str, Any] | None) -> tuple[str, str]:
+        params = {key: value for key, value in args.items() if key != "think"} if isinstance(args, dict) else args
+        encoded = json.dumps(params, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        return name, hashlib.sha256(encoded.encode()).hexdigest()
 
-        Returns a user-facing nudge string if the same tool was called
-        N times consecutively, or None if no intervention needed.
-        Does NOT remove tools — only nudges.
-        """
-        self._tool_history.append(name)
+    def record_tool_call(self, name: str, args: dict[str, Any] | None = None) -> str | None:
+        """Record the call and nudge when identical arguments keep repeating."""
+        self._tool_history.append(self._call_key(name, args))
+        self._tool_history = self._tool_history[-(self.max_consecutive_same_tool + _BLOCK_GRACE):]
         n = self.max_consecutive_same_tool
         recent = self._tool_history[-n:]
         if len(recent) == n and len(set(recent)) == 1:
             return (
-                f"You called {name} {n} times in a row. "
-                f"Consider progressing to the next step."
+                f"You called {name} with the same arguments {n} times in a row. "
+                "Inspect the result before repeating this action."
             )
         return None
 
-    def should_block_tool(self, name: str) -> bool:
-        """Return True if *name* should be hard-blocked.
-
-        After the nudge threshold (``max_consecutive_same_tool``) plus a
-        grace window of 2 additional calls, the tool is blocked to prevent
-        infinite loops.  Read-only tools are exempt because sequential
-        reads of different files are a legitimate pattern.
-        """
+    def should_block_tool(self, name: str, args: dict[str, Any] | None = None) -> bool:
+        """Block identical calls after the nudge and grace window."""
         if name in _READ_ONLY_TOOLS:
             return False
         block_at = self.max_consecutive_same_tool + _BLOCK_GRACE
         recent = self._tool_history[-block_at:]
-        return len(recent) == block_at and all(previous == name for previous in recent)
+        key = self._call_key(name, args)
+        return len(recent) == block_at and all(previous == key for previous in recent)
 
     def get_extra_params(self) -> dict[str, Any]:
         """Extra parameters to pass to litellm.acompletion()."""

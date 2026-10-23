@@ -69,6 +69,13 @@ async def browser_discover_apis(params: BrowserDiscoverApisParams) -> Capability
         body = api.response_body
         from rune.capabilities.web import MAX_JSON_OUTPUT_CHARS, _prune_json_by_term
 
+        source = {"url": api.url, "status_code": api.status, "content_type": api.content_type,
+                  "captured_body": True}
+        if api.status < 200 or api.status >= 400:
+            return CapabilityResult(success=False, error=f"The captured request returned HTTP {api.status}.", metadata=source)
+        if api.response_truncated:
+            return CapabilityResult(success=False, error="The captured body is incomplete. Use web_fetch with jsonFilter or read the page.",
+                                    metadata={**source, "delivery_truncated": True})
         pruned = _prune_json_by_term(body, params.json_filter)
         if not pruned:
             return CapabilityResult(success=False,
@@ -76,14 +83,16 @@ async def browser_discover_apis(params: BrowserDiscoverApisParams) -> Capability
                                     metadata={"url": api.url, "filter_no_match": pruned == "", "invalid_json": pruned is None})
         if params.json_filter:
             body = f"[filtered by '{params.json_filter}'] {pruned}"
-        output = f"{api.method} {api.url} [{api.status}]\n{body}"
+        prefix = f"{api.method} {api.url} [{api.status}]\n"
+        output = prefix + body
         if len(output) > MAX_JSON_OUTPUT_CHARS:
             return CapabilityResult(success=False, error="The captured response is too large. Narrow jsonFilter to read complete records.",
                                     metadata={"url": api.url, "delivery_truncated": True})
         return CapabilityResult(
             success=True,
             output=output,
-            metadata={"url": api.url, "chars": len(body)},
+            metadata={**source, "chars": len(body),
+                      "body_offset": len(prefix) + (len(body) - len(pruned) if params.json_filter else 0)},
         )
 
     apis = monitor.get_discovered_apis(params.filter)

@@ -327,6 +327,7 @@ def check_claims(answer: str, claims: Any, evidence: list[dict]) -> list[str]:
 
 @dataclass
 class TestClaimGate:
+    model_review: bool = False
     attempts: int = 0
     status: str = "not_checked"
     detail: str = ""
@@ -334,11 +335,25 @@ class TestClaimGate:
     _review_seconds: float = 0.0
     _observations: list[dict[str, Any]] = field(default_factory=list)
     _observation_count: int = 0
+    _contradicted_spans: tuple[str, ...] = ()
+    _contradicted_sequence: int = -1
+
+    def _unavailable(self, state, answer: str, detail: str) -> str:
+        normalized = " ".join(answer.split())
+        if self._contradicted_sequence == state.sequence and any(
+            " ".join(span.split()) in normalized for span in self._contradicted_spans
+        ):
+            self.status = "contradicted"
+            return "A previously contradicted claim remains in the answer; its correction could not be verified."
+        self.status = "unavailable"
+        return detail
 
     def snapshot(self) -> dict[str, str]:
         return {"status": self.status, "detail": self.detail}
 
     def observe(self, name: str, params: dict, result: Any) -> None:
+        if not self.model_review:
+            return
         if name not in {"file_read", "file_write", "file_edit", "bash_execute"} or (result.metadata or {}).get("cached"):
             return
         output = result.output or ""
@@ -364,6 +379,9 @@ class TestClaimGate:
         if review_answer != answer and not review_answer.strip():
             self.status, self.detail = "pass", "The answer matches the recorded test results."
             return None
+        if not self.model_review:
+            self.status, self.detail = "not_checked", ""
+            return None
         # Preserve earlier changes when the transcript is compacted.
         observations = review_observations(self._observations) or code_observations(messages or [])
         key = hashlib.sha256((str(state.sequence) + answer + json.dumps(observations)).encode()).hexdigest()
@@ -378,8 +396,7 @@ class TestClaimGate:
         timeout = 60.0 - self._review_seconds
         if timeout < 1:
             self.attempts = 2
-            self.status = "unavailable"
-            self.detail = "The final test summary could not be checked within its review budget."
+            self.detail = self._unavailable(state, answer, "The final test summary could not be checked within its review budget.")
             return self.detail
         self.attempts += 1
         from rune.llm.client import get_llm_client
@@ -390,7 +407,8 @@ class TestClaimGate:
         model_key = selected.model if "/" in selected.model else f"{selected.provider.value}/{selected.model}"
         control = reasoning_control(model_key)
         # Gemini shares its output budget between reasoning and the JSON result.
-        effort = "medium" if control.wire == "gemini" and "medium" in control.efforts else None
+        effort = ("medium" if control.wire == "gemini" and "medium" in control.efforts
+                  else "low" if "low" in control.efforts else None)
         answer_lines = {n: line for n, line in enumerate(review_answer.splitlines(), 1) if line.strip()}
         if not answer_lines:
             self.attempts = 2
@@ -426,7 +444,7 @@ class TestClaimGate:
             if set(data) != {"claims", "explanation_issues"}:
                 raise ValueError("Invalid test-claim response fields")
             stage = "test_claims"
-            issues, errors = [], []
+            issues, errors, contradicted_spans = [], [], []
             for stage, field_name in (("test_claims", "claims"), ("explanations", "explanation_issues")):
                 items = data[field_name]
                 if not isinstance(items, list) or len(items) > 128:
@@ -436,9 +454,12 @@ class TestClaimGate:
                     try:
                         item = answer_reference(item, review_answer)
                         if stage == "test_claims":
-                            issues.extend(check_claims(answer, referenced_claims([item], review_answer, evidence), evidence))
+                            problems = check_claims(answer, referenced_claims([item], review_answer, evidence), evidence)
                         else:
-                            issues.extend(check_explanations(answer, referenced_explanations([item], observations), observations))
+                            problems = check_explanations(answer, referenced_explanations([item], observations), observations)
+                        issues.extend(problems)
+                        if problems:
+                            contradicted_spans.append(item["quote"])
                     except ValueError as exc:
                         errors.append((stage, exc))
             if errors:
@@ -458,10 +479,11 @@ class TestClaimGate:
                         reason=str(exc) if stage != "request" and isinstance(exc, ValueError) else None)
             # Avoid regenerating the answer when the verifier is unavailable.
             self.attempts = 2
-            self.status = "unavailable"
-            note = "The final test summary could not be checked against its execution evidence."
+            note = self._unavailable(state, answer, "The final test summary could not be checked against its execution evidence.")
         else:
             self.status = "contradicted" if note else "pass"
+            self._contradicted_spans = tuple(contradicted_spans)
+            self._contradicted_sequence = state.sequence
         finally:
             self._review_seconds += time.monotonic() - started
         self.detail = note or "The explanation agrees with the recorded evidence."

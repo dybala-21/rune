@@ -1,10 +1,4 @@
-"""Tool-call truncation recovery in StreamResult.stream_text.
-
-When a turn hits the output limit mid tool-call arguments (finish_reason
-"length" with unparseable arguments), the adapter must NOT execute the broken
-call; it must raise both output caps and re-prompt to retry. Verified by driving
-the streaming loop with a faked litellm.acompletion.
-"""
+"""Truncated calls must not execute; continued answers must retain their prefix."""
 
 from __future__ import annotations
 
@@ -39,6 +33,35 @@ def _delta_chunk(*, content=None, tool_calls=None, finish_reason=None):
 async def _astream(chunks):
     for c in chunks:
         yield c
+
+
+@pytest.mark.parametrize("live", [True, False])
+@pytest.mark.parametrize("padding", [0, 400])
+async def test_text_continuation_keeps_the_full_answer_after_tool_reads(monkeypatch, live, padding):
+    prefix = '{"note":"' + "x" * padding + '","value":17.125,"observed_at":"202'
+    suffix = '6-10-16T00:00:00Z"}'
+    streams = iter([
+        [_delta_chunk(tool_calls=[{"index":0,"id":f"read{i}","name":"web_fetch","arguments":"{}"}], finish_reason="tool_calls")]
+        for i in range(2)
+    ] + [[_delta_chunk(content=prefix, finish_reason="length")], [_delta_chunk(content=suffix, finish_reason="stop")]])
+    requests = []
+
+    async def completion(**kwargs):
+        requests.append(kwargs)
+        return _astream(next(streams))
+
+    async def fetch(**kwargs):
+        return "Observed 17.125"
+
+    monkeypatch.setattr(la.litellm, "acompletion", completion)
+    result = StreamResult(model="openai/gpt-5.4", messages=[{"role":"user","content":"Read the records"}],
+        tool_schemas=[{"type":"function","function":{"name":"web_fetch"}}], tool_lookup={"web_fetch":fetch},
+        max_tokens=128, temperature=0, request_tokens_limit=20000, response_tokens_limit=128)
+    result._live_stream = live
+    shown = "".join([part async for part in result.stream_text()])
+    assert shown == await result.get_output() == prefix + suffix
+    assert len(requests) == 4 and requests[-1]["max_tokens"] == 256
+    assert not result.tool_budget_exhausted
 
 
 @pytest.mark.asyncio

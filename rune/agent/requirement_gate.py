@@ -119,27 +119,39 @@ async def _completion(
     judge: tuple[object, str | None] | None = None,
 ) -> str | None:
     """Call the best tier or explicit judge; return None on failure."""
-    try:
-        from rune.llm.client import get_llm_client
-        from rune.types import ModelTier
+    from rune.llm.client import get_llm_client
+    from rune.llm.failures import request_failure
+    from rune.types import ModelTier
 
-        provider = judge[0] if judge else None
-        model = judge[1] if judge else None
-        response = await get_llm_client().completion(
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            tier=ModelTier.BEST,
-            provider=provider,  # type: ignore[arg-type]
-            model=model,
-            max_tokens=max_tokens,
-            timeout=30.0,
-        )
-    except Exception as exc:  # never crash finalize on a checker failure
-        log.warning("requirement_gate_llm_failed", error=str(exc)[:120])
-        return None
-    return _content_of(response)
+    provider = judge[0] if judge else None
+    model = judge[1] if judge else None
+    for attempt in range(2):
+        try:
+            response = await get_llm_client().completion(
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                tier=ModelTier.BEST,
+                provider=provider,  # type: ignore[arg-type]
+                model=model,
+                max_tokens=max_tokens,
+                timeout=30.0,
+            )
+            return _content_of(response)
+        except Exception as exc:  # never crash finalize on a checker failure
+            failure = request_failure(exc)
+            log.warning("requirement_gate_llm_failed", error=str(exc)[:120], kind=failure.kind, attempt=attempt + 1)
+            # A check has no side effects, so a transient provider failure is worth one more try.
+            if attempt or not _transient(failure):
+                return None
+    return None
+
+
+def _transient(failure) -> bool:
+    status = getattr(failure, "status", None)
+    return (failure.kind in {"timeout", "connect_timeout", "pool_timeout", "read_timeout", "connection_error", "read_error"}
+            or isinstance(status, int) and (status == 429 or status >= 500))
 
 
 async def extract_requirements(

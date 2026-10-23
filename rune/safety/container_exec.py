@@ -32,7 +32,12 @@ def container_argv(command: str, cwd: str, *, image: str, name: str,
         raise ValueError("Choose a project directory, not a home or system directory")
     system = ("/etc", "/private/etc", "/var", "/private/var", "/System", "/Library",
               "/usr", "/bin", "/sbin", "/dev", "/proc", "/sys", "/run")
-    if root == Path("/private") or any(root.is_relative_to(Path(p)) for p in system):
+    from rune.safety.guardian import _user_temp_root
+
+    user_temp = _user_temp_root()
+    # The per-user temp tree is not a system directory; its root is never mounted.
+    in_user_temp = user_temp is not None and str(root).startswith(user_temp + "/")
+    if root == Path("/private") or not in_user_temp and any(root.is_relative_to(Path(p)) for p in system):
         raise ValueError("System directories cannot be used as execution workspaces")
     if any(root.is_relative_to(p) for p in private[1:]):
         raise ValueError("Rune's private data cannot be mounted into the execution environment")

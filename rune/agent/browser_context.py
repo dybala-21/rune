@@ -2,6 +2,7 @@
 
 import re
 from typing import Any
+from uuid import uuid4
 
 _MARKER = re.compile(r"^--- Interactive Elements \(\d+/\d+\) ---$", re.MULTILINE)
 _LOCATION = re.compile(r"^(?:URL|Navigated to|Already open): https?://", re.MULTILINE)
@@ -13,6 +14,31 @@ _CLIPPED = "\n[Earlier page content truncated]\n"
 MAX_SNAPSHOT_CHARS = 4_000
 MAX_HISTORY_CHARS = 12_000
 MAX_HISTORY_SNAPSHOTS = 8
+
+
+async def observe_followup(messages: list[dict], goal: str, classification, state: dict | None, tool) -> list[dict]:
+    """Supply a fresh view before planning a related browser interaction."""
+    if (classification.goal_type != "browser" or not classification.is_continuation
+            or classification.is_domain_change or not classification.available
+            or not state or state.get("status") != "open" or tool is None):
+        return messages
+    from rune.agent.attachments import content_text
+    from rune.agent.tool_output import tool_content
+
+    # Use the regular adapter so ownership, approvals, evidence and tracing still apply.
+    result = await tool.function()
+    seeded = list(messages)
+    previous = next((m.get("content", "") for m in reversed(seeded) if m.get("role") == "user"), "")
+    if content_text(previous) != goal:
+        seeded.append({"role": "user", "content": goal})
+    call_id = "observe_" + uuid4().hex[:12]
+    seeded.extend([
+        {"role": "assistant", "tool_calls": [{"id": call_id, "type": "function", "function": {
+            "name": "browser_observe", "arguments": "{}",
+        }}]},
+        {"role": "tool", "tool_call_id": call_id, "content": tool_content(result)},
+    ])
+    return compact_browser_history(seeded)
 
 
 def _historical(text: str) -> str:

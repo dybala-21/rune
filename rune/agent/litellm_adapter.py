@@ -8,6 +8,7 @@ import os
 import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -65,7 +66,7 @@ from rune.agent.model_traits import (
 )
 from rune.agent.obs_cap import mask_stale_tool_messages
 from rune.agent.run_control import controlled_tool, current_control
-from rune.agent.tool_output import ReadToolResult, ToolOutput, tool_content
+from rune.agent.tool_output import ReadToolResult, RejectedToolResult, ToolOutput, tool_content
 from rune.capabilities.output_prefixes import BLOCKED_PREFIX, looks_like_failure_output
 from rune.utils.env import env_flag as _env_flag
 from rune.utils.env import env_int as _env_int
@@ -816,6 +817,8 @@ class StreamResult:
         self._model = model
         self._request_deadline = request_deadline
         self._tool_catalog = tool_catalog
+        if tool_catalog is not None:
+            tool_catalog.reset_recovery()
         self._reserve_answer = reserve_answer
         from rune.llm.reasoning import configured_reasoning_effort, reasoning_control
         self._reasoning_effort = configured_reasoning_effort(model)
@@ -940,6 +943,7 @@ class StreamResult:
         self.answer_budget_reserved = False
         _force_tool = False
         _output_recovery_count = 0
+        _text_continuation = False
         _answer_only = False
         _answer_deadline = None
         if self._reserve_answer and self._request_deadline is not None:
@@ -991,7 +995,7 @@ class StreamResult:
                 desktop.check()
             plan_revision = control.revision if control is not None else 0
             verification = self._verification_state() if self._verification_state else None
-            recovery_tools = self._tool_recovery() if self._tool_recovery else None
+            recovery_tools = self._recovery_tools()
             verification_pending = bool(verification and verification.pending and self._require_verification)
             if verification is not None:
                 context = verification.model_context(since_sequence=self._verification_sequence, language=report_language)
@@ -1002,7 +1006,7 @@ class StreamResult:
             if verification_pending:
                 self._collected_text = ""
             # Avoid regenerating a substantial answer once required verification is clear.
-            if (_tool_round >= 2 and not verification_pending and not recovery_tools
+            if (_tool_round >= 2 and not verification_pending and not recovery_tools and not _text_continuation
                     and self._collected_text
                     and len(self._collected_text.strip()) > 300):
                 log.info(
@@ -1016,7 +1020,8 @@ class StreamResult:
             # substantial answer.  This prevents the TUI from showing
             # duplicate response boxes when the LLM rewrites its earlier
             # analysis after additional tool calls.
-            _suppress_yield = len(self._collected_text.strip()) > 300
+            _suppress_yield = len(self._collected_text.strip()) > 300 and not _text_continuation
+            _text_continuation = False
 
             # Build extra params from policy
             extra: dict[str, Any] = self._policy.get_extra_params()
@@ -1183,6 +1188,7 @@ class StreamResult:
             _streamed_live = False
             _collected_len_before = len(self._collected_text)
             _live_ok = self._live_stream and delta and not _suppress_yield
+            _repeat_checked = 0
 
             async for chunk in self._stream:
                 self.response_started = True
@@ -1215,6 +1221,25 @@ class StreamResult:
                         self._collected_text += choice.delta.content
                         _streamed_live = True
                         yield choice.delta.content
+                    if not _tool_seen and len(text_this_turn) >= _repeat_checked + 256:
+                        _repeat_checked = len(text_this_turn)
+                        cut = repeated_tail_start(text_this_turn)
+                        note = ""
+                        if cut is None and rambling(text_this_turn):
+                            # Paraphrased looping has no exact start; keep the opening, which carries the answer.
+                            cut, note = _RAMBLE_KEEP, _ramble_note()
+                        if cut is not None:
+                            # Drop the looping text and end the reply to save the run's budget.
+                            log.warning("model_output_repetition_cut", kept=cut, dropped=len(text_this_turn) - cut)
+                            dropped = len(text_this_turn) - cut
+                            text_this_turn = text_this_turn[:cut] + note
+                            if _streamed_live:
+                                self._collected_text = self._collected_text[:max(_collected_len_before,
+                                                                                 len(self._collected_text) - dropped)] + note
+                            _finish_reason = "stop"
+                            if close := getattr(self._stream, "aclose", None):
+                                await close()
+                            break
 
                 # Tool call deltas - accumulate across chunks
                 if choice.delta and choice.delta.tool_calls:
@@ -1421,6 +1446,7 @@ class StreamResult:
                         self._max_tokens = _clamp_max_tokens(
                             self._model, min(self._max_tokens * 2, 64_000),
                         )
+                        self._response_tokens_limit = max(self._response_tokens_limit, self._max_tokens)
                         log.info(
                             "output_truncation_escalate",
                             new_max=self._max_tokens,
@@ -1438,8 +1464,16 @@ class StreamResult:
                             "Continue from where you stopped."
                         ),
                     })
-                    self._collected_text = ""
+                    # The next response resumes this text; retain the prefix in the saved answer.
+                    if not _streamed_live and not _suppress_yield:
+                        self._collected_text += text_this_turn
+                        if delta:
+                            yield text_this_turn
+                    _text_continuation = True
                     continue  # retry with higher limit
+
+                if _finish_reason == "length":
+                    self.tool_budget_exhausted = True
 
             # Yield (only reached if no continuation path triggered). If the text
             # was already streamed live it is on screen and in collected_text, so
@@ -1749,6 +1783,7 @@ class StreamResult:
 
         # Answer every tool_call_id before appending nudges, as OpenAI requires.
         deferred_nudges: list[str] = []
+        attempted: list[tuple[str, str | ToolOutput]] = []
         batch_failure_seen = False
         write_exec_cap = _env_int(_BENCH_MAX_WRITE_EXEC_PER_TURN_ENV)
         write_exec_count = 0
@@ -1766,33 +1801,35 @@ class StreamResult:
                 continue
 
             if is_concurrent and len(batch) > 1:
-                async def _run_one(tc_data: dict[str, Any]) -> tuple[str, str, str | ToolOutput]:
+                async def _run_one(tc_data: dict[str, Any]) -> tuple[str, str, dict[str, Any], str | ToolOutput]:
                     fn = tc_data["function"]["name"]
                     args_str = tc_data["function"]["arguments"]
                     tc_id = tc_data["id"]
                     try:
                         args = json.loads(args_str) if args_str else {}
                     except (json.JSONDecodeError, TypeError):
-                        args = {}
-                    if self._policy.should_block_tool(fn):
-                        res = f"{BLOCKED_PREFIX} {fn} called too many times consecutively."
+                        args = None
+                    policy_args = deepcopy(args)
+                    if self._policy.should_block_tool(fn, policy_args):
+                        res = f"{BLOCKED_PREFIX} {fn} repeated the same arguments too many times. Inspect the result before retrying."
                     else:
                         res = await self._execute_tool(fn, args)
-                    return tc_id, fn, res
+                    return tc_id, fn, policy_args, res
 
                 _sem = _aio.Semaphore(self._MAX_CONCURRENT_TOOLS)
 
-                async def _limited(tc_data: dict[str, Any], sem: _aio.Semaphore = _sem) -> tuple[str, str, str | ToolOutput]:
+                async def _limited(tc_data: dict[str, Any], sem: _aio.Semaphore = _sem) -> tuple[str, str, dict[str, Any], str | ToolOutput]:
                     async with sem:
                         return await _run_one(tc_data)
 
                 results = await _aio.gather(*[_limited(tc) for tc in batch])
-                for tc_id, fn, res in results:
+                for tc_id, fn, policy_args, res in results:
                     self._messages.append({
                         "role": "tool", "tool_call_id": tc_id, "content": tool_content(res),
                     })
                     batch_failure_seen |= _looks_like_tool_failure(res)
-                    nudge = self._policy.record_tool_call(fn)
+                    attempted.append((fn, res))
+                    nudge = self._policy.record_tool_call(fn, policy_args)
                     if nudge:
                         deferred_nudges.append(nudge)
             else:
@@ -1826,20 +1863,23 @@ class StreamResult:
                     try:
                         args = json.loads(args_str) if args_str else {}
                     except (json.JSONDecodeError, TypeError):
-                        args = {}
-                    if self._guided:
+                        args = None
+                    if self._guided and isinstance(args, dict):
                         _redirected = _redirect_edit_to_write(fn, args)
                         if _redirected != fn:
                             fn = _redirected
                             log.info("guided_edit_to_write_redirect")
-                    if self._policy.should_block_tool(fn):
-                        res = f"{BLOCKED_PREFIX} {fn} called too many times consecutively."
+                    policy_args = deepcopy(args)
+                    if self._policy.should_block_tool(fn, policy_args):
+                        res = f"{BLOCKED_PREFIX} {fn} repeated the same arguments too many times. Inspect the result before retrying."
                         log.warning("policy_tool_blocked", tool=fn)
                     else:
                         res = await self._execute_tool(fn, args)
                     self._messages.append({
                         "role": "tool", "tool_call_id": tc_id, "content": tool_content(res),
                     })
+                    attempted.append((fn, res))
+                    args = args if isinstance(args, dict) else {}
                     # The check verdict is recorded whichever way it went —
                     # the failing case is the one the end-of-run gate exists
                     # for, and the success-only block below never sees it.
@@ -1902,11 +1942,16 @@ class StreamResult:
                             str(args.get("command", ""))
                         ):
                             self._vos_edited = False
-                    nudge = self._policy.record_tool_call(fn)
+                    nudge = self._policy.record_tool_call(fn, policy_args)
                     if nudge:
                         deferred_nudges.append(nudge)
                     batch_failure_seen |= _looks_like_tool_failure(res)
 
+        if attempted:
+            # A round with an executed tool still made progress, even if another call was rejected.
+            fn, res = next((item for item in attempted if not isinstance(item[1], RejectedToolResult)), attempted[-1])
+            if stopped := self._policy.record_result(fn, res):
+                self._task_blocked = stopped
         deferred_nudges.extend(getattr(self, "_read_notices", []))
         self._read_notices = []
         for nudge_text in dict.fromkeys(deferred_nudges):
@@ -2132,24 +2177,42 @@ class StreamResult:
         if name in _WRITE_TOOLS and target:
             ledger.record_write(str(target), path_exists(str(target), self._workspace_root))
 
+    def _recovery_tools(self) -> set[str] | None:
+        required = self._tool_recovery() if self._tool_recovery else None
+        return required or (self._tool_catalog.recovery_tools() if self._tool_catalog else None)
+
     @controlled_tool
     async def _execute_tool(self, name: str, params: dict[str, Any]) -> str | ToolOutput:
         """Dispatch through the tool's guards and state-aware read cache."""
+        if not isinstance(params, dict):
+            return RejectedToolResult("[ERROR] Tool arguments must be a JSON object. No action was executed.", "invalid_arguments")
         # The optional reasoning field is not a tool argument.
         params.pop("think", None)
         if self._tool_catalog is not None and name not in self._tool_catalog.loaded:
+            if name not in self._tool_catalog.all:
+                if not self._tool_catalog.recovery_tools():
+                    self._tool_catalog.lookup_required = True
+                next_step = ("Use tool_search to select an actual tool before continuing."
+                             if self._tool_catalog.lookup_required else
+                             "Use only: " + ", ".join(sorted(self._tool_catalog.recovery_tools())) + ".")
+                loaded = ", ".join(sorted(self._tool_catalog.loaded)[:32])
+                return RejectedToolResult(
+                    f"[ERROR] Tool {name} does not exist. Parameter schemas are not callable tools. "
+                    f"{next_step} Loaded names: {loaded}. No action was executed.",
+                    "unknown_tool",
+                )
             error = f"[ERROR] Tool {name} is not loaded. Use tool_search with its exact name first. No action was executed."
             reject = getattr(self._tool_lookup.get(name), "_rune_reject", None)
             if reject is not None:
                 await reject(params, error)
-            return error
+            return RejectedToolResult(error, "tool_not_loaded")
 
-        recovery = self._tool_recovery() if self._tool_recovery else None
+        recovery = self._recovery_tools()
         if recovery and name not in recovery:
             self._recovery_rejections += 1
             if self._recovery_rejections >= 3:
-                self._task_blocked = "The model repeatedly skipped required verification. The result remains unverified."
-            return "[BLOCKED] Required verification is pending. Use only: " + ", ".join(sorted(recovery)) + "."
+                self._task_blocked = "The model repeatedly skipped required recovery. The task remains unfinished."
+            return "[BLOCKED] Required recovery is pending. Use only: " + ", ".join(sorted(recovery)) + "."
         self._recovery_rejections = 0
 
         # A failed browser action must leave observation tools available.
@@ -2169,7 +2232,7 @@ class StreamResult:
             )
 
         if self._tool_fail_streak.get(failure_key, 0) >= _MAX_FAILS:
-            recovery = self._tool_recovery() if self._tool_recovery else None
+            recovery = self._recovery_tools()
             if recovery and name in recovery and name == "table_requirements":
                 self._task_blocked = f"The required {name} check repeatedly failed. The result could not be verified."
                 return self._task_blocked
@@ -2186,7 +2249,7 @@ class StreamResult:
 
         func = self._tool_lookup.get(name)
         if func is None:
-            return f"Error: unknown tool '{name}'"
+            return RejectedToolResult(f"Error: unknown tool '{name}'. No action was executed.", "unknown_tool")
 
         # Settled before the first tool runs, not just before a write: the
         # file can be authored by a shell command that never touches the
@@ -2211,7 +2274,11 @@ class StreamResult:
             control = current_control()
             if control is not None:
                 control.check()
+            if self._tool_catalog is not None and name != "tool_search" and name in self._tool_catalog.loaded:
+                self._tool_catalog.reset_recovery()
             result = await func(**params)
+            if isinstance(result, RejectedToolResult):
+                return result
 
             if isinstance(result, ReadToolResult):
                 counts = getattr(self, "_cached_read_counts", {})
@@ -2317,6 +2384,58 @@ class StreamResult:
 
 
 # LiteLLMAgent - mirrors PydanticAI Agent interface
+
+_RAMBLE_MIN_CHARS = 8_000
+_RAMBLE_KEEP = 2_000
+
+
+def rambling(text: str) -> bool:
+    """A long reply whose recent text keeps restating itself.
+
+    Measured: looping replies compress to 0.03-0.11 of their size, while tables, CSV and code stay
+    at 0.20 or more, so only a reply already past 8,000 characters is judged.
+    """
+    import zlib
+
+    if len(text) < _RAMBLE_MIN_CHARS:
+        return False
+    tail = text[-4_000:].encode()
+    return len(zlib.compress(tail, 9)) / len(tail) < 0.13
+
+
+def _ramble_note() -> str:
+    try:
+        from rune.config import get_config
+
+        korean = get_config().general.locale.split("-", 1)[0] == "ko"
+    except Exception:  # The note is a courtesy; never fail the reply over it.
+        korean = False
+    return ("\n\n[모델이 같은 내용을 반복해서 이후 응답을 잘랐습니다.]" if korean
+            else "\n\n[The rest of this reply was cut because the model kept repeating itself.]")
+
+
+def repeated_tail_start(text: str, *, min_unit: int = 20, max_unit: int = 400, min_repeats: int = 4,
+                        min_span: int = 600) -> int | None:
+    """Where a reply starts looping on one passage: the end of its first copy, or None.
+
+    Judged on character structure only, so it works for any language; a unit needs at least three
+    distinct letters or digits so separator lines and padding never count as a loop.
+    """
+    for size in range(min_unit, max_unit + 1):
+        if size * min_repeats > len(text):
+            break
+        unit = text[-size:]
+        if text[-size * min_repeats:] != unit * min_repeats:
+            continue
+        if len({char for char in unit if char.isalnum()}) < 3:
+            continue
+        start = len(text) - size * min_repeats
+        while start >= size and text[start - size:start] == unit:
+            start -= size
+        if len(text) - start >= min_span:
+            return start + size
+    return None
+
 
 class LiteLLMAgent:
     """Drop-in replacement for ``pydantic_ai.Agent``.
@@ -2496,12 +2615,17 @@ class LiteLLMAgent:
         self._tool_lookup = _build_tool_lookup(tools)
         self._tool_catalog = None
         self._system_prompt = self._base_system_prompt
-        has_deferred = any(tool.get("type") == "function" and tool["function"]["name"] in self._deferred_tools
+        deferred = {name.replace(".", "__") for name in self._deferred_tools}
+        has_deferred = any(tool.get("type") == "function" and tool["function"]["name"] in deferred
                            for tool in self._tool_schemas)
         if os.environ.get("RUNE_TOOL_SEARCH", "1") != "0" and (ToolCatalog.needed(self._tool_schemas) or self._compact_tools and has_deferred):
             from rune.agent.prompts import PROMPT_BROWSER, PROMPT_TABLE
 
-            self._tool_catalog = ToolCatalog(self._tool_schemas, deferred_tools=self._deferred_tools)
+            initial = None
+            if self._compact_tools:
+                initial = {tool["function"]["name"] for tool in self._tool_schemas
+                           if tool.get("type") == "function"} - deferred
+            self._tool_catalog = ToolCatalog(self._tool_schemas, deferred_tools=deferred, initial_tools=initial)
             self._tool_schemas = self._tool_catalog.schemas
             self._tool_lookup["tool_search"] = self._tool_catalog.search
             self._system_prompt = self._system_prompt.replace(PROMPT_BROWSER, "").replace(PROMPT_TABLE, "")

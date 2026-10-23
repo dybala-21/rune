@@ -7,7 +7,7 @@ from rune.types import CapabilityResult
 
 
 def test_successful_middle_edit_survives_reads_and_failed_retries():
-    gate = ClaimGate()
+    gate = ClaimGate(model_review=True)
     for path in ("money.py", "invoices.py", "test_invoices.py"):
         gate.observe("file_read", {"path": path}, CapabilityResult(success=True, output=f"Original {path}"))
     gate.observe("file_edit", {"path": "money.py"}, CapabilityResult(success=True, output="Applied HALF_UP"))
@@ -26,7 +26,7 @@ def test_successful_middle_edit_survives_reads_and_failed_retries():
 
 
 def test_applied_patch_and_execution_status_survive_large_requests():
-    gate = ClaimGate()
+    gate = ClaimGate(model_review=True)
     for index in range(20):
         gate.observe("file_edit", {"path": f"{index}.py", "replace": "x" * 10_000},
                      CapabilityResult(success=True, output="Edited", metadata={"fileChange": {
@@ -53,7 +53,7 @@ def test_transcript_fallback_keeps_middle_file_changes_without_inventing_success
 
 
 def test_review_excerpt_bound_includes_truncation_markers_and_status():
-    gate = ClaimGate()
+    gate = ClaimGate(model_review=True)
     for index in range(30):
         gate.observe("file_edit", {"path": f"{index}.py", "replace": "x" * 10_000},
                      CapabilityResult(success=index % 2 == 0, output="y" * 10_000))

@@ -25,7 +25,7 @@ async def _count_classify_calls(**run_kwargs) -> int:
     loop = NativeAgentLoop()
     calls = {"n": 0}
 
-    async def fake_classify(goal, *, previous_goal="", previous_goal_type="", browser_state=None):
+    async def fake_classify(goal, *, previous_goal="", previous_goal_type="", browser_state=None, saved_tasks=None):
         calls["n"] += 1
         return _clf()
 

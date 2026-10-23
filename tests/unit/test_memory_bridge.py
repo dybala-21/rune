@@ -147,6 +147,45 @@ async def test_unknown_task_domain_is_saved_without_reclassification_or_learning
     consolidate.assert_not_called()
 
 
+async def test_unchecked_explanation_is_not_retained_or_learned(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    consolidate = AsyncMock()
+    learn = AsyncMock()
+    manager = type("Manager", (), {"save_episode": AsyncMock()})()
+    monkeypatch.setattr("rune.memory.consolidation.consolidate_episode", consolidate)
+    monkeypatch.setattr("rune.memory.rule_learner.semantic_relevant_rule_keys", learn)
+    await save_agent_result_to_memory("Fix the calculation", {
+        "success": True, "reason": "completed", "output": "An unchecked claim about rounding.",
+        "verification": {"status": "pass"}, "explanation_review": {"status": "unavailable"},
+    }, manager, classification_hint="code_modify", wait_for_consolidation=True)
+    episode = manager.save_episode.call_args.args[0]
+    assert episode.utility == 1
+    assert "not verified" in episode.result and "rounding" not in episode.result
+    consolidate.assert_not_called()
+    learn.assert_not_called()
+
+
+@pytest.mark.parametrize("reason,status", [("completed", "unavailable"), ("completed", "inconclusive"),
+    ("completed", "unverified"), ("verification_unavailable", "unavailable"), ("verification_inconclusive", "inconclusive")])
+async def test_unresolved_required_checks_are_neutral_without_learning_calls(monkeypatch, reason, status):
+    from unittest.mock import AsyncMock
+
+    consolidate, learn = AsyncMock(), AsyncMock()
+    manager = type("Manager", (), {"save_episode": AsyncMock()})()
+    monkeypatch.setattr("rune.memory.consolidation.consolidate_episode", consolidate)
+    monkeypatch.setattr("rune.memory.rule_learner.semantic_relevant_rule_keys", learn)
+    await save_agent_result_to_memory("Create the report", {
+        "success": True, "reason": reason, "output": "Saved report.docx",
+        "mech_check": "pass", "table_acceptance": {"required": True, "status": status},
+    }, manager, classification_hint="artifact", wait_for_consolidation=True)
+    episode = manager.save_episode.call_args.args[0]
+    assert episode.utility == 0
+    assert "unconfirmed" in episode.lessons
+    consolidate.assert_not_called()
+    learn.assert_not_called()
+
+
 class TestSelectCrispSignal:
     """The crisp learning signal must be the actual mismatch, not agent prose."""
 

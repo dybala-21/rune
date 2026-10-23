@@ -127,11 +127,20 @@ def test_denied_post_is_blocked_and_each_write_needs_approval(approval_cfg, fetc
 
     # Denied → the capability never runs, and the model is told not to retry.
     out = asyncio.run(fetch(url="https://x.test/order.do", method="POST"))
-    assert "User declined" in out and "Do NOT retry" in out
+    assert "User declined" in out and "Do not retry" in out
     assert len(asked) == 1
     fetch_executor.assert_not_awaited()
 
+    # A denial ends approvals for the rest of the run without prompting again.
     verdict["approve"] = True
+    out = asyncio.run(fetch(url="https://x.test/order.do", method="POST"))
+    assert "User declined" in out and len(asked) == 1
+    fetch_executor.assert_not_awaited()
+
+    # The next run builds a fresh tool set and asks again.
+    fetch = build_tool_set(
+        ToolAdapterOptions(approval_callback=_cb, allowed_tools={"web_fetch"})
+    )["web_fetch"].function
     asyncio.run(fetch(url="https://x.test/order.do", method="POST"))
     assert len(asked) == 2
     asyncio.run(fetch(url="https://x.test/other.do", method="POST"))

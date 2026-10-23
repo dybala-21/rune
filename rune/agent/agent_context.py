@@ -85,6 +85,11 @@ class PostProcessInput:
     # "pass"/"fail"/"" — whether anything executable vouched for the work.
     mech_check: str = ""
     verification: dict[str, Any] | None = None
+    table_acceptance: dict[str, Any] | None = None
+    requirement_acceptance: dict[str, Any] | None = None
+    tests_passed_after_edit: bool | None = None
+    tool_budget_exhausted: bool = False
+    explanation_review: dict[str, Any] | None = None
     # goal_type used as the rule domain, so learning matches injection.
     classification_hint: str | None = None
     wait_for_consolidation: bool = False
@@ -347,6 +352,11 @@ async def post_process_agent_result(inp: PostProcessInput) -> list[str]:
                     "evidence_gate": inp.evidence_gate,
                     "mech_check": inp.mech_check,
                     "verification": inp.verification,
+                    "table_acceptance": inp.table_acceptance,
+                    "requirement_acceptance": inp.requirement_acceptance,
+                    "tests_passed_after_edit": inp.tests_passed_after_edit,
+                    "tool_budget_exhausted": inp.tool_budget_exhausted,
+                    "explanation_review": inp.explanation_review,
                     "changed_files": inp.changed_files,
                 },
                 memory_manager=manager,

@@ -18,6 +18,7 @@ from rune.agent.model_traits import (
 from rune.agent.timing import timed_completion
 from rune.llm.reasoning import apply_reasoning_control
 from rune.llm.target import ModelCompatibilityError
+from rune.llm.tool_schema import gemini_tools
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -90,6 +91,8 @@ async def compatible_completion(
     key = _compatibility_key(params)
     requested_effort = params.get("reasoning_effort")
     apply_reasoning_control(params)
+    if "tools" in params:
+        params["tools"] = gemini_tools(model, params["tools"], params.get("tool_choice"))
     if "messages" in params:
         params["messages"] = _gemini_tool_images(model, params["messages"])
     capabilities = traits(model, cache_key=key)

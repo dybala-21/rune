@@ -27,15 +27,58 @@ _MCP_WRITE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Split tool names into words; a substring search would read "get_address" as an add.
+_MCP_READ_VERBS = frozenset({
+    "get", "list", "search", "find", "read", "fetch", "query", "describe", "view", "show", "count",
+    "check", "lookup", "browse", "inspect", "preview", "download", "export", "summarize", "status", "info",
+})
+_MCP_WRITE_VERBS = frozenset({
+    "create", "update", "delete", "remove", "send", "post", "put", "patch", "write", "insert", "modify",
+    "edit", "add", "move", "archive", "merge", "upload", "comment", "commit", "publish", "approve",
+    "reject", "invite", "close", "reopen", "assign", "unassign", "run", "execute", "trigger", "set",
+    "rename", "reply", "submit", "cancel", "transfer", "pay", "book", "schedule", "share", "upsert",
+    "enable", "disable", "start", "stop", "restart", "deploy", "push", "revoke", "grant", "reset",
+    "clear", "import", "append", "mark", "react", "follow", "unfollow", "subscribe", "unsubscribe",
+    "lock", "unlock", "pin", "unpin", "star", "unstar", "fork", "tag", "label", "resolve", "dismiss",
+    "save", "store", "replace", "apply", "install", "uninstall", "drop", "truncate", "purge", "sync",
+})
+
+
+def _mcp_tool_words(cap_name: str) -> list[str]:
+    tool_name = ".".join(cap_name.split(".")[2:])
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", tool_name)
+    return [word for word in re.split(r"[^A-Za-z0-9]+", spaced.lower()) if word]
+
+
+def mcp_changes_state(cap_name: str, *, read_only_hint: bool | None = None) -> bool:
+    """Best judgement of whether an MCP call changes external state, for describing what a run did."""
+    if not cap_name.startswith("mcp.") or len(cap_name.split(".")) < 3:
+        return False
+    if read_only_hint is True:
+        return False
+    words = _mcp_tool_words(cap_name)
+    if not words:
+        return True
+    # The leading verb names the action.
+    if words[0] in _MCP_READ_VERBS:
+        return any(word in _MCP_WRITE_VERBS for word in words[1:])  # get_or_create_user still writes
+    if any(word in _MCP_WRITE_VERBS or any(word.startswith(verb) for verb in _MCP_WRITE_VERBS if len(verb) > 3)
+           for word in words):
+        return True
+    # An unrecognized verb may still change something.
+    return True
+
+
 def is_mcp_write_operation(cap_name: str) -> bool:
-    """Recognize write verbs in the tool-name portion of an MCP capability."""
+    """Whether an MCP call needs write approval; either check may flag it."""
     if not cap_name.startswith("mcp."):
         return False
     parts = cap_name.split(".")
     if len(parts) < 3:
         return False
     tool_name = ".".join(parts[2:])
-    return bool(_MCP_WRITE_PATTERN.search(tool_name))
+    words = _mcp_tool_words(cap_name)
+    return bool(_MCP_WRITE_PATTERN.search(tool_name)) or any(word in _MCP_WRITE_VERBS for word in words)
 
 
 # Network approval helper

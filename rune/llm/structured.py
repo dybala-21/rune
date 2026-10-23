@@ -17,6 +17,10 @@ def _format_type(model: str) -> str | None:
         return "json_schema"
     if model in _ANTHROPIC_NATIVE:
         return "json_schema"
+    # Ollama enforces a JSON schema in `format`; litellm's catalog omits local tags and would fall back to plain JSON.
+    # https://ollama.com/blog/structured-outputs
+    if model.startswith(("ollama/", "ollama_chat/")):
+        return "json_schema"
     from rune.agent.litellm_adapter import litellm
 
     try:

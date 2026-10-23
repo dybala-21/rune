@@ -372,6 +372,7 @@ def computer_router(computers: Computers, auth: object) -> APIRouter:
             await set_native_control(entry, True)
             entry.human = True
             entry.lease += 1
+            entry.browser.invalidate_evidence()
             entry.browser.needs_observation = True
             entry.invalidate_frame()
             if req.action in {"select_tab", "new_tab", "close_tab"} and entry.browser.profile == "native":
@@ -437,6 +438,7 @@ def computer_router(computers: Computers, auth: object) -> APIRouter:
                 entry.browser.uncertain_action = True
                 raise HTTPException(409, "The input may have taken effect. Inspect the page before retrying.") from exc
             finally:
+                entry.browser.invalidate_evidence()
                 entry.browser.needs_observation = True
         return await computers.snapshot(entry)
 
@@ -503,7 +505,7 @@ def computer_router(computers: Computers, auth: object) -> APIRouter:
                 entry.human = True
                 entry.lease += 1
                 async with entry.browser.operation():
-                    entry.browser.last_input = None
+                    entry.browser.invalidate_evidence()
                     if entry.browser.elements is not None:
                         await entry.browser.elements.release()
                     entry.browser.needs_observation = True

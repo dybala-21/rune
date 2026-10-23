@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from rune.agent.agent_context import PostProcessInput as FakePostInput
 from rune.agent.goal_loop import GoalLoop, GoalLoopConfig, GoalSpec
 from rune.agent.goal_runtime import GoalRuntime
 
@@ -24,6 +25,7 @@ class FakeTrace:
     final_step: int = 1
     total_tokens_used: int = 100
     evidence_score: float = 1.0
+    explanation_review: dict | None = None
 
 
 @dataclass
@@ -39,11 +41,6 @@ class FakeOpts:
     conversation_id: str = ""
 
 
-@dataclass
-class FakePostInput:
-    context: Any
-    success: bool
-    answer: str = ""
 
 
 class FakeLoop:
@@ -98,6 +95,15 @@ def _runtime(loop: FakeLoop, post: PostSpy, prep: PrepareSpy) -> GoalRuntime:
         make_opts=FakeOpts,
         make_post_input=FakePostInput,
     )
+
+
+async def test_goal_persistence_keeps_unavailable_explanation_status():
+    post = PostSpy()
+    review = {"status": "unavailable"}
+    runtime = _runtime(FakeLoop([FakeTrace(explanation_review=review)]), post, PrepareSpy())
+    await runtime.run_fn("Fix the calculation", 1)
+    await runtime.persist_fn(True, "Work completed")
+    assert post.calls[0].explanation_review == review
 
 
 def _goal_loop(rt: GoalRuntime, cfg: GoalLoopConfig, **kw: Any) -> GoalLoop:

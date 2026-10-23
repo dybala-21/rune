@@ -7,6 +7,7 @@ element find with Playwright-native locator strategies.
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -32,6 +33,7 @@ INTERACTIVE_ROLES = frozenset({
     "tab", "checkbox", "radio", "switch", "slider", "spinbutton",
     "menu", "treeitem",
 })
+READBACK_ROLES = frozenset({"status", "alert"})
 
 
 # 1. DOM settle detection
@@ -96,6 +98,7 @@ class ElementMeta:
     # selectors: [{"type": "role"|"text"|"label"|"placeholder"|"testid"|"css",
     #              "value": str, "confidence": float}]
     breadcrumb: str = ""  # ancestor context path (e.g. "main > list > listitem")
+    href: str = ""
 
 
 class ElementStore:
@@ -109,6 +112,7 @@ class ElementStore:
         self._ref_prefix = uuid4().hex
         self.page: Any = None
         self.document: Any = None
+        self.document_id: str = ""
         self.handles: dict[str, Any] = {}
 
     def clear(self) -> None:
@@ -119,6 +123,7 @@ class ElementStore:
         handles = [*self.handles.values(), self.document]
         self.handles.clear()
         self.document = self.page = None
+        self.document_id = ""
         self.clear()
         for handle in handles:
             if handle is not None:
@@ -129,6 +134,15 @@ class ElementStore:
 
     def get(self, ref: str) -> ElementMeta | None:
         return self._elements.get(ref)
+
+    def other_page_links(self) -> list[str]:
+        """Same-origin links on the observed page, where a saved record could be read."""
+        from urllib.parse import urldefrag, urljoin, urlsplit
+
+        here = urldefrag(self._last_url)[0]
+        origin = urlsplit(here)[:2]
+        links = (urldefrag(urljoin(here, meta.href))[0] for meta in self._elements.values() if meta.href)
+        return [link for link in links if urlsplit(link)[:2] == origin and link != here]
 
     def put(self, meta: ElementMeta) -> None:
         self._elements[meta.ref] = meta
@@ -193,6 +207,16 @@ async def extract_interactive_elements(page: Any, root_selector: str = "") -> li
                 log.debug("browser_document_changed", error=str(exc))
         store.page = page
         store.document = await page.evaluate_handle("document")
+        if not same_document:
+            store.document_id = uuid4().hex
+            if previous_document is not None:
+                from rune.capabilities.browser.session import current_session
+                session = current_session()
+                session.check_targets.clear()
+                session.observed_checks.clear()
+                session.pending_verification = None
+                session.last_effect = None
+                session.result_document = None
         root = page.locator(root_selector) if root_selector else page.locator(":root")
         snapshot_text = await root.aria_snapshot()
         elements: list[ElementMeta] = []
@@ -206,6 +230,8 @@ async def extract_interactive_elements(page: Any, root_selector: str = "") -> li
                 if handle is None:
                     continue
                 store.handles[meta.ref] = handle
+                if meta.role == "link":
+                    meta.href = await handle.evaluate("el => el.href || ''")
                 observed = previous.get((meta.role, meta.name)) if same_document else None
                 if observed and await handle.evaluate("(node, old) => node === old", observed[1]):
                     # A fresh observation does not invalidate an unchanged node.
@@ -219,7 +245,7 @@ async def extract_interactive_elements(page: Any, root_selector: str = "") -> li
                 log.debug("browser_reference_unavailable", ref=meta.ref, error=str(exc))
         store.last_url = page.url
         store.last_observe_time = time.monotonic()
-        return elements
+        return [meta for meta in elements if meta.role not in READBACK_ROLES or meta.ref in store.handles]
     except Exception as exc:
         log.warning("ax_snapshot_failed", error=str(exc))
         await store.release()
@@ -285,6 +311,7 @@ def _parse_aria_snapshot(
     each interactive element (#P3 DOM Distillation / AgentOccam).
     """
     ancestor_stack: list[tuple[int, str, str]] = []  # (indent, role, name)
+    readbacks = 0
 
     for line in text.splitlines():
         m = _ARIA_LINE_RE.match(line)
@@ -299,7 +326,8 @@ def _parse_aria_snapshot(
         while ancestor_stack and ancestor_stack[-1][0] >= indent:
             ancestor_stack.pop()
 
-        if role in INTERACTIVE_ROLES:
+        if role in INTERACTIVE_ROLES or role in READBACK_ROLES and readbacks < 8:
+            readbacks += role in READBACK_ROLES
             breadcrumb = _build_breadcrumb(ancestor_stack)
             ref = store.next_ref()
             selectors = _build_selectors(role, name, {})
@@ -350,15 +378,22 @@ def format_interactive_elements(
     """
     if not elements:
         return ""
-    shown = elements[:max_elements]
-    lines = [f"\n--- Interactive Elements ({len(shown)}/{len(elements)}) ---"]
+    controls = [meta for meta in elements if meta.role not in READBACK_ROLES]
+    results = [meta for meta in elements if meta.role in READBACK_ROLES]
+    shown = controls[:max_elements]
+    lines = [f"\n--- Interactive Elements ({len(shown)}/{len(controls)}) ---"] if controls else []
     for meta in shown:
         parts = [f"[{meta.ref}]", meta.role]
         if meta.name:
             parts.append(f'"{meta.name}"')
         if meta.breadcrumb:
             parts.append(f"in({meta.breadcrumb})")
+        if meta.href:
+            parts.append(f"href={json.dumps(meta.href[:2000])}")
         lines.append(" ".join(parts))
+    if results:
+        lines.append("--- Readback targets (use these refs in checks) ---")
+        lines.extend(f'[{meta.ref}] {meta.role} "{meta.name}"' for meta in results)
     return "\n".join(lines)
 
 
@@ -367,6 +402,9 @@ def is_element_ref(value: str) -> bool:
 
 
 def element_ref(value: str) -> str:
+    attribute = re.fullmatch(r"""\[ref=(["'])(e(?:[0-9a-f]{32}_)?\d+)\1\]""", value)
+    if attribute:
+        return attribute[2]
     candidate = value[1:-1] if value.startswith("[") and value.endswith("]") else value
     return candidate if re.fullmatch(r"e(?:[0-9a-f]{32}_)?\d+", candidate) else ""
 

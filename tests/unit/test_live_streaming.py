@@ -114,3 +114,60 @@ class TestLiveStreaming:
         assert "let me check " in deltas
         # ...but it is rolled back, so the committed output is only the answer.
         assert await sr.get_output() == "Done."
+
+
+class TestRepetitionGuard:
+    async def test_a_reply_looping_on_one_passage_is_cut_to_one_copy(self):
+        sr = _make("claude-sonnet-4-5-20250929")
+        loop = "(`test_put_get`, `test_peek_does_not_refresh`) all passed. "
+        chunks = [_chunk("Fixed the eviction order. ")] + [_chunk(loop) for _ in range(400)]
+        stream_closed = []
+
+        async def acompletion(**_):
+            async def gen():
+                try:
+                    for chunk in [*chunks, _chunk("never reached", finish="stop"), _usage()]:
+                        yield chunk
+                finally:
+                    stream_closed.append(True)
+            return gen()
+
+        with patch("litellm.acompletion", new=acompletion):
+            await _drive(sr)
+        assert await sr.get_output() == "Fixed the eviction order. " + loop
+        assert stream_closed  # the provider stream was stopped, not drained
+
+    def test_ordinary_text_is_never_treated_as_a_loop(self):
+        from rune.agent.litellm_adapter import repeated_tail_start
+
+        assert repeated_tail_start("Results\n" + "=" * 3000) is None
+        assert repeated_tail_start("".join(f"| row {i} | {i * 3} |\n" for i in range(300))) is None
+        assert repeated_tail_start("same line here\n" * 3) is None
+
+
+class TestRamblingGuard:
+    async def test_a_paraphrasing_loop_is_cut_after_the_opening(self):
+        sr = _make("claude-sonnet-4-5-20250929")
+        phrases = ["Already fixed. ", "No change needed. ", "Nothing to modify. ", "The report is stale. "]
+        chunks = [_chunk("slugify already collapses separators; tests pass. ")]
+        rng = __import__("random").Random(7)  # an irregular order, so no exact period repeats
+        chunks += [_chunk(rng.choice(phrases)) for _ in range(1200)]
+
+        async def acompletion(**_):
+            async def gen():
+                for chunk in [*chunks, _chunk("", finish="stop"), _usage()]:
+                    yield chunk
+            return gen()
+
+        with patch("litellm.acompletion", new=acompletion):
+            await _drive(sr)
+        output = await sr.get_output()
+        assert output.startswith("slugify already collapses separators") and len(output) < 2_200
+        assert "repeating" in output or "반복" in output
+
+    def test_long_structured_output_is_not_rambling(self):
+        from rune.agent.litellm_adapter import rambling
+
+        table = "".join(f"| 2026-10-{i % 28 + 1:02d} | dept{i % 5} | {i * 13 % 997} |\n" for i in range(600))
+        code = open(__import__("rune.agent.litellm_adapter", fromlist=["x"]).__file__).read()[:12_000]
+        assert not rambling(table) and not rambling(code)

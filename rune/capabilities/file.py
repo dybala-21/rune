@@ -399,7 +399,10 @@ async def file_delete(params: FileDeleteParams) -> CapabilityResult:
     if blocked := _authorize_mutation(params.path):
         return blocked
 
-    file_path = Path(params.path).expanduser().resolve()
+    requested = Path(params.path).expanduser()
+    # Remove the link itself; resolving it could delete a target outside the approved workspace.
+    link = requested.is_symlink()
+    file_path = requested.parent.resolve() / requested.name if link else requested.resolve()
 
     # hard safety net (defense-in-depth, independent of Guardian)
     _home = os.environ.get("HOME", str(Path.home()))
@@ -415,11 +418,12 @@ async def file_delete(params: FileDeleteParams) -> CapabilityResult:
             error=f"BLOCKED: path too close to filesystem root: {resolved_str}",
         )
 
-    if not file_path.exists():
+    if not file_path.exists() and not link:
         return CapabilityResult(success=False, error=f"Path not found: {params.path}",
                                 metadata={"action_status": "not_executed"})
 
-    if file_path.is_dir() and not params.recursive:
+    is_dir = file_path.is_dir() and not link
+    if is_dir and not params.recursive:
         return CapabilityResult(
             success=False,
             error=f"'{params.path}' is a directory. Use recursive=true to delete.",
@@ -428,7 +432,7 @@ async def file_delete(params: FileDeleteParams) -> CapabilityResult:
 
     from rune.agent.validation_guard import _walk_test_files, protect_tests_enabled
     if protect_tests_enabled():
-        candidates = _walk_test_files(file_path, strict=True) if file_path.is_dir() else (file_path,)
+        candidates = _walk_test_files(file_path, strict=True) if is_dir else (file_path,)
         try:
             for candidate in candidates:
                 if reason := _reject_test_overwrite(candidate):
@@ -449,7 +453,7 @@ async def file_delete(params: FileDeleteParams) -> CapabilityResult:
     recycled = is_regenerable(file_path) or not trash_enabled()
     stored: str | None = None
     if recycled:
-        if file_path.is_dir():
+        if is_dir:
             import shutil
             shutil.rmtree(file_path)
         else:
