@@ -47,11 +47,23 @@ jobs:
         run: cd web && npm ci && npm run build
       - name: Install dependencies
         run: uv sync --extra dev
-      - name: Install test browser
+      - name: Locate test browser cache
+        id: playwright
         run: |
-          export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/rune-playwright"
-          printf 'PLAYWRIGHT_BROWSERS_PATH=%s\n' "$PLAYWRIGHT_BROWSERS_PATH" >> "$GITHUB_ENV"
-          uv run playwright install --with-deps chromium
+          printf 'PLAYWRIGHT_BROWSERS_PATH=%s\n' "$HOME/.cache/rune-playwright" >> "$GITHUB_ENV"
+          printf 'version=%s\n' "$(uv run python -c 'from importlib.metadata import version; print(version("playwright"))')" >> "$GITHUB_OUTPUT"
+      - name: Cache test browser
+        id: browser-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/rune-playwright
+          key: playwright-chromium-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+      - name: Install test browser
+        if: steps.browser-cache.outputs.cache-hit != 'true'
+        run: uv run playwright install --with-deps chromium
+      - name: Install test browser system libraries
+        if: steps.browser-cache.outputs.cache-hit == 'true'
+        run: uv run playwright install-deps chromium
       - name: Allow test Chromium to create its sandbox
         shell: bash
         run: |
@@ -87,7 +99,7 @@ jobs:
           PY
       - name: Run tests
         # Browser action regressions use Chromium, including its actionability checks.
-        run: uv run pytest tests/ -q --tb=short
+        run: uv run pytest tests/ -q --tb=short -n auto --dist worksteal
       - name: Run web regression tests
         env:
           RUNE_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
