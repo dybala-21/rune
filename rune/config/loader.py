@@ -145,11 +145,15 @@ def _unknown_keys(raw: Any, model: type[BaseModel], path: str = "") -> list[str]
     if not isinstance(raw, dict):
         return []
 
+    from pydantic import AliasChoices
+
     accepted: dict[str, Any] = {}
     for name, field in model.model_fields.items():
         accepted[name] = field
         if field.alias:
             accepted[field.alias] = field
+        choices = field.validation_alias.choices if isinstance(field.validation_alias, AliasChoices) else [field.validation_alias]
+        accepted.update({choice: field for choice in choices if isinstance(choice, str)})
 
     unknown: list[str] = []
     for key, value in raw.items():

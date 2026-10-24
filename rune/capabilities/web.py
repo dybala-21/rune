@@ -12,6 +12,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from rune.capabilities.fetch_state import current_fetch_state
+from rune.capabilities.json_records import RecordQuery, query_records, record_paths
 from rune.capabilities.registry import CapabilityRegistry
 from rune.capabilities.search.duckduckgo import DuckDuckGoSearchProvider
 from rune.capabilities.search.provider import SearchOptions, SearchProvider, SearchResult
@@ -161,6 +162,8 @@ class WebFetchParams(BaseModel):
             "relevant records survive truncation"
         ),
     )
+    record_query: RecordQuery | None = Field(default=None, alias="recordQuery",
+        description="JSON record selection/aggregation; cannot combine with jsonFilter.")
 
 
 # HTML helpers
@@ -397,9 +400,24 @@ def _prune_json_by_term(text: str, term: str) -> str | None:
 
 
 async def web_fetch(params: WebFetchParams) -> CapabilityResult:
+    attempt = {"started": False}
+    result = await _fetch_response(params, attempt)
+    if (params.method or "GET").upper() not in {"GET", "HEAD"}:
+        metadata = result.metadata or {}
+        if metadata.get("status_code") == 202:
+            result.success = False
+            result.error = "The request was accepted for processing; its final result is not confirmed. Check its status before resubmitting."
+        status = "completed" if result.success else "unknown" if attempt["started"] else "not_executed"
+        result.metadata = {**metadata, "action_status": status}
+    return result
+
+
+async def _fetch_response(params: WebFetchParams, attempt: dict) -> CapabilityResult:
     """Fetch a URL; preserve short responses and isolate transient failures."""
     import httpx
 
+    if params.record_query and params.json_filter:
+        return CapabilityResult(success=False, error="recordQuery and jsonFilter cannot be combined. Use recordQuery.where for exact field matches.")
     state = current_fetch_state() if params.method.upper() == "GET" else None
     if state is not None and (delay := state.retry_after(params.url)) > 0:
         return CapabilityResult(
@@ -416,7 +434,7 @@ async def web_fetch(params: WebFetchParams) -> CapabilityResult:
         }
         async with httpx.AsyncClient(
             timeout=30.0,
-            follow_redirects=True,
+            follow_redirects=(params.method or "GET").upper() in {"GET", "HEAD"},
             max_redirects=5,
         ) as client:
             method = (params.method or "GET").upper()
@@ -436,6 +454,7 @@ async def web_fetch(params: WebFetchParams) -> CapabilityResult:
                 headers["Content-Type"] = (
                     params.content_type or "application/x-www-form-urlencoded"
                 )
+                attempt["started"] = True
                 resp = await client.request(
                     method, params.url, headers=headers, content=params.body or ""
                 )
@@ -493,13 +512,28 @@ async def web_fetch(params: WebFetchParams) -> CapabilityResult:
                 metadata={"status_code": resp.status_code, "empty_content": True},
             )
 
+        json_data = None
         if "json" in content_type.lower():
             try:
-                json.loads(text)
+                json_data = json.loads(text)
             except (ValueError, RecursionError):
                 return CapabilityResult(success=False, error="The response is not valid JSON.",
                                         metadata={**source, "invalid_json": True})
         filter_note = ""
+        record_query = None
+        if params.record_query:
+            if "json" not in content_type.lower():
+                return CapabilityResult(success=False, error="recordQuery requires JSON.")
+            try:
+                import hashlib
+                original_hash = hashlib.sha256(text.encode()).hexdigest()
+                text, record_query = query_records(text, params.record_query)
+                record_query["input_hash"] = original_hash
+                filter_note = (f"[recordQuery {params.record_query.operation}: {record_query['matched']} of "
+                               f"{record_query['records']} records in this response; pagination not checked] ")
+            except ValueError as exc:
+                return CapabilityResult(success=False, error=str(exc) + record_paths(json_data),
+                                        metadata={**source, "record_query_failed": True})
         if params.json_filter and "json" in content_type.lower():
             pruned = _prune_json_by_term(text, params.json_filter)
             if not pruned:
@@ -516,12 +550,12 @@ async def web_fetch(params: WebFetchParams) -> CapabilityResult:
         if "json" in content_type.lower():
             required_length = len(text) + len(filter_note)
             if required_length > min(params.max_length, MAX_JSON_OUTPUT_CHARS):
-                hint = ("Narrow jsonFilter to retrieve complete records."
+                hint = ("Use jsonFilter alone to inspect matching records, or recordQuery with the array path."
                         if required_length > MAX_JSON_OUTPUT_CHARS else
-                        f"Use jsonFilter or increase maxLength to at least {required_length}.")
+                        f"Use jsonFilter, recordQuery, or increase maxLength to at least {required_length}.")
                 return CapabilityResult(
                     success=False,
-                    error=f"The JSON response needs {required_length} characters. {hint}",
+                    error=f"The JSON response needs {required_length} characters. {hint}" + record_paths(json_data),
                     metadata={**source, "truncated": True, "required_length": required_length},
                 )
         elif len(text) > params.max_length:
@@ -541,7 +575,9 @@ async def web_fetch(params: WebFetchParams) -> CapabilityResult:
                 "redirected": final_url != params.url,
                 "extraction": extraction,
                 "length": len(text),
+                "body_offset": len(filter_note),
                 "truncated": truncated,
+                **({"record_query": record_query} if record_query is not None else {}),
             },
         )
 
@@ -588,7 +624,8 @@ def register_web_capabilities(registry: CapabilityRegistry) -> None:
             "for the browser only when the page must be interacted with. "
             "Supports method='POST' with body/contentType to replay API calls "
             "found by browser_discover_apis, and jsonFilter to keep only the "
-            "matching records of a large JSON response."
+            "matching records of a large JSON response. recordQuery selects latest records or computes aggregates "
+            "within the retrieved response; it does not prove that the response covers all pages or is current."
         ),
         domain=Domain.NETWORK,
         risk_level=RiskLevel.LOW,

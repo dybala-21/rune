@@ -27,7 +27,7 @@ async def test_sparse_line_references_still_check_actual_metrics(monkeypatch, st
         "explanation_issues": [],
     })}}]}
     monkeypatch.setattr("rune.llm.client.get_llm_client", lambda: client)
-    note = await ClaimGate().review(state, f"Summary\n\nThere were **{count} failure events** before the fix.")
+    note = await ClaimGate(model_review=True).review(state, f"Summary\n\nThere were **{count} failure events** before the fix.")
     assert bool(note) == blocked
     schema = client.completion.call_args.kwargs["response_format"]["json_schema"]["schema"]["properties"]
     assert "quote" not in schema["claims"]["items"]["properties"]
@@ -43,7 +43,7 @@ async def test_masked_table_cannot_supply_a_new_claim(monkeypatch, state):
         "explanation_issues": [],
     })}}]}
     monkeypatch.setattr("rune.llm.client.get_llm_client", lambda: client)
-    assert "could not be checked" in await ClaimGate().review(state, table + "\n\nChanged the code.")
+    assert "could not be checked" in await ClaimGate(model_review=True).review(state, table + "\n\nChanged the code.")
 
 
 async def test_explanation_uses_literal_answer_and_observation(monkeypatch, state):
@@ -53,7 +53,7 @@ async def test_explanation_uses_literal_answer_and_observation(monkeypatch, stat
             "reason": "Zero stays zero.", "needs_correction": True}],
     })}}]}
     monkeypatch.setattr("rune.llm.client.get_llm_client", lambda: client)
-    gate = ClaimGate(_observations=[{"id": 1, "text": "return value / 2"}])
+    gate = ClaimGate(model_review=True, _observations=[{"id": 1, "text": "return value / 2"}])
     note = await gate.review(state, "Summary\n\nThe value **always decreases**.")
     assert "always decreases" in note and "Zero stays zero" in note
     client.completion.assert_awaited_once()

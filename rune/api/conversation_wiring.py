@@ -284,6 +284,12 @@ async def record_assistant_turn(
         )
         conv = conv_manager._active.get(conversation_id)
         if conv is not None:
+            from rune.agent.source_context import remember_sources
+
+            remember_sources(conv, loop)
+            from rune.agent.task_context import remember_task
+
+            remember_task(conv, loop)
             await conv_manager._store.save(conv, embed=embed)
     except Exception as exc:
         if require_save:

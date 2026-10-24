@@ -160,6 +160,14 @@ class TestBuildSystemPrompt:
         prompt = build_system_prompt(goal="search news", goal_category="web")
         assert "Code Intelligence" not in prompt
 
+    @pytest.mark.parametrize("category,lookup", [("chat", False), ("web", True), ("web", False)])
+    def test_source_scope_guidance_survives_prompt_compaction(self, category, lookup):
+        classification = ClassificationResult(goal_type=category, confidence=.99, tier=2,
+                                             needs_web_evidence=True, needs_current_source=True, lookup_only=lookup)
+        prompt = build_system_prompt(goal="Check the current reading", classification=classification,
+                                     goal_category=category)
+        assert "Do not infer safety or normality from a reading alone" in prompt
+
     def test_full_category_includes_everything(self):
         prompt = build_system_prompt(goal="big task", goal_category="full")
         assert "Code Intelligence" in prompt

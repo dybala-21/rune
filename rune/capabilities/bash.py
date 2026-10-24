@@ -738,25 +738,39 @@ async def _bash_execute(params: BashParams) -> CapabilityResult:
                       "action_status": "not_executed"},
         )
 
+    from rune.safety import workspace_snapshot as _snap
     from rune.safety.execution_environment import execution_config
+    read_only = _snap.looks_read_only(params.command)
     sandbox = execution_config()
-    if sandbox.backend == "container":
-        from rune.safety.container_exec import execute_container
-        return await execute_container(params, sandbox)
-
-    if params.mode == "managed_service":
-        return await _execute_managed_service(params)
+    if sandbox.backend == "container" or params.mode == "managed_service":
+        if sandbox.backend == "container":
+            from rune.safety.container_exec import execute_container
+            result = await execute_container(params, sandbox)
+        else:
+            result = await _execute_managed_service(params)
+        if not read_only:
+            # No snapshot is taken on these paths, so any file change goes unseen.
+            result.metadata = {**(result.metadata or {}), "shell_untracked": True}
+        return result
 
     # Snapshot before shell execution because it can bypass tracked file operations.
-    from rune.safety import workspace_snapshot as _snap
     _took = None
-    if not _snap.looks_read_only(params.command):
+    if not read_only:
         _took = _snap.take(params.cwd or Path.cwd())
+    _started = time.time()
 
     result = await _execute_oneshot(params)
 
+    if not read_only and _took is None:
+        result.metadata = {**(result.metadata or {}), "shell_untracked": True}
     if _took is not None:
-        gone = _snap.missing_since_snapshot(params.cwd or Path.cwd())
+        try:
+            changes = await asyncio.to_thread(_snap.changes_since, _took, params.cwd or Path.cwd(), _started)
+        except OSError as exc:
+            log.debug("shell_changes_unavailable", error=str(exc))
+            changes = {"created": [], "modified": [], "removed": _snap.missing_since_snapshot(params.cwd or Path.cwd())}
+        result.metadata = {**(result.metadata or {}), "shell_changes": changes}
+        gone = changes["removed"]
         if gone:
             listed = ", ".join(gone[:8]) + ("..." if len(gone) > 8 else "")
             log.info("shell_removed_files", count=len(gone))

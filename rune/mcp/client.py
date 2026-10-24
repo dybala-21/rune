@@ -17,7 +17,7 @@ import contextlib
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from rune.mcp.config import MCPServerConfig
@@ -47,6 +47,8 @@ class MCPTool:
     name: str
     description: str
     input_schema: dict[str, Any]
+    # Server-declared behaviour hints; advisory, never a safety grant.
+    annotations: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -246,6 +248,7 @@ class MCPClient:
                 name=t.get("name", ""),
                 description=t.get("description", ""),
                 input_schema=t.get("inputSchema", {}),
+                annotations=t.get("annotations") if isinstance(t.get("annotations"), dict) else {},
             )
             for t in raw_tools
             if t.get("name")

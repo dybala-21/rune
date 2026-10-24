@@ -248,6 +248,7 @@ class GoalRuntime:
         self._make_opts = make_opts
         self._make_post_input = make_post_input
         self._last_ctx: Any | None = None
+        self._last_evidence: dict = {}
         self._last_answer: str = ""
         self._last_files: set[str] = set()
         self._run_started_at: float = 0.0
@@ -306,6 +307,10 @@ class GoalRuntime:
             )
 
         self._last_ctx = ctx
+        self._last_evidence = {key: getattr(trace, key, None) for key in (
+            "reason", "verification", "table_acceptance", "requirement_acceptance",
+            "tests_passed_after_edit", "tool_budget_exhausted", "evidence_gate", "mech_check", "explanation_review",
+        )}
         self._last_answer = (
             "".join(collected).strip()
             or getattr(trace, "final_text", "")
@@ -412,6 +417,7 @@ class GoalRuntime:
                     context=self._last_ctx,
                     success=success,
                     answer=answer or self._last_answer,
+                    **self._last_evidence,
                 )
             )
         except Exception as exc:  # best-effort; do not crash the terminal step

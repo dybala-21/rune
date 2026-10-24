@@ -4,6 +4,8 @@ import json
 import re
 from collections.abc import Collection
 
+from rune.agent.tool_output import RejectedToolResult
+
 _CORE = {"think", "ask_user", "task_blocked", "bash_execute", "project_map", "table_requirements", "table_verify"}
 _BROWSER = ("browser_observe", "browser_act", "browser_navigate", "browser_extract", "browser_batch")
 
@@ -13,6 +15,11 @@ def deferred_for_task(names: list[str], classification) -> set[str]:
 
     if is_simple_lookup(classification):
         return set(names) - {"web_search", "web_fetch", "ask_user", "task_blocked"}
+    if classification.goal_type == "browser":
+        immediate = {*_BROWSER, "ask_user", "task_blocked"}
+        if classification.needs_web_evidence:
+            immediate.update(("web_search", "web_fetch"))
+        return set(names) - immediate
     intents = classification.intent_categories
     coding = is_coding_task(classification)
     execution = coding or classification.requires_execution or classification.goal_type == "execution" or "calculation" in intents
@@ -20,16 +27,19 @@ def deferred_for_task(names: list[str], classification) -> set[str]:
             if (not coding and (name.startswith("code_") or name == "project_map"))
             or (not coding and name in {"think", "file_delete"})
             or (not execution and name == "bash_execute")
+            or ("calculation" not in intents and name == "file_query")
             or ("table" not in intents and name in {"table_requirements", "table_verify"})}
 
 
 class ToolCatalog:
-    def __init__(self, schemas: list[dict], *, deferred_tools: Collection[str] | None = None) -> None:
+    def __init__(self, schemas: list[dict], *, deferred_tools: Collection[str] | None = None,
+                 initial_tools: Collection[str] | None = None) -> None:
         self.all = {tool["function"]["name"]: tool for tool in schemas if tool.get("type") == "function"}
         # Provider-native tools stay in the request without passing through discovery.
         self.schemas = [tool for tool in schemas if tool.get("type") != "function"
                         or tool["function"]["name"] not in (deferred_tools or ())
                         and (tool["function"]["name"] in _CORE
+                             or tool["function"]["name"] in (initial_tools or ())
                              or tool["function"]["name"].startswith(("file_", "code_", "web_", "desktop_")))]
         self.loaded = {tool["function"]["name"] for tool in self.schemas if tool.get("type") == "function"}
         self.groups = sorted({re.split(r"[_.]", name)[0] for name in self.all if name not in self.loaded})
@@ -41,6 +51,19 @@ class ToolCatalog:
                            "required": ["query"], "additionalProperties": False},
         }})
         self.loaded.add("tool_search")
+        self.lookup_required = False
+        self._recovery_selection: set[str] = set()
+
+    def recovery_tools(self) -> set[str] | None:
+        if self.lookup_required:
+            return self.loaded & {"tool_search", "ask_user", "task_blocked"}
+        if self._recovery_selection:
+            return self.loaded & (self._recovery_selection | {"ask_user", "task_blocked"})
+        return None
+
+    def reset_recovery(self) -> None:
+        self.lookup_required = False
+        self._recovery_selection.clear()
 
     @staticmethod
     def needed(schemas: list[dict]) -> bool:
@@ -68,6 +91,8 @@ class ToolCatalog:
 
     async def search(self, query: str) -> str:
         if not isinstance(query, str) or not query.strip() or len(query) > 300:
+            if self.lookup_required:
+                return RejectedToolResult("Use tool_search with a tool name or short task description.", "invalid_tool_query")
             return "Use a tool name or a short English description. Families: " + ", ".join(self.groups)
         words = set(re.findall(r"[a-z0-9]+", query.lower()))
         ranked = []
@@ -89,6 +114,13 @@ class ToolCatalog:
             if name not in self.loaded:
                 self.schemas.append(self.all[name])
                 self.loaded.add(name)
+        if names:
+            if self.lookup_required:
+                # Keep the selected tools until a callable name reaches dispatch.
+                self._recovery_selection = set(names)
+            self.lookup_required = False
+        elif self.lookup_required:
+            return RejectedToolResult("No matching tool. Search by task description or report the blocker.", "tool_not_found")
         result = {"tools": [{"name": name, "description": self.all[name]["function"].get("description", "")[:500]}
                             for name in names], "families": self.groups if not names else []}
         return json.dumps(result)

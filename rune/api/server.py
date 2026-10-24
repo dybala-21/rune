@@ -451,7 +451,8 @@ def create_app() -> Any:
         if _shutting_down:
             return
         loop = _active_loops.get(run_id)
-        trust = build_cancelled_trust(trace, artifact_receipts=getattr(loop, "artifact_receipts", []))
+        trust = build_cancelled_trust(trace, artifact_receipts=getattr(loop, "artifact_receipts", []),
+                                  change_receipts=getattr(loop, "change_receipts", []))
         payload = {"runId": run_id, "trust": trust, "usage": usage_payload(trace)}
         if _aborted_runs.get(run_id) != payload:
             _aborted_runs[run_id] = payload
@@ -996,7 +997,8 @@ def create_app() -> Any:
                             "usage": usage_payload(trace),
                             "timings": {**getattr(trace, "timings", {}),
                                         "deliveryMs": round((time.monotonic() - loop_finished) * 1000, 1)},
-                            "trust": build_cancelled_trust(trace, artifact_receipts=getattr(loop, "artifact_receipts", []))
+                            "trust": build_cancelled_trust(trace, artifact_receipts=getattr(loop, "artifact_receipts", []),
+                                  change_receipts=getattr(loop, "change_receipts", []))
                             if cancelled else _trust_payload(trace),
                         },
                     }

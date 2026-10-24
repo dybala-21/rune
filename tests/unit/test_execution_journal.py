@@ -170,7 +170,8 @@ async def test_unknown_external_effect_blocks_resumption(recovery, tmp_path):
     assert (tmp_path / "external-effect").read_text() == "sent"
 
 
-async def test_failed_shell_that_already_wrote_cannot_repeat_without_review(recovery, tmp_path):
+@pytest.mark.parametrize("accepted", [False, True])
+async def test_failed_shell_that_already_wrote_cannot_repeat_without_review(recovery, tmp_path, accepted):
     from rune.capabilities.bash import BashParams, _execute_oneshot
 
     store, _, _ = recovery
@@ -191,17 +192,23 @@ async def test_failed_shell_that_already_wrote_cannot_repeat_without_review(reco
 
     async def approve(name, reason):
         approvals.append((name, reason))
-        return len(approvals) > 1
+        return accepted
 
     journal.approval = approve
     replacement = BashParams(command="printf repaired > result.txt", cwd=str(tmp_path))
-    for expected in (False, True):
-        result = await journal.execute("bash_execute", replacement.model_dump(), lambda: _execute_oneshot(replacement))
-        assert result.success is expected
+    result = await journal.execute("bash_execute", replacement.model_dump(), lambda: _execute_oneshot(replacement))
+    assert result.success is accepted
     assert "exit 1" in approvals[0][1] and "repaired" in approvals[0][1]
-    assert (tmp_path / "result.txt").read_text() == "repaired"
+    assert (tmp_path / "result.txt").read_text() == ("repaired" if accepted else "saved")
     prior = store.attempts("first")[0]
-    assert prior["state"] == "unknown" and prior["review"]["next_tool"] == "bash_execute"
+    assert prior["state"] == "unknown"
+    if accepted:
+        assert prior["review"]["next_tool"] == "bash_execute"
+    else:
+        assert result.metadata["approval_decision"] == "denied"
+        retry = await journal.execute("bash_execute", replacement.model_dump(), lambda: _execute_oneshot(replacement))
+        assert not retry.success and len(approvals) == 1
+        assert (tmp_path / "result.txt").read_text() == "saved"
 
 
 async def test_shell_failure_before_dispatch_does_not_block_followup(recovery, tmp_path):
@@ -215,6 +222,37 @@ async def test_shell_failure_before_dispatch_does_not_block_followup(recovery, t
     valid = BashParams(command="printf ok", cwd=str(tmp_path))
     result = await journal.execute("bash_execute", valid.model_dump(), lambda: _execute_oneshot(valid))
     assert result.success and result.output == "ok"
+
+
+@pytest.mark.parametrize("tool,params", [
+    ("connector_request", {"method": "POST", "path": "/messages"}),
+    ("web_fetch", {"method": "POST", "url": "https://example.org/orders"}),
+    ("desktop_act", {"action": "click"}),
+])
+async def test_unknown_writes_cannot_repeat_after_an_unrelated_read(recovery, tmp_path, tool, params):
+    store, _, _ = recovery
+    journal = ExecutionJournal(store, "first", str(tmp_path))
+    effects = []
+
+    async def send():
+        effects.append("sent")
+        return CapabilityResult(success=False, error="Acknowledgement lost", metadata={"action_status": "unknown"})
+
+    assert not (await journal.execute(tool, params, send)).success
+    read = AsyncMock(return_value=CapabilityResult(success=True, output="unrelated result"))
+    assert (await journal.execute("connector_request", {"method": "GET", "path": "/status"}, read)).success
+    retry = await journal.execute(tool, params, send)
+    assert retry.metadata["action_status"] == "not_executed"
+    assert effects == ["sent"]
+    assert store.attempts("first")[0]["state"] == "unknown"
+
+
+async def test_failed_connector_read_does_not_block_a_later_write(recovery, tmp_path):
+    journal = ExecutionJournal(recovery[0], "first", str(tmp_path))
+    read = AsyncMock(return_value=CapabilityResult(success=False, metadata={"action_status": "unknown"}))
+    await journal.execute("connector_request", {"method": "GET", "path": "/status"}, read)
+    write = AsyncMock(return_value=CapabilityResult(success=True))
+    assert (await journal.execute("connector_request", {"method": "POST", "path": "/messages"}, write)).success
 
 
 async def test_cancelled_shell_stops_its_child_and_keeps_the_effect_unknown(recovery, tmp_path):

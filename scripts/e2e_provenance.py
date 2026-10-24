@@ -35,6 +35,8 @@ def source_state(root: Path = ROOT) -> dict:
 def model_settings(cfg) -> dict:
     # Omit credentials, endpoints and user paths from reports.
     return {"reasoning_effort": cfg.llm.reasoning_effort,
+            "cost_budget_usd": cfg.llm.cost_budget_usd,
+            "model_request_limit": cfg.llm.model_request_limit,
             "reasoning_efforts": dict(cfg.llm.reasoning_efforts),
             "route_simple_queries": cfg.llm.route_simple_queries,
             "decision_routing": cfg.llm.decision_routing.model_dump(mode="json")}

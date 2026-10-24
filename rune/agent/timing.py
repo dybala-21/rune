@@ -225,6 +225,7 @@ def timing_snapshot(run: dict) -> dict:
             "remainingBudget": remaining_budget(run),
             "usage": copy.deepcopy(run["usage"]),
             "inputEstimates": dict(run["input_estimates"]),
+            **({"budgetBlocked": run["budget_blocked"]} if run["budget_blocked"] else {}),
             **({"followupBudget": dict(run["followup_budget"])} if run.get("followup_budget") else {})}
 
 
@@ -242,9 +243,6 @@ def timed_run(fn):
             budget = bound_budget(run)
             if budget is not None:
                 result.total_tokens_used = budget.used
-            if run["budget_blocked"]:
-                result.reason = "request_budget_exhausted"
-                result.completion_check = {"requirement": "Model budget", "detail": run["budget_blocked"]}
             return result
     return wrapper
 

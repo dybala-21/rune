@@ -45,9 +45,26 @@ class BrowserSession:
     tabs: list[dict] = field(default_factory=list)
     acquire_control: Callable[[], Awaitable[None]] | None = None
     last_input: dict[str, Any] | None = None
+    pending_verification: dict[str, Any] | None = None
+    last_effect: dict[str, Any] | None = None
+    observed_checks: list[Any] = field(default_factory=list)
+    checks_page: Any = None
+    check_targets: dict[str, dict] = field(default_factory=dict)
+    result_document: Any = None
+    readback_document: Any = None
 
     def __post_init__(self) -> None:
         _sessions.add(self)
+
+    def invalidate_evidence(self) -> None:
+        self.last_input = None
+        self.pending_verification = None
+        self.last_effect = None
+        self.observed_checks.clear()
+        self.checks_page = None
+        self.check_targets.clear()
+        self.result_document = None
+        self.readback_document = None
 
     @asynccontextmanager
     async def operation(self) -> AsyncIterator[None]:
@@ -80,7 +97,7 @@ class BrowserSession:
             except Exception as exc:
                 log.debug("native_browser_close_failed", error=str(exc))
         self.native_target = ""
-        self.last_input = None
+        self.invalidate_evidence()
         self.tabs.clear()
         self.observe_history.clear()
 
@@ -110,6 +127,10 @@ def manual_browser_input():
         yield
     finally:
         _manual.reset(token)
+
+
+def is_manual_input() -> bool:
+    return _manual.get()
 
 
 async def describe_browser_session() -> dict[str, Any]:
@@ -175,7 +196,13 @@ def browser_operation(function: Callable) -> Callable:
                 raise RuntimeError("This browser belongs to another execution")
             if control is not None:
                 control.check()
-            return await function(*args, **kwargs)
+            from rune.capabilities.browser.document_readback import observed_document
+            async with observed_document(session, function.__name__) as finish:
+                result = await function(*args, **kwargs)
+                await finish(result, args[0] if args else None)
+                if session.elements is not None and session.elements.document_id:
+                    result.metadata["document_id"] = session.elements.document_id
+                return result
     return wrapped
 
 

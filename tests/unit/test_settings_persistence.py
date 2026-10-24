@@ -250,6 +250,13 @@ class TestIgnoredKeysAreReported:
     def test_a_fully_known_config_reports_nothing(self):
         assert _unknown_keys({"llm": {"defaultProvider": "openai"}}, RuneConfig) == []
 
+    def test_the_legacy_language_key_sets_the_reply_locale(self, config_home):
+        (config_home / "config.yaml").write_text("general:\n  language: ko\n")
+        from rune.config.loader import get_config
+
+        assert get_config().general.locale == "ko"
+        assert _unknown_keys({"general": {"language": "ko"}}, RuneConfig) == []
+
     def test_it_survives_a_scalar_where_a_section_was_expected(self):
         assert _unknown_keys({"llm": "oops"}, RuneConfig) == []
 

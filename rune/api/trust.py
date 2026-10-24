@@ -5,19 +5,23 @@ from types import SimpleNamespace
 from typing import Any
 
 from rune.agent.escalation import can_escalate, honest_failure_note, run_was_verifiable
-from rune.agent.run_outcome import run_outcome
+from rune.agent.run_outcome import explanation_warning, run_outcome
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
 
 
-def build_cancelled_trust(trace: Any = None, *, artifact_receipts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+def build_cancelled_trust(trace: Any = None, *, artifact_receipts: list[dict[str, Any]] | None = None,
+                          change_receipts: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     out = build_trust_payload(trace or SimpleNamespace(reason="cancelled"))
     out.update(completionStatus="cancelled", reason="cancelled", verified=False,
                canEscalate=False, honestNote="", escalationHint="", completionCheck=None)
     if trace is None:
         out["artifactReceipts"] = artifact_receipts or []
+    if not out["changeReceipts"]:
+        out["changeReceipts"] = change_receipts or []
     out["artifactReceipts"] = copy.deepcopy(out["artifactReceipts"])
+    out["changeReceipts"] = copy.deepcopy(out["changeReceipts"])
     return out
 
 
@@ -31,19 +35,24 @@ def build_trust_payload(trace: Any) -> dict[str, Any]:
     out: dict[str, Any] = {
         **outcome.payload(),
         "reason": reason,
-        "budgetExhausted": bool(getattr(trace, "tool_budget_exhausted", False)) or reason == "request_budget_exhausted",
+        "budgetExhausted": (bool(getattr(trace, "tool_budget_exhausted", False))
+                            or bool((getattr(trace, "timings", None) or {}).get("budgetBlocked"))
+                            or reason == "request_budget_exhausted"),
         "testsPassedAfterEdit": getattr(trace, "tests_passed_after_edit", None),
         "verification": getattr(trace, "verification", None),
         "explanationReview": getattr(trace, "explanation_review", None),
+        "sourceReview": getattr(trace, "source_review", None),
         "completionCheck": getattr(trace, "completion_check", None)
-        if reason in ("completed_gate_warnings", "max_gate_blocked", "desktop_blocked", "request_budget_exhausted") else None,
+        if reason in ("completed_gate_warnings", "max_gate_blocked", "desktop_blocked", "request_budget_exhausted",
+                      "verification_unavailable", "verification_inconclusive", "task_incomplete") else None,
         "artifactReceipts": getattr(trace, "artifact_receipts", []),
+        "changeReceipts": list(getattr(trace, "change_receipts", None) or []),
         "tableAcceptance": getattr(trace, "table_acceptance", None),
         "requirementAcceptance": getattr(trace, "requirement_acceptance", None),
         "workspaceWarning": getattr(trace, "workspace_warning", "") or "",
         "unsourcedNumbers": list(getattr(trace, "unsourced_numbers", None) or []),
-        "canEscalate": can_escalate(reason) and not review_unavailable,
-        "honestNote": honest_failure_note(reason, run_was_verifiable(trace)) or "",
+        "canEscalate": can_escalate(reason) and not review_unavailable and outcome.verification != "unavailable",
+        "honestNote": explanation_warning(trace) or honest_failure_note(reason, run_was_verifiable(trace)) or "",
         "escalationHint": "",
     }
     gate = getattr(trace, "evidence_gate", None)

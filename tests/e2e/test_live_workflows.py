@@ -92,6 +92,24 @@ def test_simple_request_avoids_computer(workflow, request):
     request.node.live_passed = True
 
 
+@pytest.mark.parametrize("workflow", [{"max_tokens":512, "max_iterations":6}], indirect=True)
+def test_filtered_calculation_uses_source_snapshot(workflow, request):
+    from rune.config import get_config
+
+    get_config().llm.cost_budget_usd = .10
+    get_config().llm.model_request_limit = 6
+    path = workflow.workspace / "orders.csv"
+    original = "status,amount\npaid,0.2\nrefunded,99\npaid,0.4\n"
+    path.write_text(original)
+    run = workflow.submit("orders.csv에서 status가 paid인 행만 골라 amount 합계를 숫자만 답해줘. 파일은 변경하지 마.")
+    completed(run)
+    assert (run.get("answer") or run["text"]).strip() == "0.6"
+    assert not gui_calls(run)
+    assert path.read_text() == original
+    assert set(p.name for p in workflow.workspace.iterdir() if p.is_file()) == {"orders.csv"}
+    request.node.live_passed = True
+
+
 def test_csv_attachment_and_reload(workflow, request):
     attachment = {"name": "expenses.csv", "mimeType": "text/csv", "data": base64.b64encode(CSV.encode()).decode()}
     run = workflow.submit("첨부 expenses.csv의 department별 amount 합계를 summary.csv로 저장해. 열은 department,total이고 department 오름차순으로 정렬해. 원본은 유지하고 최종 답변에 부서별 합계를 보고해.", [attachment])
@@ -155,6 +173,19 @@ def form_site():
             return
 
         def do_GET(self):
+            if self.path == "/stored":
+                from html import escape
+                saved = state["saves"][-1] if state["saves"] else {"city": "부산", "people": "2"}
+                body = ('<meta charset="utf-8"><h1>저장된 기록</h1>'
+                        f'<label>도시 <input id="city" readonly value="{escape(saved["city"], quote=True)}"></label>'
+                        f'<label>인원 <input id="people" readonly value="{escape(saved["people"], quote=True)}"></label>').encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if self.path != "/form":
                 self.send_error(404)
                 return
@@ -163,7 +194,7 @@ def form_site():
             <h1>회의 일정 임시 저장</h1><label>도시 <input id="city" value="부산"></label>
             <label>인원 <input id="people" type="number" value="2"></label>
             <button onclick="fetch('/save',{method:'POST',body:JSON.stringify({city:document.querySelector('#city').value,people:document.querySelector('#people').value})}).then(()=>document.querySelector('#status').textContent='임시 저장됨')">임시 저장</button>
-            <p id="status" role="status">아직 저장하지 않음</p></html>'''.encode()
+            <p id="status" role="status">아직 저장하지 않음</p><a href="/stored">저장된 기록 보기</a></html>'''.encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -187,7 +218,12 @@ def form_site():
     thread.join(timeout=2)
 
 
+@pytest.mark.parametrize("workflow", [{"max_tokens":1024}], indirect=True)
 def test_browser_followup_retains_page(workflow, form_site, request):
+    from rune.config import get_config
+
+    get_config().llm.cost_budget_usd = .20
+    get_config().llm.model_request_limit = 10
     url, state = form_site
     first = workflow.submit(f"브라우저에서 {url} 연습 화면을 열어 도시를 군산, 인원을 3으로 바꾸고 임시 저장을 한 번 눌러줘. 저장됐는지도 확인해.")
     completed(first)

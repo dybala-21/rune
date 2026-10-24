@@ -325,6 +325,7 @@ class TableAcceptance:
                                   "scope": "tabular_data", "unverified": plan.unverified,
                                   "out_of_scope": plan.out_of_scope}
         self.results[path] = report
+        self.report_checks.retry_unresolved()
         try:
             if not plan.applicable:
                 raise ValueError("This request is outside supported table checks")
@@ -401,6 +402,8 @@ class TableAcceptance:
         return message
 
     def recovery_tools(self) -> set[str] | None:
+        if self._recovering and self.report_checks.review_pending:
+            return {"ask_user", "task_blocked"} | ({"table_verify"} if self.report_checks.retryable else set())
         if self._report_recovery:
             return {"document_create", "document_read", "file_write", "file_edit", "file_read", "ask_user", "task_blocked"}
         if self._retry_requirements or (self.required and not self.contracts and self._source_seen):
@@ -444,7 +447,7 @@ class TableAcceptance:
             if plan.reports:
                 problem = await self.report_checks.check(contract, plan, self.report_outputs, self.workspace)
                 if problem:
-                    self._report_recovery = True
+                    self._report_recovery = not self.report_checks.review_pending
                     return problem
         sources = {c["source_path"] for c in self.contracts.values()}
         unchecked = self.outputs - sources - {p for p, r in self.results.items() if r["status"] == "pass"}
@@ -455,12 +458,14 @@ class TableAcceptance:
     def snapshot(self) -> dict[str, Any]:
         results = list(self.results.values())
         unsupported = [item for c in self.contracts.values() for item in c["plan"]["unverified"]]
-        statuses = {r["status"] for r in results}
-        status = ("fail" if "fail" in statuses else "inconclusive" if unsupported or statuses - {"pass"}
+        reports = self.report_checks.snapshot()
+        statuses = {r["status"] for r in [*results, *reports]}
+        status = ("fail" if "fail" in statuses else "unavailable" if "unavailable" in statuses
+                  else "inconclusive" if unsupported or statuses - {"pass"}
                   else "unverified" if self._pending
                   else "pass" if results else "unverified")
         return {"required": self.required, "status": status, "scope": "tabular_data",
                 "contracts": copy.deepcopy(list(self.contracts.values())),
                 "results": copy.deepcopy(results), "unverified": unsupported,
-                "reports": self.report_checks.snapshot(),
+                "reports": reports,
                 "out_of_scope": [item for c in self.contracts.values() for item in c["plan"].get("out_of_scope", [])]}

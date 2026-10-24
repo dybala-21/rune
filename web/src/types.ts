@@ -64,20 +64,36 @@ export interface AgentStartData {
   /** Matches /api/message to its run when several turns share a session. */
   runId?: string;
 }
+export interface RequirementAcceptanceInfo {
+  required: boolean;
+  status: 'pass' | 'acknowledged' | 'fail' | 'inconclusive' | 'unavailable' | 'unverified' | 'not_checked';
+  requirements?: string[];
+  writeReceipt?: { status: 'accepted'; requests: { method: string; url: string; status: number }[] };
+  /** Conditions used to choose an option; no automatic check covers them. */
+  uncheckedCriteria?: string[];
+  detail?: string | null;
+  method?: 'model_review' | 'page_readback' | 'combined';
+  readback?: { status: 'pass' | 'inconclusive'; scope: 'observed_page_state' };
+  independentReadback?: { status: 'pass' | 'fail' | 'unavailable' | 'inconclusive'; scope: 'http_document'; detail?: string };
+  components?: RequirementAcceptanceInfo[];
+}
+
+/** One external change and the strength of the evidence that it happened. */
+export interface ChangeReceipt {
+  tool: string;
+  target: string;
+  tier: 'verified' | 'acknowledged' | 'observed' | 'rejected' | 'unknown';
+  evidence: string;
+}
+
 export interface TrustInfo {
   explanationReview?: { status: 'not_checked' | 'pass' | 'contradicted' | 'inconclusive' | 'unavailable'; detail: string } | null;
-  requirementAcceptance?: {
-    required: boolean;
-    status: 'pass' | 'fail' | 'inconclusive' | 'not_checked';
-    requirements: string[];
-    detail?: string | null;
-    method: 'model_review';
-  } | null;
+  requirementAcceptance?: RequirementAcceptanceInfo | null;
   tableAcceptance?: TableAcceptanceInfo | null;
   verified: boolean;
   reason: string;
   completionStatus?: 'completed' | 'incomplete' | 'failed' | 'cancelled' | 'interrupted' | 'unknown';
-  verificationStatus?: 'passed' | 'failed' | 'not_checked' | 'inconclusive';
+  verificationStatus?: 'passed' | 'failed' | 'not_checked' | 'inconclusive' | 'unavailable';
   verificationRequired?: boolean;
   completionCheck?: { name: string; detail: string } | null;
   canEscalate?: boolean;
@@ -90,6 +106,7 @@ export interface TrustInfo {
   budgetExhausted?: boolean;
   /** Test freshness after code changes; this does not establish task coverage. */
   testsPassedAfterEdit?: boolean | null;
+  changeReceipts?: ChangeReceipt[];
   artifactReceipts?: Array<{
     kind: 'document_bundle';
     scope?: never;
@@ -123,7 +140,7 @@ export interface TrustInfo {
 }
 export interface TableAcceptanceInfo {
   required: boolean;
-  status: 'pass' | 'fail' | 'inconclusive' | 'unverified';
+  status: 'pass' | 'fail' | 'inconclusive' | 'unverified' | 'unavailable';
   scope: 'tabular_data';
   contracts: Array<{
     id: string;
@@ -139,6 +156,11 @@ export interface TableAcceptanceInfo {
     issues?: Array<{ check: string; detail?: string; count?: number; examples?: string[][]; expected?: string[]; actual?: string[] }>;
   }>;
   unverified: string[];
+  reports?: Array<{
+    path: string;
+    status: 'pass' | 'fail' | 'inconclusive' | 'unavailable';
+    issues: string[];
+  }>;
   out_of_scope?: string[];
 }
 export interface AgentCompleteData { success: boolean; answer: string; durationMs: number; usage?: TokenUsage; trust?: TrustInfo }

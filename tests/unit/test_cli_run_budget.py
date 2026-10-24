@@ -29,7 +29,7 @@ def cli_run(tmp_path, monkeypatch):
     decision = dict(goal_type="chat", confidence=.99, reason="Simple answer", requires_execution=False,
         intent_categories=[], requires_desktop_input=False, is_related_to_previous=False,
         needs_web_evidence=False, needs_current_source=False, lookup_only=False,
-        table_output="none", calculation_expression="")
+        table_output="none", source_output="none", browser_effect="change", calculation_operation="other", calculation_expression="")
     request = AsyncMock(return_value={"choices": [{"message": {"content": json.dumps(decision)}, "finish_reason": "stop"}],
         "usage": {"prompt_tokens": 100, "completion_tokens": 10}})
     monkeypatch.setattr("litellm.acompletion", request)
@@ -47,7 +47,12 @@ def cli_run(tmp_path, monkeypatch):
 
 
 def test_zero_limit_blocks_cli_classification(cli_run, capsys):
-    cli_run.run("Hello")
+    import click
+
+    # A run stopped by its budget is not confirmed done, so the CLI exits 3.
+    with pytest.raises(click.exceptions.Exit) as stopped:
+        cli_run.run("Hello")
+    assert stopped.value.exit_code == 3
     cli_run.request.assert_not_called()
     assert "request_budget_exhausted" in capsys.readouterr().err
 
@@ -78,6 +83,31 @@ def test_cli_preflight_and_learning_share_the_limit(cli_run, monkeypatch, limit)
     assert seen[0].timings["usage"]["calls"] == limit
     assert seen[0].total_tokens_used == 110 * limit
     assert seen[0].reason == "completed"
+
+
+def test_cli_preserves_completed_work_when_only_the_summary_budget_runs_out(cli_run, monkeypatch):
+    from rune.agent.loop import NativeAgentLoop
+    from rune.agent.request_budget import scopes
+    from rune.agent.timing import _current, timed_run
+    from rune.types import CompletionTrace
+
+    monkeypatch.setattr(cli_run.config, "model_request_limit", 1)
+    seen = []
+
+    @timed_run
+    async def run(self, *args, **kwargs):
+        self._reset_run_state()
+        for scope in scopes(_current.get()):
+            scope["budget_blocked"] = "The final summary request was not sent."
+        trace = CompletionTrace(reason="completed")
+        seen.append(trace)
+        return trace
+
+    monkeypatch.setattr(NativeAgentLoop, "run", run)
+    cli_run.run("Hello")
+    assert seen[0].reason == "completed"
+    assert seen[0].timings["budgetBlocked"] == "The final summary request was not sent."
+    assert cli_run.request.await_count == 1
 
 
 async def test_execution_tokens_follow_loop_limits_without_resetting_usage(monkeypatch):

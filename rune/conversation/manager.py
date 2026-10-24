@@ -381,7 +381,7 @@ class ConversationManager:
         added from the end until the budget is exhausted.
         """
         conv = self._active.get(conversation_id)
-        if conv is None or not conv.turns:
+        if conv is None:
             return []
 
         system_msgs: list[dict[str, str]] = []
@@ -400,7 +400,11 @@ class ConversationManager:
             remaining -= count_tokens(msg["content"]) + 4
 
         if remaining <= 0:
-            return system_msgs[-1:] if system_msgs else []
+            messages = system_msgs[-1:] if system_msgs else []
+            from rune.agent.task_context import attach_tasks
+
+            attach_tasks(messages, conv)
+            return messages
 
         selected: list[dict[str, str]] = []
         for turn in reversed(other_turns):
@@ -436,7 +440,14 @@ class ConversationManager:
             remaining -= cost
 
         selected.reverse()
-        return system_msgs + selected
+        messages = system_msgs + selected
+        from rune.agent.source_context import attach_sources
+
+        attach_sources(messages, conv.execution_context)
+        from rune.agent.task_context import attach_tasks
+
+        attach_tasks(messages, conv)
+        return messages
 
     # Conversation compaction
 

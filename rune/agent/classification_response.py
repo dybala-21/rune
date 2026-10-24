@@ -9,45 +9,31 @@ import random
 from copy import deepcopy
 from typing import Any
 
+from rune.agent.browser_requirements import response_schema
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
 
+# Shared routing rules live in the prompt.
 _PROPERTIES = {
-    "goal_type": {
-        "type": "string", "enum": ["chat", "web", "research", "code_modify", "execution", "browser", "full", "artifact"],
-        "description": "Route by the requested outcome. Reading or summarizing even an already open webpage is web. Browser requires interaction with webpage controls, not merely an open browser or use of a page-reading tool. Native app state/features use full with desktop intent.",
-    },
-    "confidence": {"type": "number", "minimum": 0, "maximum": 1,
-                   "description": "Confidence as a fraction from 0 to 1, never a percentage."},
-    "reason": {"type": "string", "description": "One short phrase explaining the routing decision."},
-    "requires_execution": {
-        "type": "boolean",
-        "description": "True only for required code, script, shell or test execution. False for native app input, including calculations in Calculator, unless the user also requests code/tests to run.",
-    },
-    "needs_web_evidence": {
-        "type": "boolean",
-        "description": "External facts must be retrieved to help with this request, even when phrased casually or emotionally. False for stable knowledge, supplied facts, or an explicit request only to listen/not browse.",
-    },
-    "needs_current_source": {
-        "type": "boolean",
-        "description": "True when the answer needs current or recent observations, such as prices, weather, service status, availability or schedules. Requires opening a source page/API; indexed search excerpts are insufficient. False for link discovery, stable explanations, supplied facts or no-browsing requests.",
-    },
-    "lookup_only": {
-        "type": "boolean",
-        "description": "True when a few sourced observations answer a chat/web request, including a casual worry grounded by checking current conditions. Expressing a worry is not asking for a prediction. False when the user requests causal analysis, predictions, recommendations, professional advice, broad comparisons, or scope is unclear. Controls lighter default reasoning, not verification.",
-    },
-    "intent_categories": {"type": "array", "items": {"type": "string", "enum": ["coding", "email", "document", "table", "desktop", "calculation"]},
-                          "description": "coding requires software work as an outcome, not helper code for a document. desktop requires native app features or unsaved state. Office/PDF files alone use document/file tools."},
-    "requires_desktop_input": {"type": "boolean", "description": "True only for input in a native app required by the request. Saving or checking a file through document tools is false."},
+    "goal_type": {"type": "string", "enum": ["chat", "web", "research", "code_modify", "execution", "browser", "full", "artifact"]},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "reason": {"type": "string"},
+    "requires_execution": {"type": "boolean"},
+    "needs_web_evidence": {"type": "boolean"},
+    "needs_current_source": {"type": "boolean"},
+    "lookup_only": {"type": "boolean"},
+    "source_output": {"type": "string", "enum": ["none", "verbatim", "derived", "summary"]},
+    "browser_effect": {"type": "string", "enum": ["view", "edit", "change"]},
+    "browser_requirements": response_schema(),
+    "calculation_operation": {"type": "string", "enum": ["sum", "count", "mean", "min", "max", "other"]},
+    "intent_categories": {"type": "array", "items": {"type": "string", "enum": ["coding", "email", "document", "table", "desktop", "calculation"]}},
+    "requires_desktop_input": {"type": "boolean"},
     "is_related_to_previous": {"type": "boolean"},
-    "table_output": {
-        "type": "string", "enum": ["none", "csv", "xlsx"],
-        "description": "CSV/XLSX deliverable aggregating existing source data. Use none for Markdown tables, code/test summaries, software that processes data, or blank templates.",
-    },
+    "table_output": {"type": "string", "enum": ["none", "csv", "xlsx"]},
     "calculation_expression": {
         "type": "string",
-        "description": "When asked to evaluate explicit numeric arithmetic, copy the complete expression verbatim from the current request. Never solve, rewrite or invent it. Otherwise use an empty string, including native app tasks, identifiers and code-writing requests.",
+        "description": "Copy the complete numeric arithmetic expression verbatim from the current request. Never solve, rewrite or invent it. Use an empty string for all other requests, including native app tasks, identifiers and code-writing requests.",
     },
 }
 RESPONSE_FORMAT = {"type": "json_schema", "json_schema": {
@@ -110,7 +96,7 @@ def decode_response(response: Any) -> dict[str, Any]:
 
 
 def validate_decision(data: dict[str, Any]) -> dict[str, Any]:
-    if set(data) != set(_PROPERTIES):
+    if set(data) - {"resume_task", "task_scope", "browser_requirements"} != set(_PROPERTIES) - {"browser_requirements"}:
         raise InvalidClassification("invalid_fields")
     if data["goal_type"] not in _PROPERTIES["goal_type"]["enum"]:
         raise InvalidClassification("invalid_goal_type")
@@ -127,11 +113,30 @@ def validate_decision(data: dict[str, Any]) -> dict[str, Any]:
         raise InvalidClassification("invalid_intent_categories")
     if data["table_output"] not in ("none", "csv", "xlsx"):
         raise InvalidClassification("invalid_table_output")
+    if data["source_output"] not in ("none", "verbatim", "derived", "summary"):
+        raise InvalidClassification("invalid_source_output")
+    for key in ("browser_effect", "calculation_operation"):
+        if data[key] not in _PROPERTIES[key]["enum"]:
+            raise InvalidClassification("invalid_" + key)
+    if "resume_task" in data and (not isinstance(data["resume_task"], str) or len(data["resume_task"]) > 12):
+        raise InvalidClassification("invalid_resume_task")
+    if "task_scope" in data and data["task_scope"] not in {"task", "step", "inspect", "amend"}:
+        raise InvalidClassification("invalid_task_scope")
     if not isinstance(data["calculation_expression"], str):
         raise InvalidClassification("invalid_calculation_expression")
+    if data.get("browser_requirements") is not None:
+        from rune.agent.browser_requirements import BrowserRequirements
+        try:
+            BrowserRequirements.model_validate(data["browser_requirements"])
+        except ValueError as exc:
+            from pydantic import ValidationError
+
+            from rune.agent.tool_errors import validation_details
+            detail = validation_details(exc) if isinstance(exc, ValidationError) else "Invalid requirement structure"
+            raise InvalidClassification("invalid_browser_requirements: " + detail) from exc
     desktop = "desktop" in data["intent_categories"]
     if data["needs_current_source"] and not data["needs_web_evidence"]:
-        raise InvalidClassification("inconsistent_source_requirement")
+        data = {**data, "needs_web_evidence": True}
     if data["lookup_only"] and (not data["needs_web_evidence"] or data["goal_type"] not in {"chat", "web"}
                                 or data["requires_execution"] or data["intent_categories"]):
         log.debug("lookup_reasoning_disabled", goal_type=data["goal_type"])
@@ -144,7 +149,10 @@ def validate_decision(data: dict[str, Any]) -> dict[str, Any]:
         raise InvalidClassification("inconsistent_desktop_route")
     if data["table_output"] != "none" and data["goal_type"] in {"chat", "web"}:
         raise InvalidClassification("inconsistent_table_route")
-    # Deliverables may need calculation; only direct answers carry an expression.
+    # Only direct answers read an expression; other routes drop it, since small models fill it with filler.
+    if data["calculation_expression"] and data["goal_type"] != "chat":
+        log.debug("calculation_expression_dropped", goal_type=data["goal_type"])
+        data = {**data, "calculation_expression": ""}
     if data["calculation_expression"] and (data["goal_type"] != "chat"
             or data["requires_execution"] or data["table_output"] != "none"):
         raise InvalidClassification("inconsistent_calculation_route")
@@ -159,7 +167,23 @@ async def request_classification(
     from rune.llm.reasoning import reasoning_control
 
     selected = selected or get_effective_model_selection()
+    from rune.agent.browser_requirements import INSTRUCTION, validated
+
+    system += "\n" + INSTRUCTION
     response_format = RESPONSE_FORMAT
+    try:
+        state = json.loads(content)
+    except ValueError:
+        log.debug("classification_plain_request")
+        state = {}
+    task_ids = [task["id"] for task in state.get("saved_tasks", [])] if isinstance(state, dict) else []
+    if task_ids:
+        response_format = deepcopy(response_format)
+        schema = response_format["json_schema"]["schema"]
+        schema["properties"]["resume_task"] = {"type": "string", "enum": ["", *task_ids]}
+        schema["required"].append("resume_task")
+        schema["properties"]["task_scope"] = {"type": "string", "enum": ["task", "step", "inspect", "amend"]}
+        schema["required"].append("task_scope")
     names = ()
     if file_roles is not None:
         from rune.agent.provenance import role_hint_names
@@ -168,7 +192,7 @@ async def request_classification(
         if len(names) > 12:
             names = ()
         if names:
-            response_format = deepcopy(RESPONSE_FORMAT)
+            response_format = deepcopy(response_format)
             schema = response_format["json_schema"]["schema"]
             schema["properties"]["file_roles"] = {"type": "array", "items": {
                 "type": "object", "properties": {
@@ -181,6 +205,7 @@ async def request_classification(
                 "\nAlso classify the supplied file names by their role in the current request: "
                 "input=existing source to read or modify; output=new file to create; "
                 "preserve=existing file explicitly left unchanged. Omit uncertain roles. "
+                "When a file must be read and also left unchanged, use input; reading does not authorize edits. "
                 "Use each name once. Names: " + json.dumps(list(names), ensure_ascii=False)
             )
     messages = [{"role": "system", "content": system}, {"role": "user", "content": content}]
@@ -201,7 +226,20 @@ async def request_classification(
                 )
                 data = decode_object(response)
                 roles = data.pop("file_roles", []) if names else []
-                values = validate_decision(data)
+                browser_plan = data.get("browser_requirements")
+                values = validate_decision({**data, "browser_requirements": None})
+                if browser_plan is not None:
+                    try:
+                        validated(browser_plan, tuple(
+                            str(state.get(key, "")) for key in ("request_to_classify", "previous_request")))
+                        values["browser_requirements"] = browser_plan
+                    except ValueError as exc:
+                        # The executor can bind a new plan before input without repeating routing.
+                        log.info("browser_plan_deferred", error=type(exc).__name__)
+                if task_ids and values.get("resume_task") not in ["", *task_ids]:
+                    raise InvalidClassification("invalid_resume_task")
+                if not task_ids and values.get("resume_task"):
+                    raise InvalidClassification("unexpected_resume_task")
                 if names and isinstance(roles, list):
                     proposed = {}
                     for item in roles:

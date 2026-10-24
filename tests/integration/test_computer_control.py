@@ -142,7 +142,8 @@ async def test_conversation_survives_runs_but_expiry_releases_resources(computer
         assert await describe_browser_session() == {"status": "unavailable"}
 
 
-async def test_cancelled_click_keeps_unknown_outcome_until_user_checks_it(computer, monkeypatch):
+@pytest.mark.parametrize("after_dispatch", [False, True])
+async def test_cancelled_click_requires_review_only_after_dispatch(computer, monkeypatch, after_dispatch):
     from playwright.async_api import ElementHandle
 
     computers, entry, page, _, client = computer
@@ -150,16 +151,19 @@ async def test_cancelled_click_keeps_unknown_outcome_until_user_checks_it(comput
 
     async def cancelled_after_click(self, **kwargs):
         await click(self, **kwargs)
-        raise asyncio.CancelledError
+        if bool(kwargs.get("trial")) != after_dispatch:
+            raise asyncio.CancelledError
 
     monkeypatch.setattr(ElementHandle, "click", cancelled_after_click)
     async with computers.bind(entry):
         with pytest.raises(asyncio.CancelledError):
             await browser_act(BrowserActParams(action="click", selector="#save"))
-    assert entry.browser.uncertain_action and await page.evaluate("window.saves") == 1
+    assert entry.browser.uncertain_action is after_dispatch
+    assert await page.evaluate("window.saves") == int(after_dispatch)
     assert (await command(client, entry, "pause")).status_code == 200
-    assert (await command(client, entry, "resume")).status_code == 409
-    assert (await command(client, entry, "resume", acknowledgeUnknown=True)).status_code == 200
+    assert (await command(client, entry, "resume")).status_code == (409 if after_dispatch else 200)
+    if after_dispatch:
+        assert (await command(client, entry, "resume", acknowledgeUnknown=True)).status_code == 200
     assert not entry.browser.uncertain_action
 
 

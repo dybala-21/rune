@@ -272,6 +272,11 @@ async def _execute_agent(
             await post_process_agent_result(PostProcessInput(
                 classification_hint=getattr(loop, "_last_goal_type", "") or None,
                 verification=getattr(trace, "verification", None),
+                table_acceptance=getattr(trace, "table_acceptance", None),
+                requirement_acceptance=getattr(trace, "requirement_acceptance", None),
+                tests_passed_after_edit=getattr(trace, "tests_passed_after_edit", None),
+                tool_budget_exhausted=getattr(trace, "tool_budget_exhausted", False),
+                explanation_review=getattr(trace, "explanation_review", None),
                 reason=getattr(trace, "reason", ""),
                 mech_check=getattr(trace, "mech_check", ""),
                 evidence_gate=getattr(trace, "evidence_gate", None),

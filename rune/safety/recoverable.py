@@ -115,7 +115,7 @@ def verify_gone(path: Path) -> MutationCheck:
     """Confirm a delete actually removed the path."""
     if not verify_enabled():
         return MutationCheck(True, "verification disabled")
-    if path.exists():
+    if path.exists() or path.is_symlink():  # a dangling link is still there
         return MutationCheck(False, f"{path} still exists after the delete")
     return MutationCheck(True, "removed")
 

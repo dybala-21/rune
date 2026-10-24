@@ -1,4 +1,4 @@
-import type { TrustInfo } from '../types';
+import type { RequirementAcceptanceInfo, TrustInfo } from '../types';
 
 export interface TrustPresentation {
   title: string;
@@ -13,8 +13,8 @@ export interface TrustPresentation {
 function completionStatus(trust: TrustInfo): NonNullable<TrustInfo['completionStatus']> {
   if (trust.completionStatus === 'cancelled' || trust.reason === 'cancelled') return 'cancelled';
   if (trust.completionStatus === 'failed' || trust.reason === 'error' || trust.reason.startsWith('error:')) return 'failed';
-  if (trust.budgetExhausted) return 'incomplete';
   if (trust.completionStatus) return trust.completionStatus;
+  if (trust.budgetExhausted) return 'incomplete';
   return trust.reason === 'completed' || trust.reason === 'verified'
     ? 'completed' : trust.reason ? 'incomplete' : 'unknown';
 }
@@ -28,6 +28,19 @@ function verificationStatus(trust: TrustInfo): NonNullable<TrustInfo['verificati
   if (trust.verification?.status === 'pass' || trust.evidenceGate?.lastVerdict === 'pass'
     || trust.testsPassedAfterEdit === true) return 'passed';
   return trust.evidenceGate?.hasCheck ? 'inconclusive' : 'not_checked';
+}
+
+function hasPageReadback(check?: RequirementAcceptanceInfo | null): boolean {
+  return check?.readback?.status === 'pass' && check.readback.scope === 'observed_page_state'
+    || check?.components?.some(hasPageReadback) === true;
+}
+
+function acknowledgedWrite(check?: RequirementAcceptanceInfo | null): boolean {
+  return check?.status === 'acknowledged';
+}
+
+function resultReadback(check?: RequirementAcceptanceInfo | null): RequirementAcceptanceInfo['independentReadback'] {
+  return check?.independentReadback ?? check?.components?.map(resultReadback).find(Boolean);
 }
 
 /** The chat card, progress pane and status indicator use the same verdict. */
@@ -51,6 +64,34 @@ export function describeTrust(trust: TrustInfo): TrustPresentation {
   }
   if (verification === 'failed') {
     return { ...base, title: 'Checks failed', note: trust.honestNote || 'A recorded check failed. Review the evidence before using this result.', tone: 'warning', glyph: '⚠', ok: false };
+  }
+  const fetched = resultReadback(trust.requirementAcceptance);
+  if (fetched && fetched.status !== 'pass'
+    && (completion === 'unknown' || completion === 'completed' || trust.reason === 'task_incomplete')) {
+    return { ...base, title: 'Result unconfirmed', tone: 'neutral', glyph: '·', ok: null, canEscalate: false,
+      note: fetched.detail || 'The separate result check could not confirm the fields. This does not establish that saving failed; review before repeating the action.' };
+  }
+  if (hasPageReadback(trust.requirementAcceptance)
+    && (completion === 'unknown' || completion === 'incomplete' && trust.budgetExhausted)) {
+    return {
+      ...base, title: completion === 'incomplete' ? 'Page checked · run stopped' : 'Page checked · scope unconfirmed',
+      note: 'The observed page matched the checks. This does not confirm every part of the request. Review the remaining work before repeating an action.',
+      tone: 'neutral', glyph: '·', ok: null, canEscalate: false,
+    };
+  }
+  if (verification === 'unavailable') {
+    return {
+      ...base, title: 'Verification unavailable', tone: 'warning', glyph: '⚠', ok: false,
+      canEscalate: false,
+      note: trust.honestNote || 'A required check could not run. The result is unconfirmed; no mismatch was established.',
+    };
+  }
+  if (completion === 'unknown' && trust.reason === 'verification_inconclusive') {
+    return {
+      ...base, title: 'Result unconfirmed', tone: 'warning', glyph: '⚠', ok: false,
+      canEscalate: false,
+      note: trust.honestNote || 'Some requested results could not be confirmed. Review the evidence before repeating an action.',
+    };
   }
   if (completion === 'incomplete') {
     if (verification === 'passed' && trust.reason === 'max_gate_blocked'
@@ -84,6 +125,10 @@ export function describeTrust(trust: TrustInfo): TrustPresentation {
         : trust.honestNote || 'This run stopped before completing the request.',
     };
   }
+  if (completion === 'completed' && acknowledgedWrite(trust.requirementAcceptance)) {
+    return { ...base, title: 'Saved · server accepted', tone: 'neutral', glyph: '✓', ok: true, canEscalate: false,
+      note: 'The site accepted the save and the submitted fields matched. The stored record was not read back.' };
+  }
   if (required && verification !== 'passed') {
     return {
       ...base, title: verification === 'inconclusive' ? 'Verification inconclusive' : 'Verification required',
@@ -95,9 +140,26 @@ export function describeTrust(trust: TrustInfo): TrustPresentation {
     };
   }
   if (completion === 'unknown') {
-    return { ...base, title: 'Status unavailable', note: 'No completion status was reported.', tone: 'neutral', glyph: '·', ok: null, showCard: Boolean(trust.artifactReceipts?.length) };
+    return { ...base, title: 'Status unavailable', note: 'No completion status was reported.', tone: 'neutral', glyph: '·', ok: null, showCard: Boolean(trust.artifactReceipts?.length || trust.changeReceipts?.length) };
+  }
+  if (completion === 'completed' && verification === 'passed' && trust.explanationReview?.status === 'unavailable') {
+    return {
+      ...base, title: 'Completed · summary unchecked', tone: 'warning', glyph: '✓', ok: true,
+      canEscalate: false, showCard: true,
+      note: 'Execution checks passed. The explanation review was unavailable; its claims remain unverified.',
+    };
   }
   if (verification === 'passed') {
+    if (fetched?.status === 'pass') {
+      return { ...base, title: 'Retrieved fields checked', tone: 'neutral', glyph: '✓', ok: true,
+        note: 'The checked fields matched a separate response from the result URL. This check covers those fields only.'
+          + (trust.budgetExhausted ? ' Further model requests stopped at the budget limit.' : '') };
+    }
+    if (hasPageReadback(trust.requirementAcceptance)) {
+      return { ...base, title: 'Page checked',
+        note: 'The page matched the requested checks. Storage in the app was not independently verified.',
+        tone: 'neutral', glyph: '✓', ok: true };
+    }
     if (trust.tableAcceptance?.status === 'pass' && !trust.testsPassedAfterEdit && !trust.evidenceGate?.hasCheck) {
       return { ...base, title: 'Table data checked',
         note: 'The saved table matches the interpreted data requirements. These checks do not cover prose or layout.',
@@ -115,12 +177,16 @@ export function describeTrust(trust: TrustInfo): TrustPresentation {
   }
   return {
     ...base, title: 'Completed', note: 'Result verification was not performed.',
-    tone: 'neutral', glyph: '✓', ok: true, showCard: Boolean(trust.artifactReceipts?.length),
+    tone: 'neutral', glyph: '✓', ok: true, showCard: Boolean(trust.artifactReceipts?.length || trust.changeReceipts?.length),
   };
 }
 
 export function checkEvidence(trust: TrustInfo): string {
-  if (['completed_gate_warnings', 'max_gate_blocked', 'desktop_blocked'].includes(trust.reason)
+  if (trust.completionStatus === 'completed' && trust.explanationReview?.status === 'unavailable') {
+    return trust.explanationReview.detail;
+  }
+  if (['completed_gate_warnings', 'max_gate_blocked', 'desktop_blocked',
+    'verification_unavailable', 'verification_inconclusive', 'task_incomplete'].includes(trust.reason)
     && trust.completionCheck?.detail) {
     return `${trust.completionCheck.name}\n${trust.completionCheck.detail}`;
   }

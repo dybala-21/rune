@@ -370,7 +370,7 @@ async def test_failed_desktop_call_halts_batch_but_answers_every_call_id(desktop
     monkeypatch.setattr(stream, "_classify_artifact_roles", AsyncMock())
     if failure == "policy":
         for _ in range(7):
-            stream._policy.record_tool_call("desktop_observe")
+            stream._policy.record_tool_call("desktop_observe", {})
     async with computers.bind(entry):
         await require_desktop()
         await stream._execute_tool_batch([

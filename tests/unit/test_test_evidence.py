@@ -56,6 +56,23 @@ def test_before_after_and_subtests_survive_latest_result_replacement(state):
     assert '"subtest_failures"' not in context
 
 
+@pytest.mark.parametrize("answer_kind", ["prose", "recorded_table", "changed_table"])
+async def test_default_review_uses_recorded_results_without_a_model(monkeypatch, state, answer_kind):
+    from rune.types import CapabilityResult
+
+    client = AsyncMock()
+    monkeypatch.setattr("rune.llm.client.get_llm_client", lambda: client)
+    table = recorded_tables(comparison_evidence(state))[0]
+    answer = {"prose": "Changed the implementation.", "recorded_table": table,
+              "changed_table": table.replace("| Failure events | 3 | 0 |", "| Failure events | 0 | 0 |")}[answer_kind]
+    gate = ClaimGate()
+    gate.observe("file_read", {"path": "example.py"}, CapabilityResult(success=True, output="Original source"))
+    assert await gate.review(state, answer) is None
+    assert gate.status == ("pass" if answer_kind == "recorded_table" else "not_checked")
+    assert gate.attempts == 0 and not gate._observations
+    client.completion.assert_not_called()
+
+
 def test_passed_counts_are_distinct_from_total_tests_and_failure_events(state):
     evidence = comparison_evidence(state)
     assert evidence[0]["before"]["passed_tests"] == 1
@@ -250,7 +267,7 @@ async def test_claim_review_is_cached_and_does_not_run_without_historical_failur
     client = AsyncMock()
     client.completion.return_value = {"choices": [{"message": {"content": json.dumps({"claims": [], "explanation_issues": []})}}]}
     monkeypatch.setattr("rune.llm.client.get_llm_client", lambda: client)
-    gate = ClaimGate()
+    gate = ClaimGate(model_review=True)
     assert await gate.review(VerificationState(), "Summary") is None
     assert client.completion.await_count == 0
     assert await gate.review(state, "Updated the implementation.") is None
@@ -269,7 +286,7 @@ async def test_exact_recorded_result_table_needs_no_model_review(monkeypatch, st
               "| Failed tests | 1 | 0 |\n| Failure events | 3 | 0 |\n"
               "| `test_example.Cases.test_passing` | pass | pass |\n"
               "| `test_example.Cases.test_values` | fail | pass |")
-    assert await ClaimGate().review(state, answer) is None
+    assert await ClaimGate(model_review=True).review(state, answer) is None
     client.completion.assert_not_awaited()
 
 
@@ -298,10 +315,10 @@ async def test_formatted_table_without_cwd_is_local_only_for_a_single_check(monk
     client = AsyncMock()
     client.completion.side_effect = TimeoutError
     monkeypatch.setattr("rune.llm.client.get_llm_client", lambda: client)
-    assert await ClaimGate().review(state, table) is None
+    assert await ClaimGate(model_review=True).review(state, table) is None
     client.completion.assert_not_awaited()
     state.observe_command("ruff check .", True, "All checks passed!", state.history[-1].cwd)
-    assert "could not be checked" in await ClaimGate().review(state, table)
+    assert "could not be checked" in await ClaimGate(model_review=True).review(state, table)
     client.completion.assert_awaited_once()
 
 
@@ -327,7 +344,7 @@ async def test_recorded_table_does_not_hide_fabricated_explanations(monkeypatch,
         "claims": [], "explanation_issues": [{**{k: v for k, v in issue.items() if k != "evidence_quote"},
                                                "evidence_lines": [1], "evidence_id": "observation_1"}]})}}]}
     monkeypatch.setattr("rune.llm.client.get_llm_client", lambda: client)
-    gate = ClaimGate(_observations=[{"id": 1, "text": observations}])
+    gate = ClaimGate(model_review=True, _observations=[{"id": 1, "text": observations}])
     assert "contradict" in await gate.review(state, answer)
     payload = json.loads(client.completion.call_args.kwargs["messages"][-1]["content"])
     assert payload["answer_lines"] == {str(len(answer.splitlines())): claim}
@@ -360,7 +377,7 @@ async def test_altered_tables_and_extra_claims_still_require_review(monkeypatch,
     client = AsyncMock()
     client.completion.side_effect = TimeoutError
     monkeypatch.setattr("rune.llm.client.get_llm_client", lambda: client)
-    assert "could not be checked" in await ClaimGate().review(state, change(table))
+    assert "could not be checked" in await ClaimGate(model_review=True).review(state, change(table))
     client.completion.assert_awaited_once()
 
 
@@ -387,7 +404,7 @@ async def test_unresolved_other_checks_cannot_use_the_local_review_path(monkeypa
     client = AsyncMock()
     client.completion.side_effect = TimeoutError
     monkeypatch.setattr("rune.llm.client.get_llm_client", lambda: client)
-    assert "could not be checked" in await ClaimGate().review(state, table)
+    assert "could not be checked" in await ClaimGate(model_review=True).review(state, table)
     client.completion.assert_awaited_once()
 
 
@@ -395,7 +412,7 @@ async def test_review_deadline_is_shared_and_an_outage_does_not_trigger_a_rewrit
     client = AsyncMock()
     client.completion.side_effect = TimeoutError
     monkeypatch.setattr("rune.llm.client.get_llm_client", lambda: client)
-    gate = ClaimGate(_review_seconds=51.0)
+    gate = ClaimGate(model_review=True, _review_seconds=51.0)
     note = await gate.review(state, "Changed the implementation.")
     assert "could not be checked" in note and gate.attempts == 2
     assert gate.snapshot() == {"status": "unavailable", "detail": note}
@@ -406,8 +423,30 @@ async def test_review_deadline_is_shared_and_an_outage_does_not_trigger_a_rewrit
     assert gate.snapshot() == {"status": "unavailable", "detail": note}
     client.completion.side_effect = None
     client.completion.return_value = {"choices": [{"message": {"content": json.dumps({"claims": [], "explanation_issues": []})}}]}
-    assert await ClaimGate(attempts=1, _review_seconds=17.4).review(state, "Corrected answer.") is None
+    assert await ClaimGate(model_review=True, attempts=1, _review_seconds=17.4).review(state, "Corrected answer.") is None
     assert client.completion.call_args.kwargs["timeout"] == pytest.approx(42.6)
+
+
+@pytest.mark.parametrize("corrected", [False, True])
+@pytest.mark.parametrize("budget_spent", [False, True])
+async def test_review_outage_preserves_known_contradictions(monkeypatch, state, corrected, budget_spent):
+    client = AsyncMock()
+    client.completion.side_effect = [
+        {"choices": [{"message": {"content": json.dumps({"claims": [{
+            "source_line": 1, "run": 0, "test": -1, "metric": "failed_tests", "value": 3,
+        }], "explanation_issues": []})}}]},
+        TimeoutError(),
+    ]
+    monkeypatch.setattr("rune.llm.client.get_llm_client", lambda: client)
+    gate = ClaimGate(model_review=True)
+    assert "contradict" in await gate.review(state, "3 tests failed before the edit.")
+    if budget_spent:
+        gate._review_seconds = 60
+    answer = "Updated summary:\n" + ("1 test failed before the edit." if corrected else "3 tests failed before the edit.")
+    note = await gate.review(state, answer)
+    assert note
+    assert gate.status == ("unavailable" if corrected else "contradicted")
+    assert client.completion.await_count == (1 if budget_spent else 2)
 
 
 @pytest.mark.parametrize("broken", ["claims", "explanations", "both", "extra_claim", "extra_explanation"])
@@ -428,7 +467,7 @@ async def test_partial_review_preserves_grounded_errors_without_accepting_unknow
         "claims": claims, "explanation_issues": explanations,
     })}}]}
     monkeypatch.setattr("rune.llm.client.get_llm_client", lambda: client)
-    gate = ClaimGate(_observations=[{"id": 1, "text": "return sum(values) / (len(values) + 1)"}])
+    gate = ClaimGate(model_review=True, _observations=[{"id": 1, "text": "return sum(values) / (len(values) + 1)"}])
     note = await gate.review(state, answer)
     assert ("could not be checked" in note) == (broken == "both")
     assert gate.attempts == (2 if broken == "both" else 1)
@@ -451,7 +490,7 @@ async def test_explanation_contradiction_uses_existing_review_and_observed_code(
         "claims": [], "explanation_issues": [{**{k: v for k, v in issue.items() if k != "evidence_quote"},
                                                "evidence_lines": [3], "evidence_id": "observation_1"}]})}}]}
     monkeypatch.setattr("rune.llm.client.get_llm_client", lambda: client)
-    gate = ClaimGate()
+    gate = ClaimGate(model_review=True)
     note = await gate.review(state, "The result was always smaller.", messages)
     assert "zero sum" in note and "Do not edit files or rerun" in note
     assert await gate.review(state, "The result was always smaller.", messages) == note
@@ -464,7 +503,7 @@ async def test_explanation_contradiction_uses_existing_review_and_observed_code(
     client.completion.return_value = {"choices": [{"message": {"content": json.dumps({
         "claims": [], "explanation_issues": [{**{k: v for k, v in issue.items() if k != "evidence_quote"},
                                                "evidence_lines": [99], "evidence_id": "observation_1"}]})}}]}
-    invalid = ClaimGate()
+    invalid = ClaimGate(model_review=True)
     note = await invalid.review(state, "The result was always smaller.", messages)
     assert "could not be checked" in note and invalid.attempts == 2
     await invalid.review(state, "Rephrased answer.", messages)
@@ -515,7 +554,7 @@ async def test_gemini_review_reserves_tokens_for_its_result(monkeypatch, state):
     monkeypatch.setattr("rune.llm.client.get_llm_client", lambda: client)
     monkeypatch.setattr("rune.llm.model_selection.get_effective_model_selection",
                         lambda: ActiveModelSelection(provider=Provider.GEMINI, model="gemini-2.5-flash"))
-    assert await ClaimGate().review(state, "Changed the implementation.") is None
+    assert await ClaimGate(model_review=True).review(state, "Changed the implementation.") is None
     from rune.llm.reasoning import apply_reasoning_control
     params = {"model": "vertex_ai/gemini-2.5-flash", "reasoning_effort": client.completion.call_args.kwargs["reasoning_effort"]}
     apply_reasoning_control(params)
@@ -528,7 +567,7 @@ async def test_correction_keeps_tool_evidence_after_transcript_compaction(monkey
     client = AsyncMock()
     client.completion.return_value = {"choices": [{"message": {"content": json.dumps({"claims": [], "explanation_issues": []})}}]}
     monkeypatch.setattr("rune.llm.client.get_llm_client", lambda: client)
-    gate = ClaimGate()
+    gate = ClaimGate(model_review=True)
     gate.observe("file_read", {"path": "stats.py"}, CapabilityResult(success=True, output="return sum(values) / (len(values) + 1)"))
     await gate.review(state, "Initial explanation.", [])
     first = json.loads(client.completion.call_args.kwargs["messages"][-1]["content"])["code_observations"]
@@ -623,5 +662,5 @@ async def test_missing_baseline_is_unknown_and_recorded_pytest_table_needs_no_re
     assert "unknown" in table and "test_value[2]" in table
     client = AsyncMock()
     monkeypatch.setattr("rune.llm.client.get_llm_client", lambda: client)
-    assert await ClaimGate().review(state, table) is None
+    assert await ClaimGate(model_review=True).review(state, table) is None
     client.completion.assert_not_awaited()

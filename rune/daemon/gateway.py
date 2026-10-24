@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import uuid4
 
-from rune.agent.run_outcome import run_outcome
+from rune.agent.run_outcome import explanation_warning, run_outcome
 from rune.api.event_logger import append_event
 from rune.channels.registry import ChannelRegistry
 from rune.channels.types import (
@@ -943,6 +943,12 @@ class ChannelGateway:
                         conv_id, "assistant", assistant_answer,
                         goal_type=getattr(loop, "_last_goal_type", ""),
                     )
+                    from rune.agent.source_context import remember_sources
+
+                    remember_sources(conv_manager._active[conv_id], loop)
+                    from rune.agent.task_context import remember_task
+
+                    remember_task(conv_manager._active[conv_id], loop)
                     await conv_manager._store.save(
                         conv_manager._active[conv_id])
 
@@ -951,6 +957,11 @@ class ChannelGateway:
                 learned = await post_process_agent_result(PostProcessInput(
                     classification_hint=getattr(loop, "_last_goal_type", "") or None,
                     verification=getattr(trace, "verification", None),
+                    table_acceptance=getattr(trace, "table_acceptance", None),
+                    requirement_acceptance=getattr(trace, "requirement_acceptance", None),
+                    tests_passed_after_edit=getattr(trace, "tests_passed_after_edit", None),
+                    tool_budget_exhausted=getattr(trace, "tool_budget_exhausted", False),
+                    explanation_review=getattr(trace, "explanation_review", None),
                     reason=getattr(trace, "reason", ""),
                     mech_check=getattr(trace, "mech_check", ""),
                     evidence_gate=getattr(trace, "evidence_gate", None),
@@ -979,6 +990,8 @@ class ChannelGateway:
                 run_id=run_id,
             )
 
+            if note := explanation_warning(trace):
+                response += f"\n\n{note}"
             return response
 
         except Exception as exc:

@@ -488,6 +488,19 @@ async def save_agent_result_to_memory(
         if verified_outcome(result) is False:
             success = False
 
+        from rune.agent.run_outcome import run_outcome
+
+        outcome = run_outcome(result)
+        unresolved = (not success and outcome.verification != "failed"
+                      and outcome.completion != "failed"
+                      and (outcome.completion != "unknown" or outcome.verification in {"unavailable", "inconclusive"}))
+
+        review = (result.get("explanation_review") if isinstance(result, dict)
+                  else getattr(result, "explanation_review", None)) or {}
+        unchecked_summary = review.get("status") == "unavailable"
+        if unchecked_summary:
+            result_text = "Execution checks passed; the final explanation was not verified." if success else "The final explanation was not verified."
+
         # Extract intent
         intent = extract_intent_from_goal(goal, classification_hint)
 
@@ -497,7 +510,9 @@ async def save_agent_result_to_memory(
         files = list(result.get("changed_files") or []) if isinstance(result, dict) else []
 
         # Generate lessons from both success and failure
-        if not success:
+        if unresolved:
+            lessons = "Completion remains unconfirmed; do not infer a successful or failed approach."
+        elif not success:
             lessons = f"Task failed: {result_text[:200]}. Consider alternative approaches."
         else:
             # Success lessons: capture what worked for future reference
@@ -514,7 +529,7 @@ async def save_agent_result_to_memory(
                 lessons = "Success: " + "; ".join(lesson_parts)
 
         # Use completion status for episode utility; rule learning checks evidence separately.
-        _utility = 1 if success else -1
+        _utility = 0 if unresolved else 1 if success else -1
 
         episode = Episode(
             task_summary=goal[:500],
@@ -529,6 +544,14 @@ async def save_agent_result_to_memory(
         )
 
         await memory_manager.save_episode(episode)
+
+        if unresolved:
+            log.debug("learning_skipped_unresolved_outcome", reason=outcome.reason)
+            return []
+
+        if unchecked_summary:
+            log.debug("memory_learning_skipped_unchecked_summary")
+            return learned_keys
 
         # Keep the episode when routing failed, but skip domain-dependent learning.
         if not classification_hint:
@@ -593,11 +616,7 @@ async def save_agent_result_to_memory(
                 log.debug("rule_eval_skipped_no_evidence", domain=domain)
             else:
                 _keys = await semantic_relevant_rule_keys(goal, result_text[:300])
-                _executed_evidence = _mech == "pass" or (
-                    isinstance(_eg, dict) and _eg.get("last_verdict") == "pass"
-                ) or (
-                    isinstance(_verification, dict) and _verification.get("status") == "pass"
-                )
+                _executed_evidence = outcome.verification == "passed"
                 if success and not _executed_evidence and deferred_truth_enabled():
                     # Non-code completion without a check waits for the user's next response.
                     record_pending(

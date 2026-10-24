@@ -83,3 +83,23 @@ class TestGetExtraParams:
     def test_disable_parallel(self):
         p = ToolCallPolicy(disable_parallel=True)
         assert p.get_extra_params() == {"parallel_tool_calls": False}
+
+
+def test_distinct_form_actions_are_not_a_loop():
+    policy = ToolCallPolicy()
+    for index in range(20):
+        args = {"action": "type", "selector": f"#field{index}", "value": "3"}
+        assert not policy.should_block_tool("browser_act", args)
+        assert policy.record_tool_call("browser_act", args) is None
+
+
+def test_identical_actions_still_block_and_changed_values_recover():
+    policy = ToolCallPolicy()
+    args = {"action": "type", "selector": "#people", "value": "3"}
+    for index in range(7):
+        assert not policy.should_block_tool("browser_act", args)
+        policy.record_tool_call("browser_act", {**args, "think": str(index)})
+    assert policy.should_block_tool("browser_act", args)
+    assert not policy.should_block_tool("browser_act", {**args, "value": "4"})
+    policy.reset()
+    assert not policy.should_block_tool("browser_act", args)

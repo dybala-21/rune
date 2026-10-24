@@ -46,6 +46,238 @@ async def reference(page, name):
     return next(el.ref for el in elements if el.name == name)
 
 
+async def test_result_checks_verify_saved_state_without_repeating_input(screen):
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.agent.intent_engine import resolve_intent_contract
+    from rune.agent.task_evidence import TaskEvidence
+
+    await screen.set_content('''<label>Quantity<input id="quantity" value="1"></label>
+        <button id="save" onclick="window.saves++;document.querySelector('#saved').textContent='Saved '+document.querySelector('#quantity').value">Save</button>
+        <output id="saved">Not saved</output><script>window.saves=0</script>''')
+    classification = ClassificationResult("browser", .99, 2)
+    contract = resolve_intent_contract(classification, .99)
+    evidence = TaskEvidence.for_request("Set quantity to 3 and save", classification)
+    edit = await browser_act(BrowserActParams(action="type", selector="#quantity", value="3"))
+    evidence.observe("browser_act", edit)
+    assert evidence.blocker(contract, 0)
+    checks = [{"selector":"#quantity", "property":"value", "expected":"3", "requirement":"quantity to 3"},
+              {"selector":"#saved", "property":"text", "expected":"Saved 3", "requirement":"save"}]
+    before = await browser_observe(BrowserObserveParams(checks=checks))
+    evidence.observe("browser_observe", before)
+    assert evidence.blocker(contract, 0) and not before.metadata["result_checks"]["passed"]
+    saved = await browser_act(BrowserActParams(action="click", selector="#save", checks=checks))
+    evidence.observe("browser_act", saved)
+    assert evidence.blocker(contract, 0) is None
+    resumed = TaskEvidence.for_request("Finish the previous change", classification)
+    resumed.request_texts += ("Set quantity to 3 and save",)
+    readback = await browser_observe(BrowserObserveParams(checks=checks))
+    resumed.observe("browser_observe", readback)
+    assert resumed.blocker(contract, 0) is None
+    assert await screen.evaluate("window.saves") == 1
+    await screen.locator("#quantity").fill("4")
+    changed = await browser_observe(BrowserObserveParams(checks=checks))
+    resumed.observe("browser_observe", changed)
+    assert resumed.blocker(contract, 0)
+
+
+async def test_partial_readback_rechecks_prior_values_and_corrected_selectors(screen):
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.agent.intent_engine import resolve_intent_contract
+    from rune.agent.task_evidence import TaskEvidence
+
+    await screen.set_content('''<input id="quantity" value="3"><input id="title" value="Review">
+        <button id="save" onclick="window.saves++;document.querySelector('#saved').textContent='Saved'">Save</button>
+        <output id="saved">Not saved</output><script>window.saves=0</script>''')
+    classification = ClassificationResult("browser", .99, 2)
+    contract = resolve_intent_contract(classification, .99)
+    evidence = TaskEvidence.for_request("Set quantity to 3, title to Review and save", classification)
+    fields = [{"selector": "#quantity", "property": "value", "expected": "3", "requirement": "quantity to 3"},
+              {"selector": "input[type=text]", "property": "value", "expected": "Review", "requirement": "title to Review"}]
+    first = await browser_observe(BrowserObserveParams(checks=fields))
+    evidence.observe("browser_observe", first)
+    assert evidence.blocker(contract, 0)
+    await browser_act(BrowserActParams(action="click", selector="#save"))
+    params = {"checks": [{**fields[1], "selector": "#title"},
+                          {"selector": "#saved", "property": "text", "expected": "Saved", "requirement": "save"}]}
+    evidence.prepare("browser_observe", params)
+    readback = await browser_observe(BrowserObserveParams(**params))
+    evidence.observe("browser_observe", readback)
+    assert evidence.blocker(contract, 0) is None
+    assert {item["selector"] for item in readback.metadata["result_checks"]["checks"]} == {"#quantity", "#title", "#saved"}
+    await screen.locator("#quantity").fill("4")
+    params = {"checks": [params["checks"][1]]}
+    evidence.prepare("browser_observe", params)
+    changed = await browser_observe(BrowserObserveParams(**params))
+    evidence.observe("browser_observe", changed)
+    assert evidence.blocker(contract, 0)
+    assert not changed.metadata["result_checks"]["passed"]
+    assert await screen.evaluate("window.saves") == 1
+
+
+async def test_check_without_a_target_is_rejected_before_input(screen):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="current element ref"):
+        await browser_act(BrowserActParams(action="click", selector="#save", checks=[
+            {"property": "text", "expected": "Saved", "requirement": "save"},
+        ]))
+    assert await screen.evaluate("window.saves") == 0
+
+
+async def test_failed_check_requires_readback_before_another_input(screen):
+    from rune.agent.run_control import RunControl, control_scope
+
+    await screen.set_content('''<button id="open" onclick="document.querySelector('dialog').showModal()">Review</button>
+        <dialog open><button id="save" onclick="window.saves++;document.querySelector('#saved').textContent='Saved';this.closest('dialog').close()">Save</button></dialog>
+        <output id="saved">Not saved</output><script>window.saves=0</script>''')
+    with control_scope(RunControl("save")):
+        saved = await browser_act(BrowserActParams(action="click", selector="#save", checks=[
+            {"selector": "#missing", "property": "text", "expected": "Saved", "requirement": "save"},
+        ]))
+        assert saved.success and not saved.metadata["result_checks"]["passed"]
+        await browser_observe(BrowserObserveParams())
+        await browser_observe(BrowserObserveParams(checks=[
+            {"selector": "#saved", "property": "text", "expected": "Saved", "requirement": "another task"},
+        ]))
+        denied = await browser_act(BrowserActParams(action="click", selector="#open"))
+        assert not denied.success and denied.metadata["verification_required"]
+        assert await screen.evaluate("window.saves") == 1
+        verified = await browser_observe(BrowserObserveParams(checks=[
+            {"selector": "#saved", "property": "text", "expected": "Saved", "requirement": "save"},
+        ]))
+        assert verified.metadata["result_checks"]["passed"]
+        assert current_session().pending_verification is None
+
+
+async def test_rejected_save_can_retry_after_reading_the_failure(screen):
+    await screen.set_content('''<button id="save" onclick="save(this)">Save</button><output id="status">Not saved</output>
+        <script>window.attempts=0;window.saves=0;function save(button){
+            window.attempts++;
+            if(window.attempts===1){
+                document.querySelector('#status').textContent='Service unavailable. Nothing saved.';
+                button.replaceWith(button.cloneNode(true));
+            }else{window.saves++;document.querySelector('#status').textContent='Saved';}
+        }</script>''')
+    checks = [{"selector": "#status", "property": "text", "expected": "Saved", "requirement": "save"}]
+    first = await browser_act(BrowserActParams(action="click", selector="#save", checks=checks))
+    assert first.success and not first.metadata["result_checks"]["passed"]
+    assert await screen.evaluate("window.attempts") == 1
+    readback = await browser_observe(BrowserObserveParams(checks=checks))
+    assert readback.metadata["result_checks"]["checks"][0]["actual"] == "Service unavailable. Nothing saved."
+    second = await browser_act(BrowserActParams(action="click", selector=await reference(screen, "Save"), checks=checks))
+    assert second.success and second.metadata["result_checks"]["passed"]
+    assert await screen.evaluate("[window.attempts,window.saves]") == [2, 1]
+
+
+async def test_intermediate_mismatch_does_not_block_the_next_save_step(screen):
+    await screen.set_content('''<button id="review" onclick="document.querySelector('dialog').showModal()">Review</button>
+        <dialog><button id="save" onclick="window.saves++;document.querySelector('#status').textContent='Saved';this.closest('dialog').close()">Save</button></dialog>
+        <output id="status">Not saved</output><script>window.saves=0</script>''')
+    checks = [{"selector": "#status", "property": "text", "expected": "Saved", "requirement": "save"}]
+    review = await browser_act(BrowserActParams(action="click", selector="#review", checks=checks))
+    assert review.success and not review.metadata["result_checks"]["passed"]
+    saved = await browser_act(BrowserActParams(action="click", selector="#save", checks=checks))
+    assert saved.success and saved.metadata["result_checks"]["passed"]
+    assert await screen.evaluate("window.saves") == 1
+
+
+@pytest.mark.parametrize("prop", ["text", "value"])
+async def test_select_option_is_not_a_saved_confirmation(screen, prop):
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.agent.intent_engine import resolve_intent_contract
+    from rune.agent.task_evidence import TaskEvidence
+
+    await screen.set_content('<select><option id="option">10:00</option></select>')
+    goal = "Select 10:00 and save"
+    classification = ClassificationResult("browser", .99, 2)
+    evidence = TaskEvidence.for_request(goal, classification)
+    result = await browser_observe(BrowserObserveParams(checks=[
+        {"selector": "#option", "property": prop, "expected": "10:00", "requirement": "Select 10:00"},
+    ]))
+    evidence.observe("browser_observe", result)
+    assert result.metadata["result_checks"]["checks"][0]["kind"] == "control"
+    assert evidence.blocker(resolve_intent_contract(classification, .99), 0)
+
+
+async def test_checks_reject_missing_targets_and_passwords(screen):
+    await screen.set_content('<input id="secret" type="password" value="private-value">')
+    result = await browser_observe(BrowserObserveParams(checks=[
+        {"selector":"#missing", "property":"text", "expected":"Saved"},
+        {"selector":"#secret", "property":"value", "expected":"private-value"},
+    ]))
+    assert not result.metadata["result_checks"]["passed"]
+    assert all(check["actual"] is None for check in result.metadata["result_checks"]["checks"])
+
+
+async def test_action_label_is_not_a_saved_result(screen):
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.agent.intent_engine import resolve_intent_contract
+    from rune.agent.task_evidence import TaskEvidence
+
+    goal = "Approve the expense and save"
+    classification = ClassificationResult("browser", .99, 2)
+    result = await browser_observe(BrowserObserveParams(checks=[
+        {"selector": "#save", "property": "text", "expected": "Save", "requirement": "save"},
+    ]))
+    evidence = TaskEvidence.for_request(goal, classification)
+    evidence.observe("browser_observe", result)
+    assert evidence.blocker(resolve_intent_contract(classification, .99), 0)
+    assert await screen.evaluate("window.saves") == 0
+
+
+async def test_empty_input_can_be_verified(screen):
+    await screen.set_content('<input id="note" value="">')
+    result = await browser_observe(BrowserObserveParams(checks=[
+        {"selector": "#note", "property": "value", "expected": ""},
+    ]))
+    assert result.metadata["result_checks"]["passed"]
+
+
+async def test_successful_readback_skips_snapshot_but_rechecks_live_values(screen, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    await screen.set_content('<input id="quantity" value="3"><output id="saved">Saved 3</output>')
+    checks = [{"selector": "#quantity", "property": "value", "expected": "3"},
+              {"selector": "#saved", "property": "text", "expected": "Saved 3"}]
+    with monkeypatch.context() as patch:
+        snapshot = AsyncMock(side_effect=AssertionError("A passing readback does not need a snapshot"))
+        settle = AsyncMock(side_effect=AssertionError("A passing readback does not need a quiet period"))
+        patch.setattr("rune.capabilities.browser.capabilities._accessibility_snapshot", snapshot)
+        patch.setattr("rune.capabilities.browser.helpers.wait_for_dom_settle", settle)
+        result = await browser_observe(BrowserObserveParams(checks=checks))
+        assert result.success and result.metadata["result_checks"]["passed"]
+        assert "Interactive Elements" not in result.output
+        snapshot.assert_not_called()
+        settle.assert_not_called()
+    await screen.locator("#quantity").fill("4")
+    changed = await browser_observe(BrowserObserveParams(checks=checks))
+    assert not changed.metadata["result_checks"]["passed"]
+    assert "Interactive Elements" in changed.output
+    assert changed.metadata["result_checks"]["checks"][0]["actual"] == "4"
+
+
+async def test_checks_after_user_control_refresh_references(screen):
+    current_session().needs_observation = True
+    result = await browser_observe(BrowserObserveParams(checks=[
+        {"selector": "#approved", "property": "checked", "expected": "false"},
+    ]))
+    assert result.success and result.metadata["result_checks"]["passed"]
+    assert "Interactive Elements" in result.output
+    assert not current_session().needs_observation
+
+
+async def test_missing_observation_scope_falls_back_without_waiting():
+    from unittest.mock import AsyncMock, Mock
+
+    from rune.capabilities.browser.core import _accessibility_snapshot
+
+    missing = Mock(count=AsyncMock(return_value=0), wait_for=AsyncMock())
+    root = Mock(aria_snapshot=AsyncMock(return_value='- button "Save"'))
+    page = Mock(locator=Mock(side_effect=[missing, root]))
+    assert await _accessibility_snapshot(page, "form") == '- button "Save"'
+    missing.wait_for.assert_not_called()
+
+
 async def test_observation_does_not_wait_for_background_network_requests(screen):
     pending = asyncio.Event()
     release = asyncio.Event()
@@ -102,13 +334,21 @@ async def test_native_select_and_its_associated_label_remain_supported(screen):
         assert await screen.locator("#city").input_value() == value
 
 
-async def test_displayed_brackets_preserve_reference_identity(screen):
+@pytest.mark.parametrize("syntax", ["[{}]", '[ref="{}"]', "[ref='{}']"])
+async def test_displayed_brackets_preserve_reference_identity(screen, syntax):
     ref = await reference(screen, "Save")
-    result = await browser_act(BrowserActParams(action="click", selector=f"[{ref}]"))
+    result = await browser_act(BrowserActParams(action="click", selector=syntax.format(ref)))
     assert result.success and await screen.evaluate("window.saves") == 1
     await screen.locator("#save").evaluate("el => el.outerHTML = el.outerHTML")
-    stale = await browser_act(BrowserActParams(action="click", selector=f"[{ref}]"))
+    stale = await browser_act(BrowserActParams(action="click", selector=syntax.format(ref)))
     assert not stale.success and await screen.evaluate("window.saves") == 1
+
+
+@pytest.mark.parametrize("selector", ['[ref="ordinary"]', '[data-ref="e0"]', '[ref="e0"] button', '[ref="e0"],#save'])
+def test_reference_unwrapping_does_not_reinterpret_general_css(selector):
+    from rune.capabilities.browser.helpers import element_ref
+
+    assert element_ref(selector) == ""
 
 
 async def test_successful_input_is_not_repeated_just_to_verify_it(screen):
@@ -122,10 +362,10 @@ async def test_successful_input_is_not_repeated_just_to_verify_it(screen):
         assert replay.success and replay.metadata["replayed"]
         assert await screen.evaluate("window.saves") == 1
         assert (await browser_act(BrowserActParams(action="click", selector=ref, repeat=True))).success
-        assert await screen.evaluate("window.saves") == 2
+        assert await screen.evaluate("window.saves") == 1
     with control_scope(RunControl("next")):
         assert (await browser_act(BrowserActParams(action="click", selector=ref))).success
-        assert await screen.evaluate("window.saves") == 3
+        assert await screen.evaluate("window.saves") == 2
 
 
 async def test_extract_reads_current_refs_and_does_not_hide_empty_matches(screen):
@@ -217,6 +457,8 @@ async def test_lost_acknowledgement_does_not_repeat_a_write(screen, monkeypatch)
 
     async def click_then_disconnect(self, **kwargs):
         await click(self, **kwargs)
+        if kwargs.get("trial"):
+            return
         raise TimeoutError("response lost after dispatch")
 
     monkeypatch.setattr(ElementHandle, "click", click_then_disconnect)
@@ -261,6 +503,47 @@ async def test_browser_batch_stops_after_failure_and_preserves_images(screen, mo
     assert await screen.evaluate("window.saves") == 0
     captured = await browser_batch(BrowserBatchParams(actions=[{"type": "screenshot"}]))
     assert isinstance(output_for_model(captured.output, "browser_batch", captured), ToolOutput)
+
+
+@pytest.mark.parametrize("accept_value", [True, False])
+async def test_batch_checks_fields_before_saving(screen, monkeypatch, accept_value):
+    reg = CapabilityRegistry()
+    register_browser_capabilities(reg)
+    monkeypatch.setattr("rune.capabilities.registry.get_capability_registry", lambda: reg)
+    await screen.set_content('''<input id="quantity" value="1">
+        <button id="save" onclick="window.saves++;document.querySelector('#saved').textContent='Saved '+document.querySelector('#quantity').value">Save</button>
+        <output id="saved">Not saved</output><script>window.saves=0</script>''')
+    if not accept_value:
+        await screen.locator("#quantity").evaluate("el => el.oninput = () => el.value = '1'")
+    field = {"selector": "#quantity", "property": "value", "expected": "3", "requirement": "quantity to 3"}
+    result = await browser_batch(BrowserBatchParams(actions=[
+        {"type": "act", "params": {"action": "type", "selector": "#quantity", "value": "3", "checks": [field]}},
+        {"type": "act", "params": {"action": "click", "selector": "#save", "checks": [field,
+            {"selector": "#saved", "property": "text", "expected": "Saved 3", "requirement": "save"}]}},
+    ]))
+    assert result.success is accept_value
+    assert await screen.evaluate("window.saves") == int(accept_value)
+    assert len(result.metadata["browser_steps"]) == (2 if accept_value else 1)
+    assert result.metadata["browser_steps"][0]["success"]
+    if not accept_value:
+        assert "Not executed" in result.output
+        assert "do not repeat completed actions" in result.error
+
+
+async def test_failed_save_check_stops_batch_without_repeating_save(screen, monkeypatch):
+    reg = CapabilityRegistry()
+    register_browser_capabilities(reg)
+    monkeypatch.setattr("rune.capabilities.registry.get_capability_registry", lambda: reg)
+    result = await browser_batch(BrowserBatchParams(actions=[
+        {"type": "act", "params": {"action": "click", "selector": "#save", "checks": [
+            {"selector": "#count", "property": "text", "expected": "Saved", "requirement": "save"}]}},
+        {"type": "act", "params": {"action": "click", "selector": "#save"}},
+    ]))
+    assert not result.success
+    assert await screen.evaluate("window.saves") == 1
+    step = result.metadata["browser_steps"][0]
+    assert step["success"] and step["metadata"]["action_status"] == "dispatched"
+    assert not step["metadata"]["result_checks"]["passed"]
 
 
 async def test_batch_keeps_unchanged_nodes_but_rejects_replacements(screen, monkeypatch):

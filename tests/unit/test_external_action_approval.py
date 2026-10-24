@@ -124,6 +124,85 @@ async def test_strict_browser_click_approval_is_not_reused(dispatch, monkeypatch
     execute.assert_awaited_once()
 
 
+@pytest.mark.parametrize("name,params", [
+    ("web_fetch", {"url": "https://mail.test/send", "method": "POST", "body": "hello"}),
+    ("connector_request", {"connector": "mail", "origin": "https://mail.test", "path": "/send", "method": "POST"}),
+    ("browser_act", {"action": "click", "selector": "e1"}),
+    ("mcp.mail.send_message", {"to": "alice@example.test", "body": "hello"}),
+])
+async def test_refusal_does_not_prompt_again_in_the_run(dispatch, monkeypatch, name, params):
+    monkeypatch.setenv("RUNE_APPROVAL_MODE", "strict")
+    approve = AsyncMock(return_value=False)
+    run, execute, finished = dispatch(name, approve)
+    await asyncio.gather(run(**params), run(**params))
+    approve.assert_awaited_once()
+    execute.assert_not_awaited()
+    assert all(call.args[1].metadata["approval_decision"] == "denied" for call in finished.call_args_list)
+
+
+async def test_denial_is_shared_by_tools_but_resets_for_a_new_run(monkeypatch):
+    monkeypatch.setenv("RUNE_APPROVAL_MODE", "standard")
+    monkeypatch.setenv("RUNE_HYBRID_API", "1")
+    approve = AsyncMock(side_effect=[False, True])
+    opts = ToolAdapterOptions(approval_callback=approve)
+    registry = CapabilityRegistry()
+    execute = AsyncMock(return_value=CapabilityResult(success=True))
+    for name in ("web_fetch", "mcp.mail.send_message"):
+        registry.register(CapabilityDefinition(name=name, description=name, execute=execute))
+
+    def tool(name, options):
+        return _build_typed_tool(cap_def=registry.get(name), reg=registry, opts=options, cache=None, stall=None).function
+
+    await tool("web_fetch", opts)(url="https://mail.test/send", method="POST")
+    await tool("mcp.mail.send_message", opts)(to="alice@example.test")
+    approve.assert_awaited_once()
+    execute.assert_not_awaited()
+    await tool("web_fetch", opts)(url="https://mail.test/message")
+    execute.assert_awaited_once()
+    await tool("web_fetch", ToolAdapterOptions(approval_callback=approve))(url="https://mail.test/send", method="POST")
+    assert approve.await_count == execute.await_count == 2
+
+
+async def test_backend_review_denial_prevents_a_new_tool_approval(monkeypatch):
+    monkeypatch.setenv("RUNE_APPROVAL_MODE", "standard")
+    monkeypatch.setenv("RUNE_HYBRID_API", "1")
+    approve = AsyncMock(return_value=True)
+    opts = ToolAdapterOptions(approval_callback=approve)
+    registry = CapabilityRegistry()
+    denied = AsyncMock(return_value=CapabilityResult(success=False, error="Review declined", metadata={
+        "action_status": "not_executed", "approval_decision": "denied",
+    }))
+    send = AsyncMock(return_value=CapabilityResult(success=True))
+    for name, execute in (("fixture_action", denied), ("web_fetch", send)):
+        registry.register(CapabilityDefinition(name=name, description=name, execute=execute))
+
+    def tool(name):
+        return _build_typed_tool(cap_def=registry.get(name), reg=registry, opts=opts, cache=None, stall=None).function
+
+    await tool("fixture_action")()
+    await tool("web_fetch")(url="https://mail.test/send", method="POST")
+    approve.assert_not_awaited()
+    send.assert_not_awaited()
+
+
+@pytest.mark.parametrize("gate", ["guardian", "capability"])
+async def test_command_denial_is_reported_separately_from_execution_failure(dispatch, monkeypatch, gate):
+    from rune.safety.tool_policy import _GuardianResult
+
+    if gate == "guardian":
+        monkeypatch.setattr("rune.agent.tool_adapter._validate_with_guardian", lambda *args:
+                            _GuardianResult(requires_approval=True, reason="Approval needed"))
+    execute = AsyncMock(return_value=CapabilityResult(success=False, error="Approval needed", metadata={
+        "requires_approval": True, "action_status": "not_executed",
+    }))
+    approve = AsyncMock(return_value=False)
+    run, _, finished = dispatch("fixture_action", approve, execute)
+    await run()
+    assert finished.call_args.args[1].metadata["approval_decision"] == "denied"
+    approve.assert_awaited_once()
+    assert execute.await_count == (1 if gate == "capability" else 0)
+
+
 @pytest.mark.parametrize("mode,allowed", [("standard", False), ("bypass", True)])
 async def test_headless_mcp_write_honors_approval_mode(dispatch, monkeypatch, mode, allowed):
     monkeypatch.setenv("RUNE_APPROVAL_MODE", mode)

@@ -9,6 +9,22 @@ from rune.agent.timing import timed_completion, timed_run, timing_phase
 from rune.types import CompletionTrace
 
 
+@pytest.mark.parametrize("reason", ["completed", "cancelled", "task_blocked", "request_budget_exhausted"])
+async def test_budget_measurement_does_not_replace_task_decision(reason):
+    from rune.agent.timing import _current
+    from rune.api.trust import build_trust_payload
+
+    @timed_run
+    async def run():
+        _current.get()["budget_blocked"] = "No model requests remain."
+        return CompletionTrace(reason=reason)
+
+    trace = await run()
+    assert trace.reason == reason
+    assert trace.timings["budgetBlocked"] == "No model requests remain."
+    assert build_trust_payload(trace)["budgetExhausted"]
+
+
 @pytest.mark.parametrize("controls,effort,budget", [
     ({"reasoning_effort": "low"}, "low", None),
     ({"extra_body": {"reasoning": {"effort": "max"}}}, "max", None),

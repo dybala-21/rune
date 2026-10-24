@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
+from rune.capabilities.browser.checks import read_controls
 from rune.capabilities.browser.session import (
     browser_operation,
     close_browser_sessions,
@@ -46,6 +47,17 @@ async def _get_browser(profile: str | None = None) -> tuple[Any, Any]:
                 from rune.browser.native import select_native_page
                 await select_native_page(session)
                 return session.browser, session.page
+            if session.page.is_closed() and session.browser.is_connected():
+                # The followed tab closed: return to the most recent open tab.
+                live = [page for context in session.browser.contexts for page in context.pages if not page.is_closed()]
+                if live:
+                    from rune.capabilities.browser.network import get_network_monitor
+
+                    session.page = live[-1]
+                    session.invalidate_evidence()
+                    session.needs_observation = True
+                    await get_network_monitor().retarget(session.page)
+                    return session.browser, session.page
             if session.page.is_closed() or not session.browser.is_connected():
                 if profile is None:
                     raise RuntimeError("The browser was closed. Open it again and read fresh element references")
@@ -115,11 +127,9 @@ async def _accessibility_snapshot(page: Any, selector: str = "") -> str:
     """Generate a compact accessibility tree snapshot from the page."""
     try:
         if selector:
-            # Short timeout for selector — fall back to :root if not found
+            # Observe the current DOM; an absent scope needs no speculative wait.
             root = page.locator(selector)
-            try:
-                await root.wait_for(timeout=3_000)
-            except Exception:
+            if await root.count() != 1:
                 log.debug("a11y_selector_not_found", selector=selector)
                 root = page.locator(":root")
         else:
@@ -177,6 +187,7 @@ async def browser_navigate(params: BrowserNavigateParams) -> CapabilityResult:
         skipped = page.url == params.url and not params.reload
         response = None
         if not skipped:
+            current_session().invalidate_evidence()
             response = await page.goto(params.url, wait_until="domcontentloaded", timeout=30_000)
             await wait_for_dom_settle(page)
         elements = await extract_interactive_elements(page)
@@ -218,6 +229,7 @@ async def browser_navigate(params: BrowserNavigateParams) -> CapabilityResult:
                 "status": status,
                 "skipped_navigation": skipped,
                 "interactive_count": len(elements),
+                "observed_controls": await read_controls(page),
             },
         )
 
@@ -252,6 +264,7 @@ async def browser_open(params: BrowserOpenParams) -> CapabilityResult:
         skipped = page.url == params.url and not params.reload
         response = None
         if not skipped:
+            current_session().invalidate_evidence()
             response = await page.goto(params.url, wait_until="domcontentloaded", timeout=30_000)
             await wait_for_dom_settle(page)
         elements = await extract_interactive_elements(page)
@@ -276,6 +289,7 @@ async def browser_open(params: BrowserOpenParams) -> CapabilityResult:
                 "profile": current_session().profile,
                 "skipped_navigation": skipped,
                 "interactive_count": len(elements),
+                "observed_controls": await read_controls(page),
             },
         )
 

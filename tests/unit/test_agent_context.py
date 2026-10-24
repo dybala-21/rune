@@ -121,6 +121,20 @@ class TestPostProcessAgentResult:
             await post_process_agent_result(inp)
             mock_save.assert_called_once()
 
+    async def test_required_checks_survive_postprocessing(self):
+        table = {"required": True, "status": "unavailable"}
+        requirements = {"required": True, "status": "inconclusive"}
+        inp = PostProcessInput(context=AgentContext(conversation_id="conv_1"), success=False,
+                               answer="Saved", table_acceptance=table, requirement_acceptance=requirements,
+                               tests_passed_after_edit=False, tool_budget_exhausted=True)
+        with patch("rune.agent.memory_bridge.save_agent_result_to_memory", AsyncMock()) as save:
+            await post_process_agent_result(inp)
+        result = save.call_args.kwargs["result"]
+        assert result["table_acceptance"] == table
+        assert result["requirement_acceptance"] == requirements
+        assert result["tests_passed_after_edit"] is False
+        assert result["tool_budget_exhausted"] is True
+
 
 # ---------------------------------------------------------------------------
 # Constants

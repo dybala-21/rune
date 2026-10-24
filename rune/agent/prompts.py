@@ -143,6 +143,7 @@ PROMPT_WEB_BASE = """
 - Search excerpts and page update dates do not establish when a quoted value was observed. For current readings, check the source page/API for the entity, unit, market/location and observation time. Do not repeat stale or undated numbers as a list of caveats; obtain a current source or clearly say which fact is still missing.
 - Find the entity's data page without a publication-date filter, then check its observation time. Such pages often have permanent URLs. If a dated search misses them, remove the filter rather than repeating dated queries. Establish current conditions before reading forecasts or explanations.
 - A delayed reading can still be useful: report its actual time and delay, without calling it live or rejecting it solely for being delayed.
+- Do not infer safety or normality from a reading alone. Correcting an outdated alarming value does not establish that conditions are safe or stable. Give reassurance only when relevant reference criteria support it; otherwise state the observation and the limits of the evidence.
 - Prefer primary sources with matching dates and scope. Examples, demo pages and forecasts are not observed current data. Stop when the relevant facts are covered; label uncertain causes instead of extending the search indefinitely.
 - **Escalation path**: use search for discovery, web_fetch for a known readable URL, and browser tools for required page state, dynamic content or controls. Skip steps that add no information.
 - A failed search or short fetch is not proof that a browser is needed. Check the returned error and the missing fact; try a relevant source or use the browser when rendering or interaction can resolve that gap. Do not bypass access restrictions.
@@ -171,17 +172,17 @@ PROMPT_WEB_DEEP = """
 Do NOT follow a fixed quota. Instead, adapt depth to what the task needs:
 
 1. **Start**: identify the requested claims and search for the missing evidence. Batch independent queries only when they cover distinct gaps; a narrow lookup may need just one.
-2. **Assess**: Do the search snippets already contain concrete data (numbers, quotes, dates, expert names)?
-   - **Sufficient**: Snippets answer all parts of the question → write directly, minimal fetches
+2. **Assess**: Which requested claims are supported by the retrieved evidence?
+   - **Sufficient**: Excerpts may cover stable facts; current values need a source page/API with the observation time.
    - **Gaps remain**: Missing data for specific claims → targeted searches (combine site: queries, e.g. `site:brookings.edu OR site:cfr.org query`)
    - **Thin results**: change source or retrieval method for the missing evidence; low result counts alone do not justify more searches or browser use.
-3. **Fetch selectively**: Only fetch when a snippet is clearly truncated or lacks critical detail. Search snippets are often enough.
+3. **Fetch selectively**: Open sources for current observations, disputed claims, exact quotations or details missing from excerpts.
 4. **Stop rule**: Stop searching when every section of your outline has at least one supporting source. Do not search for the sake of searching.
 
 ### Fetch Failure Handling
-- On "403", "404", "Access Denied": use the search snippet for that source. Do NOT retry the same domain.
-- If a domain has failed once this session, do not fetch from it again. Use snippets or try a different domain.
-- Source diversity: do not fetch from the same domain more than twice.
+- On access denial, use another accessible source; a snippet does not replace missing current evidence. Do not bypass access controls.
+- After a missing page or record, try a corrected URL/filter or another relevant source. Do not repeat an unchanged failed request.
+- Choose sources for relevance and coverage; multiple records may legitimately come from the same primary source.
 
 ### Synthesis Verification (CRITICAL - do this BEFORE writing the final output)
 After research is done, BEFORE writing the final document:
@@ -193,8 +194,8 @@ After research is done, BEFORE writing the final document:
 
 ### DO NOT
 - Search more than needed - if 5 searches give you full coverage, stop
-- Fetch pages when search snippets already contain the needed data
-- Retry a domain that already returned 403/paywall in this session
+- Refetch unchanged evidence already sufficient for the requested claims
+- Retry an unchanged access-denied request
 - Drop collected data during writing - every relevant search result should appear in the output
 
 ### Analysis Reports
@@ -225,20 +226,19 @@ PROMPT_BROWSER = """
 - The same exact URL preserves page state by default. Set reload=true only when a refresh is needed; it can discard unsaved input.
 
 ## Browser Strategy
-- Use ref IDs from browser_observe (e.g., "e5"), not CSS selectors.
-- **Data retrieval**: navigate → observe → extract (browser_act triggers auto-refresh of elements)
-- **Interaction**: open/navigate → observe → act → (elements auto-refreshed) → act again
+- Use observed ref IDs for controls; never invent a ref. Noninteractive results may have no ref: use a unique CSS selector such as [role="status"] for their checks.
+- Navigation returns current controls, and each action returns the resulting page. Use these results directly; observe only when needed information is missing or the user may have changed the page.
+- Use browser_batch for several known form edits; do not spend a model turn on each field. Check all requested values on the last edit before an authorized save. Stop the batch before an unseen control, decision or approval, and use the returned state to continue.
+- A dispatched save is not retried in the same unchanged state. Read its result; ask for a new user turn if an identical submission is still needed.
 - **Unknown names**: If the user mentions a name you don't recognize AND a browser is already open, search the CURRENT page first (browser_find) before navigating to a new URL. It may be a menu item on the current site.
 
 ## Self-Evaluation (CRITICAL)
-- After EVERY browser_act, READ the response carefully:
-  - "⚠️ NO CHANGES DETECTED" → your action FAILED. Do NOT proceed as if it worked. Try a different element or approach.
-  - "⚠️ LOOP DETECTED" → you are repeating the same failing action. STOP and change strategy immediately.
-  - "Changes: ..." → action succeeded, proceed.
-- **NEVER report task completion unless you see actual URL/title/element changes confirming it.**
-- If stuck after 2 failed attempts: construct the target URL directly with browser_navigate instead of clicking.
+- Read each action's returned state. A dispatched action or visible change alone does not prove completion.
+- For unsaved edits, check the requested control values. For a save, attach readback={url,checks} to browser_act when an observed result URL is available. This reads stored fields after the action without changing the open tab or another model turn. Use CSS selectors and the requested values, not invented success wording.
+- If the result link only appears after saving, use browser_observe(readbackUrl=...,checks=[...]) once. Use requirement_ids or exact request quotes. Keep requested values fixed. Do not guess URLs or fetch unrelated links.
+- Page messages and edited inputs do not prove storage. If no readable saved record is available, report the observed actions and the unconfirmed result. Never repeat a save to verify it.
+- If evidence stays unavailable after one readback, report what succeeded and what remains uncertain instead of repeating writes.
 - Try constructing search URLs directly before using search bars
-- **Form filling**: Batch independent field edits, then inspect the result before a consequential submission.
 - **Page APIs**: A discovered read-only endpoint can help retrieve the requested data. Use it when its purpose is clear; do not abandon a working page flow to explore guessed APIs.
 - If browser_act fails on a search bar or form, construct the search URL directly: browser_navigate(url='https://site.com/search?keyword=...')
 - ANTI-LOOP: NEVER repeat observe→extract more than twice
@@ -450,6 +450,7 @@ Respond in the SAME language the user used. Korean input → Korean output.
 - Use a known relevant data URL directly, or one focused search (maxResults=3) to find it. Read missing detail with web_fetch (maxLength=8000 or a selector); group independent necessary reads. Broaden only for a specific evidence gap.
 - Find live data pages without publication-date filters. For news, those filters can help discovery, but page dates and search excerpts do not establish when a value was observed.
 - Verify the source's entity, unit, market/location and observation time. Report a delayed reading with its actual time and delay. Skip stale or undated numbers; never list them as current values with caveats.
+- Do not infer safety or normality from a reading alone. Correcting an outdated alarming value does not establish that conditions are safe or stable. Give reassurance only when relevant reference criteria support it; otherwise state the observation and the limits of the evidence.
 - Once a suitable source covers the current request, answer with the verified facts, observation time and a clickable source link. Honor exact-output constraints without extra commentary or links. Do not seek extra sources or past history unless needed to resolve a material conflict or answer the request. An outdated search excerpt is not a competing current observation. Current observations cannot establish a future outcome.
 - For requested trends, obtain dated values for the comparison period before calculating changes or making a table/chart. Keep completed periods separate from ongoing readings. A period's loss does not mean consecutive daily declines; calendar days and trading days differ. Never invent missing values or causes.
 - Try available retrieval before claiming information is unavailable. If a source is empty or outdated, use another relevant page/API; do not send the user to do a lookup you can still perform. State actual remaining gaps plainly.
@@ -569,8 +570,10 @@ def build_system_prompt(
         parts.append(
             "\n## Calculations\n"
             "For CSV/TSV counts and sums, file_read and document_read include facts computed over the whole file. "
-            "Use them when their scope matches the request. For filters or calculations they do not cover, "
-            "run code against the source. Report the requested result without creating extra files or running deliverable checks."
+            "Use them when their scope matches the request. For filtered counts/sums/means/min/max, use file_query "
+            "on CSV/TSV/JSON or web_fetch recordQuery on a source API. These return computed results with their scope. "
+            "For unsupported calculations, code may help, but a successful command alone does not verify its answer. "
+            "Report the requested result and any verification limits without creating unrequested files."
         )
 
     if compact_lookup:

@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from rune.agent.run_outcome import run_outcome
 from rune.utils.env import env_flag as _env_flag
 from rune.utils.env import env_int as _env_int
 
@@ -818,6 +819,11 @@ async def _run_agent(options: BenchRunOptions, attempt_dir: Path) -> None:
                     PostProcessInput(
                         classification_hint=getattr(loop, "_last_goal_type", "") or None,
                         verification=getattr(trace, "verification", None),
+                        table_acceptance=getattr(trace, "table_acceptance", None),
+                        requirement_acceptance=getattr(trace, "requirement_acceptance", None),
+                        tests_passed_after_edit=getattr(trace, "tests_passed_after_edit", None),
+                        tool_budget_exhausted=getattr(trace, "tool_budget_exhausted", False),
+                        explanation_review=getattr(trace, "explanation_review", None),
                         reason=getattr(trace, "reason", ""),
                         mech_check=getattr(trace, "mech_check", ""),
                         evidence_gate=getattr(trace, "evidence_gate", None),
@@ -831,7 +837,7 @@ async def _run_agent(options: BenchRunOptions, attempt_dir: Path) -> None:
                                 f"{options.attempt_index}"
                             ),
                         ),
-                        success=trace.reason in {"completed", "verified"},
+                        success=run_outcome(trace).success,
                         answer=final_answer,
                         duration_ms=agent_wall_time_ms,
                     )

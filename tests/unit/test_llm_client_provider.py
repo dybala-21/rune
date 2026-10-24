@@ -269,3 +269,29 @@ async def test_grok_structured_checks_use_low_effort_unless_explicitly_overridde
     await LLMClient().completion(messages=[{"role": "user", "content": "table requirements"}],
         model=model, provider=Provider.XAI, timeout=30)
     assert [p["extra_body"]["reasoning_effort"] for p in seen] == ["low", "xhigh", "low"]
+
+
+def test_ollama_routes_keep_the_json_schema_constraint():
+    """Ollama keeps its `format` schema even though litellm's catalog omits local tags."""
+    from rune.llm.structured import supported_format
+
+    requested = {"type": "json_schema", "json_schema": {"name": "x", "schema": {"type": "object"}}}
+    assert supported_format("ollama/qwen3-coder:30b", requested) == requested
+    assert supported_format("ollama_chat/qwen3-coder:30b", requested) == requested
+
+
+async def test_ollama_openai_compatible_wire_receives_the_schema(monkeypatch):
+    from rune.agent.litellm_adapter import litellm
+
+    sent = {}
+
+    async def fake(**kwargs):
+        sent.update(kwargs)
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(litellm, "acompletion", fake)
+    requested = {"type": "json_schema", "json_schema": {"name": "x", "schema": {"type": "object"}}}
+    with pytest.raises(RuntimeError, match="stop"):
+        await LLMClient().completion(messages=[{"role": "user", "content": "hi"}], model="qwen3-coder:30b",
+                                     provider="ollama", response_format=requested, max_retries=0)
+    assert sent["model"].startswith("openai/") and sent["response_format"] == requested

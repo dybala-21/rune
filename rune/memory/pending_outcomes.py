@@ -1,22 +1,4 @@
-"""Rule outcomes that wait for the user's verdict.
-
-Code-shaped work settles its outcome inside the run: an executed check
-either passed or it did not. Non-code work has no such oracle — its
-successes count the moment the run declares them, which is the exact
-surface where the office bench caught confident wrong results being
-promoted into rules. The one signal that does arrive comes later: the
-user's next message. A correction means the "success" was nothing of
-the kind.
-
-So a non-code success with no executed evidence is recorded here as
-pending instead of updating rule confidence. The next run's save pass
-resolves it against the message that started that run: a correction
-counts it as the failure it truly was; anything else — or expiry —
-as the success it would have been counted as anyway. Only corrections
-change a verdict, credit is delayed by at most one run or the TTL,
-and resolution runs after the answer is out, so the user never waits
-on it.
-"""
+"""Record explicit corrections without treating silence as approval."""
 
 from __future__ import annotations
 
@@ -77,8 +59,7 @@ def record_pending(
         "relevant_keys": sorted(relevant_keys) if relevant_keys else None,
         "created": datetime.now(UTC).isoformat(),
     })
-    # Oldest entries fall off; they would have resolved as successes and
-    # a backlog this deep means resolution has not been running anyway.
+    # Expired or evicted entries carry no learning signal.
     del pendings[:-_MAX_PENDING]
     _save(pendings)
     log.debug("rule_outcome_deferred", domain=domain, pending=len(pendings))
@@ -137,13 +118,7 @@ async def _classify_corrections(
 
 
 async def resolve_pendings(new_message: str) -> int:
-    """Settle pending outcomes against the message that started this run.
-
-    Returns how many were resolved. Corrections count as failures,
-    everything else as the success it was provisionally. A failed
-    classification leaves entries pending; expiry settles them as
-    successes so an offline aux model cannot starve rule learning.
-    """
+    """Retire observed feedback; only explicit corrections affect rule scores."""
     if not deferred_truth_enabled():
         return 0
     pendings = _load()
@@ -153,17 +128,18 @@ async def resolve_pendings(new_message: str) -> int:
     live = [p for p in pendings if not _expired(p)]
     expired = [p for p in pendings if _expired(p)]
 
-    corrected: list[int] | None = []
+    corrected: list[int] | None = None
     if live and new_message.strip():
         corrected = await _classify_corrections(live, new_message)
 
-    resolved: list[tuple[dict[str, Any], bool]] = [(p, True) for p in expired]
+    resolved: list[tuple[dict[str, Any], bool]] = []
     remaining: list[dict[str, Any]] = []
     if corrected is None:
         remaining = live  # classifier unavailable; try again next run
     else:
         for i, entry in enumerate(live):
-            resolved.append((entry, i not in corrected))
+            if i in corrected:
+                resolved.append((entry, False))
 
     from rune.memory.rule_learner import update_rules_from_outcome
 
@@ -183,4 +159,4 @@ async def resolve_pendings(new_message: str) -> int:
             )
 
     _save(remaining)
-    return len(resolved)
+    return len(expired) + (len(live) if corrected is not None else 0)

@@ -30,7 +30,7 @@ def setup(monkeypatch):
     monkeypatch.setenv("TYPESAFE_API_KEY", "test-only-key")
     values = {"goal_type": "chat", "confidence": .95, "reason": "explanation",
               "needs_web_evidence": False, "needs_current_source": False,
-              "lookup_only": False,
+              "lookup_only": False, "source_output": "none", "browser_effect": "change", "calculation_operation": "other",
               "requires_execution": False, "intent_categories": [], "requires_desktop_input": False,
               "is_related_to_previous": False, "table_output": "none", "calculation_expression": ""}
     client = SimpleNamespace(completion=AsyncMock(return_value={
@@ -41,13 +41,124 @@ def setup(monkeypatch):
 
 
 def payload(questions, **picks):
-    defaults = {"goal_type": "chat", "desktop": "none", "calculation": "none", "table_output": "none"}
+    defaults = {"goal_type": "chat", "desktop": "none", "calculation": "none", "table_output": "none", "source_output": "none", "browser_effect": "change", "resume_task": "none", "task_scope": "step"}
     answers = {}
     for name, question in questions.items():
         choice = picks.get(name, defaults.get(name, "no"))
         answers[name] = {"type": "choice", "choice": choice, "confidence": .99,
                          "probabilities": {key: float(key == choice) for key in question["criteria"]}}
     return {"model": jev.MODEL, "answers": answers, "usage": {"input_tokens": 2000, "output_tokens": 200}}
+
+
+@pytest.mark.parametrize("backend", ["connected", "jev", "fallback"])
+@pytest.mark.parametrize("provider", ["openai", "xai", "gemini", "anthropic", "ollama"])
+async def test_browser_requirements_share_checks_and_bound_calls(setup, monkeypatch, backend, provider):
+    from rune.agent.task_evidence import TaskEvidence
+    from tests.unit.test_goal_classifier import response, verdict
+
+    cfg, client = setup
+    cfg.llm.active_provider, cfg.llm.active_model = provider, "selected-model"
+    cfg.llm.decision_routing.backend = "connected" if backend == "connected" else "jev"
+    goal = "오전 10시에 6명으로 변경하고 저장해"
+    plan = {"complete": True, "items": [
+        {"requirement": "오전 10시에", "expected": "오전 10시", "value_type": "time", "canonical": "10:00"},
+        {"requirement": "6명으로", "expected": "6명", "value_type": "number", "canonical": "6"},
+        {"requirement": "저장해", "expected": None, "kind": "result", "canonical": "click"},
+    ]}
+
+    async def complete(**kwargs):
+        assert kwargs["provider"] == provider and kwargs["model"] == "selected-model"
+        state = json.loads(kwargs["messages"][-1]["content"])
+        return response(verdict(goal_type="browser", browser_requirements=plan) if "request_to_classify" in state else plan)
+
+    async def external_request(**kwargs):
+        if backend == "fallback":
+            raise jev.JevUnavailable("timeout")
+        return payload(kwargs["questions"], goal_type="browser")
+
+    client.completion.side_effect = complete
+    external = AsyncMock(side_effect=external_request)
+    monkeypatch.setattr(jev, "_request", external)
+    monkeypatch.setattr("rune.llm.reasoning.reasoning_control", lambda _: SimpleNamespace(efforts=("none",)))
+    classification = await classify_goal(goal)
+    evidence = TaskEvidence.for_request(goal, classification)
+    await evidence.prepare_requirements()
+    executor_plan = backend == "jev" and provider != "ollama"
+    if executor_plan:
+        evidence.prepare_tool("browser_observe", {"taskRequirements": plan})
+    for _ in range(3):
+        await evidence.prepare_requirements()
+        evidence.prepare_tool("browser_observe", {"checks": [
+            {"selector": "#time", "property": "value", "expected": "10:00:00", "requirement": "오전 10시에"},
+            {"selector": "#people", "property": "value", "expected": "6.0", "requirement": "6명으로"},
+        ]})
+    assert not evidence.requirements_unavailable
+    assert evidence.requirements.items[-1].canonical is None
+    assert client.completion.await_count == int(not executor_plan)
+    assert external.await_count == int(backend != "connected" and provider != "ollama")
+    with pytest.raises(ValueError, match="requirement_value_mismatch"):
+        evidence.prepare_tool("browser_act", {"action": "click", "selector": "#save", "checks": [
+            {"selector": "#people", "property": "value", "expected": "7", "requirement": "6명으로"},
+        ]})
+
+
+@pytest.mark.parametrize("backend", ["connected", "jev"])
+async def test_resume_selection_and_operation_use_the_existing_routing_call(setup, monkeypatch, backend):
+    from tests.unit.test_goal_classifier import response, verdict
+
+    cfg, client = setup
+    cfg.llm.decision_routing.backend = backend
+    task_id = "aabbccddeeff"
+    client.completion.return_value = response(verdict(goal_type="research", intent_categories=["calculation"],
+                                                      calculation_operation="sum", resume_task=task_id, task_scope="task"))
+    external = AsyncMock(side_effect=lambda **kwargs: payload(kwargs["questions"], goal_type="research",
+                                                             calculation="sum", resume_task=task_id, task_scope="task"))
+    monkeypatch.setattr(jev, "_request", external)
+    result = await classify_goal("Finish the totals in the report", previous_goal="Thanks", previous_goal_type="chat",
+                                saved_tasks=[{"id":task_id, "request":"Sum the report's amounts", "status":"task_blocked"}])
+    assert result.available and result.resume_task == task_id and not result.is_domain_change
+    assert result.calculation_operation == "sum"
+    assert result.task_scope == "task"
+    assert client.completion.await_count == int(backend == "connected")
+    assert external.await_count == int(backend == "jev")
+
+
+@pytest.mark.parametrize("backend", ["connected", "jev", "fallback"])
+@pytest.mark.parametrize("mode", ["none", "verbatim", "derived", "summary"])
+async def test_source_output_mode_survives_routing_without_an_extra_call(setup, monkeypatch, backend, mode):
+    from rune.agent.goal_classifier import from_wire, to_wire
+    from tests.unit.test_goal_classifier import response, verdict
+
+    cfg, client = setup
+    cfg.llm.decision_routing.backend = "connected" if backend == "connected" else "jev"
+    client.completion.return_value = response(verdict(source_output=mode))
+
+    async def request(**kwargs):
+        return payload(kwargs["questions"], source_output=mode,
+                       goal_type="unknown" if backend == "fallback" else "chat")
+
+    external = AsyncMock(side_effect=request)
+    monkeypatch.setattr(jev, "_request", external)
+    result = await classify_goal("Format the source as requested")
+    assert result.available and from_wire(to_wire(result)).source_output == mode
+    assert external.await_count == int(backend != "connected")
+    assert client.completion.await_count == int(backend != "jev")
+
+
+@pytest.mark.parametrize("choice,confidence", [("unknown", .99), ("verbatim", .6)])
+async def test_uncertain_output_mode_disables_exact_checks_without_reclassification(setup, monkeypatch, choice, confidence):
+    cfg, client = setup
+    cfg.llm.decision_routing.backend = "jev"
+
+    async def request(**kwargs):
+        data = payload(kwargs["questions"], source_output=choice, needs_web_evidence="yes", lookup_only="yes")
+        data["answers"]["source_output"]["confidence"] = confidence
+        return data
+
+    monkeypatch.setattr(jev, "_request", request)
+    result = await classify_goal("Revisit the earlier result")
+    assert result.available and result.source_output == "none" and not result.lookup_only
+    client.completion.assert_not_called()
 
 
 @pytest.mark.parametrize("confidence,choice,expected", [(.99, "yes", True), (.6, "yes", False), (.99, "unknown", False)])
@@ -301,7 +412,7 @@ async def test_multiturn_office_code_browser_routes_do_not_leak(setup, monkeypat
     for request, route, intents, execute, related in cases:
         values = {"goal_type": route, "confidence": .99, "reason": "requested outcome",
                   "needs_web_evidence": route == "web", "needs_current_source": False,
-                  "lookup_only": False,
+                  "lookup_only": False, "source_output": "none", "browser_effect": "change", "calculation_operation": "other",
                   "intent_categories": intents, "requires_execution": execute, "requires_desktop_input": False,
                   "is_related_to_previous": related, "table_output": "none", "calculation_expression": ""}
         client.completion.return_value = {"choices": [{"message": {"content": json.dumps(values)}}]}

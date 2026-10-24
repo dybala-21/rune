@@ -6,9 +6,9 @@ delegate to the core browser capabilities via the registry.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar, get_args
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from rune.capabilities.browser.session import browser_operation, current_session
 from rune.capabilities.browser.steps import BrowserStep
@@ -28,12 +28,41 @@ def _batch_schema(schema: dict) -> None:
 class BrowserBatchParams(BaseModel):
     """Parameters for batch browser operations."""
     model_config = ConfigDict(json_schema_extra=_batch_schema)
+    validation_hint: ClassVar[str] = (
+        "No steps in this batch executed. Keep earlier successful work; do not resend earlier batches. "
+        "Use one standalone browser_act for the next unfinished action to recover. "
+        'Batch shape: {"actions":[{"type":"act","params":{"action":"click",'
+        '"selector":"CURRENT_REF"}}]}. Put checks inside params, each with its own result selector.'
+    )
     actions: list[BrowserStep] = Field(description=(
-        "Browser tool calls in order, each with type and params. Stops after a failure. "
+        "Browser tool calls in order, each with type and params. Stops after a tool or result-check failure. "
         'Example: {"type":"act","params":{"action":"click","selector":"CURRENT_REF"}}. '
+        "For a known form, check all requested values on the last field edit before the save step. "
         "Refs remain valid only while the observed node, name and page are unchanged. "
         "After navigation or replacing controls, read the returned refs before continuing."
     ), min_length=1, max_length=20)
+
+    @model_validator(mode="before")
+    @classmethod
+    def wrap_action_steps(cls, values):
+        from rune.capabilities.browser.capabilities import BrowserActParams
+
+        if not isinstance(values, dict) or not isinstance(values.get("actions"), list):
+            return values
+        fields = set(BrowserActParams.model_fields)
+        actions = get_args(BrowserActParams.model_fields["action"].annotation)
+        def normalize(step):
+            if not isinstance(step, dict) or "params" in step:
+                return step
+            tag = step.get("type")
+            if tag == "act" and "action" in step:
+                step = {key: value for key, value in step.items() if key != "type"}
+            elif tag in actions and "action" not in step:
+                step = {**{key: value for key, value in step.items() if key != "type"}, "action": tag}
+            if "action" in step and set(step) <= fields:
+                return {"type": "act", "params": step}
+            return step
+        return {**values, "actions": [normalize(step) for step in values["actions"]]}
 
 
 class BrowserWorkflowParams(BaseModel):
@@ -71,13 +100,17 @@ async def _run_steps(steps: list[dict[str, Any]], type_key: str) -> CapabilityRe
         results.append(f"Step {i+1} ({step_type}): {result.output if result.success else result.error}")
         evidence.append({"tool": f"browser_{step_type}", "success": result.success,
                          "metadata": result.metadata or {}, "error": result.error})
-        if not result.success:
+        checks = (result.metadata or {}).get("result_checks")
+        check_failed = isinstance(checks, dict) and checks.get("passed") is not True
+        changed |= step_type in {"act", "navigate", "open"} and result.success
+        if not result.success or check_failed:
+            error = result.error or "A result check failed. Later steps were not executed. Read the returned state; do not repeat completed actions."
             results.extend(f"Step {j+1}: Not executed because an earlier step failed."
                            for j in range(i + 1, len(steps)))
-            return CapabilityResult(success=False, error=result.error, output="\n".join(results),
-                                    metadata={"browser_steps": evidence, "action_status": "unknown" if changed else
+            return CapabilityResult(success=False, error=error, output="\n".join(results),
+                                    metadata={"browser_steps": evidence, "verification_failed": check_failed and result.success,
+                                              "action_status": "unknown" if changed else
                                               (result.metadata or {}).get("action_status", "unknown")})
-        changed |= step_type in {"act", "navigate", "open"}
         if step_type == "screenshot" and result.metadata.get("path"):
             image_paths.append(result.metadata["path"])
     return CapabilityResult(success=True, output="\n".join(results),

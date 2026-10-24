@@ -115,3 +115,22 @@ async def test_office_guard_checks_both_symlink_names(tmp_path):
     alias.symlink_to(tmp_path / "report.txt")
     assert not (await file_write(FileWriteParams(path=str(alias), content="changed"))).success
     assert (tmp_path / "report.txt").read_text() == "unchanged"
+
+
+@pytest.mark.parametrize("outside", [False, True])
+async def test_deleting_a_symlink_removes_the_link_not_its_target(tmp_path, tmp_path_factory, monkeypatch, outside):
+    # Approve the link's own location, as Guardian does; deletion removes the link, not its target.
+    allow = SimpleNamespace(allowed=True, requires_approval=False, reason="")
+    monkeypatch.setattr("rune.capabilities.file.get_guardian", lambda: SimpleNamespace(
+        validate_file_path=lambda path: allow, validate_file_read_path=lambda path: allow))
+    target_dir = tmp_path_factory.mktemp("elsewhere") if outside else tmp_path
+    original = target_dir / "original.txt"
+    original.write_text("important\n")
+    link = tmp_path / "link.txt"
+    link.symlink_to(original)
+
+    result = await file_delete(FileDeleteParams(path=str(link)))
+
+    assert result.success, result.error
+    assert original.read_text() == "important\n"
+    assert not link.is_symlink() and not link.exists()

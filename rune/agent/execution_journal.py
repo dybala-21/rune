@@ -30,7 +30,7 @@ class RecoveryBlocked(RuntimeError):
 _active: ContextVar[ExecutionJournal | None] = ContextVar("execution_journal", default=None)
 _continuation_call: ContextVar[str | None] = ContextVar("continuation_call", default=None)
 _READS = frozenset({
-    "file_read", "file_list", "file_search", "code_analyze", "code_find_def", "code_find_refs",
+    "file_read", "file_query", "file_list", "file_search", "code_analyze", "code_find_def", "code_find_refs",
     "code_impact", "project_map", "document_read", "document_bundle_inspect", "web_search",
     "think", "memory_search", "task_list", "cron_list", "service_status", "service_list", "connector_list",
     "table_requirements", "table_verify", "skill_load", "skill_search", "document_preview",
@@ -71,7 +71,12 @@ async def record_check(params: dict[str, Any], invoke: Callable[[], Awaitable[An
 
 
 def _is_read(name: str, params: dict[str, Any]) -> bool:
-    return (name in _READS or name == "browser_screenshot" and not params.get("path")) or name == "web_fetch" and str(params.get("method", "GET")).upper() in {"GET", "HEAD"}
+    return (name in _READS or name == "browser_screenshot" and not params.get("path")
+            or name in {"web_fetch", "connector_request"} and str(params.get("method", "GET")).upper() in {"GET", "HEAD"})
+
+
+def _needs_effect_review(name: str, effect: dict) -> bool:
+    return effect["kind"] == "opaque" and name not in _BROWSER_EFFECTS
 
 
 def _request_key(name: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -250,6 +255,7 @@ class ExecutionJournal:
         self._readers = 0
         self._writer = False
         self._uncertain: dict[str, Any] | None = None
+        self._approval_denied = False
         self._revisions = {path: revision for r in previous or []
                            for path, revision in _revisions(r["effect"]).items()}
 
@@ -330,13 +336,15 @@ class ExecutionJournal:
     async def _approve(self, name: str, params: dict, reason: str) -> bool:
         from rune.safety.approval_request import action_request, check_revisions, request_scope
 
-        if self.approval is None:
+        if self.approval is None or self._approval_denied:
             return False
         action = action_request(name, params)
         with request_scope(action):
             accepted = await self.approval(name, reason)
         if accepted:
             check_revisions(action["revisions"])
+        else:
+            self._approval_denied = True
         return accepted
 
     async def _execute(self, name: str, params: dict[str, Any], invoke: Callable[[], Awaitable[CapabilityResult]]) -> CapabilityResult:
@@ -351,7 +359,7 @@ class ExecutionJournal:
         if self._uncertain is not None and effect["kind"] not in {"read", "question"}:
             prior = self._uncertain
             reason = (
-                "A previous command returned an error after starting. It may already have changed files or apps. "
+                "A previous operation has an unknown outcome. It may already have changed files, apps or external services. "
                 "Inspect those effects before allowing the following operation. Approval permits this next operation; "
                 "it does not verify the earlier result.\n"
                 + json.dumps({"previousTool": prior["tool"], "previousParameters": prior["params"],
@@ -360,7 +368,8 @@ class ExecutionJournal:
             )
             if not await self._approve(name, params, reason):
                 return CapabilityResult(success=False, error="Inspect the earlier command's effects before making further changes.",
-                                        metadata={"action_status": "not_executed"})
+                                        metadata={"action_status": "not_executed",
+                                                  **({"approval_decision": "denied"} if self._approval_denied else {})})
             self.check()
             from rune.agent.run_control import current_control
             if control := current_control():
@@ -379,7 +388,9 @@ class ExecutionJournal:
                 if not was_approved() and not await self._approve(
                     name, params, "New execution after recovery; earlier approvals are not reused.\n" + json.dumps(params, ensure_ascii=False),
                 ):
-                    return CapabilityResult(success=False, error="Resumed operation needs a new approval.")
+                    return CapabilityResult(success=False, error="Resumed operation needs a new approval.",
+                                            metadata={"action_status": "not_executed",
+                                                      **({"approval_decision": "denied"} if self._approval_denied else {})})
                 self.check()
         self._save(record)
         # Unresolved composite calls block resumption; their children may have acted.
@@ -393,11 +404,12 @@ class ExecutionJournal:
                     metadata={"action_status": "unknown"},
                 )))
                 self._save(record)
-                if name == "bash_execute":
+                if _needs_effect_review(name, effect):
                     self._uncertain = record
                 raise
             except Exception as exc:
-                result = CapabilityResult(success=False, error=f"Capability '{name}' failed: {exc}")
+                result = CapabilityResult(success=False, error=f"Capability '{name}' failed: {exc}",
+                                          metadata={"action_status": "unknown"})
         finally:
             _active.reset(token)
         record["state"] = "done" if result.success else "failed"
@@ -429,6 +441,6 @@ class ExecutionJournal:
         if name.startswith("desktop_") and record["result"].get("metadata"):
             record["result"]["metadata"].pop("image_base64", None)
         self._save(record)
-        if name == "bash_execute" and record["state"] == "unknown":
+        if _needs_effect_review(name, effect) and record["state"] == "unknown":
             self._uncertain = record
         return result

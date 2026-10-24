@@ -60,6 +60,54 @@ async def test_small_lookup_catalog_keeps_rendering_tools_available_on_demand():
     assert set(agent._tool_lookup) == set(names) | {"tool_search"}
 
 
+@pytest.mark.parametrize("needs_sources", [False, True])
+async def test_browser_catalog_starts_with_working_tools_and_preserves_discovery(needs_sources):
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.agent.litellm_adapter import LiteLLMAgent
+    from rune.agent.tool_adapter import ToolWrapper
+    from rune.agent.tool_catalog import deferred_for_task
+    from rune.capabilities.browser.capabilities import register_browser_capabilities
+    from rune.capabilities.registry import CapabilityRegistry
+
+    reg = CapabilityRegistry()
+    register_browser_capabilities(reg)
+    wrappers = [ToolWrapper(name=cap.name, description=cap.description,
+                            json_schema=cap.parameters_model.model_json_schema(), function=AsyncMock()) for cap in reg.list_all()]
+    wrappers += [ToolWrapper(name=name, description=name, function=AsyncMock())
+                 for name in ("ask_user", "task_blocked", "web_search", "web_fetch", "think")]
+    names = {t.name for t in wrappers}
+    classification = ClassificationResult("browser", .99, 2, needs_web_evidence=needs_sources)
+    deferred = deferred_for_task(list(names), classification)
+    agent = LiteLLMAgent("openai/gpt-5.4", tools=wrappers, deferred_tools=deferred, compact_tools=True)
+    full = LiteLLMAgent("openai/gpt-5.4", tools=wrappers)
+    expected = {"browser_navigate", "browser_observe", "browser_act", "browser_extract", "browser_batch",
+                "ask_user", "task_blocked", "tool_search"}
+    if needs_sources:
+        expected.update(("web_search", "web_fetch"))
+    assert agent._tool_catalog.loaded == expected
+    assert len(json.dumps(agent._tool_schemas)) < len(json.dumps(full._tool_schemas))
+    assert agent._tool_lookup["browser_act"] is full._tool_lookup["browser_act"]
+    for name in deferred:
+        await agent._tool_catalog.search(name)
+        assert name in agent._tool_catalog.loaded
+        assert agent._tool_lookup[name] is full._tool_lookup[name]
+    agent.update_tools([t for t in wrappers if t.name != "think"])
+    assert agent._tool_catalog.loaded == expected
+
+
+async def test_deferred_tool_alias_does_not_load_its_schema_early():
+    from rune.agent.litellm_adapter import LiteLLMAgent
+    from rune.agent.tool_adapter import ToolWrapper
+
+    tools = [ToolWrapper(name=name, description=name, function=AsyncMock()) for name in ("web_fetch", "mail.send")]
+    agent = LiteLLMAgent("openai/gpt-5.4", tools=tools, deferred_tools={"mail.send"}, compact_tools=True)
+    assert agent._tool_catalog.loaded == {"web_fetch", "tool_search"}
+    assert "mail__send" in agent._tool_catalog.all
+    await agent._tool_catalog.search("mail__send")
+    assert "mail__send" in agent._tool_catalog.loaded
+    assert agent._tool_lookup["mail__send"] is agent._tool_lookup["mail.send"]
+
+
 @pytest.mark.parametrize("compact,count", [(False, 1), (True, 1), (False, 30)])
 async def test_native_tools_pass_through_with_or_without_discovery(compact, count):
     from rune.agent.advisor.native_tool import NativeAdvisorConfig, build_native_tool_wrapper
@@ -162,10 +210,10 @@ async def test_browser_family_includes_input_and_keeps_step_schema_on_vertex():
             with pytest.raises(ValidationError):
                 validate({"actions": [invalid]}, schema)
     rejected = await registry.execute("browser_batch", {"actions": [
-        {"action": "click", "selector": "#calculate"},
+        {"type": "act", "selector": "#calculate"},
     ]})
     assert not rejected.success and rejected.metadata["action_status"] == "not_executed"
-    assert len(rejected.error) < 1200 and "type" in rejected.error
+    assert len(rejected.error) < 1200 and "params" in rejected.error
 
 
 async def test_discovery_keeps_core_stable_and_loads_exact_tools_once():
@@ -223,6 +271,189 @@ async def test_stream_discovers_a_tool_before_dispatch(monkeypatch):
     assert agent._tool_catalog is None
     assert [tool["function"]["name"] for tool in agent._tool_schemas] == ["office_export_7"]
     assert set(agent._tool_lookup) == {"office_export_7"}
+
+
+async def test_unknown_tool_lists_callable_names_without_dispatch():
+    from rune.agent.litellm_adapter import LiteLLMAgent
+    from rune.agent.tool_adapter import ToolWrapper
+
+    action = AsyncMock()
+    agent = LiteLLMAgent("openai/gpt-5.4", tools=[
+        ToolWrapper(name=name, description=name, function=action)
+        for name in ("browser_act", "browser_observe", "browser_navigate", "file_read")
+    ], deferred_tools={"browser_navigate"}, compact_tools=True)
+    async with agent.run_stream("Update the form") as stream:
+        result = await stream._execute_tool("BrowserActChecks", {"expected": "3"})
+    assert result.code == "unknown_tool"
+    assert "browser_act" in result and "browser_observe" in result
+    assert "with its exact name" not in result
+    action.assert_not_awaited()
+
+
+@pytest.mark.parametrize("model", [
+    "openai/gpt-5.4-mini", "vertex_ai/gemini-2.5-flash", "anthropic/claude-haiku-4-5", "xai/grok-4",
+])
+async def test_unknown_tool_requires_lookup_before_input_and_restores_tools(monkeypatch, model):
+    from rune.agent.litellm_adapter import LiteLLMAgent
+    from rune.agent.tool_adapter import ToolWrapper
+    from tests.unit.test_live_streaming import _chunk, _tc, _usage
+
+    write, seen = AsyncMock(return_value="Saved"), []
+    calls = [("FileWriteParams", "{}"), ("file_write", "{}"),
+             ("tool_search", '{"query":"file_write"}'), ("file_write", "{}")]
+
+    async def complete(**params):
+        seen.append(params)
+        async def chunks():
+            if len(seen) <= len(calls):
+                yield _chunk(tool_calls=_tc(*calls[len(seen) - 1]), finish="tool_calls")
+            else:
+                yield _chunk(content="Saved", finish="stop")
+            yield _usage()
+        return chunks()
+
+    monkeypatch.setattr("litellm.acompletion", complete)
+    agent = LiteLLMAgent(model, compact_tools=True, deferred_tools={"file_read"}, tools=[
+        ToolWrapper(name=name, description=name, function=write)
+        for name in ("file_read", "file_write", "ask_user", "task_blocked")
+    ])
+    async with agent.run_stream("Save the file") as stream:
+        assert "".join([part async for part in stream.stream_text()]) == "Saved"
+    assert len(seen) == 5
+    for request in seen[1:3]:
+        assert request["tool_choice"] == "required"
+        assert {tool["function"]["name"] for tool in request["tools"]} == {
+            "tool_search", "ask_user", "task_blocked",
+        }
+    assert seen[3]["tool_choice"] == "required"
+    assert {tool["function"]["name"] for tool in seen[3]["tools"]} == {
+        "file_write", "ask_user", "task_blocked",
+    }
+    assert seen[4].get("tool_choice") != "required"
+    assert any(tool["function"]["name"] == "tool_search" for tool in seen[4]["tools"])
+    assert not agent._tool_catalog.lookup_required
+    assert agent._tool_catalog.recovery_tools() is None
+    write.assert_awaited_once()
+
+
+@pytest.mark.parametrize("result", ["Saved", "[ERROR] Save failed"])
+async def test_lookup_selection_ends_at_dispatch_even_when_arguments_are_rejected(result):
+    from rune.agent.litellm_adapter import LiteLLMAgent
+    from rune.agent.tool_adapter import ToolWrapper
+    from rune.agent.tool_output import RejectedToolResult
+
+    write = AsyncMock(side_effect=[RejectedToolResult("Missing path", "invalid_arguments"), result])
+    other = AsyncMock()
+    agent = LiteLLMAgent("vertex_ai/gemini-2.5-flash", compact_tools=True, deferred_tools={"file_read"}, tools=[
+        ToolWrapper(name="file_write", description="Write a file", function=write),
+        ToolWrapper(name="file_read", description="Read a file", function=other),
+    ])
+    async with agent.run_stream("Save a file") as stream:
+        await stream._execute_tool("FileWriteParams", {})
+        await stream._execute_tool("tool_search", {"query": "file_write"})
+        assert agent._tool_catalog.recovery_tools() == {"file_write"}
+        rejected = await stream._execute_tool("OtherWriteParams", {})
+        assert rejected.code == "unknown_tool" and "file_write" in rejected
+        assert not agent._tool_catalog.lookup_required
+        assert agent._tool_catalog.recovery_tools() == {"file_write"}
+        blocked = await stream._execute_tool("tool_search", {"query": "file_read"})
+        assert "Required recovery is pending" in blocked
+        other.assert_not_awaited()
+        assert (await stream._execute_tool("file_write", {})).code == "invalid_arguments"
+        assert agent._tool_catalog.recovery_tools() is None
+        await stream._execute_tool("tool_search", {"query": "file_read"})
+        assert "file_read" in agent._tool_catalog.loaded
+        assert await stream._execute_tool("file_write", {"path": "result.txt"}) == result
+        assert agent._tool_catalog.recovery_tools() is None
+    assert write.await_count == 2
+
+
+async def test_lookup_selection_does_not_carry_into_a_new_turn():
+    from rune.agent.litellm_adapter import LiteLLMAgent
+    from rune.agent.tool_adapter import ToolWrapper
+
+    write = AsyncMock()
+    agent = LiteLLMAgent("vertex_ai/gemini-2.5-flash", compact_tools=True, deferred_tools={"file_read"}, tools=[
+        ToolWrapper(name="file_write", description="Write a file", function=write),
+        ToolWrapper(name="file_read", description="Read a file", function=write),
+    ])
+    async with agent.run_stream("Save a file") as stream:
+        await stream._execute_tool("FileWriteParams", {})
+        await stream._execute_tool("tool_search", {"query": "file_write"})
+        assert agent._tool_catalog.recovery_tools() == {"file_write"}
+    async with agent.run_stream("Just explain"):
+        assert agent._tool_catalog.recovery_tools() is None
+    write.assert_not_awaited()
+
+
+async def test_repeated_unknown_calls_cannot_restart_successful_lookup(monkeypatch):
+    from rune.agent.litellm_adapter import LiteLLMAgent
+    from rune.agent.tool_adapter import ToolWrapper
+    from tests.unit.test_live_streaming import _chunk, _tc, _usage
+
+    write, seen = AsyncMock(), []
+
+    async def complete(**params):
+        seen.append(params)
+        async def chunks():
+            name, arguments = ("tool_search", '{"query":"file_write"}') if len(seen) == 2 else ("FileWriteParams", "{}")
+            yield _chunk(tool_calls=_tc(name, arguments), finish="tool_calls")
+            yield _usage()
+        return chunks()
+
+    monkeypatch.setattr("litellm.acompletion", complete)
+    agent = LiteLLMAgent("vertex_ai/gemini-2.5-flash", compact_tools=True, deferred_tools={"file_read"}, tools=[
+        ToolWrapper(name=name, description=name, function=write) for name in ("file_read", "file_write")
+    ])
+    async with agent.run_stream("Save a file") as stream:
+        async for _ in stream.stream_text():
+            pass
+        assert "rejected tool calls" in await stream.get_output()
+    assert len(seen) == 5
+    for request in seen[2:]:
+        assert request["tool_choice"] == "required"
+        assert [tool["function"]["name"] for tool in request["tools"]] == ["file_write"]
+    write.assert_not_awaited()
+
+
+async def test_unresolved_tool_lookup_stops_without_increasing_retry_limit(monkeypatch):
+    from rune.agent.litellm_adapter import LiteLLMAgent
+    from rune.agent.tool_adapter import ToolWrapper
+    from tests.unit.test_live_streaming import _chunk, _tc, _usage
+
+    write, seen = AsyncMock(), []
+    async def complete(**params):
+        seen.append(params)
+        async def chunks():
+            yield _chunk(tool_calls=_tc(
+                "FileWriteParams" if len(seen) == 1 else "tool_search",
+                "{}" if len(seen) == 1 else '{"query":"nonexistent"}',
+            ), finish="tool_calls")
+            yield _usage()
+        return chunks()
+
+    monkeypatch.setattr("litellm.acompletion", complete)
+    agent = LiteLLMAgent("vertex_ai/gemini-2.5-flash", compact_tools=True, deferred_tools={"file_read"}, tools=[
+        ToolWrapper(name=name, description=name, function=write) for name in ("file_read", "file_write")
+    ])
+    async with agent.run_stream("Save") as stream:
+        async for _ in stream.stream_text():
+            pass
+        text = await stream.get_output()
+    assert len(seen) == 3 and "rejected tool calls" in text
+    assert agent._tool_catalog.lookup_required
+    write.assert_not_awaited()
+
+    async def explain(**params):
+        assert params.get("tool_choice") != "required"
+        async def chunks():
+            yield _chunk(content="An explanation needs no tools.", finish="stop")
+            yield _usage()
+        return chunks()
+    monkeypatch.setattr("litellm.acompletion", explain)
+    async with agent.run_stream("Just explain") as stream:
+        assert "".join([part async for part in stream.stream_text()]) == "An explanation needs no tools."
+    assert not agent._tool_catalog.lookup_required
 
 
 async def test_required_reads_are_loaded_and_completion_restores_task_tools(monkeypatch):

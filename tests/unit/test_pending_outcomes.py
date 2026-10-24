@@ -1,9 +1,4 @@
-"""Deferred rule outcomes: weak-evidence successes wait for the user.
-
-Only a correction may change a verdict — everything else, including
-expiry and a dead aux model, must resolve to the success the outcome
-would have been counted as anyway. These tests pin that asymmetry.
-"""
+"""Only explicit corrections produce deferred rule feedback."""
 
 from __future__ import annotations
 
@@ -74,13 +69,13 @@ class TestResolve:
         assert po._load() == []
 
     @pytest.mark.asyncio
-    async def test_unrelated_message_counts_as_success(self, updates):
+    async def test_unrelated_message_does_not_reward_rules(self, updates):
         po.record_pending("chat", "write the June summary")
         with patch.object(po, "_classify_corrections",
                           AsyncMock(return_value=[])):
             n = await po.resolve_pendings("play some music")
         assert n == 1
-        assert updates == [("chat", True)]
+        assert updates == []
         assert po._load() == []
 
     @pytest.mark.asyncio
@@ -94,7 +89,7 @@ class TestResolve:
         assert len(po._load()) == 1
 
     @pytest.mark.asyncio
-    async def test_expiry_settles_as_success_without_a_model(self, updates):
+    async def test_expiry_discards_unknown_outcomes_without_a_model(self, updates):
         po.record_pending("chat", "old task")
         entries = po._load()
         entries[0]["created"] = (
@@ -105,7 +100,7 @@ class TestResolve:
                           AsyncMock(return_value=None)) as classify:
             n = await po.resolve_pendings("anything")
         assert n == 1
-        assert updates == [("chat", True)]
+        assert updates == []
         classify.assert_not_called()  # nothing live to classify
         assert po._load() == []
 

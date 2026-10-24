@@ -6,6 +6,47 @@ from rune.agent.web_grounding import WebGrounding
 from rune.types import CapabilityResult
 
 
+@pytest.mark.parametrize("operation,status", [("latest", "supported"), ("sum", "insufficient")])
+def test_computed_records_cannot_be_verified_as_original_source_fields(operation, status):
+    check = WebGrounding(required=True, check_records=True)
+    body = '{"field":"v","value":3}'
+    receipt = {"query": {"operation": operation}, "scope": "retrieved_response"}
+    check.observe("web_fetch", {}, CapabilityResult(success=True, output=body, metadata={
+        "url":"https://example.org/records", "content_type":"application/json", "record_query":receipt,
+    }))
+    assert check.snapshot(body)["status"] == status
+    restored = WebGrounding(required=True, check_records=True)
+    restored.restore(check.context)
+    assert restored.snapshot(body)["status"] == status
+    assert restored.reused_sources == 1
+
+
+@pytest.mark.parametrize("metadata,accepted", [
+    ({"count": 1}, False),
+    ({"captured_body": True, "status_code": 200}, True),
+    ({"captured_body": True, "status_code": 503}, False),
+    ({"captured_body": True, "status_code": 200, "delivery_truncated": True}, False),
+    ({"captured_body": True, "status_code": 200, "cached": True}, False),
+])
+def test_browser_api_lists_are_distinct_from_reading_a_captured_body(metadata, accepted):
+    check = WebGrounding(required=True, requires_page=True)
+    result = CapabilityResult(success=True, output='{"value":120}', metadata=metadata)
+    assert check.observe("browser_discover_apis", {"readBody": "quote"}, result) is accepted
+    assert check.pages == int(accepted)
+
+
+def test_record_checks_use_the_body_without_tool_annotations():
+    check = WebGrounding(required=True, check_records=True)
+    prefix = "POST https://example.org/quotes [200]\n[filtered by 'ACME'] "
+    result = CapabilityResult(success=True, output=prefix + '{"symbol":"ACME","value":120,"unit":"USD"}',
+                              metadata={"captured_body":True, "content_type":"application/json", "body_offset":len(prefix)})
+    assert check.observe("browser_discover_apis", {}, result)
+    assert check.blocker('{"symbol":"ACME","value":120,"unit":"JPY"}')
+    assert check.blocker('{"symbol":"ACME","value":120,"unit":"USD"}') is None
+    check.observe("web_fetch", {}, CapabilityResult(success=True, output="Another source in HTML"))
+    assert not check.records.complete
+
+
 @pytest.mark.parametrize("name,metadata,success,expected", [
     ("web_search", {"count": 1}, True, True),
     ("web_search", {"count": 0}, True, False),

@@ -16,7 +16,8 @@ class Workflow:
         self.decisions = []
         self.session = uuid4().hex
 
-    def submit(self, goal, attachments=None, *, editable_files=(), allow_new_tests=False, deny_approvals=False):
+    def submit(self, goal, attachments=None, *, editable_files=(), allow_new_tests=False, deny_approvals=False,
+               question_answers=(), approve_all=False, wait_seconds=210):
         started = time.monotonic()
         payload = {"text": goal, "sessionId": self.session, "requestId": uuid4().hex, "attachments": attachments}
         response = self.client.post("/api/message", json=payload)
@@ -26,7 +27,9 @@ class Workflow:
         approvals = []
         denials = []
         answered = set()
-        while time.monotonic() - started < 210:
+        replies = iter(question_answers)
+        questions = []
+        while time.monotonic() - started < wait_seconds:
             run = self.client.get("/api/runs/snapshot", params={"sessionId": self.session}).json()["run"]
             if run and run.get("text") and first_text is None:
                 first_text = time.monotonic() - started
@@ -44,7 +47,8 @@ class Workflow:
                 denials.append(approval)
                 answered.add(approval["id"])
                 continue
-            if approval and self._can_approve_edit(run, editable_files, allow_new_tests=allow_new_tests):
+            # approve_all approves every prompt so the test measures the agent's own judgment.
+            if approval and (approve_all or self._can_approve_edit(run, editable_files, allow_new_tests=allow_new_tests)):
                 reply = self.client.post("/api/approval", json={
                     "id": approval["id"], "decision": "approve_once", "responseId": uuid4().hex,
                 })
@@ -52,7 +56,19 @@ class Workflow:
                 approvals.append(approval)
                 answered.add(approval["id"])
                 continue
-            if run and (run.get("approval") or run.get("question")):
+            question = run.get("question") if run else None
+            if question and question["id"] in answered:
+                time.sleep(.1)
+                continue
+            if question and (answer := next(replies, None)) is not None:
+                reply = self.client.post("/api/question", json={
+                    "id":question["id"], "answer":answer, "responseId":uuid4().hex,
+                })
+                assert reply.status_code == 200, reply.text
+                questions.append({"question":question, "answer":answer})
+                answered.add(question["id"])
+                continue
+            if run and (run.get("approval") or question):
                 self.client.post("/api/abort", json={"runId": accepted["runId"]})
                 break
             time.sleep(.1)
@@ -63,6 +79,7 @@ class Workflow:
         self.runs.append({"goal": goal, "seconds": round(time.monotonic() - started, 3),
                           "first_text_seconds": first_text, "acceptance": accepted,
                           "approved_fixture_edits": approvals, "denied_fixture_actions": denials, "snapshot": run})
+        self.runs[-1]["answered_fixture_questions"] = questions
         # The terminal event can arrive before server cleanup finishes.
         for _ in range(100):
             active = self.client.post("/api/v1/rpc", json={"method": "runs.active", "params": {}}).json()["data"]["runIds"]
