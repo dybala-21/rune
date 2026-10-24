@@ -77,7 +77,7 @@ _FALLBACK_PROFILES: list[LLMProfile] = [
 
 
 def build_profiles_from_config() -> list[LLMProfile]:
-    """Put the selected model first; keep local runs on the local provider."""
+    """Prefer the selected model; keep local and Azure runs on their provider."""
     try:
         from rune.llm.context import llm_settings
         llm = llm_settings()
@@ -92,6 +92,9 @@ def build_profiles_from_config() -> list[LLMProfile]:
         else:
             models = getattr(llm.models, provider, None)
             model_name = models.best if models else "gpt-5.2"
+            if provider == "azure":
+                from rune.llm.azure import tier_deployment
+                model_name = tier_deployment(model_name)
             if provider == "ollama":
                 # This path bypasses LLMClient.resolve_model, so check installed models here.
                 from rune.llm.client import (
@@ -110,7 +113,7 @@ def build_profiles_from_config() -> list[LLMProfile]:
             thinking_level="basic" if provider == "openai" else "extended",
             priority=0,
         )
-        if provider == "ollama":
+        if provider in {"ollama", "azure"}:
             return [primary]
 
         # Append fallbacks that don't duplicate the primary

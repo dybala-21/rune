@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from rune.api.auth import TokenAuthDependency
-from rune.config.schema import DecisionRoutingConfig
+from rune.config.schema import AzureDeployments, DecisionRoutingConfig
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -37,6 +37,7 @@ class RunLimits(BaseModel):
 
 
 class ConfigGetResponse(BaseModel):
+    azure: dict[str, Any] = Field(default_factory=dict)
     vertex_location: str | None = Field(None, alias="vertexLocation")
     run_limits: RunLimits = Field(default_factory=RunLimits, alias="runLimits")
     execution_environment: dict[str, Any] = Field(default_factory=dict, alias="executionEnvironment")
@@ -66,6 +67,7 @@ class ExecutionEnvironmentPatch(BaseModel):
 
 
 class ConfigPatchRequest(BaseModel):
+    azure_deployments: AzureDeployments | None = Field(None, alias="azureDeployments")
     vertex_location: str | None = Field(None, alias="vertexLocation", min_length=1, max_length=64,
                                        pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     run_limits: RunLimits | None = Field(None, alias="runLimits")
@@ -206,6 +208,14 @@ async def get_config_endpoint() -> ConfigGetResponse:
     effective = get_effective_model_selection()
     from rune.agent.decision_router import accelerator_status
     from rune.cloud.boundary import hosted
+    from rune.llm.azure import (
+        ENDPOINT_NAMES,
+        GPT6_MODELS,
+        KEY_NAMES,
+        endpoint,
+        environment_name,
+    )
+    from rune.llm.context import model_environment
     from rune.llm.target import vertex_active
     from rune.safety.execution_environment import execution_config
     from rune.utils.env import effective_env_scope
@@ -217,6 +227,14 @@ async def get_config_endpoint() -> ConfigGetResponse:
     options = control.efforts
     effort = cfg.llm.reasoning_efforts.get(reasoning_model_key(model))
     return ConfigGetResponse(
+        azure={
+            "endpoint": endpoint(), "endpointKey": environment_name(ENDPOINT_NAMES),
+            "endpointScope": effective_env_scope(environment_name(ENDPOINT_NAMES)),
+            "hasKey": bool(model_environment(environment_name(KEY_NAMES)).strip()),
+            "keyName": environment_name(KEY_NAMES),
+            "keyScope": effective_env_scope(environment_name(KEY_NAMES)),
+            "deployments": cfg.llm.azure_deployments, "suggestedModels": GPT6_MODELS,
+        },
         vertexLocation=(os.environ.get("VERTEX_LOCATION") or os.environ.get("VERTEXAI_LOCATION")
                         or cfg.vertex_location) if vertex_active() else None,
         runLimits=RunLimits(modelRequests=cfg.llm.model_request_limit, costUsd=cfg.llm.cost_budget_usd),
@@ -315,6 +333,8 @@ async def patch_config(req: ConfigPatchRequest) -> ConfigPatchResponse:
             raise HTTPException(status_code=400, detail="Add a TypeSafe API key before enabling Jev.")
 
     to_persist: dict[str, Any] = {}
+    if req.azure_deployments is not None:
+        to_persist.update({"llm.azureDeployments": req.azure_deployments, "llm.azure_deployments": None})
     if req.vertex_location is not None:
         to_persist["vertex_location"] = req.vertex_location
     limits = req.run_limits.model_dump(exclude_unset=True) if req.run_limits is not None else {}
@@ -348,6 +368,11 @@ async def patch_config(req: ConfigPatchRequest) -> ConfigPatchResponse:
             raise HTTPException(status_code=500, detail="Could not save settings. No configuration changes were applied.")
 
     updated = routing is not None or bool(environment) or bool(limits)
+    if req.azure_deployments is not None:
+        cfg.llm.azure_deployments = req.azure_deployments
+        from rune.llm.models import invalidate_cache
+        invalidate_cache()
+        updated = True
     if req.vertex_location is not None:
         cfg.vertex_location = req.vertex_location
         os.environ["VERTEX_LOCATION"] = req.vertex_location

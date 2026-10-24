@@ -16,6 +16,7 @@ import { toast } from '../utils/toast';
 import { SettingsSection, SettingsItem, MemoryField, memoryInputStyle } from './SettingsControls';
 import { DecisionRoutingSettings } from './DecisionRoutingSettings';
 import { RunLimitSettings } from './RunLimitSettings';
+import { AzureSettings } from './AzureSettings';
 
 interface SettingsSidebarProps {
   onOpenSkillPanel: (selectedName?: string) => void;
@@ -603,6 +604,7 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
 
         <details className="advanced-settings">
           <summary>Advanced settings</summary>
+        {config?.azure && <AzureSettings connection={config.azure} onSaved={load} />}
         {config?.decisionRouting && (
           <DecisionRoutingSettings routing={config.decisionRouting}
             onSaved={load} />

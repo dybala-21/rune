@@ -81,6 +81,10 @@ def resolve_target(model: str, provider: str | None = None, *, options: dict | N
         extra = vertex_options(name, extra)
         wire = f"vertex_ai/{name}"
         provider = "gemini"
+    elif provider == "azure":
+        from rune.llm.azure import connection_options
+        extra = connection_options(extra)
+        wire = f"azure/{name}"
     else:
         wire = name if provider == "openai" and not separator else f"{provider}/{name}"
     if provider != "ollama":

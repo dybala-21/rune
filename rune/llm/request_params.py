@@ -103,6 +103,9 @@ async def compatible_completion(
     routed = False
     if capabilities.responses_api or needs_responses_api(key) or "/responses/" in model:
         routed = _route_responses(params)
+    if routed and params.get("stream") and model.startswith("azure/"):
+        from rune.llm.azure import register_streaming
+        register_streaming(model)
     # Each compatible correction can happen once: endpoint, token cap, temperature.
     retries_left = 3
     while True:

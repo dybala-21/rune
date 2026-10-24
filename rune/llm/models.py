@@ -156,16 +156,6 @@ XAI_MODELS: list[ModelInfo] = [
     ModelInfo(id=name, provider="xai", label=name) for name in XAI_MODEL_IDS
 ]
 
-# Azure OpenAI (user deploys their own model names)
-
-AZURE_MODELS: list[ModelInfo] = [
-    # Azure uses deployment names, but these are common defaults
-    ModelInfo(id="gpt-4o", provider="azure", label="Azure GPT-4o"),
-    ModelInfo(id="gpt-4", provider="azure", label="Azure GPT-4"),
-    ModelInfo(id="gpt-4-turbo", provider="azure", label="Azure GPT-4 Turbo"),
-    ModelInfo(id="gpt-35-turbo", provider="azure", label="Azure GPT-3.5 Turbo"),
-]
-
 # Mistral
 
 MISTRAL_MODELS: list[ModelInfo] = [
@@ -198,7 +188,6 @@ COHERE_MODELS: list[ModelInfo] = [
 _STATIC_PROVIDER_MODELS: dict[str, list[ModelInfo]] = {
     "anthropic": ANTHROPIC_MODELS,
     "gemini":    GEMINI_MODELS,
-    "azure":     AZURE_MODELS,
     "mistral":   MISTRAL_MODELS,
     "deepseek":  DEEPSEEK_MODELS,
     "cohere":    COHERE_MODELS,
@@ -322,6 +311,10 @@ async def get_available_models() -> list[ModelInfo]:
         if _has_provider_key(provider_id):
             models.extend(provider_models)
 
+    if _has_provider_key("azure"):
+        from rune.llm.azure import deployment_names
+        models.extend(ModelInfo(id=name, provider="azure", label=name) for name in deployment_names())
+
     if _has_provider_key("xai"):
         from rune.llm.xai import available_model_ids
         fetched = await available_model_ids()
@@ -391,16 +384,16 @@ def known_models() -> list[tuple[str, str]]:
         ANTHROPIC_MODELS,
         GEMINI_MODELS,
         XAI_MODELS,
-        AZURE_MODELS,
         MISTRAL_MODELS,
         DEEPSEEK_MODELS,
         COHERE_MODELS,
     ):
         for m in group:
             result.append((m.provider, m.id))
-    # Imported here, not at module scope: client pulls in httpx and the
-    # provider SDKs, and this module is imported by things that never need them.
+    # Delay imports so callers that only need metadata do not load the provider SDKs.
+    from rune.llm.azure import deployment_names
     from rune.llm.client import installed_ollama_models
 
+    result.extend(("azure", name) for name in deployment_names())
     result.extend(("ollama", name) for name in installed_ollama_models())
     return result

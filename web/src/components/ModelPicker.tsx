@@ -24,7 +24,7 @@ export function ModelPicker({ active }: { active: ActiveModel }) {
   };
   const onOpen = () => {
     setSelProvider(shown.provider);
-    if (!Object.keys(providers).length) loadModels();
+    loadModels();
   };
   const pickModel = async (provider: string, model: string, close: () => void) => {
     if (busy) return;
@@ -33,8 +33,8 @@ export function ModelPicker({ active }: { active: ActiveModel }) {
       await setActiveModel(provider, model);
       setOverride({ provider, model, source: 'active' });
       close();
-    } catch {
-      toast.error("Couldn't switch model");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Couldn't switch model");
     } finally {
       setBusy(false);
     }
