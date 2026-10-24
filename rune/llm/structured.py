@@ -35,7 +35,9 @@ def _format_type(model: str) -> str | None:
 
 
 def supported_format(model: str, requested: dict) -> dict | None:
-    kind = _format_type(model)
+    from rune.llm.azure import GPT6_MODELS, capability_model
+    model = capability_model(model)
+    kind = "json_schema" if model.removeprefix("openai/") in GPT6_MODELS else _format_type(model)
     return requested if kind == "json_schema" else {"type": kind} if kind else None
 
 

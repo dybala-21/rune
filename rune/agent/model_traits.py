@@ -34,6 +34,15 @@ _STATIC: tuple[tuple[tuple[str, ...], ModelTraits], ...] = (
     (("gpt-6-astra",), ModelTraits(
         temperature=False, max_completion_tokens=True, responses_api=True, vision=True,
     )),
+    (("gpt-6.1-sol",), ModelTraits(
+        temperature=False, max_completion_tokens=True, responses_api=True, vision=True,
+    )),
+    (("gpt-6-sol",), ModelTraits(
+        temperature=False, max_completion_tokens=True, responses_api=True, vision=True,
+    )),
+    (("gpt-6-luna",), ModelTraits(
+        temperature=False, max_completion_tokens=True, responses_api=True, vision=True,
+    )),
     (("gpt-5.6",), ModelTraits(temperature=False, max_completion_tokens=True, responses_api=True)),
     (("gpt-5",), ModelTraits(temperature=False)),
 )
@@ -46,7 +55,8 @@ _RESPONSES_ONLY: set[Hashable] = set()
 
 def traits(model: str, *, cache_key: Hashable | None = None) -> ModelTraits:
     """Combine model settings with rejections observed for this request context."""
-    m = (model or "").lower()
+    from rune.llm.azure import capability_model
+    m = capability_model(model or "").lower()
     found = _DEFAULT
     for needles, entry in _STATIC:
         if all(n in m for n in needles):
@@ -63,13 +73,11 @@ def traits(model: str, *, cache_key: Hashable | None = None) -> ModelTraits:
     return found
 
 
-@lru_cache(maxsize=256)
 def supports_reasoning_effort(model: str) -> bool:
     """Reasoning capability alone does not imply an adjustable effort."""
     return bool(reasoning_efforts(model))
 
 
-@lru_cache(maxsize=256)
 def reasoning_efforts(model: str) -> tuple[str, ...]:
     return reasoning_control(model).efforts
 
@@ -79,12 +87,17 @@ def effective_reasoning_effort(model: str, configured: str | None) -> str | None
     return configured if configured in reasoning_efforts(model) else None
 
 
-@lru_cache(maxsize=256)
 def supports_vision(model: str) -> bool:
     """Use confirmed model traits when the SDK's catalog has not caught up."""
     declared = traits(model).vision
     if declared is not None:
         return declared
+    from rune.llm.azure import capability_model
+    return _sdk_supports_vision(capability_model(model))
+
+
+@lru_cache(maxsize=256)
+def _sdk_supports_vision(model: str) -> bool:
     try:
         import litellm
         return bool(litellm.supports_vision(model=model))

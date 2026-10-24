@@ -9,6 +9,7 @@ from __future__ import annotations
 from rune.agent.model_traits import (
     _TEMPERATURE_REJECTED,
     ModelTraits,
+    _sdk_supports_vision,
     note_temperature_rejected,
     supports_vision,
     traits,
@@ -23,13 +24,13 @@ def test_unknown_models_get_bare_defaults():
 
 def test_current_browser_models_keep_vision_when_the_sdk_catalog_is_stale(monkeypatch):
     monkeypatch.setattr("litellm.supports_vision", lambda **kwargs: False)
-    supports_vision.cache_clear()
+    _sdk_supports_vision.cache_clear()
     try:
         for model in ("gpt-6-astra", "openai/gpt-6-astra", "claude-opus-5", "anthropic/claude-opus-5"):
             assert supports_vision(model)
         assert not supports_vision("ollama/text-only-model")
     finally:
-        supports_vision.cache_clear()
+        _sdk_supports_vision.cache_clear()
 
 
 def test_specific_family_wins_over_general():

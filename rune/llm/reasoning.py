@@ -26,9 +26,14 @@ class ReasoningControl:
 
 # Exact model IDs; a newer sibling does not inherit another model's API contract.
 # https://developers.openai.com/api/docs/models/gpt-6-astra
+# https://developers.openai.com/api/docs/models/gpt-6-sol
+# https://developers.openai.com/api/docs/models
 # https://developers.openai.com/api/docs/models/gpt-5.6-sol
 # https://developers.openai.com/api/docs/models/gpt-5.3-codex
 _OPENAI = {
+    "gpt-6.1-sol": ReasoningControl(_EXTENDED, "responses"),
+    "gpt-6-sol": ReasoningControl(("none", *_EXTENDED), "responses"),
+    "gpt-6-luna": ReasoningControl(("none", *_EXTENDED), "responses"),
     "gpt-6-astra": ReasoningControl(_EXTENDED, "responses"),
     "gpt-5.6-sol": ReasoningControl(("none", *_EXTENDED), "responses"),
     "gpt-5.6": ReasoningControl(("none", *_EXTENDED), "responses"),
@@ -79,8 +84,13 @@ def reasoning_model_key(model: str) -> str:
     return f"{provider}/{name}"
 
 
-@lru_cache(maxsize=256)
 def reasoning_control(model: str) -> ReasoningControl:
+    from rune.llm.azure import capability_model
+    return _reasoning_control(capability_model(model))
+
+
+@lru_cache(maxsize=256)
+def _reasoning_control(model: str) -> ReasoningControl:
     provider, name = reasoning_model_key(model).split("/", 1)
     if provider == "xai":
         from rune.llm.xai import REASONING, model_name

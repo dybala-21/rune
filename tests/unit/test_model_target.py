@@ -79,15 +79,15 @@ def test_run_settings_and_region_do_not_change_mid_run(monkeypatch):
 def test_new_xai_model_uses_supported_sdk_metadata(monkeypatch):
     import litellm
 
-    from rune.llm.reasoning import reasoning_control
-    reasoning_control.cache_clear()
+    from rune.llm.reasoning import _reasoning_control, reasoning_control
+    _reasoning_control.cache_clear()
     monkeypatch.setattr(litellm, 'get_supported_openai_params', lambda **_: ['reasoning_effort'])
     monkeypatch.setattr(litellm, 'get_model_info', lambda *_: {'supports_low_reasoning_effort': True})
     try:
         control = reasoning_control('xai/grok-contract-fixture')
         assert control.efforts == ('low',) and control.wire == 'xai'
     finally:
-        reasoning_control.cache_clear()
+        _reasoning_control.cache_clear()
 
 
 async def test_initial_routing_reuses_file_roles_without_an_extra_request(monkeypatch):

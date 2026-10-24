@@ -488,6 +488,16 @@ export interface RunLimits {
 }
 
 export interface ConfigInfo {
+  azure?: {
+    endpoint: string;
+    endpointKey: string;
+    endpointScope: 'user' | 'project' | 'process' | null;
+    hasKey: boolean;
+    keyName: string;
+    keyScope: 'user' | 'project' | 'process' | null;
+    deployments: Record<string, string>;
+    suggestedModels: string[];
+  };
   vertexLocation?: string | null;
   runLimits?: RunLimits;
   executionEnvironment?: { backend: 'local' | 'container'; image: string; allowNetwork: boolean; managed?: boolean };
@@ -544,6 +554,7 @@ export async function fetchConfig(): Promise<ConfigInfo> {
 }
 
 export async function patchConfig(params: {
+  azureDeployments?: Record<string, string>;
   vertexLocation?: string;
   runLimits?: Partial<RunLimits>;
   executionEnvironment?: { backend?: 'local' | 'container'; image?: string };

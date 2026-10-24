@@ -7,16 +7,14 @@ from rune.agent.model_traits import (
     reasoning_efforts,
     supports_reasoning_effort,
 )
-from rune.llm.reasoning import configured_reasoning_effort, reasoning_control
+from rune.llm.reasoning import _reasoning_control, configured_reasoning_effort
 
 
 @pytest.fixture(autouse=True)
 def clear_metadata_cache():
-    for fn in (supports_reasoning_effort, reasoning_efforts, reasoning_control):
-        fn.cache_clear()
+    _reasoning_control.cache_clear()
     yield
-    for fn in (supports_reasoning_effort, reasoning_efforts, reasoning_control):
-        fn.cache_clear()
+    _reasoning_control.cache_clear()
 
 
 @pytest.mark.parametrize('model, choices', [

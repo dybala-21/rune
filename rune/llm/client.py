@@ -255,6 +255,10 @@ class LLMClient:
         tier_models = getattr(models_config, provider.value, models_config.ollama)
         resolved = getattr(tier_models, tier, tier_models.best)
 
+        if provider == Provider.AZURE:
+            from rune.llm.azure import tier_deployment
+            return tier_deployment(resolved)
+
         # Check installed local models before falling back to a tier default.
         if provider == Provider.OLLAMA:
             refresh_ollama_installed_sync()

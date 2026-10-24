@@ -49,6 +49,9 @@ def get_effective_model_selection() -> ActiveModelSelection:
     # Resolve default model for the provider
     provider_models = getattr(llm_cfg.models, provider.value, None)
     default_model = getattr(provider_models, "best", "unknown") if provider_models else "unknown"
+    if provider == Provider.AZURE:
+        from rune.llm.azure import tier_deployment
+        default_model = tier_deployment(default_model)
 
     return ActiveModelSelection(provider=provider, model=default_model)
 

@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 from rune.llm.reasoning import ReasoningEffort, reasoning_model_key
 
 # LLM Configuration
+
+AzureModelName = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")]
+AzureDeployments = dict[AzureModelName, AzureModelName]
 
 class ModelsByTier(BaseModel):
     best: str = "gpt-6-astra"
@@ -38,8 +41,8 @@ class ProviderModels(BaseModel):
     azure: ModelsByTier = Field(
         default_factory=lambda: ModelsByTier(
             best="gpt-6-astra",
-            coding="gpt-5.3-codex",
-            fast="gpt-5.4-mini",
+            coding="gpt-6.1-sol",
+            fast="gpt-6-luna",
         )
     )
     # Installed local models take precedence over these fallback names.
@@ -73,6 +76,7 @@ class LLMConfig(BaseModel):
     escalation_provider: str | None = Field(default=None, alias="escalationProvider")
     escalation_model: str | None = Field(default=None, alias="escalationModel")
     models: ProviderModels = Field(default_factory=ProviderModels)
+    azure_deployments: AzureDeployments = Field(default_factory=dict, alias="azureDeployments")
     decision_routing: DecisionRoutingConfig = Field(
         default_factory=DecisionRoutingConfig, alias="decisionRouting",
     )
