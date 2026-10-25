@@ -21,7 +21,7 @@ class BrowserExtractParams(BaseModel):
     selector: str = Field(description="Current element ref or CSS selector. Accessibility roles such as spinbutton/status are not HTML tag names; use the observed ref or a real CSS selector.")
     attribute: str = Field(
         default="",
-        description="HTML attribute to extract (empty for text content). value is the original attribute, not the live form value; use browser_observe for current input values.",
+        description="HTML attribute such as href or src (empty for text); DOM properties such as outerHTML are not attributes. value is the original attribute, not the live form value; use browser_observe for current input values.",
     )
 
 
@@ -114,6 +114,17 @@ async def browser_extract(params: BrowserExtractParams) -> CapabilityResult:
                 text = await el.inner_text()
                 if text.strip():
                     values.append(text.strip())
+
+        if not values:
+            detail = (f"Matched {len(elements)} element(s), but none has the HTML attribute {params.attribute!r}. "
+                      "DOM properties such as outerHTML are not HTML attributes."
+                      if params.attribute else f"Matched {len(elements)} element(s), but they contain no readable text.")
+            return CapabilityResult(
+                success=False,
+                error=detail + " Use browser_observe to inspect the page, or extract a known attribute such as iframe src.",
+                metadata={"selector": params.selector, "attribute": params.attribute, "count": 0,
+                          "matched_count": len(elements), "empty_content": True},
+            )
 
         return CapabilityResult(
             success=True,

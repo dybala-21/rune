@@ -221,7 +221,7 @@ def test_corrected_answer_clears_old_figures_even_after_nudge_budget(monkeypatch
     from rune.agent.loop import NativeAgentLoop
 
     monkeypatch.setenv("RUNE_OUTPUT_INTEGRITY", "1")
-    loop = object.__new__(NativeAgentLoop)
+    loop = NativeAgentLoop()
     loop._step = 1
     loop._output_integrity_fired = nudges
     loop._unsourced_numbers = []

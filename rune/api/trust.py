@@ -38,6 +38,7 @@ def build_trust_payload(trace: Any) -> dict[str, Any]:
         "budgetExhausted": (bool(getattr(trace, "tool_budget_exhausted", False))
                             or bool((getattr(trace, "timings", None) or {}).get("budgetBlocked"))
                             or reason == "request_budget_exhausted"),
+        "answerReserveReason": getattr(trace, "answer_reserve_reason", "") or "",
         "testsPassedAfterEdit": getattr(trace, "tests_passed_after_edit", None),
         "verification": getattr(trace, "verification", None),
         "explanationReview": getattr(trace, "explanation_review", None),

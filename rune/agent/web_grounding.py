@@ -46,9 +46,16 @@ class WebGrounding:
             else:
                 self.records.complete = False
 
-    def snapshot(self, answer: str) -> dict:
+    def snapshot(self, answer: str, request: str = "") -> dict:
         review = self.records.review(answer) if self.check_records else SourceReview()
-        return {**review.snapshot(), "freshSources": self.sources, "reusedSources": self.reused_sources}
+        return {**review.snapshot(), "freshSources": self.sources, "reusedSources": self.reused_sources,
+                "excerptOnlyNumbers": self.excerpt_only_numbers(answer, request)}
+
+    def excerpt_only_numbers(self, answer: str, request: str = "") -> list[str]:
+        if not self.requires_page:
+            return []
+        values = (numeric_literals(answer) & self.excerpt_values) - self.page_values - numeric_literals(request)
+        return [str(value) for value in sorted(values)[:8]]
 
     def observe(self, name: str, params: dict, result: CapabilityResult) -> bool:
         metadata = result.metadata or {}
@@ -80,28 +87,33 @@ class WebGrounding:
                     return False
             except ValueError:
                 return False
+        body = result.output or ""
+        if name != "web_search":
+            offset = metadata.get("body_offset", 0)
+            if type(offset) is not int or not 0 <= offset <= len(body):
+                return False
+            body = body[offset:]
+            if not body.strip():
+                return False
         self.sources += 1
         self.pages += int(name != "web_search")
         if name != "web_search":
             import hashlib
 
-            offset = metadata.get("body_offset", 0)
-            valid_offset = type(offset) is int and 0 <= offset <= len(result.output or "")
-            body = (result.output or "")[offset:] if valid_offset else ""
             source_url = metadata.get("url") or params.get("url") or ""
             source_id = hashlib.sha256((str(source_url) + "\n" + body).encode()).hexdigest()
             # Aggregates are computed results, not fields copied from the response.
             if ("json" in metadata.get("content_type", "").lower()
-                    and valid_offset and not metadata.get("truncated") and _original_fields(metadata.get("record_query"))):
+                    and not metadata.get("truncated") and _original_fields(metadata.get("record_query"))):
                 self.records.observe(body, source_id)
             else:
                 self.records.complete = False
             # Browser and connector snapshots may depend on permissions that later expire.
-            if name == "web_fetch" and valid_offset and not metadata.get("truncated"):
+            if name == "web_fetch" and not metadata.get("truncated"):
                 self.context.capture(source_url, body, metadata.get("content_type", "text/plain"),
                                      query=metadata.get("record_query"))
         if self.requires_page:
-            values = numeric_literals(result.output or "")
+            values = numeric_literals(body)
             (self.excerpt_values if name == "web_search" else self.page_values).update(values)
         return True
 
@@ -118,15 +130,7 @@ class WebGrounding:
                 "and check the observation date before reporting current values. A search freshness filter does "
                 "not date the underlying facts. Do not repeat unverified prices or readings in the answer."
             )
-        if self.requires_page and answer:
-            unsupported = (numeric_literals(answer) & self.excerpt_values) - self.page_values - numeric_literals(request)
-            if unsupported:
-                return (
-                    "These numbers occur in indexed search excerpts but not in any source page/API read in this run: "
-                    + ", ".join(str(value) for value in sorted(unsupported)[:8]) + ". Opening a page without those observations does not verify them. "
-                    "Try another relevant source within the tool budget. Do not present these numbers as current; "
-                    "omit unresolved values and state the limitation instead of asking the user to supply an already available URL."
-                )
+        # A numeric mention alone cannot distinguish an assertion from a caveat.
         if self.sources or self.reused_sources:
             return None
         return (

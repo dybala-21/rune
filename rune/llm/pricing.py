@@ -81,14 +81,41 @@ def rates_for(model: str) -> Rates | None:
     return _RATES.get(key)
 
 
+def _request_rates(model: str, request: dict) -> Rates | None:
+    if not model.startswith("azure/"):
+        return None if request.get("api_base") or request.get("base_url") else rates_for(model)
+
+    from urllib.parse import urlsplit
+
+    from rune.llm.azure import capability_model, endpoint
+    from rune.llm.context import llm_settings
+
+    profile = llm_settings().azure_pricing
+    base = str(request.get("api_base") or request.get("base_url") or endpoint()).rstrip("/").removesuffix("/openai/v1")
+    if profile is None or base != profile.endpoint:
+        return None
+    hostname = urlsplit(base).hostname or ""
+    if not hostname.endswith((".openai.azure.com", ".cognitiveservices.azure.com", ".services.ai.azure.com")):
+        return None
+    deployment = model.removeprefix("azure/").removeprefix("responses/")
+    factor = {"global": 1.0, "us": 1.1, "eu": 1.2}.get(profile.deployments.get(deployment))
+    # Published Standard rates; provisioned and priority deployments remain unpriced.
+    # https://azure.microsoft.com/en-us/blog/gpt-6-astra-sol-and-luna-for-production-agents-in-microsoft-foundry/
+    rate = {"openai/gpt-6-astra": (10, 50, 1, 12.5), "openai/gpt-6-sol": (2, 10, .2, 2.5),
+            "openai/gpt-6-luna": (.1, .5, .01, .125)}.get(capability_model(model))
+    if factor is None or rate is None:
+        return None
+    return Rates(*(value * factor for value in rate), long_above=272000, long_output_factor=1.5)
+
+
 def estimate_request_cost(model: str, usage: dict, request: dict | None = None) -> float | None:
     """Estimate token charges only; unknown rates or usage return None."""
     request = {**(request or {}), **((request or {}).get("extra_body") or {})}
     source = request.get("_rune_source_model", model)
     if source.partition("/")[0] in _LOCAL:
         return 0.0
-    rates = rates_for(model)
-    if rates is None or request.get("api_base") or request.get("base_url"):
+    rates = _request_rates(model, request)
+    if rates is None:
         return None
     if request.get("service_tier") not in (None, "auto", "default", "standard"):
         return None
@@ -102,7 +129,7 @@ def estimate_request_cost(model: str, usage: dict, request: dict | None = None) 
     key = model_key(model)
     if model.startswith("vertex_ai/") and key.startswith("gemini/gemini-3") and request.get("vertex_location") != "global":
         return None
-    if key == "openai/gpt-6-astra" and not usage.get("cache_write_reported"):
+    if (key == "openai/gpt-6-astra" or model.startswith("azure/")) and not usage.get("cache_write_reported"):
         return None
     factor = 1.0
     if request.get("speed") == "fast":
@@ -139,7 +166,7 @@ def reserve_request_cost(params: dict, input_tokens: int, output_tokens: int) ->
     uncached = estimate_request_cost(params["model"], usage, params)
     if uncached is None:
         return None
-    rates = rates_for(params["model"])
+    rates = _request_rates(params["model"], params)
     if rates is None or rates.write is None:
         return uncached
 

@@ -77,6 +77,50 @@ def test_answer_reserve_uses_parent_budget_and_calibrated_input(monkeypatch):
         assert needs_answer_reserve(params, 10000)
 
 
+@pytest.mark.parametrize("cost", [None, .018])
+def test_answer_reserve_does_not_charge_the_final_reply_for_unused_tools(monkeypatch, cost):
+    from rune.agent.timing import needs_answer_reserve
+
+    monkeypatch.setattr("rune.agent.request_budget.input_estimate", lambda p: 5000 if p.get("tools") else 500)
+    params = {"model": "xai/grok-4.7", "messages": [], "tools": [{"type": "function"}], "max_tokens": 100}
+    answer = {key: value for key, value in params.items() if key != "tools"}
+    with capture_timing(owner(tokens=8500, cost=cost)):
+        assert needs_answer_reserve(params, 8500)
+        assert not needs_answer_reserve(params, 8500, answer_params=answer)
+        assert needs_answer_reserve(params, 6000, answer_params=answer)
+
+
+def test_final_reservation_keeps_parent_limits_and_tool_result_growth(monkeypatch):
+    from rune.agent.timing import needs_answer_reserve
+
+    monkeypatch.setattr("rune.agent.request_budget.input_estimate", lambda p: 5000 if p.get("tools") else
+                        4000 if any(m.get("role") == "tool" for m in p.get("messages", [])) else 500)
+    params = {"model": "xai/grok-4.7", "messages": [], "tools": [{}], "max_tokens": 100}
+    answer = {"model": params["model"], "messages": [], "max_tokens": 100}
+    with capture_timing(owner(tokens=8500)), capture_timing(owner(tokens=20000)):
+        assert not needs_answer_reserve(params, 20000, answer_params=answer)
+        params["messages"] = [{"role": "tool", "content": "large result"}]
+        assert needs_answer_reserve(params, 20000, answer_params=answer)
+
+
+@pytest.mark.parametrize("guided", [False, True])
+def test_final_request_preserves_evidence_and_does_not_mutate_tool_request(guided):
+    from copy import deepcopy
+
+    from rune.agent.litellm_adapter import _answer_request
+
+    tools = [{"type": "function", "function": {"name": name}} for name in ("web_fetch", "task_blocked")]
+    params = {"model": "xai/grok-4.7", "messages": [{"role": "tool", "content": "verified notice HQ-217"}],
+              "tools": tools, "tool_choice": "required", "max_tokens": 1024}
+    original = deepcopy(params)
+    answer = _answer_request(params, tools, "budget", guided=guided)
+    assert params == original
+    assert answer["messages"][:-1] == params["messages"] and answer["max_tokens"] == 1024
+    assert "web_fetch" not in str(answer.get("tools") or answer.get("response_format"))
+    assert "task_blocked" in str(answer.get("tools") or answer.get("response_format"))
+    assert "uncertain research findings alone are not a blocker" in answer["messages"][-1]["content"]
+
+
 @pytest.mark.parametrize("model", ["openai/gpt-5.4", "xai/grok-4.7", "gemini/gemini-3.1-pro-preview",
                                    "anthropic/claude-sonnet-4-5", "ollama/qwen3"])
 @pytest.mark.parametrize("trigger", ["rounds", "tokens", "calls", "deadline"])
@@ -126,6 +170,8 @@ async def test_lookup_finishes_with_sources_before_the_limit(monkeypatch, model,
     assert len(requests) == 2
     assert await stream.get_output() == "The retrieved value is 120; its date is unverified."
     assert not stream.tool_budget_exhausted
+    assert stream.answer_reserve_reason == {"rounds": "tool_rounds", "deadline": "time"}.get(trigger, "budget")
+    assert "describe evidence gaps, not runtime limits" in requests[-1]["messages"][-1]["content"]
 
 
 @pytest.mark.parametrize("reply", ["tool", "text_tool", "empty", "truncated"])
@@ -159,7 +205,8 @@ async def test_answer_reserve_cannot_restart_tools_or_claim_truncated_completion
 
 
 @pytest.mark.parametrize("guided", [False, True])
-async def test_reserved_answer_can_report_missing_facts_without_another_call(monkeypatch, guided):
+@pytest.mark.parametrize("blocked", [False, True])
+async def test_reserved_answer_can_report_missing_facts_without_another_call(monkeypatch, guided, blocked):
     import json
 
     from rune.capabilities.blocked import TaskBlockedParams, consume_block, task_blocked
@@ -179,6 +226,7 @@ async def test_reserved_answer_can_report_missing_facts_without_another_call(mon
 
     stream._tool_lookup["task_blocked"] = report
     requests = []
+    answer = "Official maintenance notices are available; current player counts are unknown."
 
     async def completion(**kwargs):
         requests.append(kwargs)
@@ -189,9 +237,12 @@ async def test_reserved_answer_can_report_missing_facts_without_another_call(mon
             if not guided:
                 assert [tool["function"]["name"] for tool in kwargs["tools"]] == ["task_blocked"]
             assert "Rune runtime limit (tool rounds)" in kwargs["messages"][-1]["content"]
-            args = {"reason": "The source has no current value or observation time."}
-            chunks = [_chunk(json.dumps({"tool": "task_blocked", "arguments": args}), finish="stop")] if guided else [
-                _chunk(tool_calls=_tc("task_blocked", json.dumps(args)), finish="tool_calls")]
+            if blocked:
+                args = {"reason": "The source has no current value or observation time."}
+                chunks = [_chunk(json.dumps({"tool": "task_blocked", "arguments": args}), finish="stop")] if guided else [
+                    _chunk(tool_calls=_tc("task_blocked", json.dumps(args)), finish="tool_calls")]
+            else:
+                chunks = [_chunk(json.dumps({"final": answer}) if guided else answer, finish="stop")]
 
         async def response():
             for chunk in chunks:
@@ -201,8 +252,11 @@ async def test_reserved_answer_can_report_missing_facts_without_another_call(mon
     monkeypatch.setattr("litellm.acompletion", completion)
     async for _ in stream.stream_text():
         pass
-    assert len(requests) == 2 and stream._task_blocked
-    assert "no current value" in await stream.get_output()
+    assert len(requests) == 2 and bool(stream._task_blocked) is blocked
+    if blocked:
+        assert "no current value" in await stream.get_output()
+    else:
+        assert await stream.get_output() == answer
     assert not stream.tool_budget_exhausted
     consume_block()
 

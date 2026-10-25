@@ -43,8 +43,7 @@ function resultReadback(check?: RequirementAcceptanceInfo | null): RequirementAc
   return check?.independentReadback ?? check?.components?.map(resultReadback).find(Boolean);
 }
 
-/** The chat card, progress pane and status indicator use the same verdict. */
-export function describeTrust(trust: TrustInfo): TrustPresentation {
+function describeCompletion(trust: TrustInfo): TrustPresentation {
   const completion = completionStatus(trust);
   const verification = verificationStatus(trust);
   const required = trust.verificationRequired ?? (Boolean(trust.verification?.required)
@@ -179,6 +178,26 @@ export function describeTrust(trust: TrustInfo): TrustPresentation {
     ...base, title: 'Completed', note: 'Result verification was not performed.',
     tone: 'neutral', glyph: '✓', ok: true, showCard: Boolean(trust.artifactReceipts?.length || trust.changeReceipts?.length),
   };
+}
+
+/** The chat card, progress pane and status indicator use the same verdict. */
+export function describeTrust(trust: TrustInfo): TrustPresentation {
+  let presentation = describeCompletion(trust);
+  if (completionStatus(trust) === 'completed' && trust.sourceReview?.excerptOnlyNumbers?.length) {
+    presentation = { ...presentation, note: `${presentation.note} Some numbers appear only in search excerpts; their use in this answer was not checked.`,
+      tone: 'warning', showCard: true };
+  }
+  const reserveNote = {
+    budget: 'Further retrieval stopped to preserve the remaining request budget for this answer.',
+    time: 'Further retrieval stopped to leave time for this answer before the run deadline.',
+    tool_rounds: 'The tool-round limit was reached. This answer uses the sources already retrieved.',
+    '': '',
+  }[trust.answerReserveReason || ''];
+  if (!reserveNote || ['cancelled', 'interrupted', 'failed'].includes(completionStatus(trust))) return presentation;
+  if (presentation.title === 'Completed') {
+    return { ...presentation, title: 'Response returned', note: `${presentation.note} ${reserveNote}`, showCard: true, ok: null, glyph: '·' };
+  }
+  return { ...presentation, note: `${presentation.note} ${reserveNote}`, showCard: true };
 }
 
 export function checkEvidence(trust: TrustInfo): string {

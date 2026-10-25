@@ -13,6 +13,25 @@ from rune.llm.reasoning import ReasoningEffort, reasoning_model_key
 AzureModelName = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")]
 AzureDeployments = dict[AzureModelName, AzureModelName]
 
+
+class AzurePricingConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: str = Field(min_length=1, max_length=512)
+    deployments: dict[AzureModelName, Literal["global", "us", "eu"]] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_endpoint(self):
+        from urllib.parse import urlsplit
+
+        url = urlsplit(self.endpoint)
+        if (url.scheme != "https" or not url.hostname or url.username or url.password or url.query or url.fragment
+                or url.path.rstrip("/") not in {"", "/openai/v1"}):
+            raise ValueError("Azure pricing requires the resource's HTTPS endpoint.")
+        self.endpoint = self.endpoint.rstrip("/").removesuffix("/openai/v1")
+        return self
+
+
 class ModelsByTier(BaseModel):
     best: str = "gpt-6-astra"
     coding: str = "gpt-5.3-codex"
@@ -77,6 +96,7 @@ class LLMConfig(BaseModel):
     escalation_model: str | None = Field(default=None, alias="escalationModel")
     models: ProviderModels = Field(default_factory=ProviderModels)
     azure_deployments: AzureDeployments = Field(default_factory=dict, alias="azureDeployments")
+    azure_pricing: AzurePricingConfig | None = Field(default=None, alias="azurePricing")
     decision_routing: DecisionRoutingConfig = Field(
         default_factory=DecisionRoutingConfig, alias="decisionRouting",
     )

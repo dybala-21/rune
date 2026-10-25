@@ -160,6 +160,19 @@ class TestBuildSystemPrompt:
         prompt = build_system_prompt(goal="search news", goal_category="web")
         assert "Code Intelligence" not in prompt
 
+    @pytest.mark.parametrize("deep,lookup", [(False, True), (False, False), (True, False)])
+    def test_research_routes_share_selective_reading_and_coverage_guidance(self, deep, lookup):
+        classification = ClassificationResult(goal_type="research" if deep else "web", confidence=.99, tier=2,
+                                             needs_web_evidence=True, needs_current_source=True, lookup_only=lookup)
+        prompt = build_system_prompt("Research recent service notices", classification=classification,
+                                     goal_category="web", is_deep_research=deep)
+        assert prompt.count("Fetch selectively with a focused selector or a bounded maxLength") == 1
+        assert "retrieve the complete content when the user requests it" in prompt
+        assert prompt.count("relevant alternatives no longer resolve the remaining gaps") == 1
+        assert prompt.count("read the relevant frame URL before opening a browser") == 1
+        assert prompt.count("Do not add a calendar year to every discovery query") == 1
+        assert "maxLength=8000" not in prompt
+
     @pytest.mark.parametrize("category,lookup", [("chat", False), ("web", True), ("web", False)])
     def test_source_scope_guidance_survives_prompt_compaction(self, category, lookup):
         classification = ClassificationResult(goal_type=category, confidence=.99, tier=2,
@@ -430,6 +443,22 @@ class TestBuildContinuationPrompt:
     def test_contains_no_repeat_instruction(self):
         result = build_continuation_prompt(reason="more work needed")
         assert "Do NOT repeat" in result
+
+
+@pytest.mark.parametrize("category,lookup,deep", [
+    ("web", False, False), ("web", True, False), ("web", False, True), ("chat", False, False),
+])
+def test_source_caveat_policy_matches_normal_and_reserved_answers(category, lookup, deep):
+    from rune.agent.litellm_adapter import _answer_request
+    from rune.agent.prompts import SOURCE_GAP_GUIDANCE
+
+    classification = ClassificationResult(category, .99, 2, needs_web_evidence=True,
+                                         needs_current_source=True, lookup_only=lookup, browser_effect="view")
+    prompt = build_system_prompt("Read the current notices", classification, goal_category=category, is_deep_research=deep)
+    request = _answer_request({"messages": [{"role": "system", "content": prompt}]}, [], "budget")
+    assert "Omit unresolved numbers from search excerpts, even in caveats" in prompt
+    assert prompt.count(SOURCE_GAP_GUIDANCE) == 1
+    assert SOURCE_GAP_GUIDANCE in request["messages"][-1]["content"]
 
 
 @pytest.mark.asyncio

@@ -66,8 +66,7 @@ _HONEST_STOP_NOTES = {
         "later run passed. The changes are in place but unverified."
     ),
     "task_blocked": (
-        "Stopping: the task cannot be completed correctly as stated — see the "
-        "conflict described above. Nothing was forced through."
+        "The task cannot be completed yet. See the reported blocker above."
     ),
     "stalled": (
         "Stopping: I stopped making progress and won't claim a result I didn't "

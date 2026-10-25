@@ -104,6 +104,8 @@ export interface TrustInfo {
   } | null;
   /** A tool-round cap interrupted the step before its final answer. */
   budgetExhausted?: boolean;
+  /** Retrieval stopped early to leave room for the final answer. */
+  answerReserveReason?: 'budget' | 'time' | 'tool_rounds' | '';
   /** Test freshness after code changes; this does not establish task coverage. */
   testsPassedAfterEdit?: boolean | null;
   changeReceipts?: ChangeReceipt[];
@@ -129,6 +131,7 @@ export interface TrustInfo {
   workspaceWarning?: string;
   /** Figures absent from retrieved sources; derived or rounded values may still be valid. */
   unsourcedNumbers?: string[];
+  sourceReview?: { status: string; excerptOnlyNumbers?: string[] };
   evidenceGate?: {
     hasCheck: boolean;
     lastVerdict: string;

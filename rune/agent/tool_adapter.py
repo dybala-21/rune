@@ -860,8 +860,8 @@ def _format_tool_output(
             command = params.get("command", "")
             if isinstance(command, str):
                 parts.append(f"{BASH_CMD_PREFIX}{command}{BASH_EXIT_PREFIX}0]")
-        # Include fetched URLs only for opt-in citation support checks.
-        if cap_name == "web_fetch" and _env_flag("RUNE_CITATION_SUPPORT"):
+        # Cite the fetched frame, not its parent page.
+        if cap_name == "web_fetch" and (_env_flag("RUNE_CITATION_SUPPORT") or result.metadata.get("frame_path")):
             _src = ""
             if result.metadata and isinstance(result.metadata, dict):
                 _src = str(result.metadata.get("final_url")

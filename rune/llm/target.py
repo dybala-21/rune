@@ -95,3 +95,17 @@ def resolve_target(model: str, provider: str | None = None, *, options: dict | N
             if key := model_environment(key_name):
                 extra.setdefault("api_key", key)
     return ModelTarget(provider, name.removeprefix("responses/"), wire, tuple(extra.items()))
+
+
+def preflight_model(model: str, provider: str | None = None, *, cost_limit: float | None = None) -> ModelTarget:
+    """Check endpoint compatibility and budget support without making a request."""
+    target = resolve_target(model, provider)
+    if cost_limit is not None:
+        from rune.llm.pricing import request_price_known
+
+        if not request_price_known({**target.kwargs(), "_rune_source_model": target.key}):
+            raise ModelCompatibilityError(
+                "Pricing is unavailable for this model or endpoint. No request was sent; "
+                "the configured cost limit cannot be checked."
+            )
+    return target

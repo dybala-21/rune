@@ -49,6 +49,7 @@ from rune.agent.goal_classifier import (
     classify_goal,
     is_coding_task,
     is_simple_lookup,
+    is_web_research,
 )
 from rune.agent.intent_engine import resolve_intent_contract
 from rune.agent.litellm_adapter import LiteLLMAgent, UsageLimits
@@ -56,6 +57,7 @@ from rune.agent.output_integrity import (
     build_nudge,
     fabricated_citations,
     output_integrity_enabled,
+    retrieved_urls,
     unsourced_numbers,
 )
 from rune.agent.prompts import build_system_prompt
@@ -635,6 +637,7 @@ class NativeAgentLoop(EventEmitter):
         self._last_answer_text: str = ""  # latest final-answer text, for the gate's artifact
         self._task_evidence = None
         self._source_context = None
+        self._citation_urls: set[str] = set()
         self._task_context = None
         self._task_updates = False
         self._files_read: set[str] = set()
@@ -722,6 +725,7 @@ class NativeAgentLoop(EventEmitter):
         self._last_answer_text = ""
         self._task_evidence = None
         self._source_context = None
+        self._citation_urls.clear()
         self._task_context = None
         self._task_updates = False
         self._last_goal_type = ""
@@ -904,7 +908,7 @@ class NativeAgentLoop(EventEmitter):
         if self._output_integrity_fired >= 2:
             log.warning("output_integrity_budget_spent", step=self._step)
             return True, messages, blocked_count
-        bad = fabricated_citations(answer_text, messages)
+        bad = fabricated_citations(answer_text, messages, observed=self._citation_urls)
         if bad:
             self._output_integrity_fired += 1
             log.info("output_integrity_block", step=self._step, n=len(bad))
@@ -1099,6 +1103,12 @@ class NativeAgentLoop(EventEmitter):
                 log.warning("checkpoint_restore_failed", error=str(exc)[:100])
 
         try:
+            from rune.llm.model_selection import get_effective_model_selection
+            from rune.llm.target import preflight_model
+
+            selected = get_effective_model_selection()
+            preflight_model(selected.model, selected.provider, cost_limit=self._config.cost_budget_usd)
+
             # Step 1: Classify goal
             self._status = AgentStatus.THINKING
             await self.emit("status_change", self._status)
@@ -1688,6 +1698,9 @@ class NativeAgentLoop(EventEmitter):
         )
         web_grounding.restore(source_context)
         self._source_context = web_grounding.context
+        self._citation_urls.update(retrieved_urls([
+            {"role": "tool", "content": entry["url"]} for entry in source_context.entries
+        ]))
         from rune.agent.task_context import capture
 
         capture(self, (context or {}).get("original_goal") or goal, classification, original_history, CompletionTrace(reason="interrupted"))
@@ -1709,8 +1722,11 @@ class NativeAgentLoop(EventEmitter):
                 "Check that the retrieved content contains the requested observations and their dates; a page shell is not evidence. "
                 "Keep each observation with its own timestamp, units and scope (such as venue or location); do not mix records. "
                 "If they are missing, try a relevant alternative already found before ending the lookup; do not ask the user "
-                "to provide its URL. If required values or observation times remain unavailable, call task_blocked with the "
-                "missing facts and attempted sources. An inability explanation alone does not complete this lookup."
+                "to provide its URL. For a research overview, summarize supported findings with their actual dates and "
+                "separate unresolved current questions; sparse recent coverage is not an instruction conflict. "
+                "Do not label old information as current or infer closure, inactivity or user counts from missing sources. "
+                "Use task_blocked only when a concrete unmet prerequisite prevents the requested outcome, not merely "
+                "because some research findings remain uncertain."
             )
 
         # Initialize rehydration subsystem
@@ -1767,6 +1783,13 @@ class NativeAgentLoop(EventEmitter):
 
         async def _on_tool_end(cap_name: str, result: CapabilityResult) -> None:
             _last_tool_params = _tool_params.get() or {}
+            self._citation_urls.update(retrieved_urls([
+                {"role": "assistant", "tool_calls": [{"function": {
+                    "name": cap_name, "arguments": json.dumps(_last_tool_params, default=str),
+                }}]},
+                {"role": "tool", "content": result.output or result.error or ""},
+                {"role": "tool", "content": (result.metadata or {}).get("final_url", "") if cap_name == "web_fetch" else ""},
+            ]))
             self._test_claim_gate.observe(cap_name, _last_tool_params, result)
             previous_write = self._verification.last_write
             self._last_activity = time.monotonic()
@@ -2131,23 +2154,28 @@ class NativeAgentLoop(EventEmitter):
         )
         _explore_budget = _compute_explore_budget(classification, _repo_fix)
         simple_lookup = is_simple_lookup(classification)
-        reserve_answer = simple_lookup or classification.goal_type == "chat" and set(tools) <= {
+        reserve_answer = simple_lookup or is_web_research(classification) or classification.goal_type == "chat" and set(tools) <= {
             "think", "ask_user", "task_blocked", "memory_search", "memory_save", "web_search", "web_fetch",
         }
         from rune.agent.tool_catalog import deferred_for_task
 
         deferred_tools = deferred_for_task(tools, classification)
+        task_agent_options = {
+            "deferred_tools": deferred_tools,
+            "compact_tools": simple_lookup or is_web_research(classification) or classification.goal_type == "browser",
+            "reserve_answer": reserve_answer,
+            "default_reasoning_effort": "low" if simple_lookup or (
+                is_web_research(classification) and classification.complexity == "simple"
+            ) else None,
+        }
         agent = LiteLLMAgent(
             model=model,
             system_prompt=system_prompt,
             tools=list(tool_functions.values()),
-            deferred_tools=deferred_tools,
-            compact_tools=simple_lookup or classification.goal_type == "browser",
+            **task_agent_options,
             max_tool_rounds=_tool_rounds,
             extra_headers=_native_cfg.beta_headers,
             explore_budget=_explore_budget,
-            reserve_answer=reserve_answer,
-            default_reasoning_effort="low" if simple_lookup else None,
         )
 
         messages: list[Any] = []
@@ -2294,6 +2322,162 @@ class NativeAgentLoop(EventEmitter):
         _cap_upshift_pending = False
 
         for step in range(max_iterations):
+            # Keep current evidence until completion checks finish.
+            if step and not self._cancel_event.is_set():
+                rollover_phase = self._token_budget.rollover_phase
+                if rollover_phase >= 1 and 1 not in self._rollover_phase_done:
+                    try:
+                        ckpt = CheckpointManager()
+                        session_id = self._session_id or str(uuid.uuid4())[:8]
+                        self._session_id = session_id
+
+                        evidence_list = list(self._files_written) if self._files_written else []
+                        stall_summary = {
+                            "consecutive_no_progress": self._stall.consecutive_no_progress,
+                            "cumulative_no_progress": self._stall.cumulative_no_progress,
+                            "is_stalled": self._stall.is_stalled,
+                            "last_tool_call": self._stall.last_tool_call,
+                        }
+                        try:
+                            gate_input_snapshot = gate_input  # type: ignore[possibly-undefined]
+                        except NameError:
+                            gate_input_snapshot = None
+                        completion_progress: dict[str, Any] = {}
+                        if gate_input_snapshot:
+                            completion_progress = {
+                                "intent_resolved": gate_input_snapshot.intent_resolved,
+                                "changed_files_count": gate_input_snapshot.changed_files_count,
+                                "answer_length": gate_input_snapshot.answer_length,
+                            }
+
+                        ckpt_data = CheckpointData(
+                            session_id=session_id,
+                            step=self._step,
+                            goal=goal,
+                            token_usage=self._token_budget.used,
+                        )
+                        ckpt_data.tool_results = [
+                            {"evidence": evidence_list},
+                            {"changed_files": list(self._files_written)},
+                            {"stall_state": stall_summary},
+                            {"completion_progress": completion_progress},
+                        ]
+                        ckpt.save(ckpt_data)
+                        log.info("checkpoint_saved", step=self._step, phase=1)
+                    except Exception as exc:
+                        log.warning("checkpoint_save_failed", error=str(exc)[:100])
+                    self._rollover_phase_done.add(1)
+
+                if rollover_phase >= 2 and 2 not in self._rollover_phase_done:
+                    dynamic_cap = self._get_dynamic_context_cap()
+                    keep_count = max(3, int(FULL_WINDOW_MAX * dynamic_cap / 0.70))
+                    if messages and len(messages) > keep_count + 2:
+                        # Save originals so compacted messages can be restored.
+                        if self._rehydration_recorder is not None:
+                            to_compact = (
+                                messages[:-keep_count] if keep_count < len(messages) else []
+                            )
+                            if to_compact:
+                                try:
+                                    raw = [
+                                        m if isinstance(m, dict) else m.model_dump()
+                                        for m in to_compact
+                                    ]
+                                    await self._rehydration_recorder.record(
+                                        raw,
+                                        step_range=(max(0, self._step - len(raw)), self._step),
+                                        activity_phase=self._activity_phase,
+                                        compaction_event="phase_2_rollover",
+                                    )
+                                except Exception as exc:
+                                    log.debug("rehydration_record_p2_failed", error=str(exc)[:100])
+                        # Keep tool calls and their results together.
+                        messages = self._compact_messages_atomic(messages, keep_last=keep_count)
+                        log.info(
+                            "rollover_compacted",
+                            step=self._step,
+                            phase=2,
+                            msg_count=len(messages),
+                            dynamic_cap=dynamic_cap,
+                        )
+
+                    incomplete_reqs: list[str] = []
+                    try:
+                        gate_input_snapshot = gate_input  # type: ignore[possibly-undefined]
+                    except NameError:
+                        gate_input_snapshot = None
+                    if gate_input_snapshot is not None:
+                        rollover_gate_result = evaluate_completion_gate(gate_input_snapshot)
+                        # Nudge only requirements the gate explicitly marks missing.
+                        _blocking = set(
+                            rollover_gate_result.missing_requirement_ids
+                        )
+                        for req in rollover_gate_result.requirements:
+                            if req.id in _blocking:
+                                detail = req.failure_reason or req.description
+                                incomplete_reqs.append(f"{req.id}: {detail}")
+
+                    if incomplete_reqs:
+                        reqs_str = ", ".join(incomplete_reqs)
+                        resume_msg = (
+                            f"[Context rollover at step {self._step}] Previous context was compacted. "
+                            f"Incomplete requirements: [{reqs_str}]. "
+                            f"{len(self._files_written)} files modified. "
+                            f"Continue from where you left off, focusing on the incomplete requirements."
+                        )
+                    else:
+                        resume_msg = (
+                            f"[Context rollover at step {self._step}] Previous context was compacted. "
+                            f"{len(self._files_written)} files modified, "
+                            f"{self._stall.consecutive_no_progress} stall count. "
+                            f"Continue from where you left off."
+                        )
+                    messages = self._inject_system_message(messages, resume_msg)
+
+                    # Retain cache entries for the remaining context.
+                    if cache and hasattr(cache, "clear_older_than"):
+                        cache.clear_older_than(keep_count)
+                    elif cache and hasattr(cache, "access_order") and hasattr(cache, "entries"):
+                        if len(cache.access_order) > keep_count:
+                            stale_keys = cache.access_order[:-keep_count]
+                            for key in stale_keys:
+                                cache.entries.pop(key, None)
+                            cache.access_order = cache.access_order[-keep_count:]
+                            log.debug("cognitive_cache_partial_clear", removed=len(stale_keys))
+
+                    self._rollover_phase_done.add(2)
+
+                if rollover_phase >= 3 and 3 not in self._rollover_phase_done:
+                    # Near the budget limit, keep only the last three turns.
+                    if messages and len(messages) > 4:
+                        if self._rehydration_recorder is not None:
+                            to_compact = messages[:-3] if len(messages) > 3 else []
+                            if to_compact:
+                                try:
+                                    raw = [
+                                        m if isinstance(m, dict) else m.model_dump()
+                                        for m in to_compact
+                                    ]
+                                    await self._rehydration_recorder.record(
+                                        raw,
+                                        step_range=(max(0, self._step - len(raw)), self._step),
+                                        activity_phase=self._activity_phase,
+                                        compaction_event="phase_3_emergency",
+                                    )
+                                except Exception as exc:
+                                    log.debug("rehydration_record_p3_failed", error=str(exc)[:100])
+                        summary = f"[Emergency rollover] Context compacted at step {self._step}. Goal: '{goal[:100]}'"
+                        turns = _group_into_turns(messages)
+                        kept = turns[-3:] if len(turns) > 3 else turns
+                        messages = [{"role": "system", "content": summary}]
+                        for t in kept:
+                            messages.extend(t.messages)
+                        messages = _validate_tool_pairs(messages)
+                        log.warning(
+                            "emergency_rollover", step=self._step, phase=3, msg_count=len(messages)
+                        )
+                    self._rollover_phase_done.add(3)
+
             self._step = step + 1
             self._step_start_time = time.monotonic()
             _step_tool_calls.clear()
@@ -2344,7 +2528,7 @@ class NativeAgentLoop(EventEmitter):
                     model=model,
                     system_prompt=system_prompt,
                     tools=list(tool_functions.values()),
-                    deferred_tools=deferred_tools,
+                    **task_agent_options,
                     max_tool_rounds=_tool_rounds,
                     extra_headers=_native_cfg.beta_headers,
                     explore_budget=_explore_budget,
@@ -2476,7 +2660,7 @@ class NativeAgentLoop(EventEmitter):
                         model=model,
                         system_prompt=system_prompt,
                         tools=list(tool_functions.values()),
-                        deferred_tools=deferred_tools,
+                        **task_agent_options,
                         max_tool_rounds=_tool_rounds,
                         explore_budget=_explore_budget,
                     )
@@ -2493,7 +2677,7 @@ class NativeAgentLoop(EventEmitter):
                         model=model,
                         system_prompt=system_prompt,
                         tools=list(tool_functions.values()),
-                        deferred_tools=deferred_tools,
+                        **task_agent_options,
                         max_tool_rounds=_tool_rounds,
                         explore_budget=_explore_budget,
                     )
@@ -2510,7 +2694,7 @@ class NativeAgentLoop(EventEmitter):
                         model=model,
                         system_prompt=system_prompt,
                         tools=list(tool_functions.values()),
-                        deferred_tools=deferred_tools,
+                        **task_agent_options,
                         max_tool_rounds=_tool_rounds,
                         explore_budget=_explore_budget,
                     )
@@ -2601,6 +2785,7 @@ class NativeAgentLoop(EventEmitter):
                 # Expose tool-cap termination even when the model had no final turn to disclose it.
                 if getattr(result, "tool_budget_exhausted", False):
                     trace.tool_budget_exhausted = True
+                trace.answer_reserve_reason = getattr(result, "answer_reserve_reason", "")
 
                 # update token budget from usage stats
                 try:
@@ -2660,54 +2845,6 @@ class NativeAgentLoop(EventEmitter):
                     trace.final_step = self._step
                     break
 
-                # rollover / checkpoint handling
-                rollover_phase = self._token_budget.rollover_phase
-                if rollover_phase >= 1 and 1 not in self._rollover_phase_done:
-                    # Phase 1 (70%): Save structured checkpoint
-                    try:
-                        ckpt = CheckpointManager()
-                        session_id = self._session_id or str(uuid.uuid4())[:8]
-                        self._session_id = session_id
-
-                        # Build structured checkpoint with evidence
-                        evidence_list = list(self._files_written) if self._files_written else []
-                        stall_summary = {
-                            "consecutive_no_progress": self._stall.consecutive_no_progress,
-                            "cumulative_no_progress": self._stall.cumulative_no_progress,
-                            "is_stalled": self._stall.is_stalled,
-                            "last_tool_call": self._stall.last_tool_call,
-                        }
-                        try:
-                            gate_input_snapshot = gate_input  # type: ignore[possibly-undefined]
-                        except NameError:
-                            gate_input_snapshot = None
-                        completion_progress: dict[str, Any] = {}
-                        if gate_input_snapshot:
-                            completion_progress = {
-                                "intent_resolved": gate_input_snapshot.intent_resolved,
-                                "changed_files_count": gate_input_snapshot.changed_files_count,
-                                "answer_length": gate_input_snapshot.answer_length,
-                            }
-
-                        ckpt_data = CheckpointData(
-                            session_id=session_id,
-                            step=self._step,
-                            goal=goal,
-                            token_usage=self._token_budget.used,
-                        )
-                        # Attach structured metadata as tool_results
-                        ckpt_data.tool_results = [
-                            {"evidence": evidence_list},
-                            {"changed_files": list(self._files_written)},
-                            {"stall_state": stall_summary},
-                            {"completion_progress": completion_progress},
-                        ]
-                        ckpt.save(ckpt_data)
-                        log.info("checkpoint_saved", step=self._step, phase=1)
-                    except Exception as exc:
-                        log.warning("checkpoint_save_failed", error=str(exc)[:100])
-                    self._rollover_phase_done.add(1)
-
                 # update message history for next iteration
                 with contextlib.suppress(Exception):
                     messages = result.all_messages()
@@ -2734,122 +2871,6 @@ class NativeAgentLoop(EventEmitter):
                         })
                     log.info("cap_upshift_scheduled", step=self._step)
                     continue
-
-                if rollover_phase >= 2 and 2 not in self._rollover_phase_done:
-                    # Compact old messages using the phase-specific context cap.
-                    dynamic_cap = self._get_dynamic_context_cap()
-                    keep_count = max(3, int(FULL_WINDOW_MAX * dynamic_cap / 0.70))
-                    if messages and len(messages) > keep_count + 2:
-                        # Record originals before compaction (rehydration)
-                        if self._rehydration_recorder is not None:
-                            to_compact = (
-                                messages[:-keep_count] if keep_count < len(messages) else []
-                            )
-                            if to_compact:
-                                try:
-                                    raw = [
-                                        m if isinstance(m, dict) else m.model_dump()
-                                        for m in to_compact
-                                    ]
-                                    await self._rehydration_recorder.record(
-                                        raw,
-                                        step_range=(max(0, self._step - len(raw)), self._step),
-                                        activity_phase=self._activity_phase,
-                                        compaction_event="phase_2_rollover",
-                                    )
-                                except Exception as exc:
-                                    log.debug("rehydration_record_p2_failed", error=str(exc)[:100])
-                        # Use turn-atomic compaction to keep assistant+tool pairs together
-                        messages = self._compact_messages_atomic(messages, keep_last=keep_count)
-                        log.info(
-                            "rollover_compacted",
-                            step=self._step,
-                            phase=2,
-                            msg_count=len(messages),
-                            dynamic_cap=dynamic_cap,
-                        )
-
-                    # Inject rollover resume directive with incomplete requirements from completion gate
-                    incomplete_reqs: list[str] = []
-                    try:
-                        gate_input_snapshot = gate_input  # type: ignore[possibly-undefined]
-                    except NameError:
-                        gate_input_snapshot = None
-                    if gate_input_snapshot is not None:
-                        rollover_gate_result = evaluate_completion_gate(gate_input_snapshot)
-                        # Nudge only requirements the gate explicitly marks missing.
-                        _blocking = set(
-                            rollover_gate_result.missing_requirement_ids
-                        )
-                        for req in rollover_gate_result.requirements:
-                            if req.id in _blocking:
-                                detail = req.failure_reason or req.description
-                                incomplete_reqs.append(f"{req.id}: {detail}")
-
-                    if incomplete_reqs:
-                        reqs_str = ", ".join(incomplete_reqs)
-                        resume_msg = (
-                            f"[Context rollover at step {self._step}] Previous context was compacted. "
-                            f"Incomplete requirements: [{reqs_str}]. "
-                            f"{len(self._files_written)} files modified. "
-                            f"Continue from where you left off, focusing on the incomplete requirements."
-                        )
-                    else:
-                        resume_msg = (
-                            f"[Context rollover at step {self._step}] Previous context was compacted. "
-                            f"{len(self._files_written)} files modified, "
-                            f"{self._stall.consecutive_no_progress} stall count. "
-                            f"Continue from where you left off."
-                        )
-                    messages = self._inject_system_message(messages, resume_msg)
-
-                    # Cognitive cache partial clear on rollover
-                    if cache and hasattr(cache, "clear_older_than"):
-                        cache.clear_older_than(keep_count)
-                    elif cache and hasattr(cache, "access_order") and hasattr(cache, "entries"):
-                        # Manual partial clear: remove entries not accessed recently
-                        if len(cache.access_order) > keep_count:
-                            stale_keys = cache.access_order[:-keep_count]
-                            for key in stale_keys:
-                                cache.entries.pop(key, None)
-                            cache.access_order = cache.access_order[-keep_count:]
-                            log.debug("cognitive_cache_partial_clear", removed=len(stale_keys))
-
-                    self._rollover_phase_done.add(2)
-
-                if rollover_phase >= 3 and 3 not in self._rollover_phase_done:
-                    # Phase 3 (90%): Emergency rollover - aggressive compaction
-                    if messages and len(messages) > 4:
-                        # Record originals before emergency compaction (rehydration)
-                        if self._rehydration_recorder is not None:
-                            to_compact = messages[:-3] if len(messages) > 3 else []
-                            if to_compact:
-                                try:
-                                    raw = [
-                                        m if isinstance(m, dict) else m.model_dump()
-                                        for m in to_compact
-                                    ]
-                                    await self._rehydration_recorder.record(
-                                        raw,
-                                        step_range=(max(0, self._step - len(raw)), self._step),
-                                        activity_phase=self._activity_phase,
-                                        compaction_event="phase_3_emergency",
-                                    )
-                                except Exception as exc:
-                                    log.debug("rehydration_record_p3_failed", error=str(exc)[:100])
-                        summary = f"[Emergency rollover] Context compacted at step {self._step}. Goal: '{goal[:100]}'"
-                        turns = _group_into_turns(messages)
-                        kept = turns[-3:] if len(turns) > 3 else turns
-                        messages = [{"role": "system", "content": summary}]
-                        for t in kept:
-                            messages.extend(t.messages)
-                        messages = _validate_tool_pairs(messages)
-                        log.warning(
-                            "emergency_rollover", step=self._step, phase=3, msg_count=len(messages)
-                        )
-                    self._rollover_phase_done.add(3)
-
-                # Budget wind-down guidance is injected by _prepare_step.
 
                 # stall tracking
                 output_text = ""
@@ -2939,7 +2960,7 @@ class NativeAgentLoop(EventEmitter):
                 intent_contract = resolve_intent_contract(classification, classification.confidence)
                 if output_text and output_text.strip() and (blocker := web_grounding.blocker(output_text, goal)):
                     self._record_completion_block("Source retrieval", blocker)
-                    if web_grounding.repairs >= 1 or getattr(result, "answer_budget_reserved", False):
+                    if web_grounding.repairs >= 1 or trace.answer_reserve_reason:
                         trace.reason = "completed_gate_warnings"
                         trace.final_step = self._step
                         trace.completion_check = self._completion_check
@@ -3485,7 +3506,7 @@ class NativeAgentLoop(EventEmitter):
                             model=model,
                             system_prompt=system_prompt,
                             tools=list(tool_functions.values()),
-                            deferred_tools=deferred_tools,
+                            **task_agent_options,
                             explore_budget=_explore_budget,
                         )
                         log.info("agent_model_switched", model=model)
@@ -3637,7 +3658,7 @@ class NativeAgentLoop(EventEmitter):
             log.info("run_checks_failed", step=self._step)
 
         trace.total_tokens_used = self._token_budget.used
-        trace.source_review = web_grounding.snapshot(self._last_answer_text)
+        trace.source_review = web_grounding.snapshot(self._last_answer_text, goal)
         trace.requirement_acceptance = task_evidence.acceptance()
         self._finalize_browser_answer(trace)
         if trace.reason in {"completed", "verified"}:

@@ -13,6 +13,105 @@ from rune.types import AgentConfig, CapabilityResult
 from tests.unit.test_task_blocked import _astream, _delta
 
 
+@pytest.mark.parametrize("lookup", [True, False])
+@pytest.mark.parametrize("rebuild", [False, True])
+@pytest.mark.parametrize("provider,model", [("openai", "gpt-6-astra"), ("xai", "grok-4.7"),
+                                          ("anthropic", "claude-opus-5"), ("gemini", "gemini-3.1-pro-preview"),
+                                          ("azure", "gpt-6-astra")])
+async def test_frame_research_preserves_source_body_and_stops_without_an_extra_model_call(monkeypatch, tmp_path, lookup, rebuild, provider, model):
+    from types import SimpleNamespace
+
+    import httpx
+
+    from rune.agent.failover import LLMProfile
+    from rune.agent.request_budget import input_estimate
+    from rune.api.trust import build_trust_payload
+    from rune.capabilities.registry import _register_all_capabilities
+    from rune.config import get_config
+
+    for name, value in {"RUNE_HOME": str(tmp_path / "home"), "RUNE_IN_BEST_OF": "1", "RUNE_AUTO_SKILL": "0",
+                        "RUNE_AUTO_VERIFY": "0", "RUNE_REQUIREMENT_GATE": "0", "RUNE_ADVISOR": "0",
+                        "RUNE_BENCH_EVIDENCE_GATE": "0", "LITELLM_LOCAL_MODEL_COST_MAP": "True"}.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("RUNE_TOOL_ROUNDS", raising=False)
+    monkeypatch.setenv("VERTEX_LOCATION", "global")
+    monkeypatch.setenv("AZURE_API_BASE", "https://fixture.openai.azure.com")
+    monkeypatch.setenv("AZURE_API_KEY", "test-only")
+    get_config().llm.route_simple_queries = False
+    monkeypatch.setattr("rune.agent.failover.build_profiles_from_config", lambda: [
+        LLMProfile(name=model, provider=provider, model=model),
+    ])
+    monkeypatch.setattr("rune.agent.loop._compute_tool_rounds", lambda *args, **kwargs: 1)
+    pages = {
+        "/": '<frameset><frame src="/main"></frameset>',
+        "/main": '<table><tr><td><iframe src="/news"></iframe></td></tr></table>',
+        "/news": '<main>HQ-217: Login reopened on 2026-10-22. Player counts are unpublished.</main>'
+                 + ''.join(f'<iframe src="/ads/{i}"></iframe>' for i in range(20)),
+    }
+    reads, requests = [], []
+    checkpoints = []
+    monkeypatch.setattr("rune.agent.loop.CheckpointManager.save", lambda *args: checkpoints.append(True))
+
+    async def send(client, req, *args, **kwargs):
+        reads.append(req.url.path)
+        assert req.url.host == "research.example" and req.url.path in pages
+        return httpx.Response(200, text=pages[req.url.path], headers={"content-type": "text/html"}, request=req)
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    registry = CapabilityRegistry()
+    _register_all_capabilities(registry)
+    monkeypatch.setattr("rune.agent.tool_adapter.get_capability_registry", lambda: registry)
+    paths = list(pages)
+    answer = "HQ-217: Login reopened on 2026-10-22. Player counts are unpublished. https://research.example/news"
+
+    async def completion(**kwargs):
+        requests.append(kwargs)
+        step = len(requests)
+        assert step <= 2
+        usage = SimpleNamespace(choices=[], usage={"prompt_tokens": 22_000 if rebuild else input_estimate(kwargs),
+                                                  "completion_tokens": 100})
+        if step == 1:
+            assert {tool["function"]["name"] for tool in kwargs["tools"]} == {
+                "web_search", "web_fetch", "task_blocked", "tool_search",
+            }
+            return _astream([_delta(tool_calls=[{"index": 0, "id": f"read{step}", "name": "web_fetch",
+                "arguments": json.dumps({"url": "https://research.example/", "maxLength": 300})}], finish_reason="tool_calls"), usage])
+        assert {tool["function"]["name"] for tool in kwargs.get("tools", [])} <= {"task_blocked"}
+        assert "HQ-217: Login reopened on 2026-10-22. Player counts are unpublished." in str(kwargs["messages"])
+        assert "[SOURCE_URL: https://research.example/news]" in str(kwargs["messages"])
+        return _astream([_delta(content=answer, finish_reason="stop"), usage])
+
+    monkeypatch.setattr("rune.agent.litellm_adapter.litellm.acompletion", completion)
+    loop = NativeAgentLoop(AgentConfig(model=model, provider=provider, max_iterations=2, max_tokens=1024))
+    loop._token_budget.total = 50_000
+    if rebuild:
+        monkeypatch.setattr(loop, "_get_disabled_tools", lambda: {"browser_find"})
+    from rune.agent.prompts import build_system_prompt
+
+    classification = ClassificationResult("web", .99, 2, needs_web_evidence=True, needs_current_source=True,
+                                         browser_effect="view", lookup_only=lookup,
+                                         complexity="moderate" if rebuild and not lookup else "simple")
+    prompt = build_system_prompt("Research recent service notices", classification, goal_category="web")
+    assert "read the relevant frame URL before opening a browser" in prompt
+    trace = await loop._execute_loop(goal="Research recent service notices", system_prompt=prompt,
+        tools=loop._select_tools(classification), max_iterations=2,
+        classification=classification,
+        context={"workspace_root": str(tmp_path), "ephemeral": True})
+    assert trace.reason == "completed" and loop._last_answer_text == answer
+    assert trace.source_review["freshSources"] == 1
+    assert reads == paths and len(requests) == 2
+    request = requests[0]
+    effort = (request.get("output_config", {}).get("effort") if provider == "anthropic" else
+              request.get("thinkingConfig", {}).get("thinkingLevel") if provider == "gemini" else
+              request.get("extra_body", {}).get("reasoning_effort") if provider == "xai" else
+              request.get("reasoning_effort", request.get("extra_body", {}).get("reasoning", {}).get("effort")))
+    assert effort == ("low" if lookup or not rebuild else None)
+    assert "https://research.example/news" in loop._citation_urls
+    assert not checkpoints and not loop._rollover_phase_done
+    payload = build_trust_payload(trace)
+    assert payload["answerReserveReason"] == "tool_rounds" and not payload["budgetExhausted"]
+
+
 @pytest.mark.parametrize("case", ["verbatim", "repair", "derived", "summary", "current", "unrelated"])
 async def test_source_context_is_reused_only_for_the_same_historical_task(monkeypatch, tmp_path, case):
     from rune.agent.source_context import HISTORY_KEY
@@ -235,14 +334,23 @@ async def test_sources_are_required_without_redundant_model_calls(monkeypatch, t
         tools=loop._select_tools(classification), max_iterations=4, classification=classification,
         context={"workspace_root": str(tmp_path), "ephemeral": True},
     )
-    should_complete = case in {"chat", "search", "fetch", "web_lookup", "recovered", "misrouted", "reserve", "explicit_limit", "continued_lookup", "explicit_research", "current_repaired"}
+    should_complete = case in {"chat", "search", "fetch", "web_lookup", "recovered", "misrouted", "reserve", "explicit_limit", "continued_lookup", "explicit_research", "current_repaired", "current_excerpt"}
     assert trace.reason == ("completed" if should_complete else "completed_gate_warnings")
     if not should_complete:
         assert trace.completion_check["name"] == "Source retrieval"
     assert len(actions) == (2 if case in {"current_repaired", "current_excerpt"} else 1 if case == "current_refused" else 3 if case == "explicit_limit" else 4 if case in {"continued_lookup", "explicit_research"} else
                             int(case in {"search", "fetch", "web_lookup", "empty", "failed", "recovered", "misrouted", "reserve", "reserve_empty"}))
     assert len(requests) == (4 if case in {"explicit_limit", "current_repaired"} else 5 if case in {"continued_lookup", "explicit_research"} else
-                            1 if case == "chat" else 2 if case in {"missing", "search", "fetch", "web_lookup", "misrouted", "reserve", "reserve_empty"} else 3)
+                            1 if case == "chat" else 2 if case in {"missing", "search", "fetch", "web_lookup", "misrouted", "reserve", "reserve_empty", "current_excerpt"} else 3)
     assert all(call.get("stream") for call in requests)
+    from rune.api.trust import build_trust_payload
+
+    expected_limit = "tool_rounds" if case in {"reserve", "reserve_empty", "web_lookup", "explicit_limit"} else ""
+    payload = build_trust_payload(trace)
+    assert trace.answer_reserve_reason == payload["answerReserveReason"] == expected_limit
+    assert not payload["budgetExhausted"]
+    if case == "current_excerpt":
+        assert payload["sourceReview"]["excerptOnlyNumbers"] == ["120"]
+        assert not payload["verified"]
     efforts = [call.get("reasoning_effort", call.get("extra_body", {}).get("reasoning", {}).get("effort")) for call in requests]
     assert efforts == [("low" if case in {"fetch", "web_lookup"} else None)] * len(requests)

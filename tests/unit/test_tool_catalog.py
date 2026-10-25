@@ -6,6 +6,38 @@ import pytest
 from rune.agent.tool_catalog import ToolCatalog
 
 
+@pytest.mark.parametrize("kind", ["web", "research"])
+async def test_source_research_defers_other_tools_but_keeps_them_discoverable(kind):
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.agent.litellm_adapter import LiteLLMAgent
+    from rune.agent.tool_adapter import ToolWrapper
+    from rune.agent.tool_catalog import deferred_for_task
+    from rune.config.defaults import TOOLS_WEB
+
+    classification = ClassificationResult(kind, .9, 2, needs_web_evidence=True, browser_effect="view")
+    names = [*TOOLS_WEB, "task_blocked"]
+    wrappers = [ToolWrapper(name=name, description=name, function=AsyncMock()) for name in names]
+    agent = LiteLLMAgent("openai/gpt-6-astra", tools=wrappers, compact_tools=True,
+                        deferred_tools=deferred_for_task(names, classification))
+    assert agent._tool_catalog.loaded == {"web_search", "web_fetch", "task_blocked", "tool_search"}
+    for name in ("browser_extract", "file_read", "table_verify"):
+        await agent._tool_catalog.search(name)
+        assert name in agent._tool_catalog.loaded
+        assert agent._tool_lookup[name] is next(w.function for w in wrappers if w.name == name)
+
+
+@pytest.mark.parametrize("overrides", [{"intent_categories": frozenset({"document"})},
+                                      {"requires_execution": True}, {"browser_effect": "change"}])
+def test_mixed_research_keeps_its_workflow_tools(overrides):
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.agent.tool_catalog import deferred_for_task
+
+    classification = ClassificationResult("web", .9, 2, **{
+        "needs_web_evidence": True, "browser_effect": "view", **overrides,
+    })
+    assert "file_read" not in deferred_for_task(["web_fetch", "file_read"], classification)
+
+
 @pytest.mark.parametrize("goal_type,intents,immediate", [
     ("full", {"document"}, {"file_read"}),
     ("code_modify", {"coding"}, {"file_read", "code_analyze", "project_map"}),
@@ -147,7 +179,7 @@ async def test_browser_guidance_loads_with_browser_tools_and_returns_when_discov
     assert agent._tool_catalog.with_guidance(messages) is messages
     await agent._tool_catalog.search("browser_act")
     guided = agent._tool_catalog.with_guidance(messages)
-    assert PROMPT_BROWSER in guided[0]["content"] and guided[1] == messages[1]
+    assert guided[:-1] == messages and PROMPT_BROWSER in guided[-1]["content"]
     assert PROMPT_BROWSER not in messages[0]["content"]
     assert agent._tool_catalog.with_guidance(guided) is guided
     assert "browser_act" in agent._tool_catalog.loaded
@@ -157,7 +189,9 @@ async def test_browser_guidance_loads_with_browser_tools_and_returns_when_discov
     assert agent._tool_catalog is None and agent._system_prompt == prompt
 
 
-async def test_stream_restores_browser_guidance_before_requesting_recovery_tools(monkeypatch):
+@pytest.mark.parametrize("model", ["openai/gpt-6-astra", "azure/responses/gpt-6-astra",
+                                   "anthropic/claude-opus-5", "vertex_ai/gemini-3.1-pro-preview", "xai/grok-4.7"])
+async def test_stream_restores_browser_guidance_before_requesting_recovery_tools(monkeypatch, model):
     from rune.agent.prompts import PROMPT_BROWSER
     from tests.unit.test_live_streaming import _chunk, _make, _usage
 
@@ -171,7 +205,7 @@ async def test_stream_restores_browser_guidance_before_requesting_recovery_tools
     monkeypatch.setattr("litellm.acompletion", complete)
     catalog = ToolCatalog([{"type": "function", "function": {"name": "browser_observe",
                            "parameters": {"type": "object", "properties": {}}}}])
-    stream = _make("openai/gpt-5.4")
+    stream = _make(model)
     stream._tool_catalog = catalog
     stream._tool_schemas = catalog.schemas
     stream._tool_recovery = lambda: {"browser_observe"}
@@ -179,8 +213,13 @@ async def test_stream_restores_browser_guidance_before_requesting_recovery_tools
     async for _ in stream.stream_text():
         pass
     assert requests
-    assert all(any(m.get("role") == "system" and PROMPT_BROWSER in m.get("content", "")
+    def content(message):
+        value = message.get("content", "")
+        return value if isinstance(value, str) else "".join(part.get("text", "") for part in value)
+
+    assert all(any(m.get("role") == "user" and PROMPT_BROWSER in content(m)
                    for m in request["messages"]) for request in requests)
+    assert all(PROMPT_BROWSER not in str(request["messages"][0]) for request in requests)
 
 
 async def test_browser_family_includes_input_and_keeps_step_schema_on_vertex():
@@ -532,7 +571,8 @@ async def test_table_guidance_follows_discovery_and_is_not_duplicated():
     assert agent._tool_catalog.with_guidance(messages) is messages
     await agent._tool_catalog.search('table_requirements')
     messages = agent._tool_catalog.with_guidance(messages)
-    assert PROMPT_TABLE in messages[0]['content']
+    assert messages[0]['content'] == agent._system_prompt
+    assert PROMPT_TABLE in messages[-1]['content']
     await agent._tool_catalog.search('table_verify')
     assert agent._tool_catalog.with_guidance(messages) is messages
     agent.update_tools(tools[:3])

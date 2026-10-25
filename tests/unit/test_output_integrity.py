@@ -80,6 +80,30 @@ def test_file_write_content_not_counted_as_retrieval():
     assert oi.fabricated_citations(output, messages) == ["https://fake.com"]
 
 
+def test_compacted_history_keeps_retrieved_urls_without_trusting_assistant_text():
+    messages = [
+        {"role": "tool", "content": "https://real.example/notice#update"},
+        {"role": "assistant", "content": "https://invented.example/"},
+        {"role": "assistant", "tool_calls": [{"function": {
+            "name": "file_write", "arguments": '{"content":"https://written.example/"}',
+        }}]},
+    ]
+    observed = oi.retrieved_urls(messages)
+    assert observed == {"https://real.example/notice"}
+    assert oi.fabricated_citations("https://real.example/notice https://invented.example/", [],
+                                   observed=observed) == ["https://invented.example/"]
+
+
+def test_citation_evidence_does_not_leak_into_the_next_run():
+    from rune.agent.loop import NativeAgentLoop
+    from rune.types import AgentConfig
+
+    loop = NativeAgentLoop(AgentConfig())
+    loop._citation_urls.add("https://previous.example/")
+    loop._reset_run_state()
+    assert loop._citation_urls == set()
+
+
 def test_trailing_punctuation_normalized():
     messages = [{"role": "tool", "content": "https://a.com/page"}]
     output = "see https://a.com/page."

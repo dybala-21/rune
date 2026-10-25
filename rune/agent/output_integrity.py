@@ -51,10 +51,10 @@ def retrieved_urls(messages: list) -> set[str]:
     return seen
 
 
-def fabricated_citations(output: str, messages: list) -> list[str]:
+def fabricated_citations(output: str, messages: list, *, observed: set[str] | None = None) -> list[str]:
     """Return unseen citation URLs, or an empty list when retrieval is unavailable."""
     cited = _urls(output)
-    seen = retrieved_urls(messages)
+    seen = retrieved_urls(messages) | (observed or set())
     log.info("output_integrity_check", cited=len(cited), retrieved=len(seen))
     if not cited or not seen:
         return []

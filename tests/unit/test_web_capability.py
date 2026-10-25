@@ -169,6 +169,31 @@ def test_html_to_text():
     assert "   " not in result
 
 
+@pytest.mark.parametrize("body", [
+    '<table><tr><td><iframe src="/news"></iframe></td></tr></table>',
+    '<ul><li><a href="javascript:openNews()"><img src="banner.png"></a></li></ul>',
+    '<main><table><tr><td> </td></tr></table></main>',
+])
+async def test_layout_only_html_is_not_source_content(monkeypatch, body):
+    from rune.agent.web_grounding import WebGrounding
+
+    async def get(self, url, **kwargs):
+        return httpx.Response(200, text=body, headers={"content-type": "text/html"}, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", get)
+    result = await web_fetch(WebFetchParams(url="https://example.org/"))
+    assert not result.success and result.metadata["empty_content"]
+    grounding = WebGrounding(required=True, requires_page=True)
+    assert not grounding.observe("web_fetch", {"url": "https://example.org/"}, result)
+    assert grounding.pages == 0
+
+
+@pytest.mark.parametrize("body,expected", [('<p>|</p>', '|'), ('<p>0</p>', '0'),
+    ('<p>✓</p>', '✓'), ('<a href="/news">News</a>', '[News](/news)')])
+def test_html_reading_preserves_source_symbols_and_named_links(body, expected):
+    assert _html_to_text(body) == expected
+
+
 def test_extract_by_selector():
     """Basic CSS extraction: tag, class, and id selectors."""
     html = '<div id="main"><p class="content">Target text</p><p>Other</p></div>'
@@ -273,6 +298,176 @@ async def test_non_html_responses_are_preserved(monkeypatch, content_type, body)
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client(transport=transport, **kw))
     result = await web_fetch(WebFetchParams(url="https://example.org/data"))
     assert result.success and result.output == body
+
+
+async def test_frameset_exposes_content_urls_without_counting_the_shell_as_evidence(monkeypatch):
+    from rune.agent.web_grounding import WebGrounding
+
+    body = '''<html><head><title>Example game</title></head>
+    <frameset rows="0,*"><frame src="/session"><frame src="/main/index"></frameset>
+    <noframes><body></body></noframes></html>'''
+    client = httpx.AsyncClient
+    reads = []
+
+    def respond(req):
+        reads.append(str(req.url))
+        return httpx.Response(200, text=body, headers={"content-type": "text/html"})
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client(transport=httpx.MockTransport(respond), **kw))
+    result = await web_fetch(WebFetchParams(url="https://example.org/"))
+    assert not result.success and result.metadata["empty_content"]
+    assert result.metadata["embedded_pages"] == ["https://example.org/session", "https://example.org/main/index"]
+    assert "https://example.org/main/index" in result.error
+    assert reads == ["https://example.org/"]
+    check = WebGrounding(required=True, requires_page=True)
+    assert not check.observe("web_fetch", {}, result) and check.pages == 0
+
+
+async def test_iframe_links_preserve_parent_text_and_ignore_non_web_sources(monkeypatch):
+    body = '''<html><body><p>Published in 2024.</p><iframe src="../news"></iframe>
+    <iframe src="../news#latest"></iframe><iframe src="javascript:alert(1)"></iframe>
+    <iframe src="file:///etc/passwd"></iframe><iframe src="https://user:secret@example.org/private"></iframe>
+    </body></html>'''
+    client = httpx.AsyncClient
+    transport = httpx.MockTransport(lambda req: httpx.Response(200, text=body, headers={"content-type": "text/html"}))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client(transport=transport, **kw))
+    result = await web_fetch(WebFetchParams(url="https://example.org/main/index"))
+    assert result.success
+    assert result.metadata["embedded_pages"] == ["https://example.org/news"]
+    assert "https://example.org/news" in result.output
+    assert result.output[result.metadata["body_offset"]:] == "Published in 2024."
+    limited = await web_fetch(WebFetchParams(url="https://example.org/main/index", maxLength=120))
+    assert limited.success and len(limited.output) <= 120
+
+
+@pytest.mark.parametrize("limit", [105, 300, 1000])
+async def test_frame_hints_cannot_displace_a_fitting_source_body(monkeypatch, limit):
+    text = "Important announcement: service will end tomorrow."
+    frames = "".join(f'<iframe src="https://ads.example.org/widget/{i}"></iframe>' for i in range(20))
+    client = httpx.AsyncClient
+    transport = httpx.MockTransport(lambda req: httpx.Response(
+        200, text=f"<main>{text}</main>{frames}", headers={"content-type": "text/html"}))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client(transport=transport, **kw))
+    result = await web_fetch(WebFetchParams(url="https://example.org/", maxLength=limit))
+    assert result.success and len(result.output) <= limit
+    assert result.output[result.metadata["body_offset"]:] == text
+    assert not result.metadata["truncated"]
+
+
+async def test_long_parent_keeps_body_and_frame_discovery_within_the_limit(monkeypatch):
+    text = "Official notice details. " * 200
+    client = httpx.AsyncClient
+    transport = httpx.MockTransport(lambda req: httpx.Response(
+        200, text=f'<main>{text}</main><iframe src="/ads/{"x" * 500}"></iframe><iframe src="/news"></iframe>',
+        headers={"content-type": "text/html"}))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client(transport=transport, **kw))
+    result = await web_fetch(WebFetchParams(url="https://example.org/", maxLength=1000))
+    assert result.success and result.metadata["truncated"]
+    assert len(result.output) <= 1000 and "https://example.org/news" in result.output
+    assert len(result.output[result.metadata["body_offset"]:]) >= 750
+
+
+async def test_truncating_plain_text_before_its_content_does_not_count_as_a_read(monkeypatch):
+    client = httpx.AsyncClient
+    transport = httpx.MockTransport(lambda req: httpx.Response(
+        200, text=" " * 300 + "Actual content", headers={"content-type": "text/plain"}))
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: client(transport=transport, **kw))
+    result = await web_fetch(WebFetchParams(url="https://example.org/", maxLength=100))
+    assert not result.success and result.metadata["empty_content"]
+
+
+def test_inline_frame_does_not_advertise_its_inactive_src():
+    from rune.capabilities.web import _embedded_page_urls
+
+    assert _embedded_page_urls('<iframe src="/old" srcdoc="New notice"></iframe>', "https://example.org/") == []
+
+
+@pytest.mark.parametrize("case", ["chain", "external", "multiple", "parent", "cycle", "depth", "selector", "filter", "redirect", "external_redirect"])
+async def test_frame_reads_are_bounded_and_keep_the_actual_source(monkeypatch, case):
+    from rune.agent.tool_adapter import _format_tool_output
+    from rune.agent.web_grounding import WebGrounding
+
+    pages = {"/": '<iframe src="/main"></iframe>', "/main": '<iframe src="/news"></iframe>',
+             "/news": '<main>Service reopened.</main>'}
+    options = {}
+    expected = ["/", "/main", "/news"]
+    if case == "external":
+        pages["/"] = '<iframe src="https://other.example/news"></iframe>'
+        expected = ["/"]
+    elif case == "multiple":
+        pages["/"] += '<iframe src="/other"></iframe>'
+        expected = ["/"]
+    elif case == "parent":
+        pages["/"] += '<main>Parent notice.</main>'
+        expected = ["/"]
+    elif case == "cycle":
+        pages["/main"] = '<iframe src="/"></iframe>'
+        expected = ["/", "/main"]
+    elif case == "depth":
+        pages["/news"] = '<iframe src="/further"></iframe>'
+    elif case in {"selector", "filter"}:
+        options = {"selector": "body"} if case == "selector" else {"jsonFilter": "service"}
+        expected = ["/"]
+    elif case in {"redirect", "external_redirect"}:
+        expected = ["/", "/main", "/news"] if case == "redirect" else ["/", "/main"]
+    calls = []
+
+    async def send(self, request, **kwargs):
+        assert request.url.host == "example.org"
+        calls.append(request.url.path)
+        if request.url.path == "/main" and case in {"redirect", "external_redirect"}:
+            target = "/news" if case == "redirect" else "https://other.example/news"
+            return httpx.Response(302, headers={"location": target}, request=request)
+        return httpx.Response(200, text=pages[request.url.path], headers={"content-type": "text/html"}, request=request)
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    result = await web_fetch(WebFetchParams(url="https://example.org/", **options))
+    assert calls == expected
+    readable = case in {"chain", "parent", "redirect"}
+    assert result.success is readable
+    grounding = WebGrounding(required=True, requires_page=True)
+    assert grounding.observe("web_fetch", {}, result) is readable
+    if case in {"chain", "redirect"}:
+        assert result.metadata["requested_url"] == "https://example.org/"
+        assert result.metadata["final_url"] == "https://example.org/news"
+        assert "[SOURCE_URL: https://example.org/news]" in _format_tool_output("web_fetch", {}, result)
+    if case == "external_redirect":
+        assert result.metadata["redirect_blocked"]
+
+
+async def test_frame_chain_shares_one_request_deadline(monkeypatch):
+    import asyncio
+
+    timeout = asyncio.timeout
+    deadlines, calls = [], []
+
+    def deadline(seconds):
+        deadlines.append(seconds)
+        return timeout(0.01)
+
+    async def send(self, request, **kwargs):
+        calls.append(request.url.path)
+        if request.url.path == "/main":
+            await asyncio.sleep(1)
+        return httpx.Response(200, text='<iframe src="/main"></iframe>',
+                              headers={"content-type": "text/html"}, request=request)
+
+    monkeypatch.setattr("rune.capabilities.web.asyncio.timeout", deadline)
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    result = await web_fetch(WebFetchParams(url="https://example.org/"))
+    assert deadlines == [30] and calls == ["/", "/main"]
+    assert not result.success and "deadline" in result.error
+
+
+@pytest.mark.parametrize("base,expected", [
+    ('<base href="https://example.net/content/">', "https://example.net/content/news"),
+    ('<base href="https://[broken">', "https://example.org/news"),
+])
+def test_embedded_page_urls_resolve_base_without_fetching_it(base, expected):
+    from rune.capabilities.web import _embedded_page_urls
+
+    assert _embedded_page_urls(f"<html><head>{base}</head><body><iframe src='news'></iframe></body></html>",
+                               "https://example.org/") == [expected]
 
 
 def test_nested_main_is_not_duplicated_and_entities_are_readable():

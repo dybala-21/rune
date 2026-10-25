@@ -84,6 +84,14 @@ def test_web_lookup_does_not_get_a_failure_note_or_retry():
     assert payload["canEscalate"] is False
 
 
+@pytest.mark.parametrize("limit", ["budget", "time", "tool_rounds"])
+def test_answer_reservation_does_not_claim_an_exhausted_budget_or_a_verified_answer(limit):
+    payload = build_trust_payload(SimpleNamespace(reason="completed", answer_reserve_reason=limit))
+    assert payload["answerReserveReason"] == limit
+    assert payload["completionStatus"] == "completed" and not payload["budgetExhausted"]
+    assert not payload["verified"] and not payload["canEscalate"]
+
+
 def test_document_receipts_do_not_verify_the_entire_task():
     receipts = [{"kind": "document_bundle", "checks": {"native_content": "pass"}}]
     payload = build_trust_payload(SimpleNamespace(reason="completed", artifact_receipts=receipts))
