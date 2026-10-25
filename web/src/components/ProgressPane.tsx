@@ -1,5 +1,6 @@
-import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { checkEvidence, describeTrust, trustColors } from '../utils/trust';
+import { memo, useEffect, useMemo, useRef, type ReactNode } from 'react';
+import { describeTrust, trustColors } from '../utils/trust';
+import { RunEvidence } from './RunEvidence';
 import type {
   ActivitySummary,
   OrchestrationState,
@@ -18,15 +19,6 @@ import {
   type ActivityMode,
 } from '../utils/tooling';
 
-/**
- * Progress pane: the supervision view of a run, designed to answer one
- * question at a glance — "what is it doing / how did it end?". Top-down:
- * a status band (live action while running, verdict once finished), the
- * delegated-task checklist when one exists, the step timeline of what
- * actually happened, and the evidence the run touched (files for coding,
- * sources for research). Status is always glyph + color + text — never emoji.
- */
-
 interface ProgressPaneProps {
   toolCalls: ToolCall[];
   /** Computed once by WorkbenchPanel and shared with the tab bar. */
@@ -36,19 +28,17 @@ interface ProgressPaneProps {
   trust?: TrustInfo | null;
   activitySummary: ActivitySummary | null;
   orchestration: OrchestrationState | null;
-  /** The agent is blocked on the user — takes priority over every other band. */
+  /** Pending input takes priority over progress. */
   awaiting?: 'approval' | 'question' | null;
   onOpenFile?: (path: string) => void;
 }
 
-/** Last two path segments — enough to identify a file without the noise of a
-    full absolute path (which stays available as the tooltip / open target). */
+/** Shorten the label while keeping the full path in the tooltip. */
 function shortPath(path: string): string {
   const parts = path.replace(/\/+$/, '').split('/').filter(Boolean);
   return parts.length > 2 ? parts.slice(-2).join('/') : path;
 }
 
-/** One human-readable "verb target" fragment for a tool call. */
 function callLabel(tc: ToolCall): string {
   const name = normalizeToolName(tc.toolName);
   const path = argString(tc.args, 'path', 'file_path', 'file', 'target');
@@ -88,23 +78,22 @@ interface StepSource {
 
 interface StepGroup {
   step: number;
-  /** Which run this step belongs to; step numbers repeat across runs. */
+  /** Step numbers repeat across runs. */
   run: number;
   summary: string;
   failedCount: number;
-  /** searches/pages that happened in this step, in first-touch order */
+  /** Sources in order of first use. */
   sources: StepSource[];
 }
 
 interface Derived {
   groups: StepGroup[];
-  /** path → verbs used on it, in first-touch order */
+  /** Paths and actions in order of first use. */
   files: Array<[string, string[]]>;
-  /** what the agent is doing right now (newest pending, else newest call) */
+  /** Latest pending call, falling back to the latest call. */
   nowLabel: string | null;
 }
 
-/** Everything the pane renders, derived in a single pass over the calls. */
 function derive(toolCalls: ToolCall[]): Derived {
   const groups: Array<StepGroup & { labels: Set<string>; extra: number; srcKeys: Set<string> }> = [];
   const files = new Map<string, Set<string>>();
@@ -116,9 +105,7 @@ function derive(toolCalls: ToolCall[]): Derived {
     const step = tc.step ?? 0;
     const run = tc.run ?? 0;
     let g = groups[groups.length - 1];
-    // Start a new group when either changes: a new run reuses step numbers, so
-    // comparing the step alone glues the previous turn's last step onto this
-    // turn's first one.
+    // Step numbers restart each run; group by both run and step.
     if (!g || g.step !== step || g.run !== run) {
       g = { step, run, summary: '', failedCount: 0, labels: new Set(), extra: 0, sources: [], srcKeys: new Set() };
       groups.push(g);
@@ -137,7 +124,6 @@ function derive(toolCalls: ToolCall[]): Derived {
         files.get(path)!.add(name.replace('file.', ''));
       }
     } else if (name === 'web.search') {
-      // Attach the search to its own step, deduped within that step.
       const q = argString(tc.args, 'query', 'q');
       if (q && !g.srcKeys.has(`s:${q}`)) {
         g.srcKeys.add(`s:${q}`);
@@ -186,7 +172,6 @@ function StatusGlyph({ kind }: { kind: Glyph }) {
   return <span style={{ color, flexShrink: 0, width: 14, textAlign: 'center' }}>{glyph}</span>;
 }
 
-/** Section header: quiet label + count, so the pane scans as an outline. */
 function SectionTitle({ label, count }: { label: string; count?: number }) {
   return (
     <div style={{
@@ -205,7 +190,6 @@ function SectionTitle({ label, count }: { label: string; count?: number }) {
     </div>
   );
 }
-/** One band shape for every terminal state, so the layout can't drift. */
 interface BandSpec {
   color: string;
   bg: string;
@@ -214,16 +198,10 @@ interface BandSpec {
   titleMono?: boolean;
   note?: string;
   details?: string[];
-  showEvidence?: boolean;
   live?: boolean;
 }
 
-/**
- * The one-glance answer at the top of the pane. Blocked on the user: an amber
- * call to action. While running: what the agent is doing right now. Finished:
- * the run's verify-or-fail-honestly verdict, expandable to the actual
- * Evidence Gate output — the receipt, not just the claim.
- */
+/** Show current activity or a result that needs attention. */
 function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trust }: {
   isRunning: boolean;
   awaiting: 'approval' | 'question' | null;
@@ -232,8 +210,6 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
   verdictOk: boolean | null;
   trust?: TrustInfo | null;
 }) {
-  const [showEvidence, setShowEvidence] = useState(false);
-  const evidence = trust ? checkEvidence(trust) : '';
   const view = trust ? describeTrust(trust) : null;
 
   let spec: BandSpec | null = null;
@@ -245,7 +221,6 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
       note: 'respond in the chat',
     };
   } else if (isRunning) {
-    // The one thing to draw the eye while a run is live: what it's doing now.
     spec = {
       color: 'var(--accent)', bg: 'var(--accent-subtle)',
       glyph: <span className="spinner" style={{ width: 12, height: 12, flexShrink: 0 }} />,
@@ -254,7 +229,7 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
       note: stepNumber !== null ? `step ${stepNumber}` : undefined,
       live: true,
     };
-  } else if (verdictOk === null && !view?.showCard) {
+  } else if (view ? !view.showCard : verdictOk === null) {
     return null;
   } else if (trust && view) {
     const colors = trustColors(view.tone);
@@ -263,17 +238,7 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
       glyph: <span>{view.glyph}</span>,
       title: view.title,
       note: view.note,
-      details: [
-        ...(trust.escalationHint ? [trust.escalationHint] : []),
-        ...(trust.unsourcedNumbers?.length
-          ? [`Figures not found in retrieved sources: ${trust.unsourcedNumbers.slice(0, 5).join(', ')}. These may be calculated or rounded.`]
-          : []),
-        ...(trust.sourceReview?.excerptOnlyNumbers?.length
-          ? [`Numbers mentioned only in search excerpts: ${trust.sourceReview.excerptOnlyNumbers.join(', ')}. Their use in the answer has not been verified.`]
-          : []),
-        ...(trust.workspaceWarning?.trim() ? [trust.workspaceWarning.trim()] : []),
-      ],
-      showEvidence: Boolean(evidence),
+      details: trust.escalationHint ? [trust.escalationHint] : [],
     };
   } else {
     spec = {
@@ -333,33 +298,6 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
           {d}
         </div>
       ))}
-      {spec.showEvidence && evidence && (
-        <>
-          <button
-            type="button"
-            onClick={() => setShowEvidence(v => !v)}
-            style={{
-              alignSelf: 'flex-start',
-              background: 'none', border: 'none', padding: '0 0 0 21px', cursor: 'pointer',
-              color: 'var(--text-muted)', fontSize: 12, fontFamily: 'var(--font-mono)',
-            }}
-          >
-            {showEvidence ? '▾ hide evidence' : '▸ show evidence'}
-          </button>
-          {showEvidence && (
-            <pre style={{
-              margin: '2px 0 0 21px', padding: '6px 8px',
-              background: 'var(--bg-primary)', borderRadius: 6,
-              border: '1px solid var(--border-subtle, var(--border))',
-              color: 'var(--text-secondary, var(--text-primary))',
-              fontSize: 12, lineHeight: 1.5, whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-              maxHeight: 140, overflow: 'auto',
-            }}>
-              {evidence}
-            </pre>
-          )}
-        </>
-      )}
     </div>
   );
 }
@@ -411,8 +349,8 @@ export const ProgressPane = memo(function ProgressPane({
         verdictOk={verdictOk}
         trust={trust}
       />
+      {!isRunning && !awaiting && trust && <RunEvidence trust={trust} />}
 
-      {/* Delegated-task checklist — real plan data, only when it exists. */}
       {orchestration && (
         <>
           <SectionTitle label="Tasks" count={orchestration.total} />
@@ -449,13 +387,11 @@ export const ProgressPane = memo(function ProgressPane({
         </>
       )}
 
-      {/* Step timeline — what actually happened, on a vertical rail. */}
       <SectionTitle label="Steps" count={groups.length} />
       {groups.length === 0 ? (
         <div style={{ color: 'var(--text-muted)' }}>No tool activity yet.</div>
       ) : (
         <div style={{ position: 'relative' }}>
-          {/* the rail: connects step dots so the list reads as a timeline */}
           {groups.length > 1 && (
             <div style={{
               position: 'absolute', left: 6, top: 10, bottom: 10,
@@ -465,9 +401,7 @@ export const ProgressPane = memo(function ProgressPane({
           {groups.map((g, i) => {
             const isLast = i === groups.length - 1;
             const live = isLast && (isRunning || awaiting !== null);
-            // A failed call inside a step the run recovered from is an
-            // annotation, not a verdict — ✗ is reserved for the step the run
-            // actually died on (last step of a not-verified/failed run).
+            // Recovered tool failures do not make the whole step fail.
             const runEndedHere = isLast && !isRunning && awaiting === null && verdictOk === false;
             const kind: Glyph = live
               ? (isRunning ? 'running' : 'pending')
@@ -495,7 +429,6 @@ export const ProgressPane = memo(function ProgressPane({
                   }}>
                     {i + 1}
                   </span>
-                  {/* time gradient: past steps recede, the live one stays bright */}
                   <span style={{
                     color: live ? 'var(--text-primary)' : 'var(--text-muted)',
                     flex: 1,
@@ -510,7 +443,6 @@ export const ProgressPane = memo(function ProgressPane({
                     </span>
                   )}
                 </div>
-                {/* Sources from this step only, nested under it. */}
                 {g.sources.length > 0 && (
                   <div style={{ paddingLeft: 30, display: 'flex', flexDirection: 'column', gap: 1, marginTop: 1 }}>
                     {g.sources.map(src => (
@@ -549,7 +481,6 @@ export const ProgressPane = memo(function ProgressPane({
         </div>
       )}
 
-      {/* Evidence — adaptive: files for coding work, sources for research. */}
       {(mode !== 'research' && files.length > 0) && (
         <>
           <SectionTitle label="Files" count={files.length} />

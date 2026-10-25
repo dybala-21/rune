@@ -125,8 +125,8 @@ function describeCompletion(trust: TrustInfo): TrustPresentation {
     };
   }
   if (completion === 'completed' && acknowledgedWrite(trust.requirementAcceptance)) {
-    return { ...base, title: 'Saved · server accepted', tone: 'neutral', glyph: '✓', ok: true, canEscalate: false,
-      note: 'The site accepted the save and the submitted fields matched. The stored record was not read back.' };
+    return { ...base, title: 'Save request accepted', tone: 'neutral', glyph: '·', ok: true, canEscalate: false,
+      note: 'The site accepted the submitted fields. The stored result was not checked.' };
   }
   if (required && verification !== 'passed') {
     return {
@@ -175,16 +175,16 @@ function describeCompletion(trust: TrustInfo): TrustPresentation {
     return { ...base, title: 'Verification inconclusive', note: 'The run completed, but its check did not produce a verdict.', tone: 'neutral', glyph: '·', ok: true };
   }
   return {
-    ...base, title: 'Completed', note: 'Result verification was not performed.',
-    tone: 'neutral', glyph: '✓', ok: true, showCard: Boolean(trust.artifactReceipts?.length || trust.changeReceipts?.length),
+    ...base, title: 'Completed', note: '',
+    tone: 'neutral', glyph: '✓', ok: true, showCard: false,
   };
 }
 
-/** The chat card, progress pane and status indicator use the same verdict. */
+/** Shared status for chat and the work panel. */
 export function describeTrust(trust: TrustInfo): TrustPresentation {
   let presentation = describeCompletion(trust);
   if (completionStatus(trust) === 'completed' && trust.sourceReview?.excerptOnlyNumbers?.length) {
-    presentation = { ...presentation, note: `${presentation.note} Some numbers appear only in search excerpts; their use in this answer was not checked.`,
+    presentation = { ...presentation, note: `${presentation.note} Some numbers appear only in search excerpts; their use in this answer was not checked.`.trim(),
       tone: 'warning', showCard: true };
   }
   const reserveNote = {
@@ -195,7 +195,7 @@ export function describeTrust(trust: TrustInfo): TrustPresentation {
   }[trust.answerReserveReason || ''];
   if (!reserveNote || ['cancelled', 'interrupted', 'failed'].includes(completionStatus(trust))) return presentation;
   if (presentation.title === 'Completed') {
-    return { ...presentation, title: 'Response returned', note: `${presentation.note} ${reserveNote}`, showCard: true, ok: null, glyph: '·' };
+    return { ...presentation, title: 'Response returned', note: `${presentation.note} ${reserveNote}`.trim(), showCard: true, ok: null, glyph: '·' };
   }
   return { ...presentation, note: `${presentation.note} ${reserveNote}`, showCard: true };
 }
@@ -210,6 +210,16 @@ export function checkEvidence(trust: TrustInfo): string {
     return `${trust.completionCheck.name}\n${trust.completionCheck.detail}`;
   }
   return trust.requirementAcceptance?.detail?.trim() || trust.evidenceGate?.lastEvidence?.trim() || '';
+}
+
+/** Keep evidence in saved messages even without a status banner. */
+export function hasTrustContent(trust: TrustInfo): boolean {
+  return describeTrust(trust).showCard || Boolean(
+    trust.changeReceipts?.length || trust.artifactReceipts?.length || checkEvidence(trust)
+    || trust.tableAcceptance?.required || trust.tableAcceptance?.unverified.length
+    || trust.requirementAcceptance?.uncheckedCriteria?.length || trust.workspaceWarning?.trim()
+    || trust.unsourcedNumbers?.length || trust.sourceReview?.excerptOnlyNumbers?.length,
+  );
 }
 
 export function trustColors(tone: TrustPresentation['tone']): { accent: string; background: string } {

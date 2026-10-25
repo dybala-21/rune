@@ -56,7 +56,7 @@ const cases = [
   { name: 'a server-accepted save completes without claiming a stored-record check', trace: { reason: 'completed', requirement_acceptance: {
     required: true, status: 'acknowledged', method: 'page_readback',
     writeReceipt: { status: 'accepted', requests: [{ method: 'POST', url: 'https://example.test/save', status: 200 }] },
-  } }, title: 'Saved · server accepted', tone: 'neutral', ok: true, card: true, escalate: false },
+  } }, title: 'Save request accepted', tone: 'neutral', ok: true, card: true, escalate: false },
   { name: 'passing page checks do not attest an unbound outcome', trace: { reason: 'verification_inconclusive', requirement_acceptance: {
     required: true, status: 'inconclusive', method: 'page_readback', readback: { status: 'pass', scope: 'observed_page_state' },
   } }, title: 'Page checked · scope unconfirmed', tone: 'neutral', ok: null, card: true, escalate: false },
@@ -119,11 +119,11 @@ const cases = [
   { name: 'document checks do not attest the entire task', trace: { artifact_receipts: [{
     kind: 'document_bundle', revision: 'r1', source_sha256: 'abc', artifacts: [{ path: '/report.xlsx', sha256: 'def' }],
     checks: { native_content: 'pass', source_metrics: 'pass', visual_layout: 'not_performed', task_acceptance: 'not_performed' },
-  }] }, title: 'Completed', tone: 'neutral', ok: true, card: true },
+  }] }, title: 'Completed', tone: 'neutral', ok: true, card: false },
   { name: 'native download receipt does not attest document quality', trace: { artifact_receipts: [{
     scope: 'download', id: 'd1', sessionId: 'native-one', runId: 'r1', path: '/Desktop/출시 계획.rtf',
     name: '출시 계획.rtf', sha256: 'abc', size: 128, verified: true,
-  }] }, title: 'Completed', tone: 'neutral', ok: true, card: true },
+  }] }, title: 'Completed', tone: 'neutral', ok: true, card: false },
   { name: 'cancelled run retains published document checks', trace: { reason: 'cancelled', artifact_receipts: [{
     kind: 'document_bundle', revision: 'r2', source_sha256: 'abc', artifacts: [{ path: '/published.xlsx', sha256: 'def' }],
     checks: { native_content: 'pass', source_metrics: 'pass', visual_layout: 'not_performed', task_acceptance: 'not_performed' },
@@ -314,7 +314,7 @@ cases.forEach((c, i) => test(c.name, () => {
     if (trust.answerReserveReason === 'budget') assert.doesNotMatch(view.note, /time limit|deadline/i);
   }
   if (c.card) assert.ok(card.includes(c.title), card);
-  else assert.equal(card, '');
+  else assert.ok(!card.includes(`>${c.title}<`), card);
   if (trust.evidenceGate?.lastVerdict === 'fail') assert.ok(!card.includes('1 check passed'));
   if (trust.evidenceGate?.lastVerdict === 'pass' && c.card) assert.ok(!card.includes('no verdict'));
   assert.ok(!card.includes("I couldn&#x27;t confirm this result"));
@@ -322,7 +322,8 @@ cases.forEach((c, i) => test(c.name, () => {
     trust, mode: 'research', toolCalls: [], isRunning: false,
     currentStep: null, activitySummary: null, orchestration: null,
   }));
-  if (c.ok !== null) assert.ok(progress.includes(c.title), progress);
+  if (c.card) assert.ok(progress.includes(c.title), progress);
+  else assert.ok(!progress.includes(`>${c.title}<`), progress);
   if (trust.answerReserveReason && trust.completionStatus !== 'failed') assert.ok(progress.includes(view.note), progress);
   assert.ok(!progress.includes('Not verified'));
   if (trust.workspaceWarning) assert.ok(progress.includes(trust.workspaceWarning), progress);
@@ -331,8 +332,8 @@ cases.forEach((c, i) => test(c.name, () => {
     assert.ok(progress.includes(trust.unsourcedNumbers.join(', ')), progress);
   }
   if (trust.completionCheck?.detail) {
-    assert.ok(card.includes('show evidence'), card);
-    assert.ok(progress.includes('show evidence'), progress);
+    assert.ok(card.includes('Task details'), card);
+    assert.ok(progress.includes('Task details'), progress);
     assert.ok(checkEvidence(trust).includes(trust.completionCheck.detail));
   }
 }));
@@ -362,6 +363,105 @@ test('legacy required checks still warn even if the old boolean claims success',
   const view = describeTrust({ reason: 'completed', verified: true, testsPassedAfterEdit: false });
   assert.equal(view.title, 'Verification required');
   assert.equal(view.ok, false);
+});
+
+function resultViews(trust) {
+  return [
+    renderToStaticMarkup(createElement(TrustCard, { trust })),
+    renderToStaticMarkup(createElement(ProgressPane, {
+      trust, mode: 'research', toolCalls: [], isRunning: false,
+      currentStep: null, activitySummary: null, orchestration: null,
+    })),
+  ];
+}
+
+const completedLookup = {
+  reason: 'completed', verified: false, completionStatus: 'completed',
+  verificationStatus: 'not_checked', verificationRequired: false,
+};
+
+for (const tool of ['browser_act', 'web_fetch', 'connector_request']) {
+  test(`${tool} HTTP acknowledgement is a request record, not a confirmed change`, () => {
+    const receipt = {
+      tool, target: 'POST https://www.eternalcity2.co.kr/news/index.asp',
+      tier: 'acknowledged', evidence: 'HTTP 200',
+    };
+    const trust = { ...completedLookup, changeReceipts: [receipt] };
+    const snapshot = JSON.stringify(trust);
+    for (const html of resultViews(JSON.parse(snapshot))) {
+      assert.doesNotMatch(html, />Completed<|Result verification was not performed|>Changes<|Accepted, not re-read/);
+      assert.match(html, /<details(?![^>]*\bopen\b)[^>]*><summary[^>]*>Task details<\/summary>/);
+      assert.doesNotMatch(html.split('<details')[0], /HTTP 200|Response received/);
+      assert.match(html.replace(/<[^>]*>/g, ''), /index\.asp · Response received/);
+      assert.match(html, /HTTP 200/);
+      assert.match(html, /An HTTP response alone does not confirm a change/);
+    }
+    assert.equal(JSON.stringify(trust), snapshot);
+    assert.equal(computeRunVerdict(trust), true);
+  });
+}
+
+for (const completion of ['completed', 'cancelled', 'failed']) {
+  test(`${completion} retains unresolved actions outside the collapsed history`, () => {
+    const trust = {
+      ...completedLookup, completionStatus: completion, reason: completion === 'failed' ? 'error' : completion,
+      changeReceipts: [
+        { tool: 'file_write', target: '/work/report.txt', tier: 'verified', evidence: 'Content hash matched.' },
+        ...[202, 500].map(status => ({ tool: 'web_fetch', target: 'POST https://app.test/save', tier: 'unknown', evidence: `HTTP ${status}` })),
+        { tool: 'browser_act', target: 'POST https://app.test/save', tier: 'rejected', evidence: 'HTTP 409' },
+      ],
+    };
+    for (const html of resultViews(trust)) {
+      const visible = html.split('<details')[0];
+      assert.match(visible, /2 actions have an unconfirmed result/);
+      assert.match(visible, /One request was rejected/);
+      assert.match(visible, /Check the result before trying again/);
+      for (const evidence of ['Content hash matched.', 'HTTP 202', 'HTTP 500', 'HTTP 409']) assert.ok(html.includes(evidence));
+    }
+    assert.equal(computeRunVerdict(trust), completion === 'completed');
+  });
+}
+
+test('tool-reported success remains distinct from a read-back result', () => {
+  for (const html of resultViews({ ...completedLookup, changeReceipts: [
+    { tool: 'mcp.mail.send', target: 'mcp.mail.send', tier: 'acknowledged', evidence: 'Service accepted the call.' },
+  ] })) {
+    assert.match(html.split('<details')[0], /reported as successful, but the result was not read back/);
+    assert.doesNotMatch(html, /Change checked|Result read back/);
+  }
+});
+
+test('HTTP acceptance cannot hide a failed save check or missing code tests', () => {
+  for (const [verification, title] of [['failed', 'Checks failed'], ['not_checked', 'Verification required']]) {
+    const trust = { ...completedLookup, verificationStatus: verification, verificationRequired: true,
+      changeReceipts: [{ tool: 'browser_act', target: 'POST https://app.test/save', tier: 'acknowledged', evidence: 'HTTP 200' }],
+    };
+    for (const html of resultViews(trust)) {
+      assert.ok(html.split('<details')[0].includes(title));
+      assert.doesNotMatch(html, />Completed<|>Saved<|Change checked|Result read back/);
+    }
+    assert.equal(computeRunVerdict(trust), false);
+  }
+});
+
+test('required conditions and failed artifact checks stay visible without a completion card', () => {
+  const trust = { ...completedLookup,
+    requirementAcceptance: { required: false, status: 'pass', uncheckedCriteria: ['Confirm the recipient.'] },
+    artifactReceipts: [{ kind: 'document_bundle', revision: 'r1', artifacts: [{ path: '/work/report.xlsx' }],
+      checks: { native_content: 'fail', source_metrics: 'pass', visual_layout: 'not_performed', task_acceptance: 'not_performed' } }],
+  };
+  for (const html of resultViews(trust)) {
+    const visible = html.split('<details')[0];
+    assert.match(visible, /A document check failed for report.xlsx/);
+    assert.match(visible, /Still to check/);
+    assert.match(visible, /Confirm the recipient/);
+    assert.doesNotMatch(visible, />Completed</);
+  }
+});
+
+test('ordinary completed answers have no duplicate completion notice', () => {
+  assert.equal(resultViews(completedLookup)[0], '');
+  assert.doesNotMatch(resultViews(completedLookup)[1], /Completed|verification|Task details/);
 });
 
 test('stop snapshots update one card with the final receipts', () => {
