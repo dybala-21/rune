@@ -251,6 +251,49 @@ def question_flow(client, monkeypatch):
     return client, frames, answers
 
 
+@pytest.mark.parametrize("stream", [False, True])
+def test_search_sources_reach_streams_and_restored_runs(client, monkeypatch, stream):
+    from rune.api.server import SseClientManager
+
+    sources = {"count": 1, "items": [{"title": "Notice", "url": "https://example.org/news"}]}
+    frames = []
+    broadcast = SseClientManager.broadcast
+
+    def capture(manager, event, data):
+        frames.append({"event": event, "data": data})
+        return broadcast(manager, event, data)
+
+    class SearchLoop(FakeLoop):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.handlers = {}
+
+        def on(self, event, cb):
+            self.handlers[event] = cb
+
+        async def run(self, goal, **kwargs):
+            await self.handlers["tool_call"]({"name": "web_search", "callId": "c1", "params": {"query": goal}})
+            await self.handlers["tool_result"]({"name": "web_search", "callId": "c1", "success": True,
+                                               "output_head": "Original output", "searchResults": sources})
+            self._last_answer_text = "Search finished."
+            return SimpleNamespace(reason="completed", final_step=1, evidence_gate=None)
+
+    monkeypatch.setattr("rune.agent.loop.NativeAgentLoop", SearchLoop)
+    monkeypatch.setattr(SseClientManager, "broadcast", capture)
+    if stream:
+        response = client.post("/api/v1/agent/execute", json={"goal": "notices", "stream": True, "session_id": "search-ui"})
+        assert response.status_code == 200
+        frames = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+    else:
+        assert client.post("/api/message", json={"text": "notices", "sessionId": "search-ui"}).status_code == 200
+        assert _wait_for(lambda: any(frame["event"] == "agent_complete" for frame in frames))
+    result = next(frame["data"] for frame in frames if frame["event"] == "tool_result")
+    assert result["searchResults"] == sources
+    assert result["result"] == "Original output"
+    snapshot = client.get("/api/runs/snapshot", params={"sessionId": "search-ui"}).json()["run"]
+    assert snapshot["toolCalls"][0]["searchResults"] == sources
+
+
 @pytest.mark.parametrize("selected_key", ["selectedIndex", "selected_index"])
 def test_web_question_selection_contract(question_flow, selected_key):
     client, frames, answers = question_flow

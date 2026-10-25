@@ -620,6 +620,7 @@ def create_app() -> Any:
                         "runId": run_id,
                         "artifactReceipts": getattr(loop, "artifact_receipts", []),
                         "fileChange": info.get("fileChange"),
+                        "searchResults": info.get("searchResults"),
                     },
                 )
 
@@ -918,6 +919,7 @@ def create_app() -> Any:
                             "result": info.get("output_head", "")
                             or info.get("error_head", ""),
                             "success": info.get("success", True),
+                            "searchResults": info.get("searchResults"),
                             "callId": info.get("callId", ""),
                             "artifactReceipts": getattr(loop, "artifact_receipts", []),
                             "runId": run_id,

@@ -179,6 +179,7 @@ export interface ToolCallData {
   callId?: string;
 }
 export interface ToolResultData {
+  searchResults?: SearchResults | null;
   checkStatus?: 'pass' | 'fail' | 'inconclusive' | null;
   outputTruncated?: boolean;
   fileChange?: FileChange | null;
@@ -325,7 +326,6 @@ export interface ProactiveFeedItem extends ProactiveStatus {
   createdAt: string;
 }
 
-/** 도구 호출 (UI 표시용) */
 export interface FileChange {
   id: string;
   path: string;
@@ -334,7 +334,20 @@ export interface FileChange {
   notice?: string;
 }
 
+export interface SearchResultItem {
+  title: string;
+  url: string;
+  description?: string;
+  date?: string;
+}
+
+export interface SearchResults {
+  count: number;
+  items: SearchResultItem[];
+}
+
 export interface ToolCall {
+  searchResults?: SearchResults | null;
   checkStatus?: 'pass' | 'fail' | 'inconclusive' | null;
   outputTruncated?: boolean;
   id: string;

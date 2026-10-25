@@ -744,6 +744,7 @@ export function useAgent() {
           success: data.success,
           checkStatus: data.checkStatus,
           outputTruncated: data.outputTruncated,
+          searchResults: data.searchResults,
           completedAt: now,
           durationMs: Math.max(0, now - original.timestamp),
         };

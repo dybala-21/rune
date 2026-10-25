@@ -186,6 +186,8 @@ class RunSnapshots:
                     call.update(result=data.get("result", ""), success=data.get("success"),
                                 checkStatus=data.get("checkStatus"), outputTruncated=data.get("outputTruncated", False),
                                 completedAt=now, durationMs=now - call["timestamp"])
+                    if data.get("searchResults") is not None:
+                        call["searchResults"] = copy.deepcopy(data["searchResults"])
                     break
         elif event in {"question", "approval_request"}:
             if data.get("autonomous") or data.get("autoApproved"):

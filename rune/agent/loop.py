@@ -215,6 +215,8 @@ def _tool_result_event_payload(cap_name: str, result: CapabilityResult) -> dict[
     }
     if cap_name in {"file_write", "file_edit", "file_delete"} and (result.metadata or {}).get("fileChange"):
         payload["fileChange"] = result.metadata["fileChange"]
+    if cap_name == "web_search" and "searchResults" in (result.metadata or {}):
+        payload["searchResults"] = result.metadata["searchResults"]
     if result.error:
         payload["error_length"] = len(result.error)
         payload["error_head"] = result.error[:500]
