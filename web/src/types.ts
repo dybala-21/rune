@@ -78,7 +78,7 @@ export interface RequirementAcceptanceInfo {
   components?: RequirementAcceptanceInfo[];
 }
 
-/** One external change and the strength of the evidence that it happened. */
+/** An action and its evidence; an HTTP response alone does not confirm a change. */
 export interface ChangeReceipt {
   tool: string;
   target: string;

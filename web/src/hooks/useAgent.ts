@@ -10,7 +10,7 @@ import { useProactiveSuggestions } from './useProactiveSuggestions';
 import { withProactive, withoutProactive } from '../utils/proactive';
 import * as api from '../api';
 import { computeActivitySummary } from '../utils/tooling';
-import { describeTrust } from '../utils/trust';
+import { hasTrustContent } from '../utils/trust';
 import { abortedMessage, belongsToConversation, belongsToRun, upsertRunMessage } from '../utils/runEvents';
 import type {
   AgentState,
@@ -621,7 +621,7 @@ export function useAgent() {
 
       const trust = data.trust;
       setLastTrust(trust ?? null);
-      if (trust && describeTrust(trust).showCard) {
+      if (trust && hasTrustContent(trust)) {
         setMessages(prev => appendWithLimit(prev, {
           id: nextId(),
           role: 'system' as const,

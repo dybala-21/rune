@@ -70,6 +70,18 @@ test('a late cancellation receipt updates the restored stop card', () => {
   assert.deepEqual(updated[1].trust, trust);
 });
 
+test('restored action evidence survives without a completion banner', () => {
+  const trust = { reason: 'completed', verified: false, completionStatus: 'completed', verificationStatus: 'not_checked',
+    changeReceipts: [{ tool: 'browser_act', target: 'POST https://example.test/news', tier: 'acknowledged', evidence: 'HTTP 200' }],
+  };
+  const run = { runId: 'r1', status: 'completed', goal: 'Read the news', answer: 'The latest notice.', startedAt: 1, trust };
+  const restored = restoreRunMessages([], run);
+  assert.equal(restored.length, 3);
+  assert.deepEqual(restored[2].trust, trust);
+  assert.deepEqual(restoreRunMessages(restored, JSON.parse(JSON.stringify(run))), restored);
+  assert.equal(restoreRunMessages([], { ...run, trust: { ...trust, changeReceipts: [] } }).length, 2);
+});
+
 test('interrupted recovery preserves recorded input and adds one stop card', () => {
   const run = { runId: 'r1', status: 'interrupted', goal: 'report', text: 'Saved progress', startedAt: 1,
     trust: { reason: 'server_restart', completionStatus: 'interrupted', verified: false },

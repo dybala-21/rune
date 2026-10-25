@@ -1,5 +1,5 @@
 import type { ChatMessage, FileChange, PendingApproval, PendingQuestion, TokenUsage, ToolCall, TrustInfo } from '../types';
-import { describeTrust } from './trust';
+import { hasTrustContent } from './trust';
 import { abortedMessage } from './runEvents';
 
 export interface RunSnapshot {
@@ -64,7 +64,7 @@ export function restoreRunMessages(messages: ChatMessage[], run: RunSnapshot): C
   }
   if (run.status === 'cancelled') {
     restored.push(abortedMessage({ runId: run.runId, trust: run.trust ?? undefined }, '', run.updatedAt ?? run.startedAt));
-  } else if (run.trust && describeTrust(run.trust).showCard) {
+  } else if (run.trust && hasTrustContent(run.trust)) {
     restored.push({ id: `${run.runId}:trust`, role: 'system', content: '', trust: run.trust, timestamp: run.updatedAt ?? run.startedAt });
   }
   if (run.error) restored.push({ id: `${run.runId}:error`, role: 'system', content: run.error, level: 'error', timestamp: run.updatedAt ?? run.startedAt });

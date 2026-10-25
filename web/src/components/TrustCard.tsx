@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { fetchEscalationStatus, setEscalation, type EscalationStatus } from '../api';
-import type { ChangeReceipt, TrustInfo } from '../types';
-import { TableChecks } from './TableChecks';
-import { checkEvidence, checkSummary, describeTrust, trustColors } from '../utils/trust';
+import type { TrustInfo } from '../types';
+import { RunEvidence } from './RunEvidence';
+import { checkSummary, describeTrust, trustColors } from '../utils/trust';
 
 interface TrustCardProps {
   trust: TrustInfo;
@@ -11,12 +11,10 @@ interface TrustCardProps {
   onEscalate?: () => void;
 }
 
-/** Show the checks supporting a result and any remaining verification gaps. */
+/** Show the result and any unresolved checks. */
 export function TrustCard({ trust, onRetry, onEscalate }: TrustCardProps) {
-  const [showEvidence, setShowEvidence] = useState(false);
   const [esc, setEsc] = useState<EscalationStatus | null>(null);
-  // Cloud retry asks for one confirm first — that click is the moment code
-  // leaves the machine, so it shouldn't fire on a single tap.
+  // Confirm before sending this run to a cloud model.
   const [confirmCloud, setConfirmCloud] = useState(false);
   const view = describeTrust(trust);
   const hasEscalationAction = Boolean(onEscalate);
@@ -31,9 +29,8 @@ export function TrustCard({ trust, onRetry, onEscalate }: TrustCardProps) {
     return () => { live = false; };
   }, [view.canEscalate, trust.reason, hasEscalationAction]);
   const gate = trust.evidenceGate;
-  const evidence = checkEvidence(trust);
   const { accent, background } = trustColors(view.tone);
-  if (!view.showCard) return null;
+  if (!view.showCard) return <RunEvidence trust={trust} />;
 
   return (
     <div style={{
@@ -67,15 +64,6 @@ export function TrustCard({ trust, onRetry, onEscalate }: TrustCardProps) {
 
       <div style={{ marginTop: 6, fontSize: 12.5, color: 'var(--text-secondary)', lineHeight: 1.55 }}>
         {view.note}{' '}
-        {evidence && (
-          <button
-            type="button"
-            onClick={() => setShowEvidence(s => !s)}
-            style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', padding: 0, fontSize: 12 }}
-          >
-            {showEvidence ? 'hide evidence' : 'show evidence'}
-          </button>
-        )}
         {view.canEscalate && onEscalate && (
           <div style={{ marginTop: 8 }}>
             {esc?.enabled ? (
@@ -173,72 +161,7 @@ export function TrustCard({ trust, onRetry, onEscalate }: TrustCardProps) {
       </div>
 
       {onRetry && <button type="button" className="msg-action-btn" onClick={onRetry} style={{ marginTop: 8 }}>Retry request</button>}
-      <TableChecks data={trust.tableAcceptance} />
-      {trust.artifactReceipts?.map(receipt => receipt.scope === 'download' ? (
-        <div key={receipt.id} style={{ marginTop: 8, fontSize: 12, lineHeight: 1.6 }}>
-          <div style={{ fontWeight: 600 }}>Saved document</div>
-          <a href={`/api/v1/files/download?sessionId=${encodeURIComponent(receipt.sessionId)}&path=${encodeURIComponent(receipt.path)}`} download>{receipt.name}</a>
-          <div>Download copy: {receipt.verified ? 'content hash checked' : 'not confirmed'}</div>
-          <div>Document quality and layout require separate checks.</div>
-        </div>
-      ) : (
-        <div key={receipt.revision} style={{ marginTop: 8, fontSize: 12, lineHeight: 1.6 }}>
-          <div style={{ fontWeight: 600 }}>Document checks</div>
-          <div>{receipt.artifacts.map(a => a.path.split(/[\\/]/).pop()).join(', ')}</div>
-          <div>Saved content: {receipt.checks.native_content === 'pass' ? 'passed' : 'not confirmed'}</div>
-          <div>Source totals: {receipt.checks.source_metrics === 'pass' ? 'passed' : 'not confirmed'}</div>
-          <div>Layout: {receipt.checks.visual_layout === 'pass' ? 'checked' : 'not checked'}</div>
-          <div>Full task review: {receipt.checks.task_acceptance === 'pass' ? 'passed' : 'not performed'}</div>
-        </div>
-      ))}
-
-      <ChangeReceipts receipts={trust.changeReceipts} />
-      {trust.requirementAcceptance?.uncheckedCriteria?.length ? (
-        <div style={{ marginTop: 8, fontSize: 12, lineHeight: 1.6 }}>
-          <div style={{ fontWeight: 600 }}>Not checked automatically</div>
-          {trust.requirementAcceptance.uncheckedCriteria.map(criterion => (
-            <div key={criterion} style={{ display: 'flex', gap: 6 }}><span aria-hidden="true">○</span><span>{criterion}</span></div>
-          ))}
-        </div>
-      ) : null}
-
-      {showEvidence && evidence && (
-        <pre style={{
-          marginTop: 8, padding: '8px 10px', background: 'var(--bg-primary)',
-          border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
-          fontFamily: 'var(--font-mono)', fontSize: 11, lineHeight: 1.5,
-          whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: 'var(--text-secondary)',
-          maxHeight: 160, overflow: 'auto',
-        }}>{evidence}</pre>
-      )}
-    </div>
-  );
-}
-
-const RECEIPT_TIERS: Record<ChangeReceipt['tier'], { glyph: string; label: string }> = {
-  verified: { glyph: '✓', label: 'Verified' },
-  acknowledged: { glyph: '◐', label: 'Accepted, not re-read' },
-  observed: { glyph: '◐', label: 'Changed by a command' },
-  rejected: { glyph: '✗', label: 'Rejected' },
-  unknown: { glyph: '○', label: 'Outcome unknown' },
-};
-
-function ChangeReceipts({ receipts }: { receipts?: ChangeReceipt[] }) {
-  if (!receipts?.length) return null;
-  return (
-    <div style={{ marginTop: 8, fontSize: 12, lineHeight: 1.6 }}>
-      <div style={{ fontWeight: 600 }}>Changes</div>
-      {receipts.map(receipt => {
-        const tier = RECEIPT_TIERS[receipt.tier] ?? RECEIPT_TIERS.unknown;
-        return (
-          <div key={`${receipt.tool}:${receipt.target}`} title={receipt.evidence}
-            style={{ display: 'flex', gap: 6, minWidth: 0 }}>
-            <span aria-hidden="true">{tier.glyph}</span>
-            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{receipt.target}</span>
-            <span style={{ color: 'var(--text-muted)', flexShrink: 0 }}>{tier.label}</span>
-          </div>
-        );
-      })}
+      <RunEvidence trust={trust} />
     </div>
   );
 }
