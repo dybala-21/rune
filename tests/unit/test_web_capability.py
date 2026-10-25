@@ -15,7 +15,32 @@ from rune.capabilities.web import (
     _is_path_wipe_redirect,
     _prune_json_by_term,
     web_fetch,
+    web_search,
 )
+
+
+@pytest.mark.parametrize("count", [0, 2, 25])
+async def test_search_display_data_is_bounded_and_separate_from_model_output(monkeypatch, count):
+    from unittest.mock import AsyncMock
+
+    from rune.agent.loop import _tool_result_event_payload
+    from rune.agent.tool_adapter import _format_tool_output
+    from rune.capabilities.search.provider import SearchResult
+
+    provider = AsyncMock()
+    provider.search.return_value = [SearchResult(title=f"Notice {i}", url=f"https://example.org/{i}",
+                                               description="x" * 900, age="October 24, 2026") for i in range(count)]
+    monkeypatch.setattr("rune.capabilities.web.get_search_provider", lambda: provider)
+    result = await web_search(WebSearchParams(query="latest notices"))
+    display = result.metadata["searchResults"]
+    assert display["count"] == count
+    assert len(display["items"]) == min(count, 20)
+    assert all(len(item["description"]) == 600 for item in display["items"])
+    assert _tool_result_event_payload("web_search", result)["searchResults"] == display
+    model_output = _format_tool_output("web_search", {}, result)
+    result.metadata.pop("searchResults")
+    assert _format_tool_output("web_search", {}, result) == model_output
+    provider.search.assert_awaited_once()
 
 
 @pytest.mark.parametrize("case", ["timeout", "invalid_json", "accepted", "redirect", "disabled"])

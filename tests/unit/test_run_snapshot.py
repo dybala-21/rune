@@ -2,6 +2,19 @@ from rune.api.run_snapshot import RunSnapshots
 from rune.api.server import SseClientManager
 
 
+def test_search_results_survive_snapshot_restore_and_concurrent_calls():
+    runs = RunSnapshots()
+    runs.start("r1", "s1", "search")
+    for call_id in ("a", "b"):
+        runs.record("tool_call", {"runId": "r1", "callId": call_id, "toolName": "web_search"})
+    sources = {"count": 1, "items": [{"title": "Notice", "url": "https://example.org/notice"}]}
+    runs.record("tool_result", {"runId": "r1", "callId": "b", "success": True, "result": "notice", "searchResults": sources})
+    sources["items"].clear()
+    snapshot = runs.latest("s1")
+    assert "searchResults" not in snapshot["toolCalls"][0]
+    assert snapshot["toolCalls"][1]["searchResults"]["items"][0]["title"] == "Notice"
+
+
 def test_late_results_cannot_turn_a_cancelled_run_into_a_completed_run():
     runs = RunSnapshots()
     runs.start("r1", "s1", "report")

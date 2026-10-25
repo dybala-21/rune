@@ -1,0 +1,52 @@
+.tool-activity { margin: 1px 0; min-width: 0; border: 1px solid transparent; border-radius: 8px; }
+.tool-activity[open] { border-color: var(--border-subtle); background: var(--bg-secondary); }
+.tool-activity-summary { display: flex; align-items: center; gap: 8px; padding: 6px 8px; min-height: 34px; cursor: pointer; list-style: none; border-radius: 7px; transition: background 140ms ease; }
+.tool-activity-summary::-webkit-details-marker, .tool-row-summary::-webkit-details-marker { display: none; }
+.tool-activity-summary:hover, .tool-row-summary:hover { background: var(--bg-hover); }
+.tool-activity summary:focus-visible, .tool-activity a:focus-visible, .tool-technical summary:focus-visible,
+.tool-output button:focus-visible, .tool-output pre:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.tool-activity-symbol { display: inline-flex; flex-shrink: 0; color: var(--text-secondary);  }
+.tool-activity.tool-state-pending > summary .tool-activity-symbol { color: var(--accent); }
+.tool-summary-body { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 10px; }
+.tool-heading { color: var(--text-secondary); font-size: 12px; font-weight: 500; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; }
+.tool-status { flex-shrink: 0; max-width: 40%; font-size: 11px; line-height: 1.5; color: var(--text-muted); }
+.activity-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+.tool-state-failed, .tool-state-check-failed { color: var(--danger); }
+.tool-state-waiting, .tool-state-interrupted, .tool-state-unconfirmed { color: var(--warning); }
+.tool-state-pending { color: var(--accent); }
+.tool-activity[open].tool-state-failed, .tool-activity[open].tool-state-check-failed { border-color: color-mix(in srgb, var(--danger) 45%, var(--border-subtle)); }
+.tool-target { display: block; min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; line-height: 1.5; color: var(--text-muted); }
+.tool-command { font-family: var(--font-mono); font-size: 11px; }
+.tool-chevron { flex-shrink: 0; color: var(--text-muted); transition: transform 140ms ease; }
+.tool-activity[open] > summary .tool-chevron, .tool-activity-row[open] > summary .tool-chevron { transform: rotate(90deg); }
+.tool-activity-content { padding: 0 12px 12px 34px; }
+.tool-body { min-width: 0; }
+.tool-context-full { margin: 4px 0 10px; font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.tool-page-link { display: inline-block; min-height: 28px; padding: 3px 0; font-size: 12px; color: var(--text-primary); text-underline-offset: 3px; }
+.tool-page-link:hover { color: var(--accent); }
+.tool-row-summary { display: flex; align-items: center; gap: 8px; padding: 7px 4px; min-height: 34px; list-style: none; cursor: pointer; border-radius: 4px; }
+.tool-row-description { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 8px; }
+.tool-row-label { color: var(--text-secondary); font-size: 12px; font-weight: 500; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex-shrink: 0; }
+.tool-row-summary > .tool-status { max-width: 35%; }
+.tool-activity-row + .tool-activity-row { border-top: 1px solid var(--border-subtle); }
+.tool-note { margin: 8px 0; font-size: 12px; color: var(--text-muted); }
+.tool-note.tool-state-check-failed { color: var(--danger); }
+.tool-note.tool-state-interrupted, .tool-note.tool-state-waiting { color: var(--warning); }
+.tool-output { margin: 10px 0; min-width: 0; }
+.tool-output-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; color: var(--text-muted); font-size: 11px; }
+.tool-output button { min-height: 28px; padding: 3px 8px; border: 1px solid var(--border-subtle); background: transparent; border-radius: 6px; color: var(--text-secondary); font: inherit; cursor: pointer; }
+.tool-output button:hover { background: var(--bg-hover); color: var(--text-primary); }
+.tool-output pre { padding: 12px; margin: 0; max-height: 300px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--code-bg); color: var(--text-primary); border: 1px solid var(--border-subtle); border-radius: 8px; font-size: 12px; line-height: 1.6; }
+.tool-output .tool-show-output { margin-top: 6px; font-size: 12px; }
+.tool-technical { border-top: 1px solid var(--border-subtle); margin-top: 12px; color: var(--text-muted); font-size: 11px; }
+.tool-technical > summary { padding: 9px 0; cursor: pointer; min-height: 32px; }
+.tool-identifier { font-family: var(--font-mono); overflow-wrap: anywhere; }
+@media (max-width: 480px) {
+  .tool-activity-summary { min-height: 38px; gap: 6px; }
+  .tool-summary-body { gap: 7px; }
+  .tool-activity-content { padding: 0 12px 12px; }
+  .tool-row-summary { min-height: 38px; gap: 6px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tool-activity-summary, .tool-chevron { transition: none; }
+}

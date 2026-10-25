@@ -15,7 +15,9 @@ import { MessageBubble } from './MessageBubble';
 import { getLiveSessionId } from '../api';
 import { TrustCard } from './TrustCard';
 import { ProactiveCard } from './ProactiveCard';
-import { ToolCallCard, getToolColor } from './ToolCallCard';
+import { ToolCallCard } from './ToolCallCard';
+import { ToolActivity } from './ToolActivity';
+import { SearchActivity } from './SearchActivity';
 import { ThinkingBlockView } from './ThinkingBlock';
 import { normalizeToolName, inferWorkPhase } from '../utils/tooling';
 import { WelcomePanel } from './WelcomePanel';
@@ -133,11 +135,6 @@ export function ChatPanel({
   const grouped = useMemo(() => groupConsecutiveTools(timeline), [timeline]);
   const suggestions = messages.filter(message => message.suggestion);
 
-  const latestToolId = useMemo(() => {
-    if (!isRunning || toolCalls.length === 0) return null;
-    return toolCalls[toolCalls.length - 1].id;
-  }, [isRunning, toolCalls]);
-
   const isEmpty = timeline.length === 0;
   const desktopWait = desktopAttention(toolCalls, isRunning);
   const lastTool = toolCalls[toolCalls.length - 1];
@@ -228,8 +225,7 @@ export function ChatPanel({
               <ToolGroup
                 key={entry.key}
                 tools={entry.tools}
-                isLatest={latestToolId != null && entry.tools.some(t => t.id === latestToolId)}
-                latestToolId={latestToolId}
+                active={isRunning && entry.tools[0].run === lastTool?.run && entry.tools[0].runId === lastTool?.runId}
               />
             );
           }
@@ -269,7 +265,7 @@ export function ChatPanel({
           }
           if (item.type === 'tool') {
             const tc = item.item;
-            if (tc.toolName === 'ask_user') {
+            if (normalizeToolName(tc.toolName) === 'ask.user') {
               return (
                 <InlineQuestionCard
                   key={tc.id}
@@ -283,7 +279,7 @@ export function ChatPanel({
               <ToolCallCard
                 key={tc.id}
                 toolCall={tc}
-                isLatest={tc.id === latestToolId}
+                active={isRunning && tc.run === lastTool?.run && tc.runId === lastTool?.runId}
               />
             );
           }
@@ -353,8 +349,6 @@ export function ChatPanel({
     </div>
   );
 }
-
-// ── Running indicator ──
 
 const TOOL_ACTIVITIES: Record<string, string> = {
   file_read: 'Reviewing files...',
@@ -435,8 +429,6 @@ function RunningIndicator({ toolCalls, currentStepInfo }: { toolCalls: ToolCall[
   );
 }
 
-// ── Activity summary ──
-
 function ActivitySummaryBar({ summary }: { summary: ActivitySummary }) {
   const items: Array<{ label: string; value: number }> = [];
   if (summary.totalToolCalls > 0) items.push({ label: 'Tools', value: summary.totalToolCalls });
@@ -483,8 +475,6 @@ function ActivitySummaryBar({ summary }: { summary: ActivitySummary }) {
   );
 }
 
-// ── Delegate / Compaction notices ──
-
 function DelegateNotice({ event }: { event: DelegateItem }) {
   if (!event.stage?.trim() && !event.message?.trim()) return null;
   return (
@@ -518,8 +508,6 @@ function CompactionNotice({ event }: { event: CompactionItem }) {
   );
 }
 
-// ── Tool grouping ──
-
 type GroupedEntry =
   | { type: 'single'; item: TimelineItemType }
   | { type: 'group'; key: string; toolName: string; tools: ToolCall[] };
@@ -537,7 +525,7 @@ function groupConsecutiveTools(timeline: TimelineItemType[]): GroupedEntry[] {
   let currentToolName = '';
 
   const flushGroup = () => {
-    if (currentGroup.length >= 3) {
+    if (currentGroup.length >= (normalizeToolName(currentToolName) === 'web.search' ? 2 : 3)) {
       result.push({
         type: 'group',
         key: `group-${currentGroup[0].id}`,
@@ -554,8 +542,10 @@ function groupConsecutiveTools(timeline: TimelineItemType[]): GroupedEntry[] {
   };
 
   for (const entry of timeline) {
-    if (entry.type === 'tool') {
-      if (entry.item.toolName === currentToolName) {
+    if (entry.type === 'tool' && normalizeToolName(entry.item.toolName) !== 'ask.user') {
+      const previous = currentGroup[currentGroup.length - 1];
+      if (normalizeToolName(entry.item.toolName) === normalizeToolName(currentToolName)
+          && entry.item.run === previous?.run && entry.item.runId === previous?.runId) {
         currentGroup.push(entry.item);
       } else {
         flushGroup();
@@ -572,97 +562,11 @@ function groupConsecutiveTools(timeline: TimelineItemType[]): GroupedEntry[] {
   return result;
 }
 
-function ToolGroup({ tools, isLatest = false, latestToolId }: { tools: ToolCall[]; isLatest?: boolean; latestToolId: string | null }) {
-  const [manualOpen, setManualOpen] = useState<boolean | null>(null);
-
-  const prevIsLatest = useRef(isLatest);
-  useEffect(() => {
-    if (prevIsLatest.current && !isLatest) {
-      setManualOpen(null);
-    }
-    prevIsLatest.current = isLatest;
-  }, [isLatest]);
-
-  const open = manualOpen ?? false;
-  const completed = tools.filter(t => t.result !== undefined).length;
-  const toolName = tools[0].toolName;
-  const toolColor = getToolColor(toolName);
-
-  const handleToggle = () => {
-    setManualOpen(!(manualOpen ?? false));
-  };
-
-  return (
-    <div className="fade-in" style={{
-      margin: 0,
-      borderBottom: '1px solid var(--border-subtle)',
-      overflow: 'hidden',
-    }}>
-      <div
-        role="button"
-        tabIndex={0}
-        aria-expanded={open}
-        onClick={handleToggle}
-        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') handleToggle(); }}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 9,
-          padding: '6px 4px',
-          color: 'var(--text-primary)',
-          fontSize: 13,
-          cursor: 'pointer',
-          userSelect: 'none',
-        }}
-      >
-        <span aria-hidden="true" style={{
-          width: 3,
-          height: 12,
-          borderRadius: 2,
-          background: toolColor,
-          flexShrink: 0,
-        }} />
-        <span style={{
-          fontFamily: 'var(--font-mono)',
-          fontSize: 12,
-          color: 'var(--text-secondary)',
-        }}>
-          {toolName}
-        </span>
-        <span style={{
-          fontSize: 11,
-          color: 'var(--text-muted)',
-          fontFamily: 'var(--font-mono)',
-        }}>
-          {completed}/{tools.length} done
-        </span>
-        <span style={{
-          marginLeft: 'auto',
-          fontSize: 11,
-          color: 'var(--text-muted)',
-          transform: open ? 'rotate(90deg)' : 'none',
-          transition: 'transform 0.16s',
-          fontFamily: 'var(--font-mono)',
-        }}>
-          {'\u203A'}
-        </span>
-      </div>
-      {open && (
-        <div className="expand-content" style={{ padding: '0 0 6px 12px' }}>
-          {tools.map(tc => (
-            <ToolCallCard
-              key={tc.id}
-              toolCall={tc}
-              isLatest={tc.id === latestToolId}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  );
+function ToolGroup({ tools, active }: { tools: ToolCall[]; active: boolean }) {
+  return normalizeToolName(tools[0].toolName) === 'web.search'
+    ? <SearchActivity tools={tools} active={active} />
+    : <ToolActivity tools={tools} active={active} />;
 }
-
-// ── Utilities ──
 
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
@@ -676,8 +580,6 @@ function formatTokens(tokens: number): string {
   if (tokens < 1000) return `${tokens}`;
   return `${(tokens / 1000).toFixed(1)}k`;
 }
-
-// ── Inline question card (ask_user) ──
 
 export function InlineQuestionCard({
   toolCall,
@@ -904,8 +806,6 @@ export function InlineQuestionCard({
     </div>
   );
 }
-
-// ── Inline approval card ──
 
 const RISK_COLORS: Record<string, string> = {
   low: 'var(--success)',

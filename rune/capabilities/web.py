@@ -328,7 +328,7 @@ async def web_search(params: WebSearchParams) -> CapabilityResult:
         return CapabilityResult(
             success=True,
             output="No search results found.",
-            metadata={"query": params.query, "count": 0},
+            metadata={"query": params.query, "count": 0, "searchResults": {"count": 0, "items": []}},
         )
 
     lines = [
@@ -350,6 +350,12 @@ async def web_search(params: WebSearchParams) -> CapabilityResult:
         metadata={
             "query": params.query, "count": len(results), "freshness": params.freshness,
             "source_kind": "search_excerpt",
+            # UI metadata does not change the model's tool output.
+            "searchResults": {"count": len(results), "items": [
+                {"title": r.title[:300], "url": r.url,
+                 "description": (r.description or "")[:600], "date": (r.age or "")[:100]}
+                for r in results[:20] if len(r.url) <= 2048
+            ]},
         },
     )
 
