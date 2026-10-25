@@ -9,6 +9,49 @@ from rune.llm.context import model_scope
 from rune.llm.target import ModelCompatibilityError, resolve_target
 
 
+@pytest.mark.parametrize("model,provider", [("grok-4.7", "xai"), ("gpt-6-astra", "openai"),
+                                          ("claude-opus-5", "anthropic"), ("qwen3:8b", "ollama")])
+def test_model_preflight_accepts_priced_cloud_and_local_models(model, provider):
+    from rune.llm.target import preflight_model
+
+    assert preflight_model(model, provider, cost_limit=.30).provider == provider
+
+
+def test_model_preflight_blocks_unknown_pricing_only_when_a_cost_limit_is_set():
+    from rune.llm.target import preflight_model
+
+    assert preflight_model("unpriced-fixture", "openai").model == "unpriced-fixture"
+    with pytest.raises(ModelCompatibilityError, match="Pricing is unavailable"):
+        preflight_model("unpriced-fixture", "openai", cost_limit=.30)
+
+
+@pytest.mark.parametrize("case", ["region", "pricing"])
+async def test_run_preflight_happens_before_any_routing_call(monkeypatch, tmp_path, case):
+    from rune.agent.loop import NativeAgentLoop
+    from rune.config import get_config
+    from rune.types import AgentConfig
+
+    cfg = get_config()
+    if case == "region":
+        credentials = tmp_path / "credentials.json"
+        credentials.write_text("{}")
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(credentials))
+        monkeypatch.setenv("VERTEX_LOCATION", "us-central1")
+        cfg.llm.active_provider, cfg.llm.active_model = "gemini", "gemini-3.1-pro-preview"
+        error = "not available in us-central1"
+    else:
+        cfg.llm.active_provider, cfg.llm.active_model = "openai", "unpriced-fixture"
+        error = "Pricing is unavailable"
+    classify = AsyncMock()
+    monkeypatch.setattr("rune.agent.loop.classify_goal", classify)
+    monkeypatch.setenv("RUNE_HOME", str(tmp_path))
+    loop = NativeAgentLoop(AgentConfig(cost_budget_usd=.30))
+    trace = await loop.run("Research recent notices")
+    assert error in trace.reason
+    classify.assert_not_awaited()
+    assert not loop._running
+
+
 async def test_local_file_roles_keep_local_transport_and_identity(monkeypatch, tmp_path):
     import json
 

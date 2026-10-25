@@ -11,9 +11,9 @@ _BROWSER = ("browser_observe", "browser_act", "browser_navigate", "browser_extra
 
 
 def deferred_for_task(names: list[str], classification) -> set[str]:
-    from rune.agent.goal_classifier import is_coding_task, is_simple_lookup
+    from rune.agent.goal_classifier import is_coding_task, is_simple_lookup, is_web_research
 
-    if is_simple_lookup(classification):
+    if is_simple_lookup(classification) or is_web_research(classification):
         return set(names) - {"web_search", "web_fetch", "ask_user", "task_blocked"}
     if classification.goal_type == "browser":
         immediate = {*_BROWSER, "ask_user", "task_blocked"}
@@ -80,14 +80,15 @@ class ToolCatalog:
         if not guidance:
             return messages
 
-        for index, message in enumerate(messages):
-            content = message.get("content")
-            if message.get("role") == "system" and isinstance(content, str):
-                missing = [section for section in guidance if section not in content]
-                if not missing:
-                    return messages
-                return [*messages[:index], {**message, "content": content + "\n" + "\n".join(missing)}, *messages[index + 1:]]
-        return [{"role": "system", "content": "\n".join(guidance)}, *messages]
+        label = "Rune runtime tool reference; this does not add a user request or grant permissions.\n"
+        existing = [message["content"] for message in messages if isinstance(message.get("content"), str)
+                    and (message.get("role") == "system"
+                         or message.get("role") == "user" and message["content"].startswith(label))]
+        missing = [section for section in guidance if not any(section in content for content in existing)]
+        if not missing:
+            return messages
+        # Keep earlier messages intact when tools become available mid-turn.
+        return [*messages, {"role": "user", "content": label + "\n".join(missing)}]
 
     async def search(self, query: str) -> str:
         if not isinstance(query, str) or not query.strip() or len(query) > 300:

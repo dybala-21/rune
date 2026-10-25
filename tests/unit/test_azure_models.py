@@ -198,3 +198,52 @@ def test_azure_keys_are_visible_but_masked_in_environment_settings():
     for key in ("AZURE_API_KEY", "AZURE_OPENAI_API_KEY"):
         assert _is_rune_key(key) and _categorize_key(key) == "llm"
         assert _mask_value(key, "azure-test-key") != "azure-test-key"
+
+
+@pytest.mark.parametrize("zone,factor", [("global", 1), ("us", 1.1), ("eu", 1.2)])
+def test_azure_pricing_requires_a_matching_resource_and_known_deployment(azure, monkeypatch, zone, factor):
+    from rune.config.schema import AzurePricingConfig
+    from rune.llm.pricing import estimate_request_cost, reserve_request_cost
+
+    azure.azure_pricing = AzurePricingConfig(endpoint="https://fixture.openai.azure.com/openai/v1/",
+                                             deployments={"daily": zone, "deep": zone})
+    request = {"model": "azure/responses/daily", "api_base": "https://fixture.openai.azure.com"}
+    usage = {"input_tokens": 1000, "output_tokens": 100, "cached_input_tokens": 500,
+             "cache_write_tokens": 200, "cache_write_reported": True}
+    assert estimate_request_cost(request["model"], usage, request) == pytest.approx(.0022 * factor)
+    assert reserve_request_cost(request, 1000, 100) == pytest.approx(.0035 * factor)
+    assert estimate_request_cost("azure/responses/deep", usage, request) == pytest.approx(.011 * factor)
+    assert estimate_request_cost(request["model"], {**usage, "cache_write_reported": False}, request) is None
+    assert estimate_request_cost(request["model"], usage, {**request, "api_base": "https://other.openai.azure.com"}) is None
+    assert estimate_request_cost("azure/unknown", usage, request) is None
+    assert estimate_request_cost(request["model"], usage, {**request, "service_tier": "priority"}) is None
+    azure.azure_deployments["daily"] = "unknown-model"
+    assert estimate_request_cost(request["model"], usage, request) is None
+
+
+async def test_azure_pricing_can_be_saved_and_cleared(azure, monkeypatch, tmp_path):
+    from rune.api.handlers.config import ConfigPatchRequest, get_config_endpoint, patch_config
+    from rune.config import loader
+
+    path = tmp_path / "config.yaml"
+    path.write_text("llm: {}\n")
+    monkeypatch.setattr("rune.config.writer.config_file_path", lambda: path)
+    monkeypatch.setattr(loader, "_find_config_file", lambda: path)
+    pricing = {"endpoint": "https://fixture.openai.azure.com", "deployments": {"daily": "global"}}
+    assert (await patch_config(ConfigPatchRequest(azurePricing=pricing))).updated
+    assert loader.load_config(force=True).llm.azure_pricing.model_dump() == pricing
+    assert (await get_config_endpoint()).azure["pricing"] == pricing
+    assert (await patch_config(ConfigPatchRequest(azurePricing=None))).updated
+    assert loader.load_config(force=True).llm.azure_pricing is None
+
+
+@pytest.mark.parametrize("tokens,factor,output_rate", [(272000, 1, 10), (272001, 2, 15)])
+def test_azure_long_context_prices_the_whole_request(azure, tokens, factor, output_rate):
+    from rune.config.schema import AzurePricingConfig
+    from rune.llm.pricing import estimate_request_cost
+
+    azure.azure_pricing = AzurePricingConfig(endpoint="https://fixture.openai.azure.com", deployments={"daily": "global"})
+    usage = {"input_tokens": tokens, "output_tokens": 100, "cached_input_tokens": 1000,
+             "cache_write_tokens": 2000, "cache_write_reported": True}
+    expected = (((tokens - 3000) * 2 + 1000 * .2 + 2000 * 2.5) * factor + 100 * output_rate) / 1_000_000
+    assert estimate_request_cost("azure/daily", usage) == pytest.approx(expected)

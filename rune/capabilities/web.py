@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
 from datetime import UTC, datetime
 from html import unescape
 from typing import Any, Literal
+from urllib.parse import urldefrag, urljoin, urlsplit
 
 from pydantic import BaseModel, Field
 
@@ -185,6 +187,9 @@ def _html_to_text(html: str) -> str:
     page structure (navigation, sections, links).
     """
     text = _SCRIPT_STYLE_RE.sub("", html)
+    # Ignore markup without readable text.
+    if not unescape(_TAG_RE.sub(" ", text)).strip():
+        return ""
     # Structural tags → Markdown (before generic tag strip)
     text = re.sub(r"<h1[^>]*>(.*?)</h1>", r"\n# \1\n", text, flags=re.DOTALL)
     text = re.sub(r"<h2[^>]*>(.*?)</h2>", r"\n## \1\n", text, flags=re.DOTALL)
@@ -238,7 +243,7 @@ def _extract_page_content(html: str) -> tuple[str, str]:
         )
     except etree.ParserError:
         return _html_to_text(html), "body"
-    for node in tree.xpath('//head | //script | //style | //noscript | //template | //*[@hidden or @aria-hidden="true"]'):
+    for node in tree.xpath('//head | //script | //style | //noscript | //noframes | //template | //*[@hidden or @aria-hidden="true"]'):
         if node.getparent() is not None:
             node.drop_tree()
     main_nodes = set(tree.xpath('//main | //*[@role="main"]'))
@@ -259,6 +264,48 @@ def _extract_page_content(html: str) -> tuple[str, str]:
         if node.getparent() is not None:
             node.drop_tree()
     return _html_to_text(document.tostring(tree, encoding="unicode")), "body"
+
+
+def _embedded_page_urls(html: str, base_url: str) -> list[str]:
+    """Resolve frame URLs without executing page scripts."""
+    from lxml import etree
+    from lxml import html as document
+
+    try:
+        tree = document.document_fromstring(html.encode("utf-8"),
+            parser=document.HTMLParser(encoding="utf-8", no_network=True))
+    except etree.ParserError:
+        return []
+    try:
+        base = urljoin(base_url, next(iter(tree.xpath('//base/@href')), ""))
+    except ValueError:
+        log.debug("invalid_embedded_page_base")
+        base = base_url
+    urls = []
+    for src in tree.xpath('//frame/@src | //iframe[not(@srcdoc)]/@src'):
+        if not src.strip():
+            continue
+        try:
+            url = urldefrag(urljoin(base, src.strip()))[0]
+            parsed = urlsplit(url)
+        except ValueError:
+            continue
+        if (parsed.scheme in {"http", "https"} and parsed.hostname and not parsed.username and not parsed.password
+                and url != urldefrag(base_url)[0] and len(url) <= 2048 and url not in urls):
+            urls.append(url)
+        if len(urls) == 20:
+            break
+    return urls
+
+
+def _origin(url: str) -> tuple | None:
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme in {"http", "https"} and parsed.hostname and not parsed.username and not parsed.password:
+            return parsed.scheme, parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        return None
+    return None
 
 
 # Capability implementations
@@ -401,7 +448,25 @@ def _prune_json_by_term(text: str, term: str) -> str | None:
 
 async def web_fetch(params: WebFetchParams) -> CapabilityResult:
     attempt = {"started": False}
-    result = await _fetch_response(params, attempt)
+    try:
+        async with asyncio.timeout(30):
+            result = await _fetch_response(params, attempt)
+            if params.method.upper() == "GET" and not (params.selector or params.json_filter or params.record_query):
+                origin = _origin((result.metadata or {}).get("final_url", params.url))
+                path = [params.url]
+                # Follow a sole same-origin frame without another model call.
+                for _ in range(2):
+                    metadata = result.metadata or {}
+                    frames = metadata.get("embedded_pages", [])
+                    if (not metadata.get("empty_content") or len(frames) != 1 or not origin
+                            or _origin(frames[0]) != origin or frames[0] in path):
+                        break
+                    path.append(frames[0])
+                    result = await _fetch_response(params.model_copy(update={"url": frames[0]}), attempt,
+                                                   allowed_origin=origin)
+                    result.metadata = {**(result.metadata or {}), "requested_url": params.url, "frame_path": list(path)}
+    except TimeoutError:
+        result = CapabilityResult(success=False, error="The page retrieval deadline was reached.")
     if (params.method or "GET").upper() not in {"GET", "HEAD"}:
         metadata = result.metadata or {}
         if metadata.get("status_code") == 202:
@@ -412,7 +477,7 @@ async def web_fetch(params: WebFetchParams) -> CapabilityResult:
     return result
 
 
-async def _fetch_response(params: WebFetchParams, attempt: dict) -> CapabilityResult:
+async def _fetch_response(params: WebFetchParams, attempt: dict, *, allowed_origin: tuple | None = None) -> CapabilityResult:
     """Fetch a URL; preserve short responses and isolate transient failures."""
     import httpx
 
@@ -434,7 +499,7 @@ async def _fetch_response(params: WebFetchParams, attempt: dict) -> CapabilityRe
         }
         async with httpx.AsyncClient(
             timeout=30.0,
-            follow_redirects=(params.method or "GET").upper() in {"GET", "HEAD"},
+            follow_redirects=allowed_origin is None and (params.method or "GET").upper() in {"GET", "HEAD"},
             max_redirects=5,
         ) as client:
             method = (params.method or "GET").upper()
@@ -460,6 +525,16 @@ async def _fetch_response(params: WebFetchParams, attempt: dict) -> CapabilityRe
                 )
             else:
                 resp = await client.get(params.url, headers=headers)
+                if allowed_origin is not None:
+                    for _ in range(5):
+                        if not resp.is_redirect:
+                            break
+                        target = urljoin(str(resp.url), resp.headers.get("location", ""))
+                        if _origin(target) != allowed_origin:
+                            return CapabilityResult(success=False,
+                                error="The embedded page redirects to another origin. Inspect that URL separately.",
+                                metadata={"url": params.url, "redirect_blocked": True})
+                        resp = await client.get(target, headers=headers)
             resp.raise_for_status()
 
         content_type = resp.headers.get("content-type", "")
@@ -487,6 +562,7 @@ async def _fetch_response(params: WebFetchParams, attempt: dict) -> CapabilityRe
             )
 
         extraction = "selector"
+        embedded_pages = []
         if params.selector:
             try:
                 text = _extract_by_selector(html, params.selector)
@@ -502,14 +578,30 @@ async def _fetch_response(params: WebFetchParams, attempt: dict) -> CapabilityRe
             not content_type and html.lstrip().startswith("<")
         ):
             text, extraction = _extract_page_content(html)
+            embedded_pages = _embedded_page_urls(html, final_url)
         else:
             text, extraction = html, "text"
 
+        frame_limit = min(4000, params.max_length)
+        if text.strip():
+            # Frame hints must not crowd out the page body.
+            spare = params.max_length - len(text) if len(text) <= params.max_length else params.max_length
+            frame_limit = min(frame_limit, params.max_length // 4, spare)
+        frame_note = ""
+        for url in embedded_pages:
+            note = (frame_note or "Embedded pages (not yet read); use web_fetch for the relevant content:\n") + url + "\n"
+            if len(note) + 1 > frame_limit:
+                continue
+            frame_note = note
+        if frame_note:
+            frame_note += "\n"
         if not text.strip():
             return CapabilityResult(
                 success=False,
-                error="The response has no readable content. Check the URL or inspect the page in a browser if needed.",
-                metadata={"status_code": resp.status_code, "empty_content": True},
+                error=("The parent page has no readable text. " + frame_note if frame_note else
+                       "The response has no readable content. Check the URL or inspect the page in a browser if needed."),
+                metadata={**source, "empty_content": True,
+                          **({"embedded_pages": embedded_pages} if embedded_pages else {})},
             )
 
         json_data = None
@@ -519,7 +611,7 @@ async def _fetch_response(params: WebFetchParams, attempt: dict) -> CapabilityRe
             except (ValueError, RecursionError):
                 return CapabilityResult(success=False, error="The response is not valid JSON.",
                                         metadata={**source, "invalid_json": True})
-        filter_note = ""
+        filter_note = frame_note
         record_query = None
         if params.record_query:
             if "json" not in content_type.lower():
@@ -558,9 +650,15 @@ async def _fetch_response(params: WebFetchParams, attempt: dict) -> CapabilityRe
                     error=f"The JSON response needs {required_length} characters. {hint}" + record_paths(json_data),
                     metadata={**source, "truncated": True, "required_length": required_length},
                 )
-        elif len(text) > params.max_length:
-            text = text[: params.max_length]
+        elif len(text) + len(filter_note) > params.max_length:
+            text = text[: max(0, params.max_length - len(filter_note))]
             truncated = True
+        if not text.strip():
+            return CapabilityResult(
+                success=False,
+                error="No readable content fits maxLength. Increase maxLength or select the relevant content.",
+                metadata={**source, "empty_content": True, "truncated": truncated},
+            )
         if filter_note:
             text = filter_note + text
 
@@ -577,6 +675,7 @@ async def _fetch_response(params: WebFetchParams, attempt: dict) -> CapabilityRe
                 "length": len(text),
                 "body_offset": len(filter_note),
                 "truncated": truncated,
+                **({"embedded_pages": embedded_pages} if embedded_pages else {}),
                 **({"record_query": record_query} if record_query is not None else {}),
             },
         )

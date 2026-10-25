@@ -102,6 +102,28 @@ def test_current_source_cannot_bypass_the_source_requirement():
     assert values["needs_current_source"] and values["needs_web_evidence"]
 
 
+@pytest.mark.parametrize("changes,expected", [
+    ({}, True), ({"goal_type": "research"}, True),
+    ({"complexity": "complex", "is_multi_task": True}, True),
+    ({"goal_type": "browser"}, False), ({"goal_type": "artifact"}, False),
+    ({"browser_effect": "edit"}, False), ({"browser_effect": "change"}, False),
+    ({"requires_execution": True}, False), ({"requires_code": True}, False),
+    ({"requires_desktop_input": True}, False), ({"is_complex_coding": True}, False),
+    ({"output_expectation": "file"}, False), ({"output_expectation": "either"}, False),
+    ({"intent_categories": frozenset({"email"})}, False),
+    ({"needs_web_evidence": False}, False), ({"available": False}, False),
+])
+def test_research_answer_reserve_preserves_actions_and_deliverables(changes, expected):
+    from rune.agent.goal_classifier import ClassificationResult, is_web_research
+
+    classification = ClassificationResult(**{
+        "goal_type": "web", "confidence": 0.9, "tier": 2,
+        "needs_web_evidence": True, "browser_effect": "view", **changes,
+    })
+    assert is_web_research(classification) is expected
+    assert not is_web_research(None)
+
+
 @pytest.mark.parametrize("items", [
     [{"requirement": "Change people to three", "expected": "three"}],
     [{"requirement": "confirm it", "kind": "result", "confirms": "missing"}],

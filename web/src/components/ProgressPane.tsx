@@ -234,6 +234,7 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
 }) {
   const [showEvidence, setShowEvidence] = useState(false);
   const evidence = trust ? checkEvidence(trust) : '';
+  const view = trust ? describeTrust(trust) : null;
 
   let spec: BandSpec | null = null;
   if (awaiting) {
@@ -253,10 +254,9 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
       note: stepNumber !== null ? `step ${stepNumber}` : undefined,
       live: true,
     };
-  } else if (verdictOk === null) {
+  } else if (verdictOk === null && !view?.showCard) {
     return null;
-  } else if (trust) {
-    const view = describeTrust(trust);
+  } else if (trust && view) {
     const colors = trustColors(view.tone);
     spec = {
       color: colors.accent, bg: colors.background,
@@ -267,6 +267,9 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
         ...(trust.escalationHint ? [trust.escalationHint] : []),
         ...(trust.unsourcedNumbers?.length
           ? [`Figures not found in retrieved sources: ${trust.unsourcedNumbers.slice(0, 5).join(', ')}. These may be calculated or rounded.`]
+          : []),
+        ...(trust.sourceReview?.excerptOnlyNumbers?.length
+          ? [`Numbers mentioned only in search excerpts: ${trust.sourceReview.excerptOnlyNumbers.join(', ')}. Their use in the answer has not been verified.`]
           : []),
         ...(trust.workspaceWarning?.trim() ? [trust.workspaceWarning.trim()] : []),
       ],

@@ -136,9 +136,28 @@ async def _accessibility_snapshot(page: Any, selector: str = "") -> str:
             root = page.locator(":root")
         result = await root.aria_snapshot()
         if not result:
-            return "(empty page)"
+            result = "(empty page)"
         if len(result) > _SNAPSHOT_MAX_CHARS:
             result = result[:_SNAPSHOT_MAX_CHARS] + f"\n... (truncated, {len(result)} total chars)"
+        if not selector:
+            from urllib.parse import urldefrag, urlsplit
+
+            urls = []
+            for frame in page.frames:
+                if frame is page.main_frame:
+                    continue
+                try:
+                    url = urldefrag(frame.url)[0]
+                    parsed = urlsplit(url)
+                except ValueError:
+                    continue
+                if (parsed.scheme in {"http", "https"} and parsed.hostname and not parsed.username and not parsed.password
+                        and url not in urls and len(url) <= 1000 and sum(map(len, urls)) + len(url) <= 1500):
+                    urls.append(url)
+                if len(urls) == 10:
+                    break
+            if urls:
+                result += "\nEmbedded documents (not read; use web_fetch for relevant content):\n" + "\n".join(urls)
         return result
 
     except Exception as exc:

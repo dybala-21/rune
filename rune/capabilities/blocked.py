@@ -91,6 +91,8 @@ def register_blocked_capability(registry: CapabilityRegistry) -> None:
                 "documented contract, an existing test), when a required "
                 "input does not exist, or when following the request "
                 "literally would break behaviour the project relies on. "
+                "Uncertain research findings or sparse recent coverage alone are not a blocker: "
+                "summarize supported findings and identify unresolved questions instead. "
                 "Reporting a conflict is a successful outcome; quietly "
                 "working around it is not."
             ),

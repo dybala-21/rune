@@ -39,6 +39,13 @@ def pytest_collection_modifyitems(config, items):
 
     try:
         selection = select_model(get_config(), config.getoption("--live-provider"), config.getoption("--live-model"))
+        from rune.llm.target import preflight_model
+
+        limits = [get_config().llm.cost_budget_usd, *[
+            (item.callspec.params.get("workflow") or {}).get("cost_budget_usd")
+            for item in live if hasattr(item, "callspec")
+        ]]
+        preflight_model(selection[1], selection[0], cost_limit=next((n for n in limits if n is not None), None))
     except ValueError as exc:
         raise pytest.UsageError(str(exc)) from exc
     config._rune_live_selection = selection

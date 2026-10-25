@@ -13,6 +13,23 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const home = mkdtempSync(resolve(tmpdir(), 'rune-trust-contract-'));
 const gate = last_verdict => ({ has_check: true, last_verdict, verdict_counts: { pass: 1 }, last_evidence: 'check output' });
 const cases = [
+  { name: 'excerpt-only numbers remain visible after a completed lookup',
+    trace: { source_review: { status: 'not_checked', excerptOnlyNumbers: ['3200'] } },
+    title: 'Completed', tone: 'warning', ok: true, card: true, escalate: false },
+  { name: 'answer reservation keeps source caveats visible',
+    trace: { answer_reserve_reason: 'budget', source_review: { status: 'not_checked', excerptOnlyNumbers: ['3200'] } },
+    title: 'Response returned', tone: 'warning', ok: null, card: true, escalate: false },
+  ...['budget', 'time', 'tool_rounds'].map(reason => ({
+    name: `answer reservation preserves its ${reason} cause`, trace: { answer_reserve_reason: reason },
+    title: 'Response returned', tone: 'neutral', ok: null, card: true,
+  })),
+  { name: 'answer reservation leaves failed source checks visible', trace: {
+    reason: 'completed_gate_warnings', answer_reserve_reason: 'budget',
+    completion_check: { name: 'Source retrieval', detail: 'No source body was retrieved.' },
+  }, title: 'Review needed', tone: 'warning', ok: false, card: true },
+  { name: 'answer reservation cannot hide a runtime error', trace: {
+    reason: 'error: connection lost', answer_reserve_reason: 'budget',
+  }, title: 'Run failed', tone: 'danger', ok: false, card: true },
   { name: 'completed work survives an exhausted explanation budget', trace: {
     timings: { budgetBlocked: 'No further model request was sent.' },
     requirement_acceptance: { required: true, status: 'pass', method: 'page_readback',
@@ -290,6 +307,12 @@ cases.forEach((c, i) => test(c.name, () => {
   // Contradictory activity heuristics must not replace the server's result.
   assert.equal(computeRunVerdict(trust, { success: !c.ok }), c.ok);
   const card = renderToStaticMarkup(createElement(TrustCard, { trust }));
+  if (trust.answerReserveReason && trust.completionStatus !== 'failed') {
+    const note = { budget: 'remaining request budget', time: 'run deadline', tool_rounds: 'tool-round limit' }[trust.answerReserveReason];
+    assert.ok(view.note.includes(note), view.note);
+    assert.ok(card.includes(note), card);
+    if (trust.answerReserveReason === 'budget') assert.doesNotMatch(view.note, /time limit|deadline/i);
+  }
   if (c.card) assert.ok(card.includes(c.title), card);
   else assert.equal(card, '');
   if (trust.evidenceGate?.lastVerdict === 'fail') assert.ok(!card.includes('1 check passed'));
@@ -300,6 +323,7 @@ cases.forEach((c, i) => test(c.name, () => {
     currentStep: null, activitySummary: null, orchestration: null,
   }));
   if (c.ok !== null) assert.ok(progress.includes(c.title), progress);
+  if (trust.answerReserveReason && trust.completionStatus !== 'failed') assert.ok(progress.includes(view.note), progress);
   assert.ok(!progress.includes('Not verified'));
   if (trust.workspaceWarning) assert.ok(progress.includes(trust.workspaceWarning), progress);
   if (trust.unsourcedNumbers?.length) {

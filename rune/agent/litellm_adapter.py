@@ -573,6 +573,43 @@ def _build_action_schema(
     }
 
 
+def _answer_request(params: dict, tools: list | None, limit: str, *, guided: bool = False, continuation: bool = False) -> dict:
+    """Build the final request used for both reservation and dispatch."""
+    from rune.agent.prompts import SOURCE_GAP_GUIDANCE
+
+    result = dict(params)
+    if continuation:
+        result.pop("tools", None)
+        result.pop("tool_choice", None)
+        result["messages"] = [*params["messages"], {"role": "user", "content": (
+            "Continue the interrupted answer from its last character. Return only the missing suffix, "
+            "with no recap, new heading, or repeated opening. Finish using the evidence already available."
+        )}]
+        return result
+    report_tools = [tool for tool in tools or [] if (tool.get("function") or {}).get("name") == "task_blocked"]
+    note = (
+        f"Rune runtime limit ({limit}): the tool phase has ended. "
+        "Rune displays this stop reason separately; describe evidence gaps, not runtime limits. "
+        "Finish this reply now using the retrieved evidence. No more tools may retrieve data or perform work. "
+        "Give the useful supported findings with source links and state what remains unknown. "
+        "Do not invent missing facts or claim full verification. "
+    ) + SOURCE_GAP_GUIDANCE
+    if report_tools:
+        note += (" Use task_blocked only if an unmet prerequisite prevents the requested outcome; "
+                 "uncertain research findings alone are not a blocker.")
+    result["messages"] = [*params["messages"], {"role": "user", "content": note}]
+    result.pop("tools", None)
+    result.pop("tool_choice", None)
+    if guided:
+        result["response_format"] = {"type": "json_schema", "json_schema": {
+            "name": "rune_action", "schema": _build_action_schema(report_tools, allow_final=True),
+        }}
+    elif report_tools:
+        result["tools"] = report_tools
+        result["tool_choice"] = "auto"
+    return result
+
+
 def _build_tool_lookup(tools: list[Any]) -> dict[str, Any]:
     """Build name-to-callable lookup from PydanticAI Tool objects or raw functions."""
     lookup: dict[str, Any] = {}
@@ -940,7 +977,7 @@ class StreamResult:
         _oversized_batches = 0
         # The loop reports this limit because no final model response follows.
         self.tool_budget_exhausted = False
-        self.answer_budget_reserved = False
+        self.answer_reserve_reason = ""
         _force_tool = False
         _output_recovery_count = 0
         _text_continuation = False
@@ -1021,6 +1058,7 @@ class StreamResult:
             # duplicate response boxes when the LLM rewrites its earlier
             # analysis after additional tool calls.
             _suppress_yield = len(self._collected_text.strip()) > 300 and not _text_continuation
+            _continuing_text = _text_continuation
             _text_continuation = False
 
             # Build extra params from policy
@@ -1140,37 +1178,21 @@ class StreamResult:
                     "json_schema": {"name": "rune_action", "schema": _gschema},
                 }
 
-            if self._reserve_answer and _tool_round and not verification_pending and not recovery_tools:
+            if _continuing_text:
+                _answer_only = True
+                _acompletion_kwargs = _answer_request(_acompletion_kwargs, _tools, "output", continuation=True)
+            elif self._reserve_answer and _tool_round and not verification_pending and not recovery_tools:
                 from rune.agent.timing import needs_answer_reserve
 
                 time_to_answer = _answer_deadline is not None and time.monotonic() >= _answer_deadline
-                if time_to_answer or _tool_round >= _max_tool_rounds or needs_answer_reserve(_acompletion_kwargs, remaining_tokens):
+                limit = "time" if time_to_answer else "tool rounds" if _tool_round >= _max_tool_rounds else "budget"
+                answer_request = _answer_request(_acompletion_kwargs, _tools, limit, guided=self._guided)
+                if time_to_answer or _tool_round >= _max_tool_rounds or needs_answer_reserve(
+                    _acompletion_kwargs, remaining_tokens, answer_params=answer_request,
+                ):
                     _answer_only = True
-                    self.answer_budget_reserved = True
-                    report_tools = [tool for tool in _tools or [] if (tool.get("function") or {}).get("name") == "task_blocked"]
-                    limit = "time" if time_to_answer else "tool rounds" if _tool_round >= _max_tool_rounds else "budget"
-                    limit_note = f"Rune runtime limit ({limit}): the tool phase has ended. Attribute unfinished work to this run limit. "
-                    note = (
-                        limit_note + "Finish this reply now using the retrieved evidence. No more tools are available for this turn. "
-                        "Give the useful verified facts with source links and clearly state what remains unverified. "
-                        "Do not invent missing values or claim the whole request was verified."
-                    )
-                    _acompletion_kwargs["messages"] = [*_acompletion_kwargs["messages"], {"role": "user", "content": note}]
-                    _acompletion_kwargs.pop("tools", None)
-                    _acompletion_kwargs.pop("tool_choice", None)
-                    if report_tools:
-                        note = (
-                            limit_note + "Finish this reply now. No more tools may retrieve data or perform work. "
-                            "If any required fact remains unavailable, use task_blocked to report the missing facts and sources tried; "
-                            "this ends the run without another model call. Otherwise answer from verified evidence only."
-                        )
-                        _acompletion_kwargs["messages"][-1] = {"role": "user", "content": note}
-                        _acompletion_kwargs["tools"] = report_tools
-                        _acompletion_kwargs["tool_choice"] = "auto"
-                    if self._guided:
-                        _acompletion_kwargs.pop("tools", None)
-                        _acompletion_kwargs.pop("tool_choice", None)
-                        _acompletion_kwargs["response_format"]["json_schema"]["schema"] = _build_action_schema(report_tools, allow_final=True)
+                    self.answer_reserve_reason = "tool_rounds" if limit == "tool rounds" else limit
+                    _acompletion_kwargs = answer_request
 
             _ll = _litellm()
             from rune.llm.request_params import compatible_completion
@@ -1455,14 +1477,6 @@ class StreamResult:
                     self._messages.append({
                         "role": "assistant",
                         "content": text_this_turn,
-                    })
-                    self._messages.append({
-                        "role": "user",
-                        "content": (
-                            "Output was cut short. Resume directly — "
-                            "no recap of what you already wrote. "
-                            "Continue from where you stopped."
-                        ),
                     })
                     # The next response resumes this text; retain the prefix in the saved answer.
                     if not _streamed_live and not _suppress_yield:

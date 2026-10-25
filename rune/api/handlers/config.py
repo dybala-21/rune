@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from rune.api.auth import TokenAuthDependency
-from rune.config.schema import AzureDeployments, DecisionRoutingConfig
+from rune.config.schema import AzureDeployments, AzurePricingConfig, DecisionRoutingConfig
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -68,6 +68,7 @@ class ExecutionEnvironmentPatch(BaseModel):
 
 class ConfigPatchRequest(BaseModel):
     azure_deployments: AzureDeployments | None = Field(None, alias="azureDeployments")
+    azure_pricing: AzurePricingConfig | None = Field(None, alias="azurePricing")
     vertex_location: str | None = Field(None, alias="vertexLocation", min_length=1, max_length=64,
                                        pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
     run_limits: RunLimits | None = Field(None, alias="runLimits")
@@ -234,6 +235,7 @@ async def get_config_endpoint() -> ConfigGetResponse:
             "keyName": environment_name(KEY_NAMES),
             "keyScope": effective_env_scope(environment_name(KEY_NAMES)),
             "deployments": cfg.llm.azure_deployments, "suggestedModels": GPT6_MODELS,
+            "pricing": cfg.llm.azure_pricing.model_dump() if cfg.llm.azure_pricing else None,
         },
         vertexLocation=(os.environ.get("VERTEX_LOCATION") or os.environ.get("VERTEXAI_LOCATION")
                         or cfg.vertex_location) if vertex_active() else None,
@@ -335,6 +337,9 @@ async def patch_config(req: ConfigPatchRequest) -> ConfigPatchResponse:
     to_persist: dict[str, Any] = {}
     if req.azure_deployments is not None:
         to_persist.update({"llm.azureDeployments": req.azure_deployments, "llm.azure_deployments": None})
+    if "azure_pricing" in req.model_fields_set:
+        to_persist.update({"llm.azurePricing": req.azure_pricing.model_dump() if req.azure_pricing else None,
+                           "llm.azure_pricing": None})
     if req.vertex_location is not None:
         to_persist["vertex_location"] = req.vertex_location
     limits = req.run_limits.model_dump(exclude_unset=True) if req.run_limits is not None else {}
@@ -368,6 +373,9 @@ async def patch_config(req: ConfigPatchRequest) -> ConfigPatchResponse:
             raise HTTPException(status_code=500, detail="Could not save settings. No configuration changes were applied.")
 
     updated = routing is not None or bool(environment) or bool(limits)
+    if "azure_pricing" in req.model_fields_set:
+        cfg.llm.azure_pricing = req.azure_pricing
+        updated = True
     if req.azure_deployments is not None:
         cfg.llm.azure_deployments = req.azure_deployments
         from rune.llm.models import invalidate_cache

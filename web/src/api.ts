@@ -487,6 +487,11 @@ export interface RunLimits {
   costUsd: number | null;
 }
 
+export interface AzurePricing {
+  endpoint: string;
+  deployments: Record<string, 'global' | 'us' | 'eu'>;
+}
+
 export interface ConfigInfo {
   azure?: {
     endpoint: string;
@@ -497,6 +502,7 @@ export interface ConfigInfo {
     keyScope: 'user' | 'project' | 'process' | null;
     deployments: Record<string, string>;
     suggestedModels: string[];
+    pricing?: AzurePricing | null;
   };
   vertexLocation?: string | null;
   runLimits?: RunLimits;
@@ -555,6 +561,7 @@ export async function fetchConfig(): Promise<ConfigInfo> {
 
 export async function patchConfig(params: {
   azureDeployments?: Record<string, string>;
+  azurePricing?: AzurePricing | null;
   vertexLocation?: string;
   runLimits?: Partial<RunLimits>;
   executionEnvironment?: { backend?: 'local' | 'container'; image?: string };

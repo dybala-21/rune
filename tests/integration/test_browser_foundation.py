@@ -381,6 +381,34 @@ async def test_extract_reads_current_refs_and_does_not_hide_empty_matches(screen
     assert not missing.success and "browser_observe" in missing.error
 
 
+async def test_extract_distinguishes_missing_attributes_empty_values_and_empty_text(screen):
+    from rune.capabilities.browser.capabilities import BrowserExtractParams, browser_extract
+
+    await screen.set_content('<input id="empty" value=""><div id="blank"></div><iframe src="about:blank"></iframe>')
+    missing = await browser_extract(BrowserExtractParams(selector="html", attribute="outerHTML"))
+    assert not missing.success and missing.metadata["count"] == 0
+    assert missing.metadata["matched_count"] == 1 and "HTML attribute" in missing.error
+    empty = await browser_extract(BrowserExtractParams(selector="#empty", attribute="value"))
+    assert empty.success and empty.output == "" and empty.metadata["count"] == 1
+    blank = await browser_extract(BrowserExtractParams(selector="#blank"))
+    assert not blank.success and blank.metadata["empty_content"]
+    frame = await browser_extract(BrowserExtractParams(selector="iframe", attribute="src"))
+    assert frame.success and frame.output == "about:blank"
+
+
+async def test_page_snapshot_exposes_loaded_frame_urls_without_another_tool_call(screen):
+    from rune.capabilities.browser.core import _accessibility_snapshot
+
+    await screen.route("https://frame-fixture.example/**", lambda route: route.fulfill(body="<p>Notice content</p>"))
+    await screen.set_content('<main><p>Official site</p><iframe src="https://frame-fixture.example/news"></iframe>'
+                             '<iframe srcdoc="inline content"></iframe></main>')
+    snapshot = await _accessibility_snapshot(screen)
+    assert "Official site" in snapshot and "https://frame-fixture.example/news" in snapshot
+    assert "Embedded documents (not read" in snapshot
+    assert "about:srcdoc" not in snapshot
+    assert "Embedded documents" not in await _accessibility_snapshot(screen, "main p")
+
+
 async def test_resume_observes_the_live_page_without_repeating_a_click(screen, tmp_path):
     from rune.agent.execution_journal import ExecutionJournal, reconcile
     from rune.api.run_snapshot import RunSnapshots

@@ -246,6 +246,8 @@ class CompletionTrace:
     mech_check: str = ""
     # A step reached the tool-round limit before its final LLM turn.
     tool_budget_exhausted: bool = False
+    # Retrieval stopped early to leave room for the final answer.
+    answer_reserve_reason: str = ""
     # Test freshness after code changes, not task coverage. None if no code changed.
     tests_passed_after_edit: bool | None = None
     # Tool-event verification state, when available.

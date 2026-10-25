@@ -56,11 +56,16 @@ async def test_text_continuation_keeps_the_full_answer_after_tool_reads(monkeypa
     monkeypatch.setattr(la.litellm, "acompletion", completion)
     result = StreamResult(model="openai/gpt-5.4", messages=[{"role":"user","content":"Read the records"}],
         tool_schemas=[{"type":"function","function":{"name":"web_fetch"}}], tool_lookup={"web_fetch":fetch},
-        max_tokens=128, temperature=0, request_tokens_limit=20000, response_tokens_limit=128)
+        max_tokens=128, temperature=0, request_tokens_limit=20000, response_tokens_limit=128,
+        reserve_answer=True)
+    monkeypatch.setattr("rune.agent.timing.needs_answer_reserve", lambda *args, **kwargs: len(requests) >= 3)
     result._live_stream = live
     shown = "".join([part async for part in result.stream_text()])
     assert shown == await result.get_output() == prefix + suffix
     assert len(requests) == 4 and requests[-1]["max_tokens"] == 256
+    assert not requests[-1].get("tools") and "tool_choice" not in requests[-1]
+    assert "only the missing suffix" in requests[-1]["messages"][-1]["content"]
+    assert "Rune runtime limit" not in str(requests[-1]["messages"])
     assert not result.tool_budget_exhausted
 
 

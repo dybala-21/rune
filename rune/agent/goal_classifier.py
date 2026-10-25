@@ -73,6 +73,17 @@ def is_simple_lookup(classification: ClassificationResult | None) -> bool:
     )
 
 
+def is_web_research(classification: ClassificationResult | None) -> bool:
+    return bool(
+        classification is not None and classification.available
+        and classification.goal_type in {"web", "research"} and classification.needs_web_evidence
+        and classification.output_expectation == "text" and classification.browser_effect == "view"
+        and not classification.requires_execution and not classification.requires_code
+        and not classification.requires_desktop_input and not classification.is_complex_coding
+        and not classification.intent_categories
+    )
+
+
 def is_coding_task(classification: ClassificationResult) -> bool:
     intents = getattr(classification, "intent_categories", ())
     return bool(

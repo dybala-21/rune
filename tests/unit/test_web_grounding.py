@@ -47,6 +47,25 @@ def test_record_checks_use_the_body_without_tool_annotations():
     assert not check.records.complete
 
 
+@pytest.mark.parametrize("body,offset", [("", 7), ("   ", 7), ("facts", -1), ("facts", 100), ("facts", True)])
+def test_annotations_and_invalid_body_boundaries_are_not_source_reads(body, offset):
+    check = WebGrounding(required=True, requires_page=True)
+    result = CapabilityResult(success=True, output="Notice\n" + body, metadata={"body_offset": offset})
+    assert not check.observe("web_fetch", {}, result)
+    assert check.sources == check.pages == 0
+    assert not check.context.entries and check.blocker()
+
+
+def test_tool_annotations_cannot_verify_numbers_from_search_excerpts():
+    check = WebGrounding(required=True, requires_page=True)
+    check.observe("web_search", {}, CapabilityResult(success=True, output="Indexed value: 120"))
+    prefix = "120 records inspected\n"
+    result = CapabilityResult(success=True, output=prefix + "Value unavailable", metadata={"body_offset": len(prefix)})
+    assert check.observe("web_fetch", {}, result)
+    assert check.pages == 1 and check.excerpt_only_numbers("Current value: 120") == ["120"]
+    assert check.snapshot("Current value: 120")["status"] == "not_checked"
+
+
 @pytest.mark.parametrize("name,metadata,success,expected", [
     ("web_search", {"count": 1}, True, True),
     ("web_search", {"count": 0}, True, False),
@@ -122,7 +141,7 @@ def test_cache_annotations_cannot_verify_a_search_number():
     check.observe("web_search", {}, CapabilityResult(success=True, output="Indexed price: 120"))
     check.observe("web_fetch", {}, CapabilityResult(success=True, output="Unavailable"))
     check.observe("web_fetch", {}, CapabilityResult(success=True, output="CACHE HIT: 120 tokens saved", metadata={"cached": True}))
-    assert check.blocker("Price: 120")
+    assert check.excerpt_only_numbers("Price: 120") == ["120"]
 
 
 def test_post_response_is_not_a_source_read():
@@ -181,20 +200,26 @@ def test_current_lookup_requires_a_page_without_search_freshness():
     assert check.blocker() is None
 
 
-@pytest.mark.parametrize("answer,blocked", [
+@pytest.mark.parametrize("answer,warned", [
     ('Current quote: 269,500 KRW', True),
     ('현재가 **269,500원**', True),
     ('{"price":269500}', True),
+    ('269,500 is an undated search excerpt, not a confirmed current quote.', True),
+    ('검색 요약의 269,500원은 현재 시세로 확인되지 않았습니다.', True),
     ('1. Quote unavailable. See https://example.org/269500', False),
     ('The requested 7 observations could not be retrieved.', False),
 ])
-def test_opening_a_page_does_not_verify_numbers_from_search_excerpts(answer, blocked):
+def test_excerpt_number_mentions_are_reported_without_guessing_their_meaning(answer, warned):
     check = WebGrounding(required=True, requires_page=True)
     check.observe("web_search", {}, CapabilityResult(success=True, output="1. Price 269,500; last 7 observations"))
     check.observe("web_fetch", {}, CapabilityResult(success=True, output="Quotes unavailable; 20 minute delay"))
-    assert bool(check.blocker(answer, "Check the last 7 observations")) is blocked
+    assert check.blocker(answer) is None
+    snapshot = check.snapshot(answer, "Check the last 7 observations")
+    assert snapshot["excerptOnlyNumbers"] == (["269500"] if warned else [])
+    assert snapshot["status"] == "not_checked"
     check.observe("web_fetch", {}, CapabilityResult(success=True, output='{"price":269500.0,"time":"2026-10-16T10:00:00+09:00"}'))
     assert check.blocker(answer, "Check the last 7 observations") is None
+    assert check.excerpt_only_numbers(answer, "Check the last 7 observations") == []
 
 
 def test_source_numbers_preserve_precision_and_bound_exponents():

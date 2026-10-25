@@ -43,17 +43,33 @@ def remaining_tokens() -> int | None:
     return min(values) if values else None
 
 
-def needs_answer_reserve(params: dict, tokens_left: int) -> bool:
+def needs_answer_reserve(params: dict, tokens_left: int, *, answer_params: dict | None = None) -> bool:
     """Reserve enough budget for a final answer."""
     from rune.agent.request_budget import calibrated_input, input_estimate
     from rune.llm.pricing import reserve_request_cost
 
     run = _current.get()
-    estimate = input_estimate(params)
+    raw = input_estimate(params)
+    estimate = raw
     if run is not None:
         estimate = calibrated_input(run, params, estimate)
     output = params.get("max_completion_tokens", params.get("max_tokens", 4096))
-    required = 2 * (estimate + output)
+    answer = answer_params if answer_params is not None else params
+    answer_input = estimate
+    answer_output = answer.get("max_completion_tokens", answer.get("max_tokens", 4096))
+    if answer_params is not None:
+        raw_answer = input_estimate(answer)
+        answer_input = max(math.ceil(raw_answer * estimate / max(1, raw)),
+                           calibrated_input(run, answer, raw_answer) if run is not None else raw_answer)
+        recent_results = []
+        for message in reversed(params.get("messages", [])):
+            if message.get("role") == "assistant":
+                break
+            if message.get("role") == "tool":
+                recent_results.append(message)
+        # Reserve space for the next response and its tool results.
+        answer_input += output + max(1024, input_estimate({"messages": recent_results}))
+    required = estimate + output + answer_input + answer_output
     if tokens_left <= required:
         return True
     for scope in scopes(run):
@@ -64,7 +80,8 @@ def needs_answer_reserve(params: dict, tokens_left: int) -> bool:
             return True
         if budget["costUsd"] is not None:
             cost = reserve_request_cost(params, estimate, output)
-            if cost is None or budget["costUsd"] <= 2 * cost:
+            answer_cost = reserve_request_cost(answer, answer_input, answer_output)
+            if cost is None or answer_cost is None or budget["costUsd"] <= cost + answer_cost:
                 return True
     return False
 
