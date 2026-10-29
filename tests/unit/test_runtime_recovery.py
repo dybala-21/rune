@@ -135,6 +135,59 @@ run_foreground(Daemon())
     assert b"could not stop safely" in result.stderr
 
 
+@pytest.mark.parametrize(("release_after", "sleep_delay", "elapsed"), [
+    (0, 0, 0),
+    (.2, 0, .2),
+    (30, 0, 30),
+    (30.1, 0, 30.2),
+    (35, 0, 35),
+    (None, 0, 35),
+    (None, .8, 35),
+])
+def test_cli_stop_waits_for_lock_release(monkeypatch, tmp_path, release_after, sleep_delay, elapsed):
+    import time
+
+    from rune.cli import main
+    from rune.daemon import control
+
+    now = 0
+    requested = False
+
+    def owner():
+        if requested and release_after is not None and now >= release_after:
+            return None
+        return 123
+
+    def stop(*args, **kwargs):
+        nonlocal requested
+        requested = True
+        return {"success": True, "pid": 123}
+
+    def sleep(seconds):
+        nonlocal now
+        now = round(now + seconds + sleep_delay, 6)
+
+    pid = tmp_path / "rune.pid"
+    pid.write_text("123")
+    sock = str(tmp_path / "rune.sock")
+    request = Mock(side_effect=stop)
+    monkeypatch.setattr(main, "_daemon_pid", owner)
+    monkeypatch.setattr(main, "_daemon_paths", lambda: (sock, str(pid)))
+    monkeypatch.setattr(control, "request", request)
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    monkeypatch.setattr(time, "sleep", sleep)
+
+    if release_after is None:
+        with pytest.raises(typer.Exit) as stopped:
+            main.daemon_stop()
+        assert stopped.value.exit_code == 1
+    else:
+        main.daemon_stop()
+    assert now == pytest.approx(elapsed)
+    assert pid.read_text() == "123"
+    request.assert_called_once_with(sock, "stop", expected_pid=123)
+
+
 def test_service_and_cli_share_saved_address(monkeypatch, tmp_path):
     from rune.cli import main
     from rune.daemon import readiness, service

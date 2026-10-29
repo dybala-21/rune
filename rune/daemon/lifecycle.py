@@ -10,6 +10,9 @@ from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
 STARTUP_TIMEOUT = 30
+SHUTDOWN_TIMEOUT = 30
+# Allow the watchdog to fire and the OS to release the process lock.
+STOP_WAIT_TIMEOUT = SHUTDOWN_TIMEOUT + 5
 CANCEL_TIMEOUT = 1
 _unfinished: set[asyncio.Future] = set()
 

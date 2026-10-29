@@ -1161,6 +1161,7 @@ def daemon_stop() -> None:
     import time
 
     from rune.daemon.control import request
+    from rune.daemon.lifecycle import STOP_WAIT_TIMEOUT
 
     pid = _daemon_pid()
     if not pid:
@@ -1174,13 +1175,13 @@ def daemon_stop() -> None:
         console.print(f"[red]Could not stop Rune through its local socket: {exc}[/red]")
         raise typer.Exit(1) from exc
 
-    for _ in range(150):
-        if _daemon_pid() != pid:
-            break
-        time.sleep(0.2)
-    else:
-        console.print(f"[red]Daemon {pid} has not stopped; its state files were kept.[/red]")
-        raise typer.Exit(1)
+    deadline = time.monotonic() + STOP_WAIT_TIMEOUT
+    while _daemon_pid() == pid:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            console.print(f"[red]Daemon {pid} has not stopped; its state files were kept.[/red]")
+            raise typer.Exit(1)
+        time.sleep(min(0.2, remaining))
 
     console.print(f"[green]RUNE daemon stopped[/green] (PID {pid}).")
 

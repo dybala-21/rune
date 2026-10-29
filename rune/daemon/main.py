@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from rune.daemon.lifecycle import SHUTDOWN_TIMEOUT
 from rune.utils.fast_serde import json_decode, json_encode
 from rune.utils.logger import get_logger
 
@@ -223,7 +224,7 @@ class RuneDaemon:
 
     async def _stop(self) -> None:
         if self._process_deadline is not None:
-            self._process_deadline.arm(30)
+            self._process_deadline.arm(SHUTDOWN_TIMEOUT)
         self._running = False
         if self._lock_path is None:
             return
