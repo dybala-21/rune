@@ -20,6 +20,10 @@
     "productName": "RUNE",
     "files": [
       "main.js",
+      "backend.js",
+      "endpoint.js",
+      "connection.html",
+      "connection.js",
       "preload.js",
       "browser-host.js",
       "browser-shield.js"

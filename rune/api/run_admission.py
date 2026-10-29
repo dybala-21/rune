@@ -42,6 +42,11 @@ class RunAdmission:
             entry = self.computers.entries.get(session_id)
             if self.store.active_for_session(session_id) or (entry is not None and entry.control is not None):
                 raise RunBusy("This chat is still working or stopping. Wait for it to finish.")
+        from rune.daemon.maintenance import check_storage
+        try:
+            check_storage()
+        except (OSError, RuntimeError) as exc:
+            raise RunBusy(str(exc)) from exc
         run_id = uuid4().hex[:16]
         self.runs.start(run_id, session_id, goal, request=(request_id, payload_hash) if request_id else None, uploads=uploads)
         return run_id, session_id, False

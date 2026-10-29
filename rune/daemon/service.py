@@ -1,19 +1,16 @@
-"""Service installation for RUNE daemon.
-
-Ported from src/daemon/service.ts - generates and installs launchd plist
-(macOS) or systemd unit (Linux) for running the daemon as a system service.
-"""
+"""Install a foreground daemon under the OS user service manager."""
 
 from __future__ import annotations
 
 import os
 import platform
+import plistlib
 import subprocess
 import sys
 from pathlib import Path
 
 from rune.utils.logger import get_logger
-from rune.utils.paths import rune_logs
+from rune.utils.paths import rune_home, rune_logs
 
 log = get_logger(__name__)
 
@@ -21,19 +18,18 @@ _SERVICE_NAME = "com.rune.daemon"
 _SYSTEMD_UNIT = "rune-daemon.service"
 
 
-def install_service() -> None:
-    """Install the RUNE daemon as a system service.
-
-    On macOS: creates a launchd plist in ~/Library/LaunchAgents.
-    On Linux: creates a systemd user unit in ~/.config/systemd/user.
-    """
+def install_service(host: str = "127.0.0.1", port: int = 18789) -> None:
+    """Install a launchd or systemd service for the current user."""
     system = platform.system()
-    if system == "Darwin":
-        _install_launchd()
-    elif system == "Linux":
-        _install_systemd()
-    else:
+    from rune.daemon.endpoint import Endpoint, save_endpoint
+    endpoint = Endpoint(host, port)
+    if system not in ("Darwin", "Linux"):
         raise RuntimeError(f"Service installation not supported on {system}")
+    if system == "Darwin":
+        _install_launchd(host, port)
+    elif system == "Linux":
+        _install_systemd(host, port)
+    save_endpoint(endpoint)
 
 
 def uninstall_service() -> None:
@@ -57,57 +53,91 @@ def get_service_status() -> str:
     return "not_installed"
 
 
+def start_service() -> None:
+    command = (["launchctl", "kickstart", f"gui/{os.getuid()}/{_SERVICE_NAME}"]
+               if platform.system() == "Darwin" else ["systemctl", "--user", "start", _SYSTEMD_UNIT])
+    subprocess.run(command, check=True, capture_output=True)
+
+
 # macOS (launchd)
 
 def _launchd_plist_path() -> Path:
     return Path.home() / "Library" / "LaunchAgents" / f"{_SERVICE_NAME}.plist"
 
 
-def _install_launchd() -> None:
-    python = sys.executable
-    log_dir = rune_logs()
-    plist_path = _launchd_plist_path()
+def launchd_config(host: str = "127.0.0.1", port: int = 18789) -> dict:
+    from rune.daemon.endpoint import Endpoint
+    endpoint = Endpoint(host, port)
+    return {
+        "Label": _SERVICE_NAME,
+        "ProgramArguments": [sys.executable, "-m", "rune.cli.main", "daemon", "run",
+                             "--host", endpoint.host, "--port", str(endpoint.port)],
+        "RunAtLoad": True,
+        "KeepAlive": {"SuccessfulExit": False},
+        "ThrottleInterval": 10,
+        "ExitTimeOut": 35,
+        "WorkingDirectory": str(Path.home()),
+        "StandardOutPath": "/dev/null",
+        "StandardErrorPath": "/dev/null",
+        "EnvironmentVariables": service_environment(),
+    }
 
-    plist_content = f"""\
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>{_SERVICE_NAME}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{python}</string>
-        <string>-m</string>
-        <string>rune</string>
-        <string>daemon</string>
-        <string>start</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>{log_dir / "daemon-stdout.log"}</string>
-    <key>StandardErrorPath</key>
-    <string>{log_dir / "daemon-stderr.log"}</string>
-    <key>WorkingDirectory</key>
-    <string>{Path.home()}</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>{os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")}</string>
-    </dict>
-</dict>
-</plist>
+
+def service_environment() -> dict[str, str]:
+    env = {"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+           "RUNE_HOME": str(rune_home().resolve()),
+           "RUNE_LOG_FILE": str(rune_logs() / "daemon.log")}
+    if static := os.environ.get("RUNE_WEB_STATIC_DIR"):
+        env["RUNE_WEB_STATIC_DIR"] = str(Path(static).resolve())
+    return env
+
+
+def _unit_quote(value: str, *, executable: bool = False) -> str:
+    if any(char in value for char in "\n\r\0"):
+        raise ValueError("Service paths and environment values must be single-line")
+    if executable:
+        value = value.replace("$", "$$")
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
+
+
+def systemd_config(host: str = "127.0.0.1", port: int = 18789) -> str:
+    from rune.daemon.endpoint import Endpoint
+    endpoint = Endpoint(host, port)
+    env = "\n".join(f"Environment={_unit_quote(f'{key}={value}')}"
+                    for key, value in service_environment().items())
+    return f"""[Unit]
+Description=RUNE AI Daemon
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+ExecStart={_unit_quote(sys.executable, executable=True)} -m rune.cli.main daemon run --host {_unit_quote(endpoint.host)} --port {endpoint.port}
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=35
+WorkingDirectory={_unit_quote(str(Path.home()))}
+{env}
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
 """
 
+
+def _install_launchd(host: str, port: int) -> None:
+    plist_path = _launchd_plist_path()
     plist_path.parent.mkdir(parents=True, exist_ok=True)
-    plist_path.write_text(plist_content)
+    plist_path.write_bytes(plistlib.dumps(launchd_config(host, port)))
 
     subprocess.run(
-        ["launchctl", "load", str(plist_path)],
+        ["launchctl", "bootout", f"gui/{os.getuid()}/{_SERVICE_NAME}"],
+        capture_output=True,
+    )
+    subprocess.run(
+        ["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist_path)],
         check=True,
         capture_output=True,
     )
@@ -119,7 +149,7 @@ def _uninstall_launchd() -> None:
 
     if plist_path.exists():
         subprocess.run(
-            ["launchctl", "unload", str(plist_path)],
+            ["launchctl", "bootout", f"gui/{os.getuid()}/{_SERVICE_NAME}"],
             capture_output=True,
         )
         plist_path.unlink()
@@ -138,7 +168,7 @@ def _launchd_status() -> str:
         capture_output=True,
         text=True,
     )
-    if result.returncode == 0:
+    if result.returncode == 0 and '"PID"' in result.stdout:
         return "running"
     return "stopped"
 
@@ -149,32 +179,10 @@ def _systemd_unit_path() -> Path:
     return Path.home() / ".config" / "systemd" / "user" / _SYSTEMD_UNIT
 
 
-def _install_systemd() -> None:
-    python = sys.executable
-    log_dir = rune_logs()
+def _install_systemd(host: str, port: int) -> None:
     unit_path = _systemd_unit_path()
-
-    unit_content = f"""\
-[Unit]
-Description=RUNE AI Daemon
-After=network.target
-
-[Service]
-Type=simple
-ExecStart={python} -m rune daemon start
-Restart=on-failure
-RestartSec=5
-WorkingDirectory={Path.home()}
-Environment=PATH={os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin")}
-StandardOutput=append:{log_dir / "daemon-stdout.log"}
-StandardError=append:{log_dir / "daemon-stderr.log"}
-
-[Install]
-WantedBy=default.target
-"""
-
     unit_path.parent.mkdir(parents=True, exist_ok=True)
-    unit_path.write_text(unit_content)
+    unit_path.write_text(systemd_config(host, port))
 
     subprocess.run(
         ["systemctl", "--user", "daemon-reload"],

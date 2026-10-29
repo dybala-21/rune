@@ -321,9 +321,12 @@ class GeneralConfig(BaseModel):
 # Cron Execution Configuration
 
 class CronExecutionConfig(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
     enabled: bool = True
-    max_concurrent: int = 3
-    default_timeout_seconds: int = 300
+    max_concurrent: int = Field(default=3, ge=1, le=32, alias="maxConcurrent")
+    default_timeout_seconds: int = Field(default=300, ge=1, le=1800, alias="defaultTimeoutSeconds")
+    misfire_grace_seconds: int = Field(default=300, ge=0, le=86400, alias="misfireGraceSeconds")
 
 
 # Goal Loop Configuration (the /goal autonomous loop)
@@ -363,10 +366,19 @@ class SkillsConfig(BaseModel):
     eval_max_pairs: int = Field(default=20, alias="evalMaxPairs")
 
 
+class RuntimeConfig(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    daily_cost_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False, alias="dailyCostUsd")
+    monthly_cost_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False, alias="monthlyCostUsd")
+    min_free_disk_mb: int = Field(default=256, ge=0, alias="minFreeDiskMb")
+
+
 class RuneConfig(BaseModel):
     """Root configuration schema for RUNE."""
 
     version: str = "1.0"
+    runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     approval: ApprovalConfig = Field(default_factory=ApprovalConfig)
@@ -378,7 +390,7 @@ class RuneConfig(BaseModel):
     search: SearchConfig = Field(default_factory=SearchConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     general: GeneralConfig = Field(default_factory=GeneralConfig)
-    cron_execution: CronExecutionConfig = Field(default_factory=CronExecutionConfig)
+    cron_execution: CronExecutionConfig = Field(default_factory=CronExecutionConfig, alias="cronExecution")
     goal_loop: GoalLoopConfig = Field(default_factory=GoalLoopConfig)
 
     # API keys (resolved from config, then env, then None)

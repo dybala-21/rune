@@ -182,15 +182,39 @@ def _validate_salvaging_valid_sections(
             raise
 
         salvaged = {k: v for k, v in raw.items() if k not in bad_sections}
+        if "runtime" in bad_sections:
+            salvaged["runtime"] = _salvage_runtime(raw.get("runtime"))
         config = RuneConfig.model_validate(salvaged)
         log.warning(
             "config_sections_rejected",
             path=str(cfg_path),
             sections=sorted(bad_sections),
             detail=exc.errors()[0].get("msg", "")[:160],
-            hint="these sections were skipped; the rest of the file still applies",
+            hint="invalid settings were replaced; invalid runtime spending limits block paid calls"
+            if "runtime" in bad_sections else "these sections were skipped; the rest of the file still applies",
         )
         return config
+
+
+def _salvage_runtime(raw: Any) -> dict[str, Any]:
+    from pydantic import ValidationError
+
+    from rune.config.schema import RuntimeConfig
+
+    if not isinstance(raw, dict):
+        return {"dailyCostUsd": 0, "monthlyCostUsd": 0}
+    result: dict[str, Any] = {}
+    for name, field in RuntimeConfig.model_fields.items():
+        key = field.alias if field.alias in raw else name
+        if key not in raw:
+            continue
+        try:
+            parsed = RuntimeConfig.model_validate({key: raw[key]})
+            result[name] = getattr(parsed, name)
+        except ValidationError:
+            # Invalid spending limits must never become unlimited.
+            result[name] = 0 if name in {"daily_cost_usd", "monthly_cost_usd"} else field.default
+    return result
 
 
 def load_config(force: bool = False) -> RuneConfig:
@@ -245,7 +269,7 @@ def load_config(force: bool = False) -> RuneConfig:
     except Exception as exc:
         log.warning("config_load_failed", path=str(cfg_path), error=str(exc))
         if _config is None:
-            _config = RuneConfig(**_resolve_api_keys({}))
+            raise ValueError(f"Could not load {cfg_path}; fix the configuration before starting Rune.") from exc
 
     return _config
 

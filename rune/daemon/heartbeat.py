@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from rune.utils.logger import get_logger
 
@@ -27,6 +28,9 @@ class _ScheduledTask:
     cron_expr: str
     callback: CronCallback
     last_run: datetime | None = None
+    running: asyncio.Task[None] | None = None
+    failures: int = 0
+    last_success: float | None = None
 
 
 class HeartbeatScheduler:
@@ -41,6 +45,17 @@ class HeartbeatScheduler:
         self._tasks: dict[str, _ScheduledTask] = {}
         self._running = False
         self._loop_task: asyncio.Task[None] | None = None
+        self._last_tick: datetime | None = None
+        self._inflight: set[asyncio.Task] = set()
+
+    @property
+    def is_running(self) -> bool:
+        return bool(self._running and self._loop_task and not self._loop_task.done())
+
+    def healthy(self, name: str) -> bool:
+        task = self._tasks.get(name)
+        return bool(task and not task.failures and task.last_success is not None
+                    and time.monotonic() - task.last_success <= max(180, self._interval * 3))
 
     async def start(self) -> None:
         """Start the heartbeat loop."""
@@ -58,6 +73,10 @@ class HeartbeatScheduler:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._loop_task
             self._loop_task = None
+        pending = list(self._inflight)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
         log.info("heartbeat_stopped")
 
     def add_task(
@@ -73,6 +92,7 @@ class HeartbeatScheduler:
             - ``N-M``     (range)
             - ``*/N``     (step)
         """
+        self.remove_task(name)
         self._tasks[name] = _ScheduledTask(
             name=name, cron_expr=cron_expr, callback=callback
         )
@@ -82,38 +102,45 @@ class HeartbeatScheduler:
         """Remove a scheduled task by name."""
         removed = self._tasks.pop(name, None)
         if removed:
+            if removed.running is not None:
+                removed.running.cancel()
             log.info("cron_task_removed", name=name)
 
-    async def _heartbeat_loop(self) -> None:
-        """Main loop that runs at the configured interval."""
+    async def _invoke(self, task: _ScheduledTask) -> None:
         try:
-            while self._running:
-                now = datetime.now()
+            async with asyncio.timeout(120):
+                await task.callback()
+        except Exception as exc:
+            task.failures += 1
+            log.error("cron_task_failed", name=task.name, error=str(exc))
+        else:
+            task.failures = 0
+            task.last_success = time.monotonic()
 
-                for task in list(self._tasks.values()):
-                    if self._matches_cron(task.cron_expr, now):
-                        # Avoid running the same task twice in the same minute
-                        if (
-                            task.last_run is not None
-                            and task.last_run.replace(second=0, microsecond=0)
-                            == now.replace(second=0, microsecond=0)
-                        ):
-                            continue
+    def tick(self, now: datetime | None = None) -> None:
+        now = (now or datetime.now()).replace(second=0, microsecond=0)
+        if self._last_tick is not None and now <= self._last_tick:
+            return
+        first = max(self._last_tick or now - timedelta(minutes=1), now - timedelta(minutes=5))
+        self._last_tick = now
+        for task in list(self._tasks.values()):
+            if task.running is not None and not task.running.done():
+                continue
+            due = now
+            while due > first:
+                if self._matches_cron(task.cron_expr, due):
+                    if task.last_run is None or due > task.last_run:
+                        task.last_run = due
+                        task.running = asyncio.create_task(self._invoke(task))
+                        self._inflight.add(task.running)
+                        task.running.add_done_callback(self._inflight.discard)
+                    break
+                due -= timedelta(minutes=1)
 
-                        task.last_run = now
-                        try:
-                            await task.callback()
-                            log.debug("cron_task_executed", name=task.name)
-                        except Exception as exc:
-                            log.error(
-                                "cron_task_failed",
-                                name=task.name,
-                                error=str(exc),
-                            )
-
-                await asyncio.sleep(self._interval)
-        except asyncio.CancelledError:
-            pass
+    async def _heartbeat_loop(self) -> None:
+        while self._running:
+            self.tick()
+            await asyncio.sleep(self._interval)
 
     @staticmethod
     def _matches_cron(expr: str, now: datetime) -> bool:

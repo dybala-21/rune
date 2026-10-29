@@ -90,6 +90,9 @@ def check_isolated_worker_budget() -> None:
     from rune.agent.request_budget import BudgetExceeded
 
     run = _current.get()
+    from rune.agent.spend_budget import enabled
+    if enabled():
+        raise BudgetExceeded("Isolated workers cannot enforce the shared model budget. No worker was started.")
     if run is not None and any(getattr(bound_budget(s), "total", None) is not None for s in scopes(run)):
         # Subprocess workers cannot yet reserve or settle against their parent's budget.
         run["budget_blocked"] = "Isolated workers cannot enforce the shared run budget. No worker was started."
@@ -313,7 +316,13 @@ class _MeasuredStream:
 
 
 async def timed_completion(completion, params):
+    from rune.agent import spend_budget
+
+    shared_limit = spend_budget.enabled()
     run = _current.get()
+    if run is None and shared_limit:
+        with capture_timing():
+            return await timed_completion(completion, params)
     wire_params = {key: value for key, value in params.items() if key != "_rune_source_model"}
     if run is None:
         return await completion(**wire_params)
@@ -333,13 +342,14 @@ async def timed_completion(completion, params):
         # Check the budget before tokenizing the prompt.
         for scope in parents:
             check_request_budget(scope)
-        estimated = input_estimate(params) if any(getattr(bound_budget(s), "total", None) is not None
+        estimated = input_estimate(params) if shared_limit or any(getattr(bound_budget(s), "total", None) is not None
             or getattr(getattr(s["owner"], "_config", None), "cost_budget_usd", None) is not None for s in parents) else 0
         reserved_input = calibrated_input(run, params, estimated)
         for scope in parents:
             params, allowance = admit(scope, params, reserved_input)
             if allowance:
                 reservation = allowance
+        params, shared_reservation = spend_budget.reserve(params, reserved_input)
     except BudgetExceeded as exc:
         scope["budget_blocked"] = run["budget_blocked"] = str(exc)
         raise
@@ -373,11 +383,13 @@ async def timed_completion(completion, params):
         response = await completion(**{key: value for key, value in params.items() if key != "_rune_source_model"})
     except BaseException as exc:
         settle(run, row, exc)
+        spend_budget.settle(shared_reservation, row, exc)
         measurement.__exit__(type(exc), exc, exc.__traceback__)
         raise
     if not params.get("stream"):
         _record_usage(run, row, response, streaming=False, request=params)
         settle(run, row)
+        spend_budget.settle(shared_reservation, row)
         measurement.__exit__(None, None, None)
         return response
 
@@ -393,6 +405,7 @@ async def timed_completion(completion, params):
 
     def finish(error):
         settle(run, row, error)
+        spend_budget.settle(shared_reservation, row, error)
         measurement.__exit__(type(error) if error else None, error, getattr(error, "__traceback__", None))
 
     return _MeasuredStream(response, record, finish)

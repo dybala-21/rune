@@ -3,27 +3,39 @@
 
 'use strict';
 
-const { app, BrowserWindow, dialog, shell, session, ipcMain } = require('electron');
+const { app, BrowserWindow, dialog, shell, session, ipcMain, powerMonitor } = require('electron');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
-const http = require('node:http');
+const { waitForBackend } = require('./backend');
+const { readEndpoint } = require('./endpoint');
 const os = require('node:os');
 const path = require('node:path');
 
 const ICON_PATH = path.join(__dirname, 'build', 'icon.png');
-// Name in the macOS menu bar and dock — a dev run (`electron .`) shows
-// "Electron" without this; packaging uses productName.
+// Use the app name in the menu bar and dock during development too.
 app.setName('RUNE');
 
-const PORT = Number(process.env.RUNE_API_PORT || 18789);
-const ORIGIN = `http://127.0.0.1:${PORT}`;
-// In dev, point at the Vite dev server (RUNE_UI_URL=http://localhost:5173) and
-// run the daemon yourself; in prod the shell spawns the daemon and loads ORIGIN.
+let PORT = 18789;
+let ORIGIN = `http://127.0.0.1:${PORT}`;
+// RUNE_UI_URL uses a dev server and leaves daemon startup to the developer.
 const DEV_URL = process.env.RUNE_UI_URL || null;
-const UI_URL = DEV_URL || ORIGIN;
+let UI_URL = DEV_URL || ORIGIN;
 
 let mainWindow = null;
 let browserHost = null;
+let openingWindow = null;
+
+ipcMain.handle('rune:retry-backend', async event => {
+  if (!mainWindow || event.sender !== mainWindow.webContents
+      || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('Unknown app window');
+  try {
+    await ensureDaemon();
+    await waitForBackend(ORIGIN);
+    startBrowserHost();
+    await mainWindow.loadURL(UI_URL);
+    return { connected: true };
+  } catch (error) { return { error: error.message }; }
+});
 
 ipcMain.handle('rune:browser-layout', (event, payload) => {
   if (!mainWindow || event.sender !== mainWindow.webContents
@@ -44,30 +56,7 @@ ipcMain.on('rune:browser-takeover', event => {
   if (browserHost && event.sender === browserHost.shield.webContents) void browserHost.takeover();
 });
 
-/** Poll `url` until it responds, or reject after `timeoutMs`. */
-function waitForBackend(url, timeoutMs = 30000) {
-  const deadline = Date.now() + timeoutMs;
-  return new Promise((resolve, reject) => {
-    const tick = () => {
-      const req = http.get(url, (res) => {
-        res.resume();
-        resolve(true);
-      });
-      req.on('error', () => {
-        if (Date.now() > deadline) reject(new Error('backend did not come up'));
-        else setTimeout(tick, 400);
-      });
-      req.setTimeout(2000, () => req.destroy());
-    };
-    tick();
-  });
-}
-
-/**
- * Locate the `rune` CLI. Finder-launched apps get a minimal PATH
- * (/usr/bin:/bin:/usr/sbin:/sbin), so a bare spawn('rune') only works when
- * started from a terminal. Order: RUNE_BIN → PATH → common install dirs.
- */
+// Check common install paths too; Finder launches with a minimal PATH.
 function resolveRuneBinary() {
   const override = process.env.RUNE_BIN;
   if (override && fs.existsSync(override)) return override;
@@ -90,12 +79,15 @@ function resolveRuneBinary() {
   return null;
 }
 
-/**
- * `rune daemon start` is idempotent and detached: it attaches to a running
- * engine, and the engine outlives this app. In dev (RUNE_UI_URL set) the
- * user runs the engine themselves.
- */
+// Reuse a ready daemon or start one that outlives the window.
 function ensureDaemon() {
+  let endpoint;
+  try {
+    endpoint = readEndpoint();
+    PORT = endpoint.port;
+    ORIGIN = endpoint.origin;
+    UI_URL = DEV_URL || ORIGIN;
+  } catch (error) { return Promise.reject(error); }
   if (DEV_URL) return Promise.resolve();
   const bin = resolveRuneBinary();
   if (!bin) {
@@ -111,16 +103,16 @@ function ensureDaemon() {
     );
     return Promise.resolve();
   }
-  return new Promise((resolve) => {
-    const p = spawn(bin, ['daemon', 'start', '--port', String(PORT)], {
+  return new Promise((resolve, reject) => {
+    const p = spawn(bin, ['daemon', 'start', '--host', endpoint.host, '--port', String(PORT)], {
       stdio: 'inherit',
       env: { ...process.env },
     });
     p.on('error', (err) => {
       console.error('[rune-desktop] failed to start daemon:', err.message);
-      resolve();
+      reject(err);
     });
-    p.on('exit', () => resolve());
+    p.on('exit', code => code === 0 ? resolve() : reject(new Error('Rune could not start. Check the daemon address and logs.')));
   });
 }
 
@@ -135,10 +127,7 @@ function maybeStopDaemon() {
 function hardenSession() {
   session.defaultSession.setPermissionRequestHandler((_wc, _perm, cb) => cb(false));
 
-  // Content-Security-Policy for our first-party, localhost-only UI.
-  // NOTE: the React app uses inline style attributes, hence 'unsafe-inline' for
-  // styles only. Scripts stay 'self'. The daemon should also send this header;
-  // this is defense-in-depth. Tune if the app needs more.
+  // React needs inline styles; scripts remain restricted to the UI origin.
   session.defaultSession.webRequest.onHeadersReceived((details, cb) => {
     cb({
       responseHeaders: {
@@ -157,7 +146,7 @@ function hardenSession() {
   });
 }
 
-function createWindow() {
+function createWindow(connectionError = null) {
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 820,
@@ -189,10 +178,9 @@ function createWindow() {
     return { action: 'deny' };
   });
 
-  mainWindow.loadURL(UI_URL);
-  const { BrowserHost } = require('./browser-host');
-  browserHost = new BrowserHost(mainWindow, ORIGIN);
-  browserHost.start().catch(error => console.error('[browser-host] startup:', error.message));
+  if (connectionError) mainWindow.loadFile(path.join(__dirname, 'connection.html'));
+  else mainWindow.loadURL(UI_URL);
+  startBrowserHost();
 
   mainWindow.webContents.on('did-finish-load', () => {
     console.log(`[rune-desktop] window loaded ${mainWindow.webContents.getURL()}`);
@@ -214,21 +202,27 @@ function createWindow() {
   mainWindow.on('close', () => { browserHost?.close(); browserHost = null; });
   mainWindow.on('closed', () => { mainWindow = null; });
 
-  watchForReload();
+  const stopWatching = watchForReload();
+  mainWindow.once('closed', () => stopWatching?.());
 }
 
-// Reload the window when the web build changes, so a `npm run build` is picked
-// up without restarting the app. Only active when the dist dir is watchable
-// (dev / unpackaged); in a packaged app the assets live in resources/asar and
-// this simply no-ops.
+function startBrowserHost() {
+  if (browserHost?.origin === ORIGIN) return;
+  browserHost?.close();
+  const { BrowserHost } = require('./browser-host');
+  browserHost = new BrowserHost(mainWindow, ORIGIN);
+  browserHost.start().catch(error => console.error('[browser-host] startup:', error.message));
+}
+
+// Reload after local web builds; packaged assets have no watchable dist directory.
 function watchForReload() {
   const distDir = path.join(__dirname, '..', 'web', 'dist');
   if (!fs.existsSync(distDir)) return;
   let timer = null;
   try {
-    fs.watch(distDir, { recursive: true }, () => {
+    const watcher = fs.watch(distDir, { recursive: true }, () => {
       if (timer) clearTimeout(timer);
-      // Debounce: a build writes many files; reload once it settles.
+      // Wait for the build to finish writing before reloading.
       timer = setTimeout(() => {
         if (mainWindow && !mainWindow.isDestroyed()) {
           console.log('[rune-desktop] web build changed — reloading');
@@ -236,9 +230,27 @@ function watchForReload() {
         }
       }, 400);
     });
+    return () => { watcher.close(); if (timer) clearTimeout(timer); };
   } catch (err) {
     console.error('[rune-desktop] dist watch unavailable:', err.message);
   }
+}
+
+async function openWindow() {
+  if (openingWindow) return openingWindow;
+  openingWindow = (async () => {
+    let connectionError = null;
+    try {
+      await ensureDaemon();
+      await waitForBackend(ORIGIN);
+    } catch (error) {
+      connectionError = error;
+      console.error('[rune-desktop]', error.message);
+    }
+    createWindow(connectionError);
+  })();
+  try { await openingWindow; }
+  finally { openingWindow = null; }
 }
 
 if (!app.requestSingleInstanceLock()) {
@@ -257,16 +269,13 @@ if (!app.requestSingleInstanceLock()) {
       try { app.dock.setIcon(ICON_PATH); } catch { /* non-fatal */ }
     }
     hardenSession();
-    await ensureDaemon();
-    try {
-      await waitForBackend(UI_URL);
-    } catch (err) {
-      console.error('[rune-desktop]', err.message);
-    }
-    createWindow();
+    await openWindow();
+    powerMonitor.on('resume', () => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('rune:resume');
+    });
 
     app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+      if (BrowserWindow.getAllWindows().length === 0) void openWindow();
     });
   });
 

@@ -164,6 +164,13 @@ class ProactiveAgentBridge:
             self._subscribed = False
         log.info("bridge_stopped", history_size=len(self._history))
 
+    async def close(self) -> None:
+        pending = [*self._inflight.values()]
+        if self._poll_task is not None:
+            pending.append(self._poll_task)
+        self.stop()
+        await asyncio.gather(*pending, return_exceptions=True)
+
     def _on_suggestion_event(self, suggestions: list[Suggestion]) -> None:
         if self._running:
             for suggestion in suggestions:

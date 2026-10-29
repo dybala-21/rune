@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import structlog
@@ -82,13 +83,14 @@ def configure_logging(
 
     root = logging.getLogger()
     root.handlers.clear()
-    root.addHandler(stderr_handler)
+    if not os.environ.get("RUNE_LOG_FILE"):
+        root.addHandler(stderr_handler)
     root.setLevel(getattr(logging, resolved_level, logging.WARNING))
 
-    # Optional file handler
+    log_file = log_file or (Path(os.environ["RUNE_LOG_FILE"]) if os.environ.get("RUNE_LOG_FILE") else None)
     if log_file is not None:
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(str(log_file), encoding="utf-8")
+        file_handler = RotatingFileHandler(str(log_file), maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8")
         file_handler.setFormatter(formatter)
         root.addHandler(file_handler)
 
