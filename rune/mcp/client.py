@@ -209,7 +209,7 @@ class MCPClient:
 
     async def disconnect(self) -> None:
         """Close the MCP connection."""
-        if not self._connected:
+        if not self._connected and self._process is None and self._reader_task is None:
             return
 
         if self._reader_task is not None:
@@ -226,6 +226,7 @@ class MCPClient:
                 )
             except TimeoutError:
                 self._process.kill()
+                await self._process.wait()
             self._process = None
 
         # Resolve all pending futures with an error
@@ -620,8 +621,8 @@ class MCPClientManager:
     ) -> list[MCPTool]:
         """Internal connection logic."""
         connect_timeout = timeout or CONNECT_TIMEOUT
+        client = MCPClient(name, config)
         try:
-            client = MCPClient(name, config)
             await client.connect(timeout=connect_timeout)
 
             # Fetch tool list
@@ -645,7 +646,13 @@ class MCPClientManager:
             )
             return tools
 
-        except Exception as exc:
+        except BaseException as exc:
+            try:
+                await client.disconnect()
+            except Exception as cleanup_error:
+                log.warning("mcp_connect_cleanup_failed", server=name, error=str(cleanup_error))
+            if not isinstance(exc, Exception):
+                raise
             log.error(
                 "mcp_connect_failed",
                 server=name,

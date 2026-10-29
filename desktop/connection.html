@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'unsafe-inline'">
+<title>Rune · Connecting</title>
+<style>
+  :root { color-scheme: light dark; font: 16px system-ui, sans-serif; }
+  body { display: grid; place-items: center; min-height: 100vh; margin: 0; background: Canvas; color: CanvasText; }
+  main { max-width: 400px; padding: 32px; }
+  h1 { font-size: 24px; font-weight: 600; }
+  p { line-height: 1.6; opacity: .75; }
+  button { font: inherit; padding: 10px 20px; border: 1px solid GrayText; border-radius: 8px; cursor: pointer; }
+</style>
+<main>
+  <h1>Rune isn’t connected yet</h1>
+  <p id="status" role="status">The local engine may still be starting or need attention. Your conversations are kept on this computer.</p>
+  <button id="retry" type="button">Try again</button>
+</main>
+<script src="connection.js"></script>
+</html>

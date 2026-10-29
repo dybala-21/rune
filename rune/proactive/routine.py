@@ -56,9 +56,10 @@ def task_fingerprint(job) -> str:
     ], sort_keys=True).encode()).hexdigest()
 
 
-def claim_occurrence(job) -> tuple[ExecutionStore, str, str]:
+def claim_occurrence(job, scheduled_minute: int | None = None) -> tuple[ExecutionStore, str, str]:
     store = ExecutionStore(rune_data() / "routine-executions.db")
-    occurrence = f"cron:{job.id}:{int(time.time() // 60)}"
+    minute = int(time.time() // 60) if scheduled_minute is None else scheduled_minute
+    occurrence = f"cron:{job.id}:{minute}"
     decision = store.claim(occurrence, task_fingerprint(job), 1000, resource=f"cron:{job.id}")
     return store, occurrence, decision
 

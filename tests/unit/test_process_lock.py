@@ -5,8 +5,6 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
-import pytest
-
 from rune.daemon.process_lock import (
     acquire_lock,
     get_lock_owner,
@@ -48,21 +46,29 @@ class TestAcquireLock:
             finally:
                 release_lock(lock_path)
 
-    def test_raises_when_owner_still_running(self, tmp_path):
+    def test_reused_pid_does_not_block_an_unlocked_file(self, tmp_path):
         lock_path = tmp_path / "daemon.lock"
         lock_path.write_text("3333\n")
 
         with patch("rune.daemon.process_lock.is_process_running", return_value=True):
-            with pytest.raises(RuntimeError, match="Process lock already held by pid 3333"):
-                acquire_lock(lock_path, pid=4444)
+            acquire_lock(lock_path, pid=4444)
+            try:
+                assert lock_path.read_text().strip() == "4444"
+            finally:
+                release_lock(lock_path)
 
 
 class TestReleaseLock:
-    def test_release_removes_lock_file(self, tmp_path):
+    def test_release_keeps_inode_but_clears_owner(self, tmp_path):
         lock_path = tmp_path / "daemon.lock"
         acquire_lock(lock_path, pid=os.getpid())
+        inode = lock_path.stat().st_ino
         release_lock(lock_path)
-        assert not lock_path.exists()
+        assert lock_path.stat().st_ino == inode
+        assert lock_path.read_text() == ""
+        assert get_lock_owner(lock_path) is None
+        acquire_lock(lock_path)
+        release_lock(lock_path)
 
     def test_release_ignores_missing_lock(self, tmp_path):
         lock_path = tmp_path / "missing.lock"

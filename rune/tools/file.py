@@ -28,7 +28,7 @@ def _trash_dir() -> Path:
     return rune_data() / "trash"
 
 
-def cleanup_trash(retention_days: int = _TRASH_RETENTION_DAYS) -> int:
+def cleanup_trash(retention_days: int = _TRASH_RETENTION_DAYS, *, max_entries: int = 100) -> int:
     """Remove trash entries older than *retention_days*. Returns count removed."""
     trash_dir = _trash_dir()
     if not trash_dir.is_dir():
@@ -36,9 +36,14 @@ def cleanup_trash(retention_days: int = _TRASH_RETENTION_DAYS) -> int:
     cutoff = time.time() - retention_days * 86400
     removed = 0
     for entry in trash_dir.iterdir():
+        if removed >= max_entries:
+            break
         try:
-            if entry.stat().st_mtime < cutoff:
-                if entry.is_dir():
+            timestamp, separator, _ = entry.name.partition("_")
+            if not separator or not timestamp.isdigit():
+                continue
+            if int(timestamp) / 1000 < cutoff:
+                if entry.is_dir() and not entry.is_symlink():
                     shutil.rmtree(entry)
                 else:
                     entry.unlink()

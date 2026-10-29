@@ -1506,24 +1506,16 @@ class MemoryStore:
             for r in rows
         ]
 
-    def prune_tool_calls(self, max_age_days: int = 30) -> int:
+    def prune_tool_calls(self, max_age_days: int = 30, *, limit: int = 2000) -> int:
         cutoff = datetime.fromtimestamp(
             time.time() - max_age_days * 86400, tz=UTC,
         ).isoformat()
-
-        (cnt,) = self.conn.execute(
-            "SELECT COUNT(*) FROM tool_call_log WHERE created_at < ?",
-            (cutoff,),
-        ).fetchone()
-
-        if cnt > 0:
-            self.conn.execute(
-                "DELETE FROM tool_call_log WHERE created_at < ?",
-                (cutoff,),
-            )
-        return cnt
-
-    # Gated Skill Learning (T1-1)
+        self.conn.execute(
+            "DELETE FROM tool_call_log WHERE rowid IN "
+            "(SELECT rowid FROM tool_call_log WHERE created_at < ? LIMIT ?)",
+            (cutoff, max(0, limit)),
+        )
+        return self.conn.changes()
 
     def log_skill_eval(
         self,

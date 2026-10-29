@@ -38,6 +38,8 @@ def current_background_task() -> BackgroundTask | None:
 
 
 async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str, Any]:
+    from rune.daemon.maintenance import check_storage
+    check_storage()
     from rune.agent.loop import NativeAgentLoop
     from rune.types import AgentConfig
     from rune.utils.paths import normalize_path, user_workspace

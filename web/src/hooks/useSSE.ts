@@ -23,6 +23,7 @@ export function useSSE(): SseConnection {
     let disposed = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let recoveryVersion = 0;
+    let connectionVersion = 0;
     const emit = (type: SseEventType, data: unknown) => {
       for (const handler of listenersRef.current.get(type) ?? []) handler(data);
     };
@@ -58,21 +59,23 @@ export function useSSE(): SseConnection {
 
     const connect = async () => {
       if (disposed) return;
+      const version = ++connectionVersion;
       try {
         await ensureWebAuth();
       } catch {
-        if (!disposed) {
+        if (!disposed && version === connectionVersion) {
           setConnected(false);
           scheduleReconnect();
         }
         return;
       }
-      if (disposed) return;
+      if (disposed || version !== connectionVersion) return;
 
       const source = new EventSource('/api/events', { withCredentials: true });
       sourceRef.current = source;
 
       source.addEventListener('connected', (e) => {
+        if (disposed || sourceRef.current !== source) return;
         try {
           const data = JSON.parse((e as MessageEvent).data) as { clientId: string };
           setClientId(data.clientId);
@@ -84,6 +87,7 @@ export function useSSE(): SseConnection {
 
       for (const eventType of SSE_EVENT_TYPES.filter(e => e !== 'connected')) {
         source.addEventListener(eventType, (e) => {
+          if (disposed || sourceRef.current !== source) return;
           try {
             const data = JSON.parse((e as MessageEvent).data);
             if (eventType === 'resync_required') void restore();
@@ -93,6 +97,7 @@ export function useSSE(): SseConnection {
       }
 
       source.onerror = () => {
+        if (disposed || sourceRef.current !== source) return;
         setConnected(false);
         // Leave CONNECTING alone while the browser retries.
         if (source.readyState === EventSource.CLOSED) {
@@ -109,10 +114,27 @@ export function useSSE(): SseConnection {
       };
     };
 
+    const resume = () => {
+      if (disposed) return;
+      recoveryVersion++;
+      sourceRef.current?.close();
+      sourceRef.current = null;
+      if (retryTimer) clearTimeout(retryTimer);
+      retryTimer = null;
+      resetWebAuth();
+      setConnected(false);
+      void connect();
+    };
+    const unsubscribeResume = window.rune?.onResume?.(resume);
+    window.addEventListener('online', resume);
+
     void connect();
 
     return () => {
       disposed = true;
+      connectionVersion++;
+      unsubscribeResume?.();
+      window.removeEventListener('online', resume);
       restoreRef.current = () => {};
       recoveryVersion += 1;
       if (retryTimer) clearTimeout(retryTimer);

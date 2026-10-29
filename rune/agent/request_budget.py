@@ -151,12 +151,7 @@ def settle(run: dict, row: dict, error: BaseException | None = None) -> None:
     reservation = row.pop("reservation", None)
     if reservation is None:
         return
-    from rune.llm.failures import request_failure
-
-    failure = request_failure(error) if error is not None else None
-    # Release reservations for requests rejected before generation.
-    rejected = failure is not None and (failure.kind in {"connect_timeout", "pool_timeout", "connection_error"}
-                                        or failure.status in {400, 401, 403, 404, 422, 429})
+    rejected = rejected_before_generation(error)
     for scope in scopes(run):
         if (row.get("usage") is not None and error is None) or rejected:
             scope["reservations"].pop(reservation, None)
@@ -166,3 +161,11 @@ def settle(run: dict, row: dict, error: BaseException | None = None) -> None:
             if row.get("usage") is not None:
                 row["usageIncomplete"] = True
                 scope["usage"]["incomplete_calls"] = scope["usage"].get("incomplete_calls", 0) + 1
+
+
+def rejected_before_generation(error: BaseException | None) -> bool:
+    from rune.llm.failures import request_failure
+
+    failure = request_failure(error) if error is not None else None
+    return failure is not None and (failure.kind in {"connect_timeout", "pool_timeout", "connection_error"}
+                                    or failure.status in {400, 401, 403, 404, 422, 429})

@@ -40,6 +40,7 @@ import contextlib
 
 from rune.cli.advisor_cmd import advisor_app
 from rune.cli.bench_cmd import bench_app
+from rune.cli.budget_cmd import budget_app
 from rune.cli.cloud_cmd import cloud_app
 from rune.cli.connector_cmd import connector_app
 from rune.cli.memory_cmd import memory_app
@@ -54,6 +55,7 @@ app.add_typer(self_app, name="self")
 app.add_typer(memory_app, name="memory")
 app.add_typer(advisor_app, name="advisor")
 app.add_typer(bench_app, name="bench")
+app.add_typer(budget_app, name="budget")
 app.add_typer(connector_app, name="connector")
 app.add_typer(cloud_app, name="cloud")
 
@@ -979,7 +981,6 @@ def web(
 
     Launches the API server with the web frontend and opens the browser.
     """
-    import asyncio
     from pathlib import Path
 
     # Locate bundled web assets, preferring RUNE_WEB_STATIC_DIR.
@@ -1039,28 +1040,16 @@ def web(
         "api_host": host,
         "api_port": port,
     })
-    daemon = RuneDaemon(config=cfg, install_signal_handlers=False)
-
-    import signal
-
-    def _force_exit() -> None:
-        try:
-            sys.stdout.flush()
-            sys.stderr.flush()
-        except Exception:
-            pass
-        os._exit(0)
-
-    async def _serve() -> None:
-        loop = asyncio.get_running_loop()
-        loop.add_signal_handler(signal.SIGINT, _force_exit)
-        loop.add_signal_handler(signal.SIGTERM, _force_exit)
-        await daemon.serve_forever()
-
+    daemon = RuneDaemon(config=cfg)
     try:
-        asyncio.run(_serve())
-    except (KeyboardInterrupt, SystemExit):
-        _force_exit()
+        from rune.daemon.lifecycle import run_foreground
+        run_foreground(daemon)
+    except KeyboardInterrupt:
+        pass
+    except Exception:
+        from rune.utils.logger import get_logger
+        get_logger(__name__).exception("daemon_failed")
+        raise
 
 
 # Run rune web detached for daemon startup; it already owns the socket and API lifecycle.
@@ -1072,117 +1061,128 @@ def _daemon_paths() -> tuple[str, str]:
 
 
 def _daemon_pid() -> int | None:
-    """Return the live daemon PID, or None. Cleans up a stale pid file."""
-    from pathlib import Path
-    _sock, pid_file = _daemon_paths()
-    p = Path(pid_file)
-    if not p.is_file():
-        return None
-    try:
-        pid = int(p.read_text().strip())
-    except (ValueError, OSError):
-        return None
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        import contextlib
-        with contextlib.suppress(OSError):
-            p.unlink()
-        return None
-    except PermissionError:
-        return pid
-    return pid
+    """Return the owner of the held daemon lock."""
+    from rune.daemon.process_lock import get_lock_owner
+    return get_lock_owner()
+
+
+@daemon_app.command("run")
+def daemon_run(
+    host: Annotated[str | None, typer.Option("--host")] = None,
+    port: Annotated[int | None, typer.Option("--port", min=1, max=65535)] = None,
+) -> None:
+    """Run in the foreground under launchd or systemd."""
+    from rune.daemon.endpoint import resolve_endpoint
+    endpoint = resolve_endpoint(host, port)
+    web(host=endpoint.host, port=endpoint.port, no_open=True)
+
+
+@daemon_app.command("install")
+def daemon_install(
+    host: Annotated[str | None, typer.Option("--host")] = None,
+    port: Annotated[int | None, typer.Option("--port", min=1, max=65535)] = None,
+) -> None:
+    """Enable the background service for this OS user."""
+    from rune.daemon.service import install_service
+    if _daemon_pid():
+        console.print("[red]Stop the detached daemon before installing the service.[/red]")
+        raise typer.Exit(1)
+    from rune.daemon.endpoint import resolve_endpoint
+    endpoint = resolve_endpoint(host, port)
+    install_service(endpoint.host, endpoint.port)
+    console.print("[green]RUNE service enabled.[/green]")
+
+
+@daemon_app.command("uninstall")
+def daemon_uninstall() -> None:
+    """Disable the background service for this OS user."""
+    from rune.daemon.service import uninstall_service
+    uninstall_service()
+    console.print("[green]RUNE service disabled.[/green]")
 
 
 @daemon_app.command("start")
 def daemon_start(
-    host: Annotated[str, typer.Option("--host", "-H", help="Host to bind")] = "127.0.0.1",
-    port: Annotated[int, typer.Option("--port", "-P", help="Port to bind")] = 18789,
+    host: Annotated[str | None, typer.Option("--host", "-H", help="Host to bind")] = None,
+    port: Annotated[int | None, typer.Option("--port", "-P", min=1, max=65535, help="Port to bind")] = None,
 ) -> None:
     """Start the RUNE daemon (engine + API) detached in the background."""
     import subprocess
     import time
 
+    from rune.daemon.endpoint import resolve_endpoint, save_endpoint, saved_endpoint
+    from rune.daemon.readiness import is_ready
+    endpoint = resolve_endpoint(host, port)
+    host, port = endpoint.host, endpoint.port
     existing = _daemon_pid()
     if existing:
-        console.print(f"[green]RUNE daemon already running[/green] (PID {existing}).")
-        raise typer.Exit(0)
+        if is_ready(endpoint.connect_host, port, existing):
+            console.print(f"[green]RUNE daemon already running[/green] (PID {existing}).")
+            raise typer.Exit(0)
+        console.print(f"[yellow]Daemon {existing} is running but not ready. Check its status and logs.[/yellow]")
+        raise typer.Exit(1)
 
-    from rune.utils.paths import rune_home
-    log_path = rune_home() / "daemon.log"
-    # Use this installation rather than a different rune executable found on PATH.
-    launcher = sys.argv[0] if sys.argv else ""
-    if (launcher and os.path.isfile(launcher) and os.access(launcher, os.X_OK)
-            and "rune" in os.path.basename(launcher).lower()):
-        web_cmd = [launcher, "web", "--no-open", "--host", host, "--port", str(port)]
+    from rune.daemon.service import get_service_status, start_service
+    from rune.utils.paths import rune_logs
+    log_path = rune_logs() / "daemon.log"
+    proc = None
+    if get_service_status() != "not_installed":
+        if endpoint != saved_endpoint():
+            console.print("[red]The installed service uses a different address. Stop it and run `rune daemon install --host HOST --port PORT` to change it.[/red]")
+            raise typer.Exit(1)
+        start_service()
     else:
-        web_cmd = [
-            sys.executable, "-m", "rune.cli.main", "web",
-            "--no-open", "--host", host, "--port", str(port),
-        ]
-
-    with open(log_path, "ab") as log_f:
+        save_endpoint(endpoint)
+        child_env = {**os.environ, "RUNE_LOG_FILE": str(log_path)}
         proc = subprocess.Popen(
-            web_cmd,
-            stdout=log_f,
-            stderr=log_f,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,
+            [sys.executable, "-m", "rune.cli.main", "daemon", "run",
+             "--host", host, "--port", str(port)],
+            env=child_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, start_new_session=True,
         )
-
-    sock, _pid_file = _daemon_paths()
-    for _ in range(50):  # ~10s
-        if os.path.exists(sock) and _daemon_pid():
-            console.print(
-                f"[green]RUNE daemon started[/green] (PID {proc.pid}) "
-                f"on http://{host}:{port}"
-            )
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        pid = _daemon_pid()
+        if pid and is_ready(endpoint.connect_host, port, pid):
+            console.print(f"[green]RUNE daemon started[/green] (PID {pid}) on http://{host}:{port}")
             console.print(f"[dim]logs: {log_path}[/dim]")
             raise typer.Exit(0)
-        if proc.poll() is not None:
-            console.print(
-                f"[red]Daemon exited early (code {proc.returncode}).[/red] "
-                f"[dim]See {log_path}[/dim]"
-            )
+        if proc is not None and proc.poll() is not None:
+            console.print(f"[red]Daemon exited (code {proc.returncode}).[/red] [dim]See {log_path}[/dim]")
             raise typer.Exit(1)
         time.sleep(0.2)
-    console.print(
-        f"[yellow]Daemon still starting (PID {proc.pid}); socket not up yet.[/yellow] "
-        f"[dim]See {log_path}[/dim]"
-    )
+    console.print(f"[red]Daemon did not become ready within 30 seconds.[/red] [dim]See {log_path}[/dim]")
+    raise typer.Exit(1)
 
 
 @daemon_app.command("stop")
 def daemon_stop() -> None:
     """Stop the running RUNE daemon."""
-    import contextlib
-    import signal
     import time
-    from pathlib import Path
+
+    from rune.daemon.control import request
+    from rune.daemon.lifecycle import STOP_WAIT_TIMEOUT
 
     pid = _daemon_pid()
     if not pid:
         console.print("[yellow]RUNE daemon is not running.[/yellow]")
         raise typer.Exit(0)
 
-    sock, pid_file = _daemon_paths()
+    sock, _ = _daemon_paths()
     try:
-        os.kill(pid, signal.SIGTERM)
-    except OSError as exc:
-        console.print(f"[red]Failed to signal daemon (PID {pid}): {exc}[/red]")
+        request(sock, "stop", expected_pid=pid)
+    except (OSError, ValueError, RuntimeError) as exc:
+        console.print(f"[red]Could not stop Rune through its local socket: {exc}[/red]")
         raise typer.Exit(1) from exc
 
-    for _ in range(25):  # ~5s
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            break
-        time.sleep(0.2)
+    deadline = time.monotonic() + STOP_WAIT_TIMEOUT
+    while _daemon_pid() == pid:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            console.print(f"[red]Daemon {pid} has not stopped; its state files were kept.[/red]")
+            raise typer.Exit(1)
+        time.sleep(min(0.2, remaining))
 
-    # Force-exit on SIGTERM can skip the daemon's own cleanup, so remove stale files.
-    for pth in (sock, pid_file):
-        with contextlib.suppress(OSError):
-            Path(pth).unlink()
     console.print(f"[green]RUNE daemon stopped[/green] (PID {pid}).")
 
 
@@ -1197,28 +1197,14 @@ def daemon_status() -> None:
     sock, _pid_file = _daemon_paths()
     console.print(f"[dim]RUNE daemon:[/dim] [green]running[/green] (PID {pid})")
 
-    import asyncio
-
-    async def _query() -> None:
-        from rune.daemon.client import DaemonClient
-        client = DaemonClient(socket_path=sock)
-        try:
-            await client.connect()
-            st = await client.status()
-            console.print(
-                f"  uptime {st.uptime_seconds:.0f}s · "
-                f"active {st.active_tasks} · queued {st.queued_tasks}"
-            )
-            if st.channels:
-                console.print(f"  channels: {', '.join(st.channels)}")
-        finally:
-            with contextlib.suppress(Exception):
-                await client.disconnect()
-
+    from rune.daemon.control import request
     try:
-        asyncio.run(_query())
-    except Exception:
-        console.print("  [dim](socket not responding; API may still be starting)[/dim]")
+        health = request(sock, "health", expected_pid=pid)
+        failed = [name for name, ok in health.get("checks", {}).items() if not ok]
+        console.print("  [yellow]needs attention: " + ", ".join(failed) + "[/yellow]"
+                      if failed else "  [green]ready[/green]")
+    except (OSError, ValueError, RuntimeError):
+        console.print("  [yellow]not responding; startup or recovery may be in progress[/yellow]")
 
 
 # Overnight: unattended verified goal run

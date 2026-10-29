@@ -214,6 +214,7 @@ def create_app() -> Any:
             FastAPI,
             HTTPException,
             Request,
+            Response,
             WebSocket,
             WebSocketDisconnect,
         )
@@ -374,6 +375,10 @@ def create_app() -> Any:
         status: str
         version: str
         uptime_seconds: float
+        pid: int
+        ready: bool
+        checks: dict[str, bool] = Field(default_factory=dict)
+        connections: dict[str, str] = Field(default_factory=dict)
 
     class MessageAttachment(BaseModel):
         ref: str = ""
@@ -1068,12 +1073,24 @@ def create_app() -> Any:
 
     @app.get("/health", response_model=HealthResponse)
     @app.get("/api/v1/health", response_model=HealthResponse)
-    async def health() -> HealthResponse:
+    async def health(response: Response) -> HealthResponse:
+        probe = getattr(app.state, "runtime_health", None)
+        state = probe() if probe is not None else {"status": "ok", "checks": {}}
+        response.status_code = 200 if state["checks"].get("daemon", True) else 503
         return HealthResponse(
-            status="ok",
+            **state,
             version="0.1.0",
             uptime_seconds=time.monotonic() - _start_time,
+            pid=os.getpid(),
+            ready=state["status"] == "ok",
         )
+
+    @app.get("/ready", response_model=HealthResponse)
+    @app.get("/api/v1/ready", response_model=HealthResponse)
+    async def ready(response: Response) -> HealthResponse:
+        result = await health(response)
+        response.status_code = 200 if result.ready else 503
+        return result
 
     # SSE Events endpoint (GET /api/v1/events)
 
@@ -2051,6 +2068,8 @@ def create_app() -> Any:
             elif method == "health":
                 from rune.api.handlers.health import health
                 result = await health()
+                if probe := getattr(app.state, "runtime_health", None):
+                    result.status = probe()["status"]
                 return _ok(result)
 
             # channels

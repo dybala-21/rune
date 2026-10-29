@@ -52,7 +52,9 @@ def _row_to_cronjob(row: dict) -> CronJob:
     notify = ""
     desc = ""
     bash_cmd = raw_cmd
-    policy = RoutinePolicy()
+    from rune.config.loader import get_config
+    default_timeout = get_config().cron_execution.default_timeout_seconds
+    policy = RoutinePolicy(timeout_seconds=default_timeout)
 
     try:
         payload = _json.loads(raw_cmd)
@@ -63,7 +65,7 @@ def _row_to_cronjob(row: dict) -> CronJob:
         goal = payload.get("goal", "")
         notify = payload.get("notify_channel", "")
         desc = payload.get("description", "")
-        policy = RoutinePolicy.model_validate(payload.get("policy", {}))
+        policy = RoutinePolicy.model_validate({"timeout_seconds": default_timeout, **payload.get("policy", {})})
 
     return CronJob(
         id=row["id"],
@@ -393,7 +395,28 @@ async def cron_delete(params: CronDeleteParams) -> CapabilityResult:
 
 # Cron execution engine - runs pending jobs via heartbeat
 
-async def execute_cron_job(job: CronJob, *, approval_from: str | None = None, refresh: bool = False) -> None:
+async def execute_cron_job(job: CronJob, *, approval_from: str | None = None, refresh: bool = False,
+                           scheduled_minute: int | None = None) -> None:
+    from rune.daemon.cron_dispatcher import execution_slot
+
+    async with execution_slot() as enabled:
+        if not enabled and approval_from:
+            raise ValueError("Scheduled execution is disabled. Enable it before continuing this task.")
+        if enabled:
+            if scheduled_minute is not None:
+                import time
+
+                from rune.config.loader import get_config
+                if int(time.time() // 60) - scheduled_minute > get_config().cron_execution.misfire_grace_seconds // 60:
+                    return
+            from rune.daemon.maintenance import check_storage
+            check_storage()
+            await _execute_cron_job(job, approval_from=approval_from, refresh=refresh,
+                                    scheduled_minute=scheduled_minute)
+
+
+async def _execute_cron_job(job: CronJob, *, approval_from: str | None = None, refresh: bool = False,
+                            scheduled_minute: int | None = None) -> None:
     """Execute a single cron job (bash command or agent goal)."""
     import asyncio
 
@@ -409,6 +432,10 @@ async def execute_cron_job(job: CronJob, *, approval_from: str | None = None, re
     row = store.get_cron_job(job.id)
     if row is None:
         return
+    if scheduled_minute is not None:
+        from rune.proactive.routine import task_fingerprint
+        if task_fingerprint(job) != task_fingerprint(_row_to_cronjob(row)):
+            return
     job = _row_to_cronjob(row)
     if job.status != "active" or job.policy.expired:
         if approval_from:
@@ -441,7 +468,7 @@ async def execute_cron_job(job: CronJob, *, approval_from: str | None = None, re
         job.routing = prior.get("routing")
         decision = "claimed"
     else:
-        claims, occurrence, decision = claim_occurrence(job)
+        claims, occurrence, decision = claim_occurrence(job, scheduled_minute)
     started = False
     measured = None
     result = {}
@@ -499,10 +526,15 @@ async def execute_cron_job(job: CronJob, *, approval_from: str | None = None, re
         with capture_timing(owner) as measured, journal_scope(journal):
             try:
                 started = True
-                result = await run_while_current(job, store, _execute_goal_job if job.goal else _execute_bash_job)
+                async with asyncio.timeout(job.policy.timeout_seconds):
+                    result = await run_while_current(job, store, _execute_goal_job if job.goal else _execute_bash_job)
             except BudgetExceeded as exc:
                 result = {"status": "budget_exhausted", "success": False, "verified": False,
                           "output": "", "error": str(exc)}
+            except TimeoutError:
+                result = {"status": "interrupted", "success": False, "verified": False,
+                          "execution_unknown": True, "output": "",
+                          "error": "The scheduled task exceeded its execution timeout. Inspect its effects before resuming."}
             except Exception as exc:
                 result = {"status": "failed", "verified": False, "execution_unknown": True,
                           "output": "", "error": str(exc)}

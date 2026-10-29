@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from rune.daemon.lifecycle import SHUTDOWN_TIMEOUT
 from rune.utils.fast_serde import json_decode, json_encode
 from rune.utils.logger import get_logger
 
@@ -25,8 +26,8 @@ _EXECUTOR_FLUSH_INTERVAL_S = 300.0  # 5 minutes
 # Default configuration
 
 def _default_rune_dir() -> Path:
-    """Resolve ``~/.rune/data``."""
-    return Path.home() / ".rune" / "data"
+    from rune.utils.paths import rune_data
+    return rune_data()
 
 
 _proactive_cache: tuple[float, bool] | None = None
@@ -141,6 +142,16 @@ class RuneDaemon:
         self._server: asyncio.AbstractServer | None = None
         self._running = False
         self._start_time: float | None = None
+        self._stop_requested = asyncio.Event()
+        self._stop_task: asyncio.Task[None] | None = None
+        self._api_server: Any = None
+        self._cron_dispatcher: Any = None
+        self._maintenance: Any = None
+        self._registered_signals: list[signal.Signals] = []
+        from rune.daemon.connections import Connections
+        self._connections = Connections()
+        self._startup_incomplete = False
+        self._process_deadline = None
 
         # Subsystem references (initialised in start())
         self._proactive_engine: Any = None
@@ -154,8 +165,10 @@ class RuneDaemon:
         self._channel_registry: Any = None
         self._heartbeat_scheduler: Any = None
         self._heartbeat_task: asyncio.Task[None] | None = None
-        # Prevent overlapping skill evaluations, which can outlast a heartbeat tick.
+        # Skill evaluations can outlast a heartbeat tick; allow only one at a time.
         self._skill_eval_running: bool = False
+        self._skill_eval_task: asyncio.Task | None = None
+        self._proactive_bridge: Any = None
         self._api_server_task: asyncio.Task[None] | None = None
         self._executor_flush_task: asyncio.Task[None] | None = None
 
@@ -177,24 +190,18 @@ class RuneDaemon:
         """Initialise subsystems and start the Unix socket server."""
         log.info("daemon_starting", version=VERSION)
 
-        # Load environment (.rune/.env etc.)
         self._load_env()
 
-        # Ensure data directory exists
         rune_dir = _default_rune_dir()
         rune_dir.mkdir(parents=True, exist_ok=True)
 
-        # 1. Process lock acquisition
         await self._acquire_process_lock()
 
-        # Write PID file
         pid_path = Path(self._config["pid_file"])
         pid_path.write_text(str(os.getpid()))
 
-        # Initialise subsystems (2-12)
         await self._init_subsystems()
 
-        # Start Unix socket server
         socket_path = self._config["socket_path"]
         if os.path.exists(socket_path):
             os.unlink(socket_path)
@@ -203,52 +210,108 @@ class RuneDaemon:
             self._handle_client,
             path=socket_path,
         )
+        Path(socket_path).chmod(0o600)
         self._running = True
         self._start_time = time.monotonic()
         log.info("daemon_started", socket=socket_path, pid=os.getpid())
 
-        # Install signal handlers (skip when caller manages signals, e.g. rune web)
-        if self._install_signal_handlers:
-            loop = asyncio.get_running_loop()
-            for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-                loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(self.stop(s)))
-
     async def stop(self, sig: signal.Signals | None = None) -> None:
-        """Gracefully shut down all subsystems."""
-        if not self._running:
-            return
+        """Share one cleanup task across concurrent shutdown requests."""
+        self._stop_requested.set()
+        if self._stop_task is None:
+            self._stop_task = asyncio.create_task(self._stop())
+        await asyncio.shield(self._stop_task)
+
+    async def _stop(self) -> None:
+        if self._process_deadline is not None:
+            self._process_deadline.arm(SHUTDOWN_TIMEOUT)
         self._running = False
-        log.info("daemon_stopping", signal=sig.name if sig else "manual")
-
-        if self._server:
-            self._server.close()
-            await self._server.wait_closed()
-
-        # Shutdown subsystems in reverse-dependency order
-        await self._shutdown_subsystems()
-
-        # Remove socket and PID file
-        for path_key in ("socket_path", "pid_file"):
-            p = Path(self._config[path_key])
-            if p.exists():
-                p.unlink(missing_ok=True)
-
-        # Release process lock
-        await self._release_process_lock()
-
-        log.info("daemon_stopped")
+        if self._lock_path is None:
+            return
+        log.info("daemon_stopping")
+        cleaned = False
+        try:
+            async with asyncio.timeout(25):
+                if self._server:
+                    self._server.close()
+                    await self._server.wait_closed()
+                await self._shutdown_subsystems()
+                if self._startup_incomplete:
+                    raise RuntimeError("Startup is still running; process ownership retained")
+                cleaned = True
+        finally:
+            if cleaned:
+                try:
+                    for key in ("socket_path", "pid_file", "heartbeat_file"):
+                        if path := self._config.get(key):
+                            Path(path).unlink(missing_ok=True)
+                finally:
+                    await self._release_process_lock()
+                log.info("daemon_stopped")
+            else:
+                # The OS releases ownership when this process exits.
+                log.error("daemon_cleanup_incomplete", lock_retained=True)
 
     async def serve_forever(self) -> None:
-        """Convenience: start and run until stopped."""
-        await self.start()
-        if self._server:
-            async with self._server:
-                await self._server.serve_forever()
+        """Keep the supervised process alive until shutdown or a critical failure."""
+        loop = asyncio.get_running_loop()
+        if self._install_signal_handlers:
+            for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+                loop.add_signal_handler(sig, self._stop_requested.set)
+                self._registered_signals.append(sig)
+        try:
+            from rune.daemon.lifecycle import IncompleteShutdown, start_until_stopped
+            try:
+                if not await start_until_stopped(self.start, self._stop_requested):
+                    return
+            except IncompleteShutdown:
+                self._startup_incomplete = True
+                raise
+            if self._process_deadline is not None:
+                self._process_deadline.disarm()
+            api_deadline = time.monotonic() + 30
+            while not self._stop_requested.is_set():
+                if (self._api_server_task is not None and time.monotonic() >= api_deadline
+                        and not (self._api_server and self._api_server.started)):
+                    raise RuntimeError("API server did not become ready within 30 seconds")
+                tasks = {"api": self._api_server_task, "heartbeat": self._heartbeat_task}
+                if self._heartbeat_scheduler is not None:
+                    tasks["scheduler"] = self._heartbeat_scheduler._loop_task
+                for name, task in tasks.items():
+                    if task is not None and task.done():
+                        if not task.cancelled():
+                            task.result()
+                        raise RuntimeError(f"Critical service stopped: {name}")
+                try:
+                    await asyncio.wait_for(self._stop_requested.wait(), timeout=0.5)
+                except TimeoutError:
+                    pass
+        finally:
+            try:
+                await self.stop()
+            finally:
+                for sig in self._registered_signals:
+                    loop.remove_signal_handler(sig)
+                self._registered_signals.clear()
+
+    def health(self) -> dict[str, Any]:
+        checks = {"daemon": self._running and not self._stop_requested.is_set()}
+        if self._config.get("api_enabled"):
+            checks["api"] = bool(self._api_server and self._api_server.started
+                                 and self._api_server_task and not self._api_server_task.done())
+        if self._heartbeat_scheduler is not None:
+            checks["scheduler"] = self._heartbeat_scheduler.is_running
+            if self._cron_dispatcher is not None:
+                checks["schedules"] = self._heartbeat_scheduler.healthy("cron_goal_tick")
+        if self._maintenance is not None:
+            checks["storage"] = self._maintenance.healthy
+        return {"status": "ok" if all(checks.values()) else "degraded", "checks": checks,
+                "connections": dict(self._connections.status)}
 
     # process lock
 
     async def _acquire_process_lock(self) -> None:
-        """Acquire the daemon PID-based process lock."""
+        """Acquire the daemon's advisory file lock."""
         try:
             from rune.daemon.process_lock import acquire_lock
             self._lock_path = acquire_lock()
@@ -256,14 +319,17 @@ class RuneDaemon:
         except RuntimeError as exc:
             log.error("process_lock_failed", error=str(exc))
             raise
-        except Exception as exc:
-            log.warning("process_lock_unavailable", error=str(exc))
+        except Exception:
+            log.exception("process_lock_unavailable")
+            raise
 
     async def _release_process_lock(self) -> None:
         """Release the daemon process lock."""
         try:
             from rune.daemon.process_lock import release_lock
-            release_lock(self._lock_path)
+            if self._lock_path is not None:
+                release_lock(self._lock_path)
+                self._lock_path = None
             log.info("process_lock_released")
         except Exception as exc:
             log.warning("process_lock_release_failed", error=str(exc))
@@ -281,7 +347,6 @@ class RuneDaemon:
     async def _init_subsystems(self) -> None:
         """Initialize daemon services in dependency order."""
 
-        # 2. Memory store init
         try:
             from rune.memory.store import get_memory_store
             self._memory_store = get_memory_store()
@@ -290,8 +355,8 @@ class RuneDaemon:
             log.info("subsystem_initialised", name="memory_store")
         except Exception as exc:
             log.warning("memory_store_init_failed", error=str(exc))
+            raise
 
-        # 3. Conversation store init
         try:
             from rune.conversation.store import ConversationStore
             from rune.utils.paths import conversations_db_path
@@ -299,29 +364,12 @@ class RuneDaemon:
             log.info("subsystem_initialised", name="conversation_store")
         except Exception as exc:
             log.warning("conversation_store_init_failed", error=str(exc))
+            raise
 
-        # 3a. Trash cleanup (enforce retention TTL on startup)
-        try:
-            from rune.tools.file import cleanup_trash
-            removed = cleanup_trash()
-            if removed:
-                log.info("subsystem_initialised", name="trash_cleanup", removed=removed)
-        except Exception as exc:
-            log.debug("trash_cleanup_failed", error=str(exc))
-
-        # 3b. Prune old tool call logs (30-day retention)
-        try:
-            from rune.memory.store import get_memory_store
-            pruned = get_memory_store().prune_tool_calls(max_age_days=30)
-            if pruned:
-                log.info("subsystem_initialised", name="tool_call_prune", removed=pruned)
-        except Exception as exc:
-            log.debug("tool_call_prune_failed", error=str(exc))
-
-        # 4. Orphaned run cleanup
         await self._cleanup_orphaned_runs()
+        from rune.daemon.maintenance import recover_spend
+        await recover_spend()
 
-        # 5. Reflexion learner init
         try:
             from rune.proactive.reflexion import get_reflexion_learner
             self._reflexion_learner = get_reflexion_learner()
@@ -329,7 +377,6 @@ class RuneDaemon:
         except Exception as exc:
             log.warning("reflexion_learner_init_failed", error=str(exc))
 
-        # 6. Pattern learner init
         try:
             from rune.proactive.patterns import PatternLearner
             self._pattern_learner = PatternLearner.load_from_db()
@@ -337,7 +384,7 @@ class RuneDaemon:
         except Exception as exc:
             log.warning("pattern_learner_init_failed", error=str(exc))
 
-        # Initialize even when proactive suggestions are off because cron shares this wiring.
+        # Cron uses this engine even when proactive suggestions are disabled.
         try:
             from rune.proactive.engine import get_proactive_engine
             self._proactive_engine = get_proactive_engine()
@@ -351,168 +398,93 @@ class RuneDaemon:
 
         # Start the scheduler before proactive services register jobs.
         await self._start_heartbeat()
+        from rune.daemon.cron_dispatcher import CronDispatcher
+        self._cron_dispatcher = CronDispatcher()
+        self._heartbeat_scheduler.add_task("cron_goal_tick", "* * * * *", self._cron_dispatcher.tick)
+        from rune.daemon.maintenance import Maintenance
+        self._maintenance = Maintenance(self._memory_store)
+        self._heartbeat_scheduler.add_task("maintenance", "* * * * *", self._maintenance.tick)
 
-        # Connect optional proactive services.
         if self._proactive_engine is not None:
             await self._init_proactive_subsystems()
 
-        # 8. MCP bridge init
-        await self._initialize_mcp_bridge()
-
-        # 9. Autonomous executor init
         try:
             from rune.agent.autonomous import get_autonomous_executor
             self._autonomous_executor = get_autonomous_executor()
             log.info("subsystem_initialised", name="autonomous_executor")
 
-            # Start periodic executor state flush
             self._executor_flush_task = asyncio.create_task(
                 self._executor_flush_loop()
             )
         except Exception as exc:
             log.warning("autonomous_executor_init_failed", error=str(exc))
 
-        # 9b. Browser relay + page pool
         await self._init_browser_subsystems()
 
-        # 10. Channel adapters start
-        await self._start_channel_adapters()
-
-        # 11. API server start (non-blocking)
         await self._start_api_server()
+        self._connections.start("mcp", self._initialize_mcp_bridge)
+        self._connections.start("channels", self._start_channel_adapters)
 
     async def _shutdown_subsystems(self) -> None:
-        """Gracefully shut down subsystems in reverse order."""
+        from rune.daemon.lifecycle import Cleanup
 
-        # 11. Stop API server
+        cleanup = Cleanup()
+        if self._api_server is not None:
+            self._api_server.should_exit = True
+        await self._connections.stop(cleanup)
+        if self._heartbeat_scheduler is not None:
+            await cleanup.run("scheduler", self._heartbeat_scheduler.stop)
+        if self._cron_dispatcher is not None:
+            await cleanup.run("cron", self._cron_dispatcher.stop)
+        await cleanup.cancel("skill_eval", self._skill_eval_task)
+        if self._proactive_bridge is not None:
+            await cleanup.run("proactive_bridge", self._proactive_bridge.close)
+
         if self._api_server_task is not None:
-            self._api_server_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._api_server_task
+            await cleanup.run("api", lambda: self._api_server_task, timeout=12)
             self._api_server_task = None
-            log.info("subsystem_shutdown", name="api_server")
 
-        # Stop gateway dispatch before shutting down channel adapters.
-        try:
+        async def stop_gateway():
             from rune.daemon.gateway import get_gateway
-            gw = get_gateway()
-            if gw is not None:
-                await gw.stop()
-        except Exception as exc:
-            log.warning("gateway_shutdown_failed", error=str(exc))
+            if gateway := get_gateway():
+                await gateway.stop()
 
+        await cleanup.run("gateway", stop_gateway)
         if self._channel_registry is not None:
-            try:
-                await self._channel_registry.stop_all()
-                log.info("subsystem_shutdown", name="channel_adapters")
-            except Exception as exc:
-                log.warning("channel_adapters_shutdown_failed", error=str(exc))
-
-        # 9. Stop autonomous executor flush
-        if self._executor_flush_task is not None:
-            self._executor_flush_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._executor_flush_task
-            self._executor_flush_task = None
-            # Persist final state
-            if self._autonomous_executor is not None:
-                with contextlib.suppress(Exception):
-                    await self._persist_executor_state()
-            log.info("subsystem_shutdown", name="autonomous_executor")
-
-        # 9b. Shutdown browser subsystems
-        await self._shutdown_browser_subsystems()
-
-        # 8. Shutdown MCP bridge
-        await self._shutdown_mcp_bridge()
-
-        # Stop proactive services in reverse initialization order.
+            await cleanup.run("channels", self._channel_registry.stop_all)
+        await cleanup.cancel("executor_flush", self._executor_flush_task)
+        self._executor_flush_task = None
+        if self._autonomous_executor is not None:
+            await cleanup.run("executor_state", self._persist_executor_state)
+        await cleanup.run("browser", self._shutdown_browser_subsystems)
+        await cleanup.run("mcp", self._shutdown_mcp_bridge)
         if self._environment_sensor is not None:
-            try:
-                await self._environment_sensor.stop()
-                log.info("subsystem_shutdown", name="environment_sensor")
-            except Exception as exc:
-                log.warning("environment_sensor_shutdown_failed", error=str(exc))
+            await cleanup.run("environment_sensor", self._environment_sensor.stop)
             self._environment_sensor = None
+        self._conversation_initiator = None
 
-        # ConversationInitiator (remove cron task)
-        if self._conversation_initiator is not None:
-            try:
-                if self._heartbeat_scheduler is not None:
-                    self._heartbeat_scheduler.remove_task("conversation_initiator")
-                log.info("subsystem_shutdown", name="conversation_initiator")
-            except Exception as exc:
-                log.warning("conversation_initiator_shutdown_failed", error=str(exc))
-            self._conversation_initiator = None
-
-        # EngagementTracker - persist suggestions before shutting down
         if self._engagement_tracker is not None:
-            try:
-                if self._proactive_engine is not None and self._memory_store is not None:
-                    saved = self._proactive_engine.save_suggestions(self._memory_store)
-                    if saved > 0:
-                        log.info("suggestions_persisted_on_shutdown", count=saved)
-                log.info("subsystem_shutdown", name="engagement_tracker")
-            except Exception as exc:
-                log.warning("engagement_tracker_shutdown_failed", error=str(exc))
+            if self._proactive_engine is not None and self._memory_store is not None:
+                await cleanup.run("suggestions", lambda: self._proactive_engine.save_suggestions(self._memory_store))
             self._engagement_tracker = None
-
-        # Remove heartbeat-to-engine cron task
-        if self._heartbeat_scheduler is not None:
-            with contextlib.suppress(Exception):
-                self._heartbeat_scheduler.remove_task("proactive_engine_tick")
-
-        # 7a. Stop heartbeat scheduler (after cron tasks removed)
-        if self._heartbeat_task is not None:
-            self._heartbeat_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await self._heartbeat_task
-            self._heartbeat_task = None
-        if self._heartbeat_scheduler is not None:
-            with contextlib.suppress(Exception):
-                await self._heartbeat_scheduler.stop()
-            log.info("subsystem_shutdown", name="heartbeat")
-
-        # 7. Stop proactive engine
+        await cleanup.cancel("heartbeat", self._heartbeat_task)
+        self._heartbeat_task = None
         if self._proactive_engine is not None:
-            try:
-                if hasattr(self._proactive_engine, "shutdown"):
-                    await self._proactive_engine.shutdown()
-                elif hasattr(self._proactive_engine, "stop"):
-                    await self._proactive_engine.stop()
-                log.info("subsystem_shutdown", name="proactive_engine")
-            except Exception as exc:
-                log.warning("proactive_engine_shutdown_failed", error=str(exc))
-
-        # 6. Pattern learner shutdown
+            stop_engine = getattr(self._proactive_engine, "shutdown", None) or getattr(self._proactive_engine, "stop", None)
+            if stop_engine is not None:
+                await cleanup.run("proactive_engine", stop_engine)
         if self._pattern_learner is not None and hasattr(self._pattern_learner, "shutdown"):
-            try:
-                await self._pattern_learner.shutdown()
-                log.info("subsystem_shutdown", name="pattern_learner")
-            except Exception as exc:
-                log.warning("pattern_learner_shutdown_failed", error=str(exc))
+            await cleanup.run("pattern_learner", self._pattern_learner.shutdown)
 
-        # 5. Reflexion learner - stateless singleton, no shutdown needed
+        def persist_vectors():
+            from rune.memory import manager
+            if manager._manager is not None:
+                manager._manager.persist_vectors()
 
-        # Persist the vector index before closing the memory store.
-        try:
-            from rune.memory import manager as _mm_mod
-
-            # Read the existing singleton; do not initialize memory during shutdown.
-            _mm = _mm_mod._manager
-            if _mm is not None:
-                _mm.persist_vectors()
-                log.info("subsystem_shutdown", name="vector_index")
-        except Exception as exc:
-            log.warning("vector_index_persist_failed", error=str(exc))
-
-        if self._memory_store is not None:
-            try:
-                if hasattr(self._memory_store, "close"):
-                    self._memory_store.close()
-                log.info("subsystem_shutdown", name="memory_store")
-            except Exception as exc:
-                log.warning("memory_store_shutdown_failed", error=str(exc))
+        await cleanup.run("vector_index", persist_vectors)
+        if self._memory_store is not None and hasattr(self._memory_store, "close"):
+            await cleanup.run("memory_store", self._memory_store.close)
+        cleanup.check()
 
     # browser subsystem init/shutdown
 
@@ -613,13 +585,11 @@ class RuneDaemon:
 
             self._engagement_tracker = EngagementTracker()
 
-            # Wire MemoryStore to EngagementStore adapter (mirrors TS engagementStoreAdapter)
             if self._memory_store is not None:
                 store = self._memory_store
                 engagement_store_adapter = _EngagementStoreAdapter(store)
                 self._engagement_tracker.initialize(engagement_store_adapter)
 
-                # Connect persist store to engine and restore persisted suggestions
                 try:
                     loaded = engine.load_persisted_suggestions(store)
                     if loaded > 0:
@@ -745,6 +715,7 @@ class RuneDaemon:
                 autonomous_executor=self._autonomous_executor,
                 execution_store=ExecutionStore(rune_data() / "proactive-executions.db"),
             )
+            self._proactive_bridge = bridge
             bridge.start()
             log.info("subsystem_initialised", name="proactive_agent_bridge")
         except Exception as exc:
@@ -808,28 +779,6 @@ class RuneDaemon:
                     _heartbeat_engine_tick,
                 )
 
-                # Check scheduled goals each minute and execute them without blocking the heartbeat.
-                async def _cron_goal_tick() -> None:
-                    try:
-                        from datetime import datetime
-
-                        from rune.capabilities.cron import execute_cron_job, get_active_cron_jobs
-                        from rune.daemon.heartbeat import HeartbeatScheduler
-
-                        now = datetime.now()
-                        for job in get_active_cron_jobs():
-                            if HeartbeatScheduler._matches_cron(job.schedule, now):
-                                # Run in background to avoid blocking heartbeat
-                                asyncio.create_task(execute_cron_job(job))
-                    except Exception as exc:
-                        log.debug("cron_goal_tick_failed", error=str(exc))
-
-                self._heartbeat_scheduler.add_task(
-                    "cron_goal_tick",
-                    "* * * * *",
-                    _cron_goal_tick,
-                )
-
                 # Consolidate the backlog left by short-lived CLI runs.
                 async def _consolidation_tick() -> None:
                     try:
@@ -853,7 +802,7 @@ class RuneDaemon:
 
     # MCP bridge
 
-    async def _initialize_mcp_bridge(self) -> None:
+    async def _initialize_mcp_bridge(self) -> str:
         """Connect configured MCP servers and register their tools."""
         try:
             from rune.mcp.bridge import initialize_mcp_bridge
@@ -863,7 +812,7 @@ class RuneDaemon:
             mcp_servers = self._get_mcp_server_configs()
             if not mcp_servers:
                 log.debug("mcp_bridge_skipped", reason="no servers configured")
-                return
+                return "disabled"
 
             # Convert raw dicts to MCPServerConfig if needed
             configs: dict[str, MCPServerConfig] = {}
@@ -890,8 +839,10 @@ class RuneDaemon:
             if result.failed_servers:
                 for name in result.failed_servers:
                     log.warning("mcp_server_connect_failed", name=name)
+            return "degraded" if result.failed_servers else "ready"
         except Exception as exc:
             log.warning("mcp_bridge_init_failed", error=str(exc))
+            return "failed"
 
     def _get_mcp_server_configs(self) -> list[dict[str, Any]]:
         """Load MCP server settings, starting with the shared ~/.rune/mcp_servers.json file."""
@@ -939,6 +890,8 @@ class RuneDaemon:
 
     async def _shutdown_mcp_bridge(self) -> None:
         """Disconnect all MCP clients."""
+        from rune.mcp.bridge import shutdown_mcp_bridge
+        await shutdown_mcp_bridge()
         for client in self._mcp_clients:
             try:
                 await client.disconnect()
@@ -973,7 +926,7 @@ class RuneDaemon:
 
     # channel adapters
 
-    async def _start_channel_adapters(self) -> None:
+    async def _start_channel_adapters(self) -> str:
         """Discover and start channel adapters from environment."""
         try:
             from rune.channels.registry import (
@@ -1004,8 +957,14 @@ class RuneDaemon:
                 log.debug("gateway_singleton_registered", started=bool(discovered))
             except Exception as exc:
                 log.warning("gateway_start_failed", error=str(exc))
+                return "failed"
+            if not discovered:
+                return "disabled"
+            return "ready" if all(self._channel_registry.get(name).status == "connected"
+                                  for name in discovered) else "degraded"
         except Exception as exc:
             log.warning("channel_adapters_init_failed", error=str(exc))
+            return "failed"
 
     # heartbeat
 
@@ -1092,7 +1051,7 @@ class RuneDaemon:
         if self._skill_eval_running:
             return
         self._skill_eval_running = True
-        asyncio.create_task(self._run_skill_eval_cycle_bg())
+        self._skill_eval_task = asyncio.create_task(self._run_skill_eval_cycle_bg())
 
     async def _run_skill_eval_cycle_bg(self) -> None:
         """Run one bounded gated-skill eval cycle in the background."""
@@ -1162,50 +1121,25 @@ class RuneDaemon:
                 log.debug("api_server_disabled")
                 return
 
+        from rune.api.server import create_app
+
+        app = create_app()
+        app.state.runtime_health = self.health
+        host = self._config.get("api_host", "127.0.0.1")
+        port = self._config.get("api_port", 18789)
+        self._api_server_task = asyncio.create_task(self._run_api_server(app, host, port))
+
+    async def _run_api_server(self, app: Any, host: str, port: int) -> None:
+        import uvicorn
+
+        config = uvicorn.Config(app, host=host, port=port, log_level="warning", log_config=None,
+                                timeout_graceful_shutdown=10)
+        self._api_server = uvicorn.Server(config)
+        self._api_server.capture_signals = contextlib.nullcontext
         try:
-            from rune.api.server import create_app
-
-            app = create_app()
-            host = self._config.get("api_host", "127.0.0.1")
-            port = self._config.get("api_port", 18789)
-
-            self._api_server_task = asyncio.create_task(
-                self._run_api_server(app, host, port)
-            )
-            log.info(
-                "subsystem_initialised",
-                name="api_server",
-                host=host,
-                port=port,
-            )
-        except ImportError as exc:
-            log.warning(
-                "api_server_unavailable",
-                error=str(exc),
-                hint="Install fastapi and uvicorn",
-            )
-        except Exception as exc:
-            log.warning("api_server_init_failed", error=str(exc))
-
-    @staticmethod
-    async def _run_api_server(app: Any, host: str, port: int) -> None:
-        """Run uvicorn in-process (non-blocking)."""
-        try:
-            import uvicorn
-
-            config = uvicorn.Config(
-                app,
-                host=host,
-                port=port,
-                log_level="warning",
-            )
-            server = uvicorn.Server(config)
-            server.install_signal_handlers = lambda: None  # Caller manages signals
-            await server.serve()
-        except asyncio.CancelledError:
-            pass
-        except Exception as exc:
-            log.error("api_server_crashed", error=str(exc))
+            await self._api_server.serve()
+        except SystemExit as exc:
+            raise RuntimeError("API server could not start") from exc
 
     # client handling
 
@@ -1243,12 +1177,16 @@ class RuneDaemon:
         if command == "status":
             return self._status()
         elif command == "execute":
+            if self._stop_requested.is_set():
+                return {"success": False, "error": "Rune is shutting down"}
             return await self._execute_agent(params)
         elif command == "stop":
-            asyncio.create_task(self.stop())
-            return {"success": True, "message": "Daemon stopping"}
+            if params.get("expected_pid", os.getpid()) != os.getpid():
+                return {"success": False, "error": "The Rune instance changed"}
+            self._stop_requested.set()
+            return {"success": True, "pid": os.getpid(), "message": "Daemon stopping"}
         elif command == "health":
-            return {"success": True, "version": VERSION, "pid": os.getpid()}
+            return {"success": True, "version": VERSION, "pid": os.getpid(), **self.health()}
         else:
             return {"success": False, "error": f"Unknown command: {command}"}
 
@@ -1278,8 +1216,8 @@ class RuneDaemon:
                 "mcp_bridge": self._mcp_bridge is not None,
                 "autonomous_executor": self._autonomous_executor is not None,
                 "channel_adapters": self._channel_registry is not None,
-                "heartbeat": self._heartbeat_scheduler is not None,
-                "api_server": self._api_server_task is not None,
+                "heartbeat": bool(self._heartbeat_scheduler and self._heartbeat_scheduler.is_running),
+                "api_server": bool(self._api_server_task and not self._api_server_task.done()),
             },
         }
 
