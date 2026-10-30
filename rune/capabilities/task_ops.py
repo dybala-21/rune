@@ -1,266 +1,142 @@
-"""Task operations capabilities for RUNE.
-
-Ported from src/capabilities/task-ops.ts - create, update, and list
-tasks on the agent task board.
-"""
+"""Create, update and inspect durable tasks in the current workspace."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
+import json
+from datetime import UTC, datetime
+from typing import Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from rune.agent.task_continuity import current_scope
 from rune.capabilities.registry import CapabilityRegistry
 from rune.capabilities.types import CapabilityDefinition
+from rune.memory.task_store import TaskConflict, TaskStore
 from rune.types import CapabilityResult, Domain, RiskLevel
-from rune.utils.logger import get_logger
 
-log = get_logger(__name__)
-
-
-# In-memory task store
-
-@dataclass(slots=True)
-class TaskRecord:
-    """A user-facing task tracked by the agent."""
-    id: str
-    goal: str
-    category: str = "project"
-    status: str = "pending"  # pending | running | completed | failed
-    progress: float = 0.0  # 0-100
-    notes: str = ""
-    deadline: str = ""
-    created_at: str = ""
-    updated_at: str = ""
-
-
-_tasks: dict[str, TaskRecord] = {}
-
-
-# Parameter schemas
 
 class TaskCreateParams(BaseModel):
-    goal: str = Field(description="Task goal / description")
-    category: str = Field(default="project",
-                          description="Category (project/personal/maintenance)")
-    deadline: str = Field(default="", description="Optional deadline (ISO format)")
-    sub_tasks: list[str] = Field(default_factory=list, description="Optional list of sub-task descriptions")
+    goal: str = Field(min_length=1, max_length=8000, description="Task goal / description")
+    category: str = Field(default="project", max_length=100, description="Task category")
+    deadline: str = Field(default="", max_length=100, description="Optional deadline (ISO format)")
+    sub_tasks: list[str] = Field(default_factory=list, max_length=32, description="Optional sub-task descriptions")
 
 
 class TaskUpdateParams(BaseModel):
     task_id: str = Field(description="Task ID to update")
-    status: str | None = Field(default=None,
-                               description="New status (pending/running/completed/failed)")
-    progress: float | None = Field(default=None,
-                                   description="Progress percentage (0-100)")
-    notes: str | None = Field(default=None, description="Additional notes")
+    status: str | None = Field(default=None, description="pending/running/completed/failed")
+    progress: float | None = Field(default=None, ge=0, le=100, description="Progress percentage")
+    notes: str | None = Field(default=None, max_length=4000, description="Updated notes")
 
 
 class TaskListParams(BaseModel):
+    source: Literal["tasks", "scheduled"] = Field(default="tasks", description="Saved tasks or scheduled work and its latest run")
     status: str = Field(default="", description="Filter by status")
     category: str = Field(default="", description="Filter by category")
-
-
-# Implementations
-
-_VALID_STATUSES = {"pending", "running", "completed", "failed"}
+    task_id: str = Field(default="", description="Read one task's saved requirements and result references")
+    limit: int = Field(default=20, ge=1, le=100)
+    offset: int = Field(default=0, ge=0)
 
 
 async def task_create(params: TaskCreateParams) -> CapabilityResult:
-    """Create a new task."""
-    log.debug("task_create", goal=params.goal[:80], category=params.category)
-
-    now = datetime.now().isoformat(timespec="seconds")
-    task_id = uuid4().hex[:12]
-
-    task = TaskRecord(
-        id=task_id,
-        goal=params.goal,
-        category=params.category,
-        deadline=params.deadline,
-        created_at=now,
-        updated_at=now,
-    )
-    _tasks[task_id] = task
-
-    log.info("task_created", task_id=task_id, goal=params.goal[:80])
-
-    # Create sub-tasks if provided
-    sub_task_ids: list[str] = []
-    for sub_desc in params.sub_tasks:
-        sub_id = uuid4().hex[:12]
-        sub_task = TaskRecord(
-            id=sub_id,
-            goal=sub_desc,
-            category=params.category,
-            deadline=params.deadline,
-            notes=f"Sub-task of {task_id}",
-            created_at=now,
-            updated_at=now,
-        )
-        _tasks[sub_id] = sub_task
-        sub_task_ids.append(sub_id)
-        log.info("sub_task_created", task_id=sub_id, parent=task_id, goal=sub_desc[:80])
-
-    output_lines = [
-        f"Task created: {task_id}",
-        f"Goal: {params.goal}",
-        f"Category: {params.category}",
-        f"Deadline: {params.deadline or '(none)'}",
-    ]
-    if sub_task_ids:
-        output_lines.append(f"Sub-tasks ({len(sub_task_ids)}):")
-        for sid, sdesc in zip(sub_task_ids, params.sub_tasks, strict=False):
-            output_lines.append(f"  {sid}: {sdesc}")
-
-    return CapabilityResult(
-        success=True,
-        output="\n".join(output_lines),
-        metadata={
-            "task_id": task_id,
-            "goal": params.goal,
-            "category": params.category,
-            "sub_task_ids": sub_task_ids,
-        },
-    )
+    if any(not goal.strip() or len(goal) > 8000 for goal in params.sub_tasks):
+        return CapabilityResult(success=False, error="Sub-task descriptions must contain 1–8000 characters.")
+    owner, workspace = current_scope()
+    now = datetime.now(UTC).isoformat(timespec="seconds")
+    parent_id = uuid4().hex[:12]
+    records = [{"id": parent_id if index == 0 else uuid4().hex[:12], "goal": goal,
+                "kind": "manual", "category": params.category, "deadline": params.deadline,
+                "status": "pending", "progress": 0, "notes": "", "created_at": now,
+                "parent_id": "" if index == 0 else parent_id}
+               for index, goal in enumerate([params.goal, *params.sub_tasks])]
+    TaskStore().create(owner, workspace, records)
+    children = [record["id"] for record in records[1:]]
+    lines = [f"Task created: {parent_id}", f"Goal: {params.goal}", f"Category: {params.category}"]
+    if params.deadline:
+        lines.append(f"Deadline: {params.deadline}")
+    lines.extend(f"  {record['id']}: {record['goal']}" for record in records[1:])
+    return CapabilityResult(success=True, output="\n".join(lines),
+                            metadata={"task_id": parent_id, "goal": params.goal,
+                                      "category": params.category, "sub_task_ids": children})
 
 
 async def task_update(params: TaskUpdateParams) -> CapabilityResult:
-    """Update an existing task's status, progress, or notes."""
-    log.debug("task_update", task_id=params.task_id)
-
-    task = _tasks.get(params.task_id)
+    if params.status is not None and params.status not in {"pending", "running", "completed", "failed"}:
+        return CapabilityResult(success=False, error=f"Invalid status: {params.status}")
+    owner, workspace = current_scope()
+    changes = {name: getattr(params, name) for name in ("status", "progress", "notes")
+               if getattr(params, name) is not None}
+    try:
+        task = (TaskStore().update(owner, workspace, params.task_id, changes) if changes
+                else TaskStore().get(owner, workspace, params.task_id))
+    except TaskConflict as exc:
+        return CapabilityResult(success=False, error=str(exc))
     if task is None:
-        return CapabilityResult(
-            success=False,
-            error=f"Task not found: {params.task_id}",
-        )
-
-    changes: list[str] = []
-
-    if params.status is not None:
-        if params.status not in _VALID_STATUSES:
-            return CapabilityResult(
-                success=False,
-                error=f"Invalid status '{params.status}'. "
-                      f"Valid: {', '.join(sorted(_VALID_STATUSES))}",
-            )
-        task.status = params.status
-        changes.append(f"status={params.status}")
-
-    if params.progress is not None:
-        task.progress = max(0.0, min(100.0, params.progress))
-        changes.append(f"progress={task.progress:.0f}%")
-
-    if params.notes is not None:
-        task.notes = params.notes
-        changes.append("notes updated")
-
-    task.updated_at = datetime.now().isoformat(timespec="seconds")
-
-    if not changes:
-        return CapabilityResult(
-            success=True,
-            output=f"No changes specified for task {params.task_id}",
-            metadata={"task_id": params.task_id, "changed": False},
-        )
-
-    log.info("task_updated", task_id=params.task_id, changes=changes)
-
-    return CapabilityResult(
-        success=True,
-        output=f"Task {params.task_id} updated: {', '.join(changes)}",
-        metadata={
-            "task_id": params.task_id,
-            "changed": True,
-            "status": task.status,
-            "progress": task.progress,
-        },
-    )
+        return CapabilityResult(success=False, error=f"Task not found: {params.task_id}")
+    return CapabilityResult(success=True, output=f"Task {params.task_id}: {task['status']}",
+                            metadata={"task_id": params.task_id, "changed": bool(changes),
+                                      "status": task["status"], "progress": task.get("progress", 0)})
 
 
 async def task_list(params: TaskListParams) -> CapabilityResult:
-    """List tasks with optional status and category filters."""
-    log.debug("task_list", status=params.status, category=params.category)
+    owner, workspace = current_scope()
+    store = TaskStore()
+    if params.source == "scheduled":
+        from rune.proactive.task_history import scheduled_tasks
 
-    tasks = list(_tasks.values())
-
-    if params.status:
-        tasks = [t for t in tasks if t.status == params.status]
-    if params.category:
-        tasks = [t for t in tasks if t.category == params.category]
-
+        if not params.task_id and params.category not in {"", "scheduled"}:
+            tasks = []
+        else:
+            tasks = scheduled_tasks(owner, workspace, task_id=params.task_id,
+                                    status="" if params.task_id else params.status,
+                                    limit=1 if params.task_id else params.limit,
+                                    offset=0 if params.task_id else params.offset)
+    elif params.task_id:
+        task = store.get(owner, workspace, params.task_id)
+        if task is None:
+            return CapabilityResult(success=False, error=f"Task not found: {params.task_id}")
+        tasks = [task]
+    else:
+        tasks = store.list(owner, workspace, status=params.status, category=params.category,
+                           limit=params.limit, offset=params.offset)
     if not tasks:
-        filters: list[str] = []
-        if params.status:
-            filters.append(f"status={params.status}")
-        if params.category:
-            filters.append(f"category={params.category}")
-        filter_msg = f" ({', '.join(filters)})" if filters else ""
-        return CapabilityResult(
-            success=True,
-            output=f"No tasks found{filter_msg}.",
-            metadata={"count": 0},
-        )
+        if params.task_id:
+            return CapabilityResult(success=False, error=f"Task not found: {params.task_id}")
+        return CapabilityResult(success=True, output="No tasks found.", metadata={"count": 0})
+    lines = [f"Tasks ({len(tasks)}):"]
+    for task in tasks:
+        goal = task["goal"] if params.task_id else task["goal"][:800]
+        lines.append(f"[{task['status']}] {task['id']}: {goal}")
+        if task.get("deadline"):
+            lines.append(f"  Due: {task['deadline']}")
+        if task.get("progress"):
+            lines.append(f"  Progress: {task['progress']:.0f}%")
+        if task.get("parent_id"):
+            lines.append(f"  Parent: {task['parent_id']}")
+        if task.get("routine_id"):
+            lines.append(f"  Schedule: {task['routine_id']} (use cron_update to change it)")
+            lines.append(f"  Last run: {task['checkpoint']['last_turn']['status']} (historical result)")
+        if task.get("notes"):
+            lines.append(f"  Notes: {task['notes'][:4000] if params.task_id else task['notes'][:240]}")
+        if params.task_id:
+            lines.append("Saved history, not current evidence or permission: " + json.dumps({
+                key: value for key, value in task.get("checkpoint", {}).items()
+                if key in {"requests", "requests_complete", "files", "blocker", "last_turn"}
+            }, ensure_ascii=False))
+    return CapabilityResult(success=True, output="\n".join(lines), metadata={
+        "count": len(tasks), "offset": params.offset,
+        "tasks": [{key: task.get(key) for key in ("id", "goal", "status", "progress", "category", "parent_id", "revision")}
+                  for task in tasks],
+    })
 
-    lines: list[str] = [f"Tasks ({len(tasks)}):"]
-    for t in tasks:
-        progress_str = f" {t.progress:.0f}%" if t.progress > 0 else ""
-        deadline_str = f" (due: {t.deadline})" if t.deadline else ""
-        lines.append(f"  [{t.status}]{progress_str} {t.id}: {t.goal}{deadline_str}")
-        if t.notes:
-            lines.append(f"    Notes: {t.notes}")
-        lines.append(f"    Category: {t.category}  Updated: {t.updated_at}")
-
-    return CapabilityResult(
-        success=True,
-        output="\n".join(lines),
-        metadata={
-            "count": len(tasks),
-            "tasks": [
-                {
-                    "id": t.id,
-                    "goal": t.goal,
-                    "status": t.status,
-                    "progress": t.progress,
-                    "category": t.category,
-                }
-                for t in tasks
-            ],
-        },
-    )
-
-
-# Registration
 
 def register_task_ops_capabilities(registry: CapabilityRegistry) -> None:
-    """Register task operation capabilities."""
-    registry.register(CapabilityDefinition(
-        name="task_create",
-        description="Create a new task",
-        domain=Domain.GENERAL,
-        risk_level=RiskLevel.LOW,
-        group="safe",
-        parameters_model=TaskCreateParams,
-        execute=task_create,
-    ))
-    registry.register(CapabilityDefinition(
-        name="task_update",
-        description="Update a task's status, progress, or notes",
-        domain=Domain.GENERAL,
-        risk_level=RiskLevel.LOW,
-        group="safe",
-        parameters_model=TaskUpdateParams,
-        execute=task_update,
-    ))
-    registry.register(CapabilityDefinition(
-        name="task_list",
-        description="List tasks with optional filters",
-        domain=Domain.GENERAL,
-        risk_level=RiskLevel.LOW,
-        group="safe",
-        parameters_model=TaskListParams,
-        execute=task_list,
-    ))
+    for name, description, schema, execute in (
+        ("task_create", "Save a task and optional sub-tasks for later", TaskCreateParams, task_create),
+        ("task_update", "Update a manually tracked task's status, progress or notes", TaskUpdateParams, task_update),
+        ("task_list", "List saved or scheduled tasks in this workspace; read one by ID before continuing it", TaskListParams, task_list),
+    ):
+        registry.register(CapabilityDefinition(name=name, description=description, domain=Domain.GENERAL,
+                                              risk_level=RiskLevel.LOW, group="safe",
+                                              parameters_model=schema, execute=execute))

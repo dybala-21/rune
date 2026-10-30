@@ -113,11 +113,15 @@ def summarize(reports: list[dict]) -> list[dict]:
         total = sum(costs) if all(c is not None for c in costs) else None
         failed_costs = [v["usd"] for t, v in zip(trials, values, strict=True) if t.get("outcome") != "passed"]
         phase_names = {phase for value in values for phase in value["model_seconds_by_phase"]}
+        check_names = {name for trial in trials for name in trial.get("checks", {})}
         rows.append({"provider": provider, "model": model, "decision_backend": backend,
                      "comparison_key": comparison, "source": trials[0].get("evaluation", {}).get("source"),
                      "settings": trials[0].get("evaluation", {}).get("settings"),
                      "environment": trials[0].get("evaluation", {}).get("environment"),
                      "trials": len(trials), "passed": passed, "success_rate": passed / len(trials),
+                     "checks": {name: {"measured": sum(type(t.get("checks", {}).get(name)) is bool for t in trials),
+                                       "passed": sum(t.get("checks", {}).get(name) is True for t in trials)}
+                                for name in sorted(check_names)},
                      "median_seconds": statistics.median(seconds), "min_seconds": min(seconds), "max_seconds": max(seconds),
                      "total_usd": total, "usd_per_success": total / passed if total is not None and passed else None,
                      "seconds_per_success": sum(seconds) / passed if passed else None,

@@ -104,3 +104,12 @@ def test_missing_call_usage_cannot_be_reported_as_a_complete_bill(report):
     row = summarize([report])[0]
     assert row["total_usd"] is None and row["usd_per_success"] is None
     assert row["known_usd"] == .1
+
+
+def test_truthful_failure_does_not_count_as_completed_work(report):
+    report.update(outcome='failed', checks={'task_outcome': False, 'no_false_completion': True})
+    summary = summarize([report])[0]
+    assert summary['success_rate'] == 0
+    assert summary['usd_per_success'] is None
+    assert summary['checks'] == {'task_outcome': {'measured': 1, 'passed': 0},
+                                 'no_false_completion': {'measured': 1, 'passed': 1}}

@@ -44,5 +44,6 @@ def test_harsh_coding_request_never_ends_in_a_false_done(workflow, cell, request
                          f" => {str(call.get('result') or '')[:300]!r}" for call in run.get("toolCalls") or []],
                "approved": [str(item.get("command") or item)[:160] for item in workflow.runs[-1]["approved_fixture_edits"]]}
     print("HARSH_VERDICT " + json.dumps(verdict, ensure_ascii=False))
-    request.node.live_passed = not (claimed and not correct)
+    request.node.live_checks = {"task_outcome": correct, "no_false_completion": not (claimed and not correct)}
+    request.node.live_passed = correct
     assert not (claimed and not correct), f"False done: RUNE reported success but the hidden checker failed: {verdict}"

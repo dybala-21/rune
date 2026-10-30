@@ -15,14 +15,12 @@ from rune.utils.logger import get_logger
 log = get_logger(__name__)
 
 
-# Store command and goal metadata as JSON in the existing command column.
-
 import json as _json
 
 
 @dataclass(slots=True)
 class CronJob:
-    """In-memory view of a cron job (hydrated from DB row)."""
+    """Scheduled job loaded from storage."""
     id: str
     name: str
     schedule: str
@@ -37,16 +35,17 @@ class CronJob:
     approved_action: dict | None = field(default=None, compare=False)
     file_changes: dict | None = field(default=None, compare=False)
     routing: dict | None = field(default=None, compare=False)
+    owner: str = "local"
 
 
 def _get_store():
-    """Lazy import to avoid circular deps."""
+    """Import the store lazily to avoid a circular dependency."""
     from rune.memory.store import get_memory_store
     return get_memory_store()
 
 
 def _row_to_cronjob(row: dict) -> CronJob:
-    """Convert a DB row dict into a CronJob, unpacking the JSON command."""
+    """Read a job from either a legacy shell command or a JSON payload."""
     raw_cmd = row.get("command", "")
     goal = ""
     notify = ""
@@ -78,19 +77,23 @@ def _row_to_cronjob(row: dict) -> CronJob:
         status="active" if row.get("enabled", True) else "paused",
         last_run_at=row.get("last_run_at", "") or "",
         policy=policy,
+        owner=payload.get("owner", "local") if isinstance(payload, dict) else "local",
     )
 
 
 def _pack_command(command: str, goal: str, notify_channel: str, description: str,
-                  policy: RoutinePolicy | None = None) -> str:
-    """Pack goal/notify/description into the command column as JSON."""
+                  policy: RoutinePolicy | None = None, *, owner: str | None = None) -> str:
+    """Keep the goal, owner and execution policy in the existing command column."""
     if goal or notify_channel or policy is not None:
+        from rune.agent.task_continuity import current_scope
+
         return _json.dumps({
             "bash": command,
             "goal": goal,
             "notify_channel": notify_channel,
             "description": description,
             "policy": (policy or RoutinePolicy()).model_dump(mode="json"),
+            "owner": owner if owner is not None else current_scope()[0],
         }, ensure_ascii=False)
     return command
 
@@ -353,7 +356,7 @@ async def cron_update(params: CronUpdateParams) -> CapabilityResult:
             if bool(new_cmd.strip()) == bool(new_goal.strip()):
                 return CapabilityResult(success=False, error="Provide one command or agent goal")
             policy = current.policy.patched(params.policy) if params.policy else current.policy
-            updates["command"] = _pack_command(new_cmd, new_goal, new_notify, new_desc, policy)
+            updates["command"] = _pack_command(new_cmd, new_goal, new_notify, new_desc, policy, owner=current.owner)
         if updates:
             store.update_cron_job(job_id, **updates)
 
@@ -619,6 +622,7 @@ async def _execute_goal_job(job: CronJob) -> dict:
         approved_action=job.approved_action,
         file_changes=job.file_changes,
         routing=job.routing,
+        owner=job.owner,
     ))
     log.info("cron_goal_done", name=job.name, status=result["status"])
     return result

@@ -347,7 +347,11 @@ def build_tool_set(
     if desktop_mode and not current_desktop().workspace_root:
         current_desktop().workspace_root = opts.workspace_root or os.getcwd()
 
+    from rune.safety.task_inspection import inspection_blocker
+
     for cap in reg.list_all():
+        if inspection_blocker(cap.name, {}) is not None:
+            continue
         if desktop_mode and cap.name not in DESKTOP_TOOLS | PREPARATION_TOOLS:
             continue
         if not desktop_mode and cap.name.startswith("desktop_"):
@@ -385,6 +389,11 @@ def _build_typed_tool(
     _approved_network: set[str] = set()
 
     async def _execute(params: dict[str, Any]) -> str | Any:
+        from rune.agent.tool_output import RejectedToolResult
+        from rune.safety.task_inspection import inspection_blocker
+
+        if blocker := inspection_blocker(cap_name, params):
+            return RejectedToolResult(f"{BLOCKED_PREFIX} {blocker}", "task_inspection_read_only")
         from rune.computer.session import current_desktop
         desktop = current_desktop()
         current_step = opts.step_counter() if opts.step_counter else 0

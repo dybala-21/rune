@@ -28,6 +28,7 @@ class BackgroundTask:
     approved_action: dict | None = None
     file_changes: dict | None = None
     routing: dict | None = None
+    owner: str = "local"
 
 
 _current_task: ContextVar[BackgroundTask | None] = ContextVar("background_task", default=None)
@@ -107,7 +108,7 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
                     await execute_approved_action(task.approved_action, journal, loop.emit)
                     result["approved_action"] = {"tool": task.approved_action["tool"],
                                                  "status": "executed", "verification": "pending"}
-                context = {"workspace_root": workspace}
+                context = {"workspace_root": workspace, "task_owner": task.owner}
                 continuation = task.continuation
                 if journal is not None and journal.previous is not None:
                     context["recovery_written_files"] = recovery_written_files(journal.previous)

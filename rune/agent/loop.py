@@ -62,6 +62,7 @@ from rune.agent.output_integrity import (
 )
 from rune.agent.prompts import build_system_prompt
 from rune.agent.requirement_gate import RequirementGate, requirement_gate_enabled
+from rune.agent.task_continuity import claim_selected_task, with_task_continuity
 from rune.agent.timing import timed_run, timing_phase
 from rune.agent.tool_adapter import STALL_LIMITS, ToolAdapterOptions, build_tool_set
 from rune.agent.verification_state import VerificationState, verified_outcome
@@ -1033,6 +1034,7 @@ class NativeAgentLoop(EventEmitter):
 
     @with_browser_session
     @with_execution_environment
+    @with_task_continuity
     @timed_run
     async def run(
         self,
@@ -1045,11 +1047,7 @@ class NativeAgentLoop(EventEmitter):
         extra_system_context: str | None = None,
         classification: ClassificationResult | None = None,
     ) -> CompletionTrace:
-        """Classify, select tools and stream the run, optionally resuming history or a checkpoint.
-
-        Reuse a supplied classification only without message history; continuation
-        classification must account for the previous task.
-        """
+        """Run the task, resolving saved work before selecting tools."""
         if self._running:
             raise RuntimeError("Agent loop is already running")
 
@@ -1119,11 +1117,16 @@ class NativeAgentLoop(EventEmitter):
             browser_state = await describe_browser_session()
             context = {**(context or {}), "browser_state": browser_state}
 
+            from rune.agent.task_context import from_history
             from rune.config.defaults import TOKEN_OPTIMIZATION_ENABLED
 
-            # Reuse classification only without history; recheck domains for continuations.
-            if classification is None or message_history:
-                # Extract previous goal info from message_history for domain change
+            has_previous_messages = any(message.get("content") for message in message_history or [])
+            has_saved_tasks = bool(from_history(message_history or []))
+            _prev_goal = ""
+            _prev_goal_type = ""
+
+            # Saved work needs fresh routing; an empty metadata carrier does not.
+            if classification is None or has_previous_messages or has_saved_tasks:
                 _prev_goal = ""
                 _prev_goal_type = ""
                 if message_history:
@@ -1150,6 +1153,7 @@ class NativeAgentLoop(EventEmitter):
             if not getattr(classification, "available", True):
                 from rune.agent.classification_response import RoutingUnavailable
                 raise RoutingUnavailable(f"Task routing failed: {classification.reason}. No task tools were run.")
+            claim_selected_task(message_history or [], classification)
             self._last_goal_type = classification.goal_type
             log.info(
                 "goal_classified",
@@ -1190,8 +1194,8 @@ class NativeAgentLoop(EventEmitter):
 
                 self._evidence_gate = EvidenceGate(goal, _os.getcwd())
 
-            # Mark as continuation only when history exists AND domain hasn't changed
-            if message_history:
+            # A domain change starts a new task even when history exists.
+            if has_previous_messages or classification.resume_task:
                 if classification.is_domain_change:
                     classification.is_continuation = False
                     log.info(
@@ -1399,6 +1403,10 @@ class NativeAgentLoop(EventEmitter):
         from rune.connectors.client import broker_available
 
         tools = self._select_base_tools(classification)
+        from rune.safety.task_inspection import inspecting_task
+
+        if inspecting_task():
+            tools = list(dict.fromkeys([*tools, "task_list"]))
         if classification.needs_web_evidence:
             tools = list(dict.fromkeys([*tools, "web_search", "web_fetch", "task_blocked"]))
         kind = resolve_intent_contract(classification, classification.confidence).kind
@@ -1690,6 +1698,11 @@ class NativeAgentLoop(EventEmitter):
         elif not from_history(message_history or []):
             source_context = SourceContext.from_history(message_history or [], classification)
         task_message = resume_message(previous_task, message_history)
+        from rune.safety.task_inspection import inspecting_task
+
+        if inspecting_task():
+            system_prompt += ("\nThis turn only inspects saved work. Read current results or task_list history; "
+                              "do not modify files, run commands or send app input. Report any checks that need execution.")
         source_message = source_context.message()
         web_grounding = WebGrounding(
             required=resolve_intent_contract(classification, classification.confidence).grounding_requirement == "required",

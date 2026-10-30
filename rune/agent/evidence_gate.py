@@ -175,6 +175,10 @@ class EvidenceGate:
 
     async def verdict(self) -> tuple[str, str | None]:
         """Return (pass/fail/skip, message); only a failed check blocks completion."""
+        from rune.safety.task_inspection import inspecting_task
+
+        if inspecting_task():
+            return self._record("skip", None, "Execution checks were not run during task inspection.")
         # Restore modified original tests before verification and disclose the restoration.
         from rune.agent.validation_guard import restoration_note, restore_tests
 
