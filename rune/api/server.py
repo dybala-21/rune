@@ -1871,12 +1871,12 @@ def create_app() -> Any:
                             _lcfg.active_provider or "ollama",
                             _lcfg.active_model or "",
                         ) or ""
+                from rune.llm.endpoints import self_hosted
                 return _ok({
                     "enabled": bool(_prov),
                     "provider": _prov,
                     "model": _model,
-                    # Only Ollama is a local provider here.
-                    "isCloud": bool(_prov) and _prov != "ollama",
+                    "isCloud": bool(_prov) and not self_hosted(_prov, _model),
                     # Local single-jump candidate when nothing is configured.
                     "suggestion": _suggestion,
                 })
@@ -2019,6 +2019,11 @@ def create_app() -> Any:
             elif method == "config.patch":
                 from rune.api.handlers.config import ConfigPatchRequest, patch_config
                 result = await patch_config(ConfigPatchRequest(**params))
+                return _ok(result)
+
+            elif method == "config.testEndpoint":
+                from rune.api.handlers.config import EndpointTestRequest, test_endpoint
+                result = await test_endpoint(str(params.get("name", "")), EndpointTestRequest(model=params.get("model")))
                 return _ok(result)
 
             # cron

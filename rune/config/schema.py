@@ -4,7 +4,17 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AfterValidator,
+    AliasChoices,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
 
 from rune.llm.reasoning import ReasoningEffort, reasoning_model_key
 
@@ -30,6 +40,74 @@ class AzurePricingConfig(BaseModel):
             raise ValueError("Azure pricing requires the resource's HTTPS endpoint.")
         self.endpoint = self.endpoint.rstrip("/").removesuffix("/openai/v1")
         return self
+
+
+EndpointName = Annotated[str, Field(min_length=1, max_length=40, pattern=r"^[a-z0-9][a-z0-9-]*$")]
+
+
+class CompatibleEndpoint(BaseModel):
+    """An OpenAI-compatible server such as vLLM, LM Studio or llama.cpp."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    base_url: str = Field(min_length=1, max_length=512, alias="baseUrl")
+    # Empty: use the models the server lists.
+    models: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(default_factory=list, max_length=200)
+    # None: free when the host is private.
+    free: bool | None = None
+    # Guided: schema-constrained JSON actions for servers or models without tool calls.
+    tool_mode: Literal["native", "guided"] = Field(default="native", alias="toolMode")
+    # GET /models does not report image support.
+    vision_models: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(
+        default_factory=list, max_length=200, alias="visionModels")
+
+    @model_validator(mode="after")
+    def validate_base_url(self):
+        from urllib.parse import urlsplit
+
+        url = urlsplit(self.base_url.strip())
+        if url.scheme not in {"http", "https"} or not url.hostname or url.username or url.password \
+                or url.query or url.fragment:
+            raise ValueError("Enter the server's http(s) base URL, for example http://localhost:8000/v1.")
+        from rune.cloud.boundary import hosted
+        from rune.llm.endpoints import private_host
+
+        # Keep hosted workers away from their own host and the metadata service.
+        if hosted() and (url.scheme != "https" or private_host(url.hostname)):
+            raise ValueError("Hosted Rune can only connect to public HTTPS endpoints.")
+        path = url.path.rstrip("/")
+        # Most servers mount the API under /v1.
+        self.base_url = f"{url.scheme}://{url.netloc}{path or '/v1'}"
+        return self
+
+
+def _no_provider_names(endpoints: dict) -> dict:
+    # "<endpoint>/<model>" would read as that provider's model.
+    from rune.llm.target import _PROVIDERS
+
+    if clash := sorted(set(endpoints) & _PROVIDERS):
+        raise ValueError(f"Endpoint names cannot be provider names: {', '.join(clash)}.")
+    return endpoints
+
+
+CompatibleEndpoints = Annotated[dict[EndpointName, CompatibleEndpoint], AfterValidator(_no_provider_names)]
+
+
+def _usable_endpoints(value):
+    """Drop invalid entries so one typo does not discard the whole llm section."""
+    if not isinstance(value, dict):
+        return value
+    from rune.utils.logger import get_logger
+
+    adapter = TypeAdapter(CompatibleEndpoints)
+    usable = {}
+    for name, entry in value.items():
+        try:
+            usable.update(adapter.validate_python({name: entry}))
+        except ValidationError as exc:
+            get_logger(__name__).warning("endpoint_ignored", endpoint=str(name),
+                                         reason=exc.errors()[0].get("msg", "invalid"))
+    return usable
 
 
 class ModelsByTier(BaseModel):
@@ -113,6 +191,7 @@ class LLMConfig(BaseModel):
     models: ProviderModels = Field(default_factory=ProviderModels)
     azure_deployments: AzureDeployments = Field(default_factory=dict, alias="azureDeployments")
     azure_pricing: AzurePricingConfig | None = Field(default=None, alias="azurePricing")
+    endpoints: Annotated[CompatibleEndpoints, BeforeValidator(_usable_endpoints)] = Field(default_factory=dict)
     decision_routing: DecisionRoutingConfig = Field(
         default_factory=DecisionRoutingConfig, alias="decisionRouting",
     )

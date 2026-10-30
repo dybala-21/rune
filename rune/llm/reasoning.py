@@ -85,7 +85,7 @@ def reasoning_model_key(model: str) -> str:
 
 
 def reasoning_control(model: str) -> ReasoningControl:
-    from rune.llm.azure import capability_model
+    from rune.llm.endpoints import capability_model
     return _reasoning_control(capability_model(model))
 
 

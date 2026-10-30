@@ -77,7 +77,7 @@ _FALLBACK_PROFILES: list[LLMProfile] = [
 
 
 def build_profiles_from_config() -> list[LLMProfile]:
-    """Prefer the selected model; keep local and Azure runs on their provider."""
+    """Prefer the selected model; keep local, Azure and endpoint runs on their provider."""
     try:
         from rune.llm.context import llm_settings
         llm = llm_settings()
@@ -95,6 +95,10 @@ def build_profiles_from_config() -> list[LLMProfile]:
             if provider == "azure":
                 from rune.llm.azure import tier_deployment
                 model_name = tier_deployment(model_name)
+            if provider == "openai_compatible":
+                from rune.llm.endpoints import tier_model
+                # Empty fails with a clear error instead of falling back to a cloud model.
+                model_name = tier_model()
             if provider == "ollama":
                 # This path bypasses LLMClient.resolve_model, so check installed models here.
                 from rune.llm.client import (
@@ -113,7 +117,7 @@ def build_profiles_from_config() -> list[LLMProfile]:
             thinking_level="basic" if provider == "openai" else "extended",
             priority=0,
         )
-        if provider in {"ollama", "azure"}:
+        if provider in {"ollama", "azure", "openai_compatible"}:
             return [primary]
 
         # Append fallbacks that don't duplicate the primary

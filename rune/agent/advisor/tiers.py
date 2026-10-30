@@ -131,10 +131,12 @@ async def suggest_local_escalation(
     """
     import httpx
 
+    from rune.llm.endpoints import ollama_root
+
     exec_tier = resolve_tier(executor_provider, executor_model)
     try:
         async with httpx.AsyncClient(timeout=1.5) as client:
-            resp = await client.get("http://localhost:11434/api/tags")
+            resp = await client.get(f"{ollama_root()}/api/tags")
             if resp.status_code != 200:
                 return None
             models = [m.get("name", "") for m in resp.json().get("models", [])]

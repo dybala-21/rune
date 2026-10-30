@@ -1367,7 +1367,9 @@ class RuneApp:
         """Fetch available models from local Ollama instance."""
         try:
             import httpx
-            resp = httpx.get("http://localhost:11434/api/tags", timeout=2.0)
+
+            from rune.llm.endpoints import ollama_root
+            resp = httpx.get(f"{ollama_root()}/api/tags", timeout=2.0)
             if resp.status_code == 200:
                 return [m["name"] for m in resp.json().get("models", [])]
         except Exception:

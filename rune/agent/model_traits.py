@@ -23,6 +23,8 @@ class ModelTraits:
 
 
 _DEFAULT = ModelTraits()
+# Self-hosted models named after Claude use the OpenAI route.
+_ANTHROPIC_ROUTES = ("anthropic/", "claude")
 
 # First match wins; put specific models before families.
 _STATIC: tuple[tuple[tuple[str, ...], ModelTraits], ...] = (
@@ -55,10 +57,12 @@ _RESPONSES_ONLY: set[Hashable] = set()
 
 def traits(model: str, *, cache_key: Hashable | None = None) -> ModelTraits:
     """Combine model settings with rejections observed for this request context."""
-    from rune.llm.azure import capability_model
+    from rune.llm.endpoints import capability_model
     m = capability_model(model or "").lower()
     found = _DEFAULT
     for needles, entry in _STATIC:
+        if entry.anthropic_wire and not m.startswith(_ANTHROPIC_ROUTES):
+            continue
         if all(n in m for n in needles):
             found = entry
             break
@@ -92,7 +96,9 @@ def supports_vision(model: str) -> bool:
     declared = traits(model).vision
     if declared is not None:
         return declared
-    from rune.llm.azure import capability_model
+    from rune.llm.endpoints import accepts_images, capability_model
+    if (accepts := accepts_images(model)) is not None:
+        return accepts
     return _sdk_supports_vision(capability_model(model))
 
 

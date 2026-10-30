@@ -202,6 +202,8 @@ _PROVIDER_LABELS: dict[str, str] = {
     "mistral":   "Mistral AI",
     "deepseek":  "DeepSeek",
     "cohere":    "Cohere",
+    "ollama":    "Ollama",
+    "openai_compatible": "OpenAI-compatible",
 }
 
 
@@ -315,6 +317,10 @@ async def get_available_models() -> list[ModelInfo]:
         from rune.llm.azure import deployment_names
         models.extend(ModelInfo(id=name, provider="azure", label=name) for name in deployment_names())
 
+    from rune.llm.endpoints import model_ids, refresh_discovered
+    await refresh_discovered()
+    models.extend(ModelInfo(id=name, provider="openai_compatible", label=name) for name in model_ids())
+
     if _has_provider_key("xai"):
         from rune.llm.xai import available_model_ids
         fetched = await available_model_ids()
@@ -354,12 +360,16 @@ def invalidate_cache() -> None:
     _cache_timestamp = 0.0
     from rune.llm.xai import invalidate_cache as invalidate_xai
     invalidate_xai()
+    from rune.llm.endpoints import forget_discovered
+    forget_discovered()
 
 
 async def selectable_models() -> list[tuple[str, str]]:
     """Replace Grok fallbacks with the models available to the account."""
+    from rune.llm.endpoints import refresh_discovered
     from rune.llm.xai import available_model_ids
 
+    await refresh_discovered()
     result = known_models()
     fetched = await available_model_ids()
     if fetched is not None:
@@ -393,7 +403,9 @@ def known_models() -> list[tuple[str, str]]:
     # Delay imports so callers that only need metadata do not load the provider SDKs.
     from rune.llm.azure import deployment_names
     from rune.llm.client import installed_ollama_models
+    from rune.llm.endpoints import model_ids
 
     result.extend(("azure", name) for name in deployment_names())
     result.extend(("ollama", name) for name in installed_ollama_models())
+    result.extend(("openai_compatible", name) for name in model_ids())
     return result

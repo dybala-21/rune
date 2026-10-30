@@ -126,6 +126,9 @@ def estimate_request_cost(model: str, usage: dict, request: dict | None = None) 
     source = request.get("_rune_source_model", model)
     if source.partition("/")[0] in _LOCAL:
         return 0.0
+    from rune.llm.endpoints import endpoint_of, is_free
+    if (endpoint := endpoint_of(source)) is not None:
+        return 0.0 if is_free(endpoint) else None
     rates = _request_rates(model, request)
     if rates is None:
         return None

@@ -48,6 +48,7 @@ def _key_id(target: DecisionTarget) -> str:
 
 def accelerator_status(selected: ActiveModelSelection | None = None, *,
                        settings: DecisionRoutingConfig | None = None, backend: str | None = None) -> str:
+    from rune.llm.endpoints import self_hosted
     from rune.llm.model_selection import get_effective_model_selection
 
     settings = settings or llm_settings().decision_routing
@@ -60,7 +61,7 @@ def accelerator_status(selected: ActiveModelSelection | None = None, *,
     if not target.endpoint or not target.deployment:
         return "missing_config"
     selected = selected or get_effective_model_selection()
-    if selected.provider == "ollama":
+    if self_hosted(selected.provider, selected.model):
         return "local"
     llm = llm_settings()
     # Automatic model selection already runs its own classifier.

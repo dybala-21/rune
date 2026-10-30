@@ -493,6 +493,26 @@ export interface AzurePricing {
   deployments: Record<string, 'global' | 'us' | 'eu'>;
 }
 
+export type EnvScope = 'user' | 'project' | 'process' | null;
+
+export interface CompatibleEndpoint {
+  baseUrl: string;
+  models: string[];
+  /** null: inferred from the host (private addresses are self-hosted). */
+  free?: boolean | null;
+  toolMode: 'native' | 'guided';
+  /** Server model ids that accept images. */
+  visionModels: string[];
+}
+
+export interface EndpointTestResult {
+  reachable: boolean;
+  models: string[];
+  model?: string;
+  tools: 'native' | 'unparsed' | 'text' | 'unsupported' | 'unknown';
+  detail: string;
+}
+
 export type DecisionStatus = 'disabled' | 'ready' | 'unverified' | 'local' | 'automatic_model'
   | 'missing_key' | 'missing_config' | 'cooldown' | 'auth_error';
 
@@ -503,6 +523,12 @@ export interface DecisionConnection {
 }
 
 export interface ConfigInfo {
+  localModels?: {
+    ollama: { baseUrl: string; envKey: string; scope: EnvScope };
+    endpoints: Record<string, CompatibleEndpoint & {
+      keyName: string; hasKey: boolean; keyScope: EnvScope; selfHosted: boolean;
+    }>;
+  };
   azure?: {
     endpoint: string;
     endpointKey: string;
@@ -571,8 +597,13 @@ export async function fetchConfig(): Promise<ConfigInfo> {
   return rpc('config.get', {});
 }
 
+export async function testEndpoint(name: string, model?: string): Promise<EndpointTestResult> {
+  return rpc('config.testEndpoint', { name, model });
+}
+
 export async function patchConfig(params: {
   azureDeployments?: Record<string, string>;
+  endpoints?: Record<string, CompatibleEndpoint>;
   azurePricing?: AzurePricing | null;
   vertexLocation?: string;
   runLimits?: Partial<RunLimits>;
