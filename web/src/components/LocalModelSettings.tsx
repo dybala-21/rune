@@ -5,7 +5,11 @@ import {
 } from '../api';
 
 type State = NonNullable<ConfigInfo['localModels']>;
-type Row = { name: string; baseUrl: string; models: string; toolMode: CompatibleEndpoint['toolMode']; free: string; key: string };
+type Row = {
+  original: string; name: string; baseUrl: string; models: string; visionModels: string;
+  toolMode: CompatibleEndpoint['toolMode']; free: string; key: string;
+};
+const lines = (text: string) => text.split(/[\n,]/).map(value => value.trim()).filter(Boolean);
 
 const inputStyle = {
   width: '100%', boxSizing: 'border-box' as const, padding: '7px 9px', borderRadius: 6,
@@ -19,7 +23,8 @@ const TOOLS: Record<EndpointTestResult['tools'], string> = {
 };
 
 const rowsFrom = (state: State): Row[] => Object.entries(state.endpoints).map(([name, entry]) => ({
-  name, baseUrl: entry.baseUrl, models: entry.models.join('\n'), toolMode: entry.toolMode,
+  original: name, name, baseUrl: entry.baseUrl, models: entry.models.join('\n'),
+  visionModels: entry.visionModels.join('\n'), toolMode: entry.toolMode,
   free: entry.free == null ? '' : String(entry.free), key: '',
 }));
 
@@ -51,9 +56,8 @@ export function LocalModelSettings({ state, onSaved }: { state: State; onSaved: 
         const url = new URL(row.baseUrl.trim());
         if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Enter an http(s) base URL for each endpoint.');
         endpoints[name] = {
-          baseUrl: row.baseUrl.trim(), toolMode: row.toolMode,
-          models: row.models.split(/[\n,]/).map(model => model.trim()).filter(Boolean),
-          ...(row.free ? { free: row.free === 'true' } : {}),
+          baseUrl: row.baseUrl.trim(), toolMode: row.toolMode, models: lines(row.models),
+          visionModels: lines(row.visionModels), ...(row.free ? { free: row.free === 'true' } : {}),
         };
       }
       await patchConfig({ endpoints });
@@ -110,6 +114,9 @@ export function LocalModelSettings({ state, onSaved }: { state: State; onSaved: 
           <label htmlFor={`endpoint-models-${index}`}>Models (optional, one per line)</label>
           <textarea id={`endpoint-models-${index}`} value={row.models} rows={2} style={field}
             placeholder="Empty: use the models the server lists" onChange={event => edit(index, { models: event.target.value })} />
+          <label htmlFor={`endpoint-vision-${index}`}>Models that accept images (optional)</label>
+          <textarea id={`endpoint-vision-${index}`} value={row.visionModels} rows={1} style={field}
+            placeholder="Qwen/Qwen2.5-VL-7B-Instruct" onChange={event => edit(index, { visionModels: event.target.value })} />
           <label htmlFor={`endpoint-tools-${index}`}>Tool mode</label>
           <select id={`endpoint-tools-${index}`} value={row.toolMode} style={field}
             onChange={event => edit(index, { toolMode: event.target.value as Row['toolMode'] })}>
@@ -123,6 +130,8 @@ export function LocalModelSettings({ state, onSaved }: { state: State; onSaved: 
             <option value="true">Self-hosted, no per-token cost</option>
             <option value="false">Paid service, cost unknown</option>
           </select>
+          {row.original && row.name.trim() !== row.original && state.endpoints[row.original]?.hasKey && !row.key.trim() &&
+            <p style={muted}>The saved key belongs to "{row.original}". Enter it again for the new name.</p>}
           {row.baseUrl.trim().startsWith('http:') && row.key.trim() &&
             <p style={muted}>This URL is not encrypted. The key will be sent in plain text.</p>}
           <button type="button" onClick={() => { change(); setRows(rows.filter((_, i) => i !== index)); }}
@@ -136,7 +145,7 @@ export function LocalModelSettings({ state, onSaved }: { state: State; onSaved: 
       })}
       <button type="button" onClick={() => {
         change();
-        setRows([...rows, { name: '', baseUrl: '', models: '', toolMode: 'native', free: '', key: '' }]);
+        setRows([...rows, { original: '', name: '', baseUrl: '', models: '', visionModels: '', toolMode: 'native', free: '', key: '' }]);
       }}>Add endpoint</button>{' '}
       <button type="button" onClick={save} disabled={!dirty.current}>{saving ? 'Saving…' : 'Save'}</button>
     </fieldset>

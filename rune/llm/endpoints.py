@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import socket
 import time
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -28,6 +29,8 @@ PROVIDER = "openai_compatible"
 OLLAMA_PORT = 11434
 OLLAMA_NAMES = ("OLLAMA_API_BASE", "OLLAMA_HOST")
 _DISCOVERY_TTL = 300.0
+# A server that was down is retried sooner than a healthy list is refreshed.
+_FAILED_DISCOVERY_TTL = 30.0
 _discovered: dict[str, tuple[float, list[str]]] = {}
 
 
@@ -82,6 +85,10 @@ def split_model(model: str) -> tuple[str, str]:
     """``<endpoint>/<server model id>``; the server id may itself contain slashes."""
     from rune.llm.target import ModelCompatibilityError
 
+    if not model:
+        raise ModelCompatibilityError(
+            "No model is selected for the OpenAI-compatible endpoints. "
+            "Pick one in the model picker, or list models for the endpoint in Settings.")
     endpoint, separator, name = model.partition("/")
     if not separator or not name:
         raise ModelCompatibilityError(
@@ -95,21 +102,62 @@ def split_model(model: str) -> tuple[str, str]:
 def connection_options(endpoint: str, options: dict[str, Any]) -> dict[str, Any]:
     result = dict(options)
     result.setdefault("api_base", configured()[endpoint].base_url)
+    check_destination(result["api_base"])
     # The OpenAI client refuses to send without a key even when the server ignores it.
     result.setdefault("api_key", model_environment(key_name(endpoint)).strip() or "none")
     return result
 
 
-def private_host(host: str | None) -> bool:
-    """Loopback, private-network, link-local or single-label hosts."""
-    host = (host or "").lower()
-    if host == "localhost" or host.endswith((".localhost", ".local", ".lan", ".internal")) or "." not in host:
-        return True
+def _address(host: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
     try:
-        address = ipaddress.ip_address(host)
+        return ipaddress.ip_address(host)
     except ValueError:
-        return False
-    return address.is_private or address.is_loopback or address.is_link_local
+        pass
+    # Resolvers also accept legacy IPv4 forms such as 0x7f.1 or 2130706433.
+    try:
+        return ipaddress.ip_address(socket.inet_ntoa(socket.inet_aton(host)))
+    except OSError:
+        return None
+
+
+def private_host(host: str | None) -> bool:
+    """Whether a host is not on the public internet.
+
+    IP literals use the IANA special-purpose registry (``is_global``), which
+    also covers IPv4-mapped IPv6, CGNAT/Tailscale and reserved ranges. Names
+    count as private when they are single-label or use a local-only suffix.
+    """
+    host = (host or "").lower().rstrip(".")
+    address = _address(host)
+    if address is not None:
+        return not address.is_global
+    return host == "localhost" or "." not in host or host.endswith(
+        (".localhost", ".local", ".lan", ".home.arpa", ".internal"))
+
+
+def check_destination(base_url: str) -> None:
+    """In hosted mode, refuse endpoints that resolve to non-public addresses.
+
+    Validation already rejects private names and literals; resolving here also
+    catches public names pointed at private addresses. A name that changes its
+    answer between this check and the request (DNS rebinding) is not covered.
+    """
+    from rune.cloud.boundary import hosted
+
+    if not hosted():
+        return
+    from rune.llm.target import ModelCompatibilityError
+
+    url = urlsplit(base_url)
+    host = url.hostname or ""
+    if url.scheme != "https" or private_host(host):
+        raise ModelCompatibilityError("Hosted Rune can only connect to public HTTPS endpoints.")
+    try:
+        answers = socket.getaddrinfo(host, url.port or 443, proto=socket.IPPROTO_TCP)
+    except OSError as exc:
+        raise ModelCompatibilityError(f"Could not resolve {host}.") from exc
+    if any(private_host(str(answer[4][0])) for answer in answers):
+        raise ModelCompatibilityError("Hosted Rune can only connect to public HTTPS endpoints.")
 
 
 def is_free(endpoint: str) -> bool:
@@ -155,13 +203,38 @@ def model_ids() -> list[str]:
     return result
 
 
-def tier_model(model: str) -> str:
-    """Every tier runs the selected server model; others may not be loaded."""
+def tier_model() -> str:
+    """The model every tier runs, since other server models may not be loaded.
+
+    The selected model, else the configured default, else the first one
+    available. Empty when there is none, so the request fails with a clear
+    message instead of a model name from another provider.
+    """
     settings = llm_settings()
-    if settings.active_provider == PROVIDER and settings.active_model:
-        return str(settings.active_model)
+    for provider, model in ((settings.active_provider, settings.active_model),
+                            (settings.default_provider, settings.default_model)):
+        if provider == PROVIDER and model and endpoint_of(f"{PROVIDER}/{model}"):
+            return str(model)
     ids = model_ids()
-    return model if model in ids or not ids else ids[0]
+    return ids[0] if ids else ""
+
+
+def capability_model(model: str) -> str:
+    """The id used to look up model capabilities: the request's own ``openai/`` route."""
+    provider, separator, rest = model.partition("/")
+    if provider == PROVIDER and separator:
+        return f"openai/{rest.partition('/')[2] or rest}"
+    from rune.llm.azure import capability_model as azure_capability
+
+    return azure_capability(model)
+
+
+def accepts_images(model: str) -> bool | None:
+    """Whether an endpoint model takes images, as the user declared; None for other providers."""
+    endpoint = endpoint_of(model)
+    if endpoint is None:
+        return None
+    return model.partition("/")[2].partition("/")[2] in configured()[endpoint].vision_models
 
 
 def _headers(endpoint: str) -> dict[str, str]:
@@ -172,6 +245,7 @@ def _headers(endpoint: str) -> dict[str, str]:
 async def discover(endpoint: str, *, timeout: float = 3.0) -> list[str]:
     """Models the server reports at ``GET /models``; cached for the pickers."""
     entry = configured()[endpoint]
+    check_destination(entry.base_url)
     async with httpx.AsyncClient(timeout=timeout, trust_env=False, follow_redirects=False) as client:
         response = await client.get(f"{entry.base_url}/models", headers=_headers(endpoint))
     response.raise_for_status()
@@ -184,7 +258,9 @@ async def refresh_discovered() -> None:
     """Refresh stale discovery results without failing the caller."""
     now = time.monotonic()
     for endpoint, entry in configured().items():
-        if entry.models or now - _discovered.get(endpoint, (-_DISCOVERY_TTL, []))[0] < _DISCOVERY_TTL:
+        checked, names = _discovered.get(endpoint, (None, []))
+        ttl = _DISCOVERY_TTL if names else _FAILED_DISCOVERY_TTL
+        if entry.models or (checked is not None and now - checked < ttl):
             continue
         try:
             await discover(endpoint, timeout=1.5)
@@ -197,28 +273,56 @@ def forget_discovered() -> None:
     _discovered.clear()
 
 
-_TOOL_HINT = ("The server rejected tool calls. vLLM needs --enable-auto-tool-choice and "
-              "--tool-call-parser; llama.cpp needs --jinja. Otherwise set Tool mode to Guided.")
+_TOOL_HINT = ("If the model supports tools, vLLM needs --enable-auto-tool-choice and --tool-call-parser "
+              "and llama.cpp needs --jinja. Otherwise set Tool mode to Guided.")
 
 
-async def diagnose(endpoint: str, model: str | None = None, *, timeout: float = 30.0) -> dict[str, Any]:
-    """List models and send one small tool request to show whether the agent can run."""
+def _error_message(response: httpx.Response) -> str:
+    """The server's own error text: OpenAI-style ``error.message``, else the raw body."""
     try:
-        names = await discover(endpoint, timeout=5.0)
+        error = response.json().get("error")
+        message = error.get("message") if isinstance(error, dict) else error
+    except (ValueError, AttributeError):
+        message = None
+    return str(message or response.text)[:300]
+
+
+async def diagnose(endpoint: str, model: str | None = None, *, timeout: float = 120.0) -> dict[str, Any]:
+    """List models and send one small tool request to show whether the agent can run.
+
+    The first request to a local server may include loading the model, hence the
+    long timeout. Reasoning models spend completion tokens before any tool call
+    (vLLM counts reasoning against ``max_tokens``), so the budget leaves room for
+    that, and a response cut off by the limit is reported as inconclusive.
+    https://docs.vllm.ai/en/latest/features/reasoning_outputs.html
+    """
+    from rune.llm.target import ModelCompatibilityError
+
+    entry = configured()[endpoint]
+    try:
+        check_destination(entry.base_url)
+    except ModelCompatibilityError as exc:
+        return {"reachable": False, "models": [], "tools": "unknown", "detail": str(exc)}
+    names: list[str] = []
+    listing = ""
+    try:
+        names = await discover(endpoint, timeout=10.0)
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code
-        detail = "The API key was rejected." if status in {401, 403} else f"GET /models returned {status}."
-        return {"reachable": False, "models": [], "tools": "unknown", "detail": detail}
+        if status in {401, 403}:
+            return {"reachable": False, "models": [], "tools": "unknown", "detail": "The API key was rejected."}
+        listing = f"GET /models returned {status}. "
     except (httpx.HTTPError, OSError, ValueError, KeyError, TypeError) as exc:
         return {"reachable": False, "models": [], "tools": "unknown",
-                "detail": f"Could not reach the server ({type(exc).__name__}). Check the URL ends in /v1."}
-    entry = configured()[endpoint]
+                "detail": f"Could not reach the server ({type(exc).__name__}). Check the URL, usually ending in /v1."}
     model = model or (entry.models[0] if entry.models else names[0] if names else None)
     if model is None:
-        return {"reachable": True, "models": names, "tools": "unknown", "detail": "The server lists no models."}
+        return {"reachable": True, "models": names, "tools": "unknown",
+                "detail": listing + "No model to test. List the model names in Settings."}
+    result: dict[str, Any] = {"reachable": True, "models": names, "model": model}
     request = {
-        "model": model, "max_tokens": 32, "tool_choice": "auto",
-        "messages": [{"role": "user", "content": "Call the ping tool."}],
+        "model": model, "max_tokens": 1024, "tool_choice": "auto",
+        "messages": [{"role": "user", "content": "Call the ping tool now."}],
         "tools": [{"type": "function", "function": {
             "name": "ping", "description": "Reply to a ping.",
             "parameters": {"type": "object", "properties": {}}}}],
@@ -228,19 +332,24 @@ async def diagnose(endpoint: str, model: str | None = None, *, timeout: float = 
             response = await client.post(f"{entry.base_url}/chat/completions",
                                          json=request, headers=_headers(endpoint))
     except (httpx.HTTPError, OSError) as exc:
-        return {"reachable": True, "models": names, "model": model, "tools": "unknown",
-                "detail": f"The test request failed ({type(exc).__name__})."}
+        return {**result, "tools": "unknown", "detail": listing + f"The test request failed ({type(exc).__name__})."}
     if response.status_code == 200:
         try:
-            calls = response.json()["choices"][0]["message"].get("tool_calls")
+            choice = response.json()["choices"][0]
+            calls = choice["message"].get("tool_calls")
+            finish = choice.get("finish_reason")
         except (ValueError, KeyError, IndexError, TypeError, AttributeError):
-            calls = None
+            return {**result, "tools": "unknown", "detail": listing + "The server returned an unexpected response."}
         if calls:
-            return {"reachable": True, "models": names, "model": model, "tools": "native",
-                    "detail": "The model returned a native tool call."}
-        return {"reachable": True, "models": names, "model": model, "tools": "text",
-                "detail": "The server accepts tools but the model answered in text. Guided mode may work better."}
-    body = response.text[:300]
-    rejected = response.status_code == 400 and "tool" in body.lower()
-    return {"reachable": True, "models": names, "model": model, "tools": "unsupported" if rejected else "unknown",
-            "detail": _TOOL_HINT if rejected else f"The test request returned {response.status_code}: {body}"}
+            return {**result, "tools": "native", "detail": listing + "The model returned a native tool call."}
+        if finish == "length":
+            return {**result, "tools": "unknown", "detail": listing + (
+                "The model used its whole test budget, likely on reasoning, before answering. "
+                "Run a short task to check tool use.")}
+        return {**result, "tools": "text", "detail": listing + (
+            "The server accepts tools but the model answered in text. Guided mode may work better.")}
+    message = _error_message(response)
+    rejected = response.status_code == 400 and "tool" in message.lower()
+    detail = f"Tool calls were rejected: {message}. {_TOOL_HINT}" if rejected else (
+        f"The test request returned {response.status_code}: {message}")
+    return {**result, "tools": "unsupported" if rejected else "unknown", "detail": listing + detail}

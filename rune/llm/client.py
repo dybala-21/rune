@@ -262,7 +262,7 @@ class LLMClient:
 
         if provider == Provider.OPENAI_COMPATIBLE:
             from rune.llm.endpoints import tier_model
-            return tier_model("")
+            return tier_model()
 
         models_config = settings.models
         tier_models = getattr(models_config, provider.value, models_config.ollama)

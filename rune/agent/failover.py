@@ -97,7 +97,8 @@ def build_profiles_from_config() -> list[LLMProfile]:
                 model_name = tier_deployment(model_name)
             if provider == "openai_compatible":
                 from rune.llm.endpoints import tier_model
-                model_name = tier_model(llm.default_model)
+                # Empty fails the request with a clear message; it never falls back to a cloud model.
+                model_name = tier_model()
             if provider == "ollama":
                 # This path bypasses LLMClient.resolve_model, so check installed models here.
                 from rune.llm.client import (

@@ -4,7 +4,17 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import AfterValidator, AliasChoices, BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    AfterValidator,
+    AliasChoices,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
 
 from rune.llm.reasoning import ReasoningEffort, reasoning_model_key
 
@@ -47,6 +57,9 @@ class CompatibleEndpoint(BaseModel):
     free: bool | None = None
     # Guided constrains output to a tool-call JSON schema for servers or models without native tool calls.
     tool_mode: Literal["native", "guided"] = Field(default="native", alias="toolMode")
+    # Server model ids that accept images; servers do not report this in GET /models.
+    vision_models: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(
+        default_factory=list, max_length=200, alias="visionModels")
 
     @model_validator(mode="after")
     def validate_base_url(self):
@@ -60,6 +73,7 @@ class CompatibleEndpoint(BaseModel):
         from rune.llm.endpoints import private_host
 
         # A hosted worker must not reach its own host or the cloud metadata service.
+        # Names are resolved again before each connection (rune.llm.endpoints.check_destination).
         if hosted() and (url.scheme != "https" or private_host(url.hostname)):
             raise ValueError("Hosted Rune can only connect to public HTTPS endpoints.")
         path = url.path.rstrip("/")
@@ -78,6 +92,28 @@ def _no_provider_names(endpoints: dict) -> dict:
 
 
 CompatibleEndpoints = Annotated[dict[EndpointName, CompatibleEndpoint], AfterValidator(_no_provider_names)]
+
+
+def _usable_endpoints(value):
+    """Skip invalid entries from a config file, keeping the rest of the llm section.
+
+    Without this one hand-edited typo would reject the whole section, silently
+    reverting the provider and dropping the cost budget. Settings requests are
+    still validated strictly.
+    """
+    if not isinstance(value, dict):
+        return value
+    from rune.utils.logger import get_logger
+
+    adapter = TypeAdapter(CompatibleEndpoints)
+    usable = {}
+    for name, entry in value.items():
+        try:
+            usable.update(adapter.validate_python({name: entry}))
+        except ValidationError as exc:
+            get_logger(__name__).warning("endpoint_ignored", endpoint=str(name),
+                                         reason=exc.errors()[0].get("msg", "invalid"))
+    return usable
 
 
 class ModelsByTier(BaseModel):
@@ -145,7 +181,7 @@ class LLMConfig(BaseModel):
     models: ProviderModels = Field(default_factory=ProviderModels)
     azure_deployments: AzureDeployments = Field(default_factory=dict, alias="azureDeployments")
     azure_pricing: AzurePricingConfig | None = Field(default=None, alias="azurePricing")
-    endpoints: CompatibleEndpoints = Field(default_factory=dict)
+    endpoints: Annotated[CompatibleEndpoints, BeforeValidator(_usable_endpoints)] = Field(default_factory=dict)
     decision_routing: DecisionRoutingConfig = Field(
         default_factory=DecisionRoutingConfig, alias="decisionRouting",
     )

@@ -41,7 +41,11 @@ def _format_type(model: str) -> str | None:
 
 
 def supported_format(model: str, requested: dict) -> dict | None:
-    from rune.llm.azure import GPT6_MODELS, capability_model
+    from rune.llm.azure import GPT6_MODELS
+    from rune.llm.endpoints import capability_model
+    if model.startswith("openai_compatible/"):
+        # The server, not the model catalog, decides; see _format_type.
+        return requested if _format_type(model) == "json_schema" else None
     model = capability_model(model)
     kind = "json_schema" if model.removeprefix("openai/") in GPT6_MODELS else _format_type(model)
     return requested if kind == "json_schema" else {"type": kind} if kind else None

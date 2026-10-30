@@ -501,6 +501,8 @@ export interface CompatibleEndpoint {
   /** null: inferred from the host (private addresses are self-hosted). */
   free?: boolean | null;
   toolMode: 'native' | 'guided';
+  /** Server model ids that accept images. */
+  visionModels: string[];
 }
 
 export interface EndpointTestResult {

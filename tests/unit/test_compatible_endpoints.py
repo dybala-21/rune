@@ -6,7 +6,7 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
-from rune.config.schema import LLMConfig
+from rune.config.schema import CompatibleEndpoints, LLMConfig
 from rune.llm import endpoints
 from rune.llm.target import ModelCompatibilityError, resolve_target
 
@@ -69,14 +69,23 @@ def test_unknown_endpoint_or_model_fails_before_any_request(servers, model):
 ])
 def test_invalid_base_urls_are_rejected(entry):
     with pytest.raises(ValidationError):
-        LLMConfig(endpoints={"gpu": entry})
+        _strict({"gpu": entry})
+    # A config file keeps its other settings and skips only the bad entry.
+    assert LLMConfig(endpoints={"gpu": entry}).endpoints == {}
+
+
+def _strict(value):
+    from pydantic import TypeAdapter
+
+    return TypeAdapter(CompatibleEndpoints).validate_python(value)
 
 
 def test_endpoint_names_cannot_shadow_providers():
     with pytest.raises(ValidationError, match="provider names"):
-        LLMConfig(endpoints={"ollama": {"baseUrl": "http://localhost:8000"}})
+        _strict({"ollama": {"baseUrl": "http://localhost:8000"}})
     with pytest.raises(ValidationError):
-        LLMConfig(endpoints={"Has Space": {"baseUrl": "http://localhost:8000"}})
+        _strict({"Has Space": {"baseUrl": "http://localhost:8000"}})
+    assert LLMConfig(endpoints={"ollama": {"baseUrl": "http://localhost:8000"}}).endpoints == {}
 
 
 @pytest.mark.parametrize("url", ["http://localhost:8000", "http://169.254.169.254/v1", "http://10.0.0.5/v1",
@@ -84,8 +93,9 @@ def test_endpoint_names_cannot_shadow_providers():
 def test_hosted_workers_only_reach_public_https(monkeypatch, url):
     monkeypatch.setenv("RUNE_CLOUD_WORKER", "1")
     with pytest.raises(ValidationError, match="public HTTPS"):
-        LLMConfig(endpoints={"gpu": {"baseUrl": url}})
-    assert LLMConfig(endpoints={"gpu": {"baseUrl": "https://api.example.com/v1"}}).endpoints
+        _strict({"gpu": {"baseUrl": url}})
+    assert LLMConfig(endpoints={"gpu": {"baseUrl": url}}).endpoints == {}
+    assert _strict({"gpu": {"baseUrl": "https://api.example.com/v1"}})
 
 
 def test_self_hosted_servers_cost_nothing_and_hosted_ones_are_unpriced(servers):
@@ -174,6 +184,7 @@ async def test_unreachable_server_contributes_no_models(servers, monkeypatch):
     (200, {"choices": [{"message": {"content": "pong"}}]}, "text"),
     (400, {"error": {"message": '"auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser'}},
      "unsupported"),
+    (400, {"error": {"message": "registry.ollama.ai/library/olmo-3:7b-think does not support tools"}}, "unsupported"),
     (500, {"error": {"message": "out of memory"}}, "unknown"),
 ])
 async def test_connection_test_reports_tool_support(servers, monkeypatch, status, body, tools):
@@ -191,12 +202,14 @@ async def test_connection_test_reports_tool_support(servers, monkeypatch, status
     assert result["models"] == ["Qwen/Qwen3-Coder-30B", "gpt-oss-20b"]
     assert sent[0]["model"] == "Qwen/Qwen3-Coder-30B" and sent[0]["tool_choice"] == "auto"
     if tools == "unsupported":
-        assert "--enable-auto-tool-choice" in result["detail"]
+        # The server's own reason is shown, since the model itself may lack tools (Ollama says so).
+        assert body["error"]["message"] in result["detail"]
+        assert "--enable-auto-tool-choice" in result["detail"] and "Guided" in result["detail"]
 
 
 @pytest.mark.parametrize("failure,detail", [
     (httpx.Response(401), "API key was rejected"),
-    (httpx.ConnectError("refused"), "ends in /v1"),
+    (httpx.ConnectError("refused"), "ending in /v1"),
 ])
 async def test_connection_test_explains_unreachable_servers(servers, monkeypatch, failure, detail):
     async def send(self, request, **kwargs):
@@ -255,3 +268,128 @@ async def test_endpoint_settings_persist_without_storing_keys(servers, monkeypat
     assert _mask_value("RUNE_ENDPOINT_LAB_API_KEY", "lab-secret") != "lab-secret"
     with pytest.raises(ValidationError):
         ConfigPatchRequest(endpoints={"openai": {"baseUrl": "http://localhost:1234"}})
+
+
+def test_one_bad_endpoint_does_not_discard_the_llm_section(monkeypatch, tmp_path):
+    from rune.config import loader
+
+    path = tmp_path / "config.yaml"
+    path.write_text("llm:\n  defaultProvider: anthropic\n  costBudgetUsd: 5\n  endpoints:\n"
+                    "    Lab:\n      baseUrl: http://localhost:8000\n"
+                    "    gpu:\n      baseUrl: http://10.0.0.9:8000\n")
+    monkeypatch.setattr(loader, "_find_config_file", lambda: path)
+    settings = loader.load_config(force=True).llm
+    assert settings.default_provider == "anthropic" and settings.cost_budget_usd == 5
+    assert list(settings.endpoints) == ["gpu"]
+
+
+@pytest.mark.parametrize("settings,expected", [
+    ({}, ""),
+    ({"models": ["Qwen/Qwen3-32B"]}, "gpu/Qwen/Qwen3-32B"),
+    ({"models": ["m1"], "default": "gpu/m2"}, "gpu/m2"),
+    ({"models": ["m1"], "default": "gone/m2"}, "gpu/m1"),
+])
+def test_tiers_never_borrow_another_providers_model(monkeypatch, settings, expected):
+    from rune.agent.failover import build_profiles_from_config
+    from rune.config import get_config
+    from rune.llm.client import LLMClient
+    from rune.llm.model_selection import get_effective_model_selection
+    from rune.types import ModelTier
+
+    endpoints.forget_discovered()
+    entry = {"baseUrl": "http://10.0.0.9:8000", "models": settings.get("models", [])}
+    llm = LLMConfig(defaultProvider="openai_compatible", endpoints={"gpu": entry},
+                    **({"defaultModel": settings["default"]} if "default" in settings else {}))
+    monkeypatch.setattr(get_config(), "llm", llm)
+    assert LLMClient().resolve_model(ModelTier.FAST) == expected
+    assert get_effective_model_selection().model == expected
+    profiles = build_profiles_from_config()
+    # Never the OpenAI fallback chain, even with nothing to select.
+    assert [(p.provider, p.model) for p in profiles] == [("openai_compatible", expected)]
+    if not expected:
+        with pytest.raises(ModelCompatibilityError, match="No model is selected"):
+            resolve_target(expected, "openai_compatible")
+
+
+def test_capability_lookups_stay_quiet_and_use_declared_vision(servers, capsys):
+    from rune.agent.model_traits import supports_vision
+    from rune.llm.reasoning import reasoning_control
+
+    servers.endpoints["gpu"].vision_models = ["Qwen/Qwen2.5-VL-7B-Instruct"]
+    assert supports_vision("openai_compatible/gpu/Qwen/Qwen2.5-VL-7B-Instruct")
+    assert not supports_vision("openai_compatible/gpu/Qwen/Qwen3-Coder-30B")
+    assert reasoning_control("openai_compatible/gpu/Qwen/Qwen3-Coder-30B").efforts == ()
+    assert endpoints.capability_model("openai_compatible/gpu/Qwen/Qwen3-Coder-30B") == "openai/Qwen/Qwen3-Coder-30B"
+    assert "Provider List" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("host,private", [
+    ("localhost", True), ("gpu-box", True), ("lab.local", True), ("nas.home.arpa", True),
+    ("10.0.0.5", True), ("100.101.1.1", True), ("169.254.169.254", True), ("::1", True), ("fd00::1", True),
+    ("::ffff:169.254.169.254", True), ("0x7f.1", True), ("2130706433", True), ("127.1", True),
+    ("8.8.8.8", False), ("2606:4700::1111", False), ("::ffff:8.8.8.8", False), ("api.example.com", False),
+])
+def test_private_hosts_follow_the_special_purpose_registry(host, private):
+    assert endpoints.private_host(host) is private
+
+
+@pytest.mark.parametrize("answer,allowed", [("93.184.216.34", True), ("10.0.0.5", False), ("169.254.169.254", False)])
+def test_hosted_workers_resolve_names_before_connecting(servers, monkeypatch, answer, allowed):
+    import socket
+
+    servers.endpoints["router"].base_url = "https://models.example.com/v1"
+    monkeypatch.setenv("RUNE_CLOUD_WORKER", "1")
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (answer, 443))])
+    if allowed:
+        assert resolve_target("router/m", "openai_compatible").kwargs()["api_base"] == "https://models.example.com/v1"
+    else:
+        with pytest.raises(ModelCompatibilityError, match="public HTTPS"):
+            resolve_target("router/m", "openai_compatible")
+
+
+async def test_reasoning_models_get_room_and_a_cut_off_test_is_inconclusive(servers, monkeypatch):
+    sent = []
+
+    async def send(self, request, **kwargs):
+        if response := _models_response(request):
+            return response
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, request=request, json={"choices": [{
+            "finish_reason": "length", "message": {"content": None, "reasoning": "Let me think..."}}]})
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    result = await endpoints.diagnose("gpu")
+    assert result["tools"] == "unknown" and "budget" in result["detail"]
+    assert sent[0]["max_tokens"] >= 1024
+
+
+async def test_pinned_models_are_tested_when_the_server_has_no_model_list(servers, monkeypatch):
+    async def send(self, request, **kwargs):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(404, request=request)
+        return httpx.Response(200, request=request, json={"choices": [{"finish_reason": "tool_calls", "message": {
+            "tool_calls": [{"id": "1", "type": "function", "function": {"name": "ping", "arguments": "{}"}}]}}]})
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    result = await endpoints.diagnose("router")
+    assert result["tools"] == "native" and result["model"] == "qwen/qwen3-coder"
+    assert "GET /models returned 404" in result["detail"]
+
+
+async def test_a_down_server_is_retried_sooner_than_a_healthy_list_refreshes(servers, monkeypatch):
+    calls = []
+    clock = [1000.0]
+    monkeypatch.setattr(endpoints.time, "monotonic", lambda: clock[0])
+
+    async def send(self, request, **kwargs):
+        calls.append(request)
+        raise httpx.ConnectError("refused", request=request)
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    await endpoints.refresh_discovered()
+    clock[0] += 10
+    await endpoints.refresh_discovered()
+    assert len(calls) == 1
+    clock[0] += 25
+    await endpoints.refresh_discovered()
+    assert len(calls) == 2

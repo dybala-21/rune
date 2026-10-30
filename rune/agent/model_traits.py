@@ -55,7 +55,7 @@ _RESPONSES_ONLY: set[Hashable] = set()
 
 def traits(model: str, *, cache_key: Hashable | None = None) -> ModelTraits:
     """Combine model settings with rejections observed for this request context."""
-    from rune.llm.azure import capability_model
+    from rune.llm.endpoints import capability_model
     m = capability_model(model or "").lower()
     found = _DEFAULT
     for needles, entry in _STATIC:
@@ -92,7 +92,10 @@ def supports_vision(model: str) -> bool:
     declared = traits(model).vision
     if declared is not None:
         return declared
-    from rune.llm.azure import capability_model
+    from rune.llm.endpoints import accepts_images, capability_model
+    # A server's catalog says nothing about the model it serves; the user declares it.
+    if (accepts := accepts_images(model)) is not None:
+        return accepts
     return _sdk_supports_vision(capability_model(model))
 
 
