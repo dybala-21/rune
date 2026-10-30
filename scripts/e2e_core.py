@@ -237,7 +237,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("/tmp/rune-core-results.json"))
     parser.add_argument("--scenario", choices=SCENARIOS, action="append")
-    parser.add_argument("--routing", choices=("connected", "jev", "both"), default="connected")
+    parser.add_argument("--routing", choices=("connected", "jev", "microsoft", "both"), default="connected")
     parser.add_argument("--provider", choices=tuple(p for p, _ in MODELS))
     parser.add_argument("--repeat", type=int, choices=range(1, 21), default=1)
     parser.add_argument("--worker", nargs=3, metavar=("SCENARIO", "PROVIDER", "MODEL"), help=argparse.SUPPRESS)

@@ -270,6 +270,10 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
       background: 'var(--bg-primary)',
     }}>
       <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
+        {config?.decisionRouting && (
+          <DecisionRoutingSettings routing={config.decisionRouting}
+            onSaved={async () => { setConfig(await fetchConfig()); }} />
+        )}
         {config?.runLimits && <RunLimitSettings limits={config.runLimits} onSaved={load} />}
         {config?.vertexLocation && <div style={{ padding: '10px 14px', fontSize: 13 }}>
           <label htmlFor="vertex-location">Gemini (Vertex AI) location</label>
@@ -607,10 +611,6 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
           <summary>Advanced settings</summary>
         {config?.azure && <AzureSettings connection={config.azure} onSaved={load} />}
         {config?.localModels && <LocalModelSettings state={config.localModels} onSaved={load} />}
-        {config?.decisionRouting && (
-          <DecisionRoutingSettings routing={config.decisionRouting}
-            onSaved={load} />
-        )}
 
         {config && memoryDraft && (
           <div style={{ padding: '6px 14px', marginBottom: 6 }}>

@@ -82,6 +82,18 @@ def rates_for(model: str) -> Rates | None:
 
 
 def _request_rates(model: str, request: dict) -> Rates | None:
+    from rune.llm.decision_backends import MICROSOFT, DecisionTarget, azure_endpoint
+
+    if model == MICROSOFT.billing_model:
+        target = request.get("target")
+        if not isinstance(target, DecisionTarget) or target.backend != "microsoft" or not target.deployment:
+            return None
+        try:
+            azure_endpoint(target.endpoint)
+        except ValueError:
+            return None
+        # https://commandline.microsoft.com/microsoft-decision-1-model-foundry/
+        return Rates(.042, 0, 0) if target.model == MICROSOFT.model else None
     if not model.startswith("azure/"):
         return None if request.get("api_base") or request.get("base_url") else rates_for(model)
 

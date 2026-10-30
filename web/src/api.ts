@@ -513,6 +513,15 @@ export interface EndpointTestResult {
   detail: string;
 }
 
+export type DecisionStatus = 'disabled' | 'ready' | 'unverified' | 'local' | 'automatic_model'
+  | 'missing_key' | 'missing_config' | 'cooldown' | 'auth_error';
+
+export interface DecisionConnection {
+  hasKey: boolean;
+  keyScope: 'user' | 'project' | 'process' | null;
+  status: DecisionStatus;
+}
+
 export interface ConfigInfo {
   localModels?: {
     ollama: { baseUrl: string; envKey: string; scope: EnvScope };
@@ -552,10 +561,12 @@ export interface ConfigInfo {
   reasoningOptions?: ReasoningEffort[];
   reasoningBudgets?: Partial<Record<ReasoningEffort, number>>;
   decisionRouting?: {
-    backend: 'connected' | 'jev';
+    backend: 'connected' | 'jev' | 'microsoft';
     timeoutMs: number;
-    effectiveBackend: 'connected' | 'jev';
-    status: 'disabled' | 'ready' | 'unverified' | 'local' | 'automatic_model' | 'missing_key' | 'cooldown' | 'auth_error';
+    effectiveBackend: 'connected' | 'jev' | 'microsoft';
+    status: DecisionStatus;
+    microsoft: { endpoint: string; deployment: string };
+    providers: Record<'jev' | 'microsoft', DecisionConnection>;
     hasKey: boolean;
     keyScope: 'user' | 'project' | 'process' | null;
   };
@@ -599,7 +610,7 @@ export async function patchConfig(params: {
   executionEnvironment?: { backend?: 'local' | 'container'; image?: string };
   proactiveEnabled?: boolean;
   advisorEnabled?: boolean;
-  decisionRouting?: { backend?: 'connected' | 'jev'; timeoutMs?: number };
+  decisionRouting?: { backend?: 'connected' | 'jev' | 'microsoft'; timeoutMs?: number; microsoft?: { endpoint?: string; deployment?: string } };
   memoryTuning?: {
     scope?: 'user' | 'project';
     preset?: 'speed' | 'balanced' | 'accuracy';

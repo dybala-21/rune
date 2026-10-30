@@ -11,7 +11,7 @@ import pytest
 from rune.agent import decision_router
 from rune.agent.goal_classifier import _TIER2_SYSTEM_PROMPT, classify_goal
 from rune.config.schema import RuneConfig
-from rune.llm import jev
+from rune.llm import system_one
 
 
 @pytest.fixture
@@ -24,9 +24,7 @@ def setup(monkeypatch):
     cfg.llm.active_model = "grok-4.6"
     monkeypatch.setattr("rune.config.get_config", lambda: cfg)
     monkeypatch.setattr(rune.llm.model_selection, "get_config", lambda: cfg)
-    monkeypatch.setattr(decision_router, "_cooldown", None)
-    monkeypatch.setattr(decision_router, "_rejected_key", None)
-    monkeypatch.setattr(decision_router, "_verified_key", None)
+    monkeypatch.setattr(decision_router, "_health", {})
     monkeypatch.setenv("TYPESAFE_API_KEY", "test-only-key")
     values = {"goal_type": "chat", "confidence": .95, "reason": "explanation",
               "needs_web_evidence": False, "needs_current_source": False,
@@ -47,7 +45,7 @@ def payload(questions, **picks):
         choice = picks.get(name, defaults.get(name, "no"))
         answers[name] = {"type": "choice", "choice": choice, "confidence": .99,
                          "probabilities": {key: float(key == choice) for key in question["criteria"]}}
-    return {"model": jev.MODEL, "answers": answers, "usage": {"input_tokens": 2000, "output_tokens": 200}}
+    return {"model": system_one.MODEL, "answers": answers, "usage": {"input_tokens": 2000, "output_tokens": 200}}
 
 
 @pytest.mark.parametrize("backend", ["connected", "jev", "fallback"])
@@ -73,12 +71,12 @@ async def test_browser_requirements_share_checks_and_bound_calls(setup, monkeypa
 
     async def external_request(**kwargs):
         if backend == "fallback":
-            raise jev.JevUnavailable("timeout")
+            raise system_one.DecisionUnavailable("timeout")
         return payload(kwargs["questions"], goal_type="browser")
 
     client.completion.side_effect = complete
     external = AsyncMock(side_effect=external_request)
-    monkeypatch.setattr(jev, "_request", external)
+    monkeypatch.setattr(system_one, "_request", external)
     monkeypatch.setattr("rune.llm.reasoning.reasoning_control", lambda _: SimpleNamespace(efforts=("none",)))
     classification = await classify_goal(goal)
     evidence = TaskEvidence.for_request(goal, classification)
@@ -113,7 +111,7 @@ async def test_resume_selection_and_operation_use_the_existing_routing_call(setu
                                                       calculation_operation="sum", resume_task=task_id, task_scope="task"))
     external = AsyncMock(side_effect=lambda **kwargs: payload(kwargs["questions"], goal_type="research",
                                                              calculation="sum", resume_task=task_id, task_scope="task"))
-    monkeypatch.setattr(jev, "_request", external)
+    monkeypatch.setattr(system_one, "_request", external)
     result = await classify_goal("Finish the totals in the report", previous_goal="Thanks", previous_goal_type="chat",
                                 saved_tasks=[{"id":task_id, "request":"Sum the report's amounts", "status":"task_blocked"}])
     assert result.available and result.resume_task == task_id and not result.is_domain_change
@@ -138,7 +136,7 @@ async def test_source_output_mode_survives_routing_without_an_extra_call(setup, 
                        goal_type="unknown" if backend == "fallback" else "chat")
 
     external = AsyncMock(side_effect=request)
-    monkeypatch.setattr(jev, "_request", external)
+    monkeypatch.setattr(system_one, "_request", external)
     result = await classify_goal("Format the source as requested")
     assert result.available and from_wire(to_wire(result)).source_output == mode
     assert external.await_count == int(backend != "connected")
@@ -155,7 +153,7 @@ async def test_uncertain_output_mode_disables_exact_checks_without_reclassificat
         data["answers"]["source_output"]["confidence"] = confidence
         return data
 
-    monkeypatch.setattr(jev, "_request", request)
+    monkeypatch.setattr(system_one, "_request", request)
     result = await classify_goal("Revisit the earlier result")
     assert result.available and result.source_output == "none" and not result.lookup_only
     client.completion.assert_not_called()
@@ -171,7 +169,7 @@ async def test_uncertain_lookup_scope_keeps_normal_reasoning_without_another_cal
         data["answers"]["lookup_only"]["confidence"] = confidence
         return data
 
-    monkeypatch.setattr(jev, "_request", request)
+    monkeypatch.setattr(system_one, "_request", request)
     result = await classify_goal("A current factual lookup")
     assert result.available and result.decision_backend == "jev"
     assert result.lookup_only is expected
@@ -192,7 +190,7 @@ async def test_uncertain_source_scope_requires_a_page_without_reclassification(s
         data["answers"]["needs_current_source"]["confidence"] = confidence
         return data
 
-    monkeypatch.setattr(jev, "_request", request)
+    monkeypatch.setattr(system_one, "_request", request)
     result = await classify_goal("A factual request")
     assert result.available and result.decision_backend == "jev"
     assert result.needs_current_source is expected
@@ -216,7 +214,7 @@ async def test_source_need_survives_chat_routing_without_extra_calls(setup, monk
                        needs_web_evidence="yes" if needed else "no")
 
     external = AsyncMock(side_effect=request)
-    monkeypatch.setattr(jev, "_request", external)
+    monkeypatch.setattr(system_one, "_request", external)
     result = await classify_goal("A current concern" if needed else "Just listen")
     assert result.available and result.goal_type == "chat"
     assert from_wire(to_wire(result)).needs_web_evidence is needed
@@ -243,7 +241,7 @@ async def test_current_source_requirement_survives_routing(setup, monkeypatch, b
                        needs_web_evidence="yes", needs_current_source="yes")
 
     external = AsyncMock(side_effect=request)
-    monkeypatch.setattr(jev, "_request", external)
+    monkeypatch.setattr(system_one, "_request", external)
     result = await classify_goal("Read the current service status")
     assert result.available and from_wire(to_wire(result)).needs_current_source
     assert external.await_count == int(backend != "connected")
@@ -255,7 +253,7 @@ async def test_budget_blocked_fallback_preserves_the_cause(setup, monkeypatch):
 
     cfg, client = setup
     cfg.llm.decision_routing.backend = "jev"
-    monkeypatch.setattr(jev, "_request", AsyncMock(side_effect=jev.JevUnavailable("timeout")))
+    monkeypatch.setattr(system_one, "_request", AsyncMock(side_effect=system_one.DecisionUnavailable("timeout")))
     client.completion.side_effect = BudgetExceeded("Model cost could not be determined; the configured cost limit cannot be checked.")
     result = await classify_goal("Read the current service status")
     assert not result.available and result.fallback_reason == "timeout"
@@ -275,7 +273,7 @@ async def test_file_roles_survive_independent_routing_abstention(setup, monkeypa
                        file_role_0="input", file_role_1="output")
 
     external = AsyncMock(side_effect=request)
-    monkeypatch.setattr(jev, "_request", external)
+    monkeypatch.setattr(system_one, "_request", external)
     result = await classify_goal(goal)
     assert result.available
     assert result.decision_backend == ("connected" if uncertain_routing else "jev")
@@ -303,7 +301,7 @@ async def test_uncertain_file_does_not_discard_routing_or_other_roles(setup, mon
         data["answers"]["file_role_1"]["confidence"] = confidence
         return data
 
-    monkeypatch.setattr(jev, "_request", request)
+    monkeypatch.setattr(system_one, "_request", request)
     result = await classify_goal(goal)
     assert result.decision_backend == "jev"
     assert result.artifact_roles.matching_roles(goal) == {"source.csv": "input"}
@@ -319,7 +317,7 @@ async def test_invalid_file_answer_rejects_entire_batch_even_when_routing_abstai
         data["answers"]["file_role_1"]["probabilities"] = None
         return data
 
-    monkeypatch.setattr(jev, "_request", request)
+    monkeypatch.setattr(system_one, "_request", request)
     result = await classify_goal("Read source.csv and create summary.csv.")
     assert result.available and result.fallback_reason == "invalid_probabilities"
     assert result.artifact_roles is None
@@ -344,8 +342,8 @@ def test_role_hints_cannot_cross_requests_or_serialized_runs():
 
 
 def test_data_calculations_do_not_require_a_command_or_output_file():
-    questions, expressions = jev.build_questions({"request_to_classify": "Count and sum expenses.csv"})
-    result = jev.decode_answers(payload(questions, goal_type="research", calculation="data"), questions, expressions)
+    questions, expressions = system_one.build_questions({"request_to_classify": "Count and sum expenses.csv"})
+    result = system_one.decode_answers(payload(questions, goal_type="research", calculation="data"), questions, expressions)
     assert result["intent_categories"] == ["calculation"]
     assert result["requires_execution"] is False and result["table_output"] == "none"
 
@@ -359,7 +357,7 @@ async def test_jev_keeps_document_and_software_intents_separate(setup, monkeypat
         return payload(kwargs["questions"], goal_type="code_modify" if coding == "yes" else "artifact", coding=coding, document="yes")
 
     external = AsyncMock(side_effect=request)
-    monkeypatch.setattr(jev, "_request", external)
+    monkeypatch.setattr(system_one, "_request", external)
     result = await classify_goal("Create the requested deliverables")
     assert result.available and result.decision_backend == "jev"
     assert "document" in result.intent_categories
@@ -384,7 +382,7 @@ def test_file_role_batch_excludes_ambiguous_names_and_respects_limits(monkeypatc
 async def test_key_alone_does_not_enable_external_routing(setup, monkeypatch):
     cfg, client = setup
     external = AsyncMock()
-    monkeypatch.setattr(jev, "classify", external)
+    monkeypatch.setattr(system_one, "classify", external)
     result = await classify_goal("Explain TCP sockets")
     assert result.available and result.decision_backend == "connected"
     assert client.completion.await_count == 1
@@ -424,7 +422,7 @@ async def test_multiturn_office_code_browser_routes_do_not_leak(setup, monkeypat
                            requires_execution="yes" if execute else "no", is_related_to_previous="yes" if related else "no",
                            **{key: "output" for key in kwargs["questions"] if key.startswith("file_role_")})
 
-        monkeypatch.setattr(jev, "_request", jev_request)
+        monkeypatch.setattr(system_one, "_request", jev_request)
         result = await classify_goal(request, previous_goal=previous, previous_goal_type=previous_type,
                                      browser_state={"status": "open", "url": "https://example.org/booking"})
         assert result.available and result.goal_type == route
@@ -453,7 +451,7 @@ async def test_local_and_missing_key_use_current_model(setup, monkeypatch, local
     if not has_key:
         monkeypatch.delenv("TYPESAFE_API_KEY")
     external = AsyncMock()
-    monkeypatch.setattr(jev, "classify", external)
+    monkeypatch.setattr(system_one, "classify", external)
     result = await classify_goal("Explain this")
     assert result.available and result.fallback_reason == reason
     assert client.completion.call_args.kwargs["provider"] == cfg.llm.active_provider
@@ -471,11 +469,11 @@ async def test_success_uses_one_request_and_reports_cost(setup, monkeypatch):
         return payload(kwargs["questions"], calculation="expression_0")
 
     external = AsyncMock(side_effect=request)
-    monkeypatch.setattr(jev, "_request", external)
+    monkeypatch.setattr(system_one, "_request", external)
     with capture_timing() as run:
         result = await classify_goal("계산해줘: 0.1 + 0.2")
         timing = timing_snapshot(run)
-    assert result.decision_backend == "jev" and result.decision_model == jev.MODEL
+    assert result.decision_backend == "jev" and result.decision_model == system_one.MODEL
     assert '"result": "0.3"' in calculation_context("계산해줘: 0.1 + 0.2", result)
     assert external.await_count == 1
     client.completion.assert_not_called()
@@ -492,7 +490,7 @@ async def test_abstention_falls_back_without_disabling_other_requests(setup, mon
     async def request(**kwargs):
         return payload(kwargs["questions"], calculation=choice)
 
-    monkeypatch.setattr(jev, "_request", request)
+    monkeypatch.setattr(system_one, "_request", request)
     result = await classify_goal("Calculate the expression")
     assert result.available and result.decision_backend == "connected"
     assert result.fallback_reason in {"uncertain", "extraction_needed"}
@@ -500,12 +498,12 @@ async def test_abstention_falls_back_without_disabling_other_requests(setup, mon
     assert decision_router.accelerator_status() == "ready"
 
 
-@pytest.mark.parametrize("failure", [jev.JevUnavailable("http_429"), jev.JevUnavailable("invalid_answers"), TimeoutError()])
+@pytest.mark.parametrize("failure", [system_one.DecisionUnavailable("http_429"), system_one.DecisionUnavailable("invalid_answers"), TimeoutError()])
 async def test_service_failure_pauses_calls_and_new_key_can_retry(setup, monkeypatch, failure):
     cfg, client = setup
     cfg.llm.decision_routing.backend = "jev"
     external = AsyncMock(side_effect=failure)
-    monkeypatch.setattr(jev, "classify", external)
+    monkeypatch.setattr(system_one, "classify", external)
     for _ in range(2):
         assert (await classify_goal("Explain sockets")).available
     assert external.await_count == 1 and client.completion.await_count == 2
@@ -523,7 +521,7 @@ async def test_cancellation_does_not_start_fallback(setup, monkeypatch):
         entered.set()
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(jev, "classify", wait)
+    monkeypatch.setattr(system_one, "classify", wait)
     task = asyncio.create_task(classify_goal("Explain sockets"))
     await entered.wait()
     task.cancel()
@@ -541,7 +539,7 @@ async def test_accelerator_and_fallback_share_one_deadline(setup, monkeypatch):
     async def wait(*args, **kwargs):
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(jev, "classify", wait)
+    monkeypatch.setattr(system_one, "classify", wait)
     client.completion.side_effect = wait
     result = await asyncio.wait_for(classify_goal("Explain sockets"), .2)
     assert not result.available
@@ -553,11 +551,11 @@ async def test_accelerator_and_fallback_share_one_deadline(setup, monkeypatch):
     ("probabilities", {"chat": 1}), ("probabilities", None),
 ])
 def test_invalid_answers_are_rejected(field, value):
-    questions, expressions = jev.build_questions({"request_to_classify": "Explain sockets"})
+    questions, expressions = system_one.build_questions({"request_to_classify": "Explain sockets"})
     data = payload(questions)
     data["answers"]["goal_type"][field] = value
-    with pytest.raises(jev.JevUnavailable):
-        jev.decode_answers(data, questions, expressions)
+    with pytest.raises(system_one.DecisionUnavailable):
+        system_one.decode_answers(data, questions, expressions)
 
 
 @pytest.mark.parametrize("picks", [
@@ -567,9 +565,9 @@ def test_invalid_answers_are_rejected(field, value):
     {"table_output": "csv", "goal_type": "chat"},
 ])
 def test_conflicting_decisions_fall_back(picks):
-    questions, expressions = jev.build_questions({"request_to_classify": "Calculator: 1 + 2"})
-    with pytest.raises(jev.DecisionAbstained, match="inconsistent"):
-        jev.decode_answers(payload(questions, **picks), questions, expressions)
+    questions, expressions = system_one.build_questions({"request_to_classify": "Calculator: 1 + 2"})
+    with pytest.raises(system_one.DecisionAbstained, match="inconsistent"):
+        system_one.decode_answers(payload(questions, **picks), questions, expressions)
 
 
 @pytest.mark.parametrize("goal,expected", [
@@ -595,13 +593,13 @@ async def test_http_failure_never_exposes_response_or_key(monkeypatch):
     original = httpx.AsyncClient
 
     def handler(request):
-        assert request.url == jev.ENDPOINT
+        assert request.url == system_one.ENDPOINT
         assert request.headers["authorization"] == "Bearer test-only-key"
         return httpx.Response(401, json={"private": "request content and credentials"})
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: original(transport=httpx.MockTransport(handler), **kw))
-    with pytest.raises(jev.JevUnavailable, match="^http_401$") as error:
-        await jev.classify(_TIER2_SYSTEM_PROMPT, json.dumps({"request_to_classify": "hi"}), timeout=1)
+    with pytest.raises(system_one.DecisionUnavailable, match="^http_401$") as error:
+        await system_one.classify(_TIER2_SYSTEM_PROMPT, json.dumps({"request_to_classify": "hi"}), timeout=1)
     assert "credentials" not in str(error.value) and "test-only-key" not in str(error.value)
 
 
@@ -644,7 +642,7 @@ async def test_automatic_model_selection_keeps_its_single_classifier_and_fast_mo
     client._effective_provider = lambda _: Provider.XAI
     client.resolve_model = lambda *args: "grok-4.3"
     external = AsyncMock()
-    monkeypatch.setattr(jev, "classify", external)
+    monkeypatch.setattr(system_one, "classify", external)
     result = await classify_goal("Explain TCP sockets")
     lane = decide_fast_lane(result)
     assert result.available and result.decision_backend == "connected"
@@ -659,8 +657,8 @@ async def test_jev_still_runs_when_automatic_model_selection_is_disabled(setup, 
     cfg.llm.route_simple_queries = False
     cfg.llm.decision_routing.backend = "jev"
     values = json.loads(client.completion.return_value["choices"][0]["message"]["content"])
-    external = AsyncMock(return_value=jev.DecisionBatch(values))
-    monkeypatch.setattr(jev, "classify", external)
+    external = AsyncMock(return_value=system_one.DecisionBatch(values))
+    monkeypatch.setattr(system_one, "classify", external)
     assert decision_router.accelerator_status() == "unverified"
     result = await classify_goal("Explain TCP sockets")
     assert result.decision_backend == "jev"
@@ -674,8 +672,8 @@ async def test_auth_rejection_stays_blocked_until_a_different_key_is_used(setup,
     cfg.llm.decision_routing.backend = "jev"
     clock = SimpleNamespace(monotonic=lambda: 100.0)
     monkeypatch.setattr(decision_router, "time", clock)
-    external = AsyncMock(side_effect=jev.JevUnavailable(f"http_{code}"))
-    monkeypatch.setattr(jev, "classify", external)
+    external = AsyncMock(side_effect=system_one.DecisionUnavailable(f"http_{code}"))
+    monkeypatch.setattr(system_one, "classify", external)
     assert (await classify_goal("Explain sockets")).available
     clock.monotonic = lambda: 86400.0
     assert decision_router.accelerator_status() == "auth_error"
@@ -694,9 +692,9 @@ async def test_inflight_failure_does_not_reject_a_replacement_key(setup, monkeyp
     async def rejected(*args, **kwargs):
         assert kwargs["api_key"] == "test-only-key"
         monkeypatch.setenv("TYPESAFE_API_KEY", "replacement-test-key")
-        raise jev.JevUnavailable("http_401")
+        raise system_one.DecisionUnavailable("http_401")
 
-    monkeypatch.setattr(jev, "classify", rejected)
+    monkeypatch.setattr(system_one, "classify", rejected)
     assert (await classify_goal("Explain sockets")).available
     assert decision_router.accelerator_status() == "unverified"
 
