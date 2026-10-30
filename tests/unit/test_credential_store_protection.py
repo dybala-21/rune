@@ -107,6 +107,7 @@ def test_a_project_env_is_still_the_developers(guardian, path):
     assert guardian.validate_file_read_path(path).allowed is True
 
 
+@pytest.mark.perf
 def test_validation_stays_on_the_fast_path(guardian):
     """This runs on every shell command; CLAUDE.md wants hot paths sub-ms."""
     import time

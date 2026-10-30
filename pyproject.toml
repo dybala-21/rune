@@ -151,6 +151,9 @@ warn_return_any = true
 warn_unused_configs = true
 
 [tool.pytest.ini_options]
-markers = ["embedding_engine: exercise the embedding engine with an explicitly isolated worker or downloader"]
+markers = [
+    "embedding_engine: exercise the embedding engine with an explicitly isolated worker or downloader",
+    "perf: wall-clock budget; CI runs these serially without coverage",
+]
 asyncio_mode = "auto"
 testpaths = ["tests"]
