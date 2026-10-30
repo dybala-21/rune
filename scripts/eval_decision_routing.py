@@ -105,7 +105,7 @@ async def run(args) -> bool:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--backend", choices=("connected", "jev"), action="append")
+    parser.add_argument("--backend", choices=("connected", "jev", "microsoft"), action="append")
     parser.add_argument("--provider", choices=tuple(provider for provider, _ in MODELS))
     parser.add_argument("--suite", choices=("calibration", "held-out"), default="held-out")
     parser.add_argument("--concurrency", type=int, choices=range(1, 5), default=1)

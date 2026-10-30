@@ -48,7 +48,5 @@ def isolated_rune_home(tmp_path_factory, monkeypatch):
     from rune.agent import decision_router
     from rune.config.loader import reset_config
 
-    monkeypatch.setattr(decision_router, "_cooldown", None)
-    monkeypatch.setattr(decision_router, "_rejected_key", None)
-    monkeypatch.setattr(decision_router, "_verified_key", None)
+    monkeypatch.setattr(decision_router, "_health", {})
     reset_config()
