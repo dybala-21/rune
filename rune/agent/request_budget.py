@@ -139,7 +139,7 @@ def admit(run: dict, params: dict, estimated_input: int | None = None) -> tuple[
             output = min(output, max(0, math.floor((available - base) / (single - base))))
     if output <= 0:
         raise BudgetExceeded("The output token allowance is zero. No request was sent.")
-    # Jev's choice API has no output-token parameter.
+    # System One APIs do not accept output-token limits.
     if "messages" in params:
         params[output_key] = output
         params["num_retries"] = 0

@@ -147,7 +147,8 @@ required field and one short reason. Apply these rules in every language.
 
 Choose goal_type by the requested outcome:
 chat: conversation or a general question; web: online lookup or URL reading;
-research: read-only analysis of files, data or code; code_modify: implement or modify software;
+research: read, inspect or analyze existing files, data or code, including quoting their contents in the reply;
+code_modify: implement or modify software;
 artifact: create or revise non-code files, documents, reports, spreadsheets or presentations;
 execution: command-line execution, tests, builds, installs or deployments;
 browser: required interaction with webpage controls (forms, seats, bookings),

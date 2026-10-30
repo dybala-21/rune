@@ -217,12 +217,21 @@ async def get_config_endpoint() -> ConfigGetResponse:
         environment_name,
     )
     from rune.llm.context import model_environment
+    from rune.llm.decision_backends import BACKENDS
     from rune.llm.target import vertex_active
     from rune.safety.execution_environment import execution_config
     from rune.utils.env import effective_env_scope
 
     environment = execution_config()
-    decision_status = accelerator_status(effective) if cfg.llm.decision_routing.backend == "jev" else "disabled"
+    decision_settings = cfg.llm.decision_routing
+    decision_status = accelerator_status(effective, settings=decision_settings)
+    decision_connections = {
+        name: {"hasKey": bool(model_environment(target.key_name).strip()),
+               "keyScope": effective_env_scope(target.key_name),
+               "status": accelerator_status(effective, settings=decision_settings, backend=name)}
+        for name, target in BACKENDS.items()
+    }
+    selected_connection = decision_connections.get(decision_settings.backend, {})
     model = loop_model_string(effective.provider.value, effective.model)
     control = await asyncio.to_thread(reasoning_control, model)
     options = control.efforts
@@ -261,9 +270,10 @@ async def get_config_endpoint() -> ConfigGetResponse:
         decisionRouting={
             **cfg.llm.decision_routing.model_dump(by_alias=True),
             "status": decision_status,
-            "effectiveBackend": "jev" if decision_status in {"ready", "unverified"} else "connected",
-            "hasKey": bool(os.environ.get("TYPESAFE_API_KEY", "").strip()),
-            "keyScope": effective_env_scope("TYPESAFE_API_KEY"),
+            "effectiveBackend": decision_settings.backend if decision_status in {"ready", "unverified"} else "connected",
+            "hasKey": selected_connection.get("hasKey", False),
+            "keyScope": selected_connection.get("keyScope"),
+            "providers": decision_connections,
         },
         memoryTuning=_memory_tuning_state(),
         safetyTuning={
@@ -330,9 +340,19 @@ async def patch_config(req: ConfigPatchRequest) -> ConfigPatchResponse:
     routing = None
     routing_updates = req.decision_routing.model_dump(exclude_unset=True) if req.decision_routing is not None else {}
     if routing_updates:
-        routing = cfg.llm.decision_routing.model_copy(update=routing_updates)
-        if routing_updates.get("backend") == "jev" and not os.environ.get("TYPESAFE_API_KEY", "").strip():
-            raise HTTPException(status_code=400, detail="Add a TypeSafe API key before enabling Jev.")
+        from rune.llm.context import model_environment
+        from rune.llm.decision_backends import decision_target
+
+        merged = {**cfg.llm.decision_routing.model_dump(), **routing_updates}
+        if "microsoft" in routing_updates:
+            merged["microsoft"] = {**cfg.llm.decision_routing.microsoft.model_dump(), **routing_updates["microsoft"]}
+        routing = DecisionRoutingConfig.model_validate(merged)
+        if routing.backend != "connected":
+            target = decision_target(routing)
+            if not model_environment(target.key_name).strip():
+                raise HTTPException(status_code=400, detail=f"Add an API key before enabling {target.label}.")
+            if not target.endpoint or not target.deployment:
+                raise HTTPException(status_code=400, detail="Add the Azure resource endpoint and deployment name.")
 
     to_persist: dict[str, Any] = {}
     if req.azure_deployments is not None:
@@ -355,8 +375,11 @@ async def patch_config(req: ConfigPatchRequest) -> ConfigPatchResponse:
         raise HTTPException(403, "Hosted execution settings are managed by the operator")
     to_persist.update({f"safety.sandbox.{key}": value for key, value in environment.items()})
     if routing is not None:
-        to_persist.update({f"llm.decisionRouting.{key}": value for key, value in
-                           req.decision_routing.model_dump(by_alias=True, exclude_unset=True).items()})
+        for key, value in req.decision_routing.model_dump(by_alias=True, exclude_unset=True).items():
+            if key == "microsoft":
+                to_persist.update({f"llm.decisionRouting.microsoft.{name}": field for name, field in value.items()})
+            else:
+                to_persist[f"llm.decisionRouting.{key}"] = value
     if req.proactive_enabled is not None:
         to_persist["proactive.enabled"] = req.proactive_enabled
     if provider:

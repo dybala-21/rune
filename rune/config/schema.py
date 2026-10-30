@@ -74,11 +74,27 @@ class ProviderModels(BaseModel):
     )
 
 
+class MicrosoftDecisionConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    endpoint: str = Field(default="", max_length=512)
+    deployment: AzureModelName | Literal[""] = ""
+
+    @model_validator(mode="after")
+    def validate_endpoint(self) -> MicrosoftDecisionConfig:
+        from rune.llm.decision_backends import azure_endpoint
+
+        if self.endpoint:
+            self.endpoint = azure_endpoint(self.endpoint)
+        return self
+
+
 class DecisionRoutingConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
-    backend: Literal["connected", "jev"] = "connected"
+    backend: Literal["connected", "jev", "microsoft"] = "connected"
     timeout_ms: int = Field(default=1500, ge=250, le=5000, alias="timeoutMs")
+    microsoft: MicrosoftDecisionConfig = Field(default_factory=MicrosoftDecisionConfig)
 
 
 class LLMConfig(BaseModel):

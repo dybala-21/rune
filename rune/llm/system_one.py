@@ -1,10 +1,9 @@
-"""Translate bounded routing questions to TypeSafe's decision API."""
+"""Routing questions and response validation for System One APIs."""
 
 from __future__ import annotations
 
 import json
 import math
-import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -12,14 +11,13 @@ import httpx
 
 from rune.agent.classification_response import InvalidClassification, validate_decision
 from rune.agent.provenance import ArtifactRoleHints, role_hint_names
+from rune.llm.decision_backends import JEV, DecisionTarget
 
-# Pin the model so an alias update cannot change the confidence distribution.
-# https://docs.typesafe.ai/api
+MODEL = JEV.model
+ENDPOINT = JEV.endpoint
 # https://docs.typesafe.ai/confidence
-MODEL = "jev-1.13.0"
-ENDPOINT = "https://api.typesafe.ai/v1/systemone"
 MIN_CONFIDENCE = 0.8
-# File roles affect missing-input checks; borderline answers use the fallback.
+# Uncertain file roles stay with the main classifier.
 MIN_ROLE_CONFIDENCE = 0.9
 _CONSERVATIVE_FIELDS = {"lookup_only", "needs_current_source", "source_output", "browser_effect", "resume_task", "task_scope"}
 
@@ -38,7 +36,7 @@ class DecisionAbstained(Exception):
         self.reason = reason
 
 
-class JevUnavailable(Exception):
+class DecisionUnavailable(Exception):
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
@@ -70,9 +68,9 @@ def build_questions(state: dict) -> tuple[dict, dict[str, str]]:
         "goal_type": _choice("Choose the requested outcome, following routing_rules.", {
             "chat": "Conversation, acknowledgements, general questions, direct arithmetic, or repeating/reformatting the SAME previously retrieved record. A current concern stays chat; needs_web_evidence separately decides whether to retrieve facts.",
             "web": "Explicitly requested online lookup or URL reading, without interacting with webpage controls.",
-            "research": "Read-only analysis of files, data, code or a project, including data sums and counts.",
+            "research": "Read, inspect, or analyze existing files, data, code or a project. Includes quoting a file's exact contents in the reply and data sums/counts. No new or modified file is requested.",
             "code_modify": "Implement or modify software, including related reports and tests.",
-            "artifact": "Create or revise non-code files, documents, reports, spreadsheets or presentations, including source reads and saved-file checks.",
+            "artifact": "Create or revise a non-code file, document, report, spreadsheet or presentation, including source reads and saved-file checks. Reading an existing file and quoting its contents in the reply is research.",
             "execution": "Run commands, tests, builds, installs, or deployments.",
             "browser": "Interact with webpage controls, forms, seats, or bookings.",
             "full": "Operate native apps, or fulfill independent outcomes across categories. Reading, writing and verifying non-code deliverables belong to artifact, not full.",
@@ -150,21 +148,21 @@ def build_questions(state: dict) -> tuple[dict, dict[str, str]]:
     return questions, expressions
 
 
-def _validated_choices(payload: Any, questions: dict) -> tuple[dict[str, str], dict[str, float]]:
-    if not isinstance(payload, dict) or payload.get("model") != MODEL:
-        raise JevUnavailable("invalid_model")
+def _validated_choices(payload: Any, questions: dict, *, model: str = MODEL) -> tuple[dict[str, str], dict[str, float]]:
+    if not isinstance(payload, dict) or payload.get("model") != model:
+        raise DecisionUnavailable("invalid_model")
     answers = payload.get("answers")
     if not isinstance(answers, dict) or set(answers) != set(questions):
-        raise JevUnavailable("invalid_answers")
+        raise DecisionUnavailable("invalid_answers")
     picked = {}
     confidences = {}
     for name, question in questions.items():
         answer = answers[name]
         if not isinstance(answer, dict) or answer.get("type") != "choice":
-            raise JevUnavailable("invalid_choice")
+            raise DecisionUnavailable("invalid_choice")
         choice, confidence, probabilities = (answer.get(k) for k in ("choice", "confidence", "probabilities"))
         if not isinstance(choice, str) or choice not in question["criteria"]:
-            raise JevUnavailable("invalid_choice")
+            raise DecisionUnavailable("invalid_choice")
         if (type(confidence) not in (int, float) or not math.isfinite(confidence)
                 or not 0 <= confidence <= 1 or not isinstance(probabilities, dict)
                 or set(probabilities) != set(question["criteria"])
@@ -172,7 +170,7 @@ def _validated_choices(payload: Any, questions: dict) -> tuple[dict[str, str], d
                        for p in probabilities.values())
                 or not math.isclose(sum(probabilities.values()), 1, abs_tol=.02)
                 or probabilities[choice] < max(probabilities.values())):
-            raise JevUnavailable("invalid_probabilities")
+            raise DecisionUnavailable("invalid_probabilities")
         picked[name] = choice
         confidences[name] = confidence
     return picked, confidences
@@ -203,7 +201,7 @@ def _routing_values(picked: dict[str, str], confidences: dict[str, float], expre
         intents.append("calculation")
     values = {
         "goal_type": picked["goal_type"],
-        # Distribution confidence is not comparable to the connected model's score.
+        # Choice confidence differs from the main model's self-reported score.
         "confidence": min(confidences[name] for name in routing_fields), "reason": "Structured routing decision",
         "requires_execution": picked["requires_execution"] == "yes",
         "needs_web_evidence": picked["needs_web_evidence"] == "yes",
@@ -231,7 +229,7 @@ def _routing_values(picked: dict[str, str], confidences: dict[str, float], expre
     try:
         return validate_decision(values)
     except InvalidClassification as exc:
-        raise JevUnavailable("invalid_decision") from exc
+        raise DecisionUnavailable("invalid_decision") from exc
 
 
 def decode_answers(payload: Any, questions: dict, expressions: dict[str, str]) -> dict:
@@ -239,28 +237,33 @@ def decode_answers(payload: Any, questions: dict, expressions: dict[str, str]) -
     return _routing_values(picked, confidences, expressions)
 
 
-async def _request(*, model: str, state: dict, questions: dict, timeout: float, api_key: str) -> dict:
+async def _request(*, model: str, state: dict, questions: dict, timeout: float, api_key: str,
+                   target: DecisionTarget = JEV) -> dict:
     try:
+        if model != target.billing_model:
+            raise DecisionUnavailable("invalid_model")
+        headers = {"api-key": api_key} if target.backend == "microsoft" else {"Authorization": "Bearer " + api_key}
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
-            response = await client.post(ENDPOINT, headers={
-                "Authorization": "Bearer " + api_key,
-            }, json={"model": model.removeprefix("typesafe/"), "state": state, "questions": questions})
+            response = await client.post(target.endpoint, headers=headers,
+                                         json={"model": target.deployment, "state": state, "questions": questions})
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
-            raise JevUnavailable("invalid_response")
+            raise DecisionUnavailable("invalid_response")
         return payload
     except httpx.HTTPStatusError as exc:
-        raise JevUnavailable(f"http_{exc.response.status_code}") from None
+        raise DecisionUnavailable(f"http_{exc.response.status_code}") from None
     except (httpx.HTTPError, ValueError, KeyError) as exc:
-        raise JevUnavailable(type(exc).__name__) from None
+        raise DecisionUnavailable(type(exc).__name__) from None
 
 
-async def classify(system: str, content: str, *, timeout: float, api_key: str | None = None) -> DecisionBatch:
+async def classify(system: str, content: str, *, timeout: float, api_key: str | None = None,
+                   target: DecisionTarget = JEV) -> DecisionBatch:
     from rune.agent.timing import timed_completion
+    from rune.llm.context import model_environment
 
     state = json.loads(content)
-    # Send large requests straight to the existing classifier to avoid duplicate work.
+    # Avoid duplicate routing calls for large requests.
     if len(content) > 16000:
         raise DecisionAbstained("large_request")
     questions, expressions = build_questions(state)
@@ -277,12 +280,12 @@ async def classify(system: str, content: str, *, timeout: float, api_key: str | 
                 "preserve": "Mentioned only to keep unchanged; its contents are not needed for this task.",
             })
     payload = await timed_completion(_request, {
-        "model": f"typesafe/{MODEL}", "state": {**state, "routing_rules": system},
+        "model": target.billing_model, "state": {**state, "routing_rules": system}, "target": target,
         "questions": questions, "timeout": timeout,
-        "api_key": api_key if api_key is not None else os.environ.get("TYPESAFE_API_KEY", ""),
+        "api_key": api_key if api_key is not None else model_environment(target.key_name),
     })
-    # Validate the entire response before reusing any independent answer.
-    picked, confidences = _validated_choices(payload, questions)
+    # Reject malformed batches before reusing file roles.
+    picked, confidences = _validated_choices(payload, questions, model=target.model)
     roles = {name: picked[key] for key, name in file_questions.items()
              if picked[key] != "unknown" and confidences[key] >= MIN_ROLE_CONFIDENCE}
     hints = ArtifactRoleHints.for_request(request, roles) if roles else None
