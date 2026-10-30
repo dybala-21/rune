@@ -40,7 +40,7 @@ Every task execution feeds back into the system:
 
 ### Memory
 
-Source of truth is markdown (MEMORY.md, learned.md, daily/*.md). SQLite and FAISS are derived caches — rebuildable from markdown at any time. User can edit, delete, or version-control their memory.
+Source of truth for user-facing memory is markdown (MEMORY.md, learned.md, daily/*.md); the FAISS index rebuilds from it at any time. The SQLite store also holds episode records — utility scores, tool-call logs — that markdown only summarizes, so treat it as a primary store for those, not a throwaway cache. User can edit, delete, or version-control the markdown.
 
 ### Safety
 
