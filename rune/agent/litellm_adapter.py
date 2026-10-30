@@ -499,9 +499,9 @@ def _guided_tools_enabled() -> bool:
 
     Default ON — measured to take qwen2.5-coder:7b from 0%->100% artifact delivery
     on a multi-step coding task (benchmarks/weak_model_deliverability). It only
-    applies to local ollama, non-cloud models and OpenAI-compatible endpoints set
-    to guided tool mode (see ``_guided_for_model``), so cloud/strong models are
-    unaffected. Opt out with RUNE_GUIDED_TOOLS=0.
+    applies to local ollama, non-cloud models and guided endpoints (see
+    ``_guided_for_model``), so cloud/strong models are unaffected. Opt out with
+    RUNE_GUIDED_TOOLS=0.
     """
     import os
 
@@ -511,9 +511,8 @@ def _guided_tools_enabled() -> bool:
 
 
 def _guided_for_model(model: str, has_tools: bool, provider_extra: object) -> bool:
-    """Whether guided decoding applies: enabled, has tools, and either a local
-    ollama model (not '-cloud', which uses native tool calls) or an
-    OpenAI-compatible endpoint the user set to guided tool mode."""
+    """Whether guided decoding applies: enabled, has tools, and a local ollama
+    model (not '-cloud') or an endpoint in guided tool mode."""
     from rune.llm.endpoints import guided, is_ollama_request
 
     if not (_guided_tools_enabled() and has_tools):
@@ -909,7 +908,7 @@ class StreamResult:
                 else 0
             )
         # Guided decoding: schema-constrain tool calls for local (ollama) models
-        # and endpoints set to guided tool mode. When on, the model must emit a tool
+        # and guided endpoints. When on, the model must emit a tool
         # call or a final answer as schema-valid JSON each turn.
         self._guided = _guided_for_model(
             self._model, bool(tool_schemas), self._provider_extra

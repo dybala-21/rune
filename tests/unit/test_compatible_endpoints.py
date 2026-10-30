@@ -24,8 +24,10 @@ def servers(monkeypatch):
                 "RUNE_CLOUD_WORKER"):
         monkeypatch.delenv(key, raising=False)
     endpoints.forget_discovered()
+    endpoints._resolved.clear()
     yield settings
     endpoints.forget_discovered()
+    endpoints._resolved.clear()
 
 
 @pytest.mark.parametrize("variable,value,root", [
@@ -182,9 +184,15 @@ async def test_unreachable_server_contributes_no_models(servers, monkeypatch):
     (200, {"choices": [{"message": {"tool_calls": [{"id": "1", "type": "function",
                                                     "function": {"name": "ping", "arguments": "{}"}}]}}]}, "native"),
     (200, {"choices": [{"message": {"content": "pong"}}]}, "text"),
+    # vLLM 0.32 without --enable-auto-tool-choice.
+    (200, {"choices": [{"finish_reason": "stop", "message": {
+        "content": '<tool_call>\n{"name": "ping", "arguments": {}}\n</tool_call>'}}]}, "unparsed"),
     (400, {"error": {"message": '"auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser'}},
      "unsupported"),
     (400, {"error": {"message": "registry.ollama.ai/library/olmo-3:7b-think does not support tools"}}, "unsupported"),
+    # llama.cpp b11960 with --no-jinja.
+    (500, {"error": {"code": 500, "message": "tools param requires --jinja flag", "type": "server_error"}},
+     "unsupported"),
     (500, {"error": {"message": "out of memory"}}, "unknown"),
 ])
 async def test_connection_test_reports_tool_support(servers, monkeypatch, status, body, tools):
@@ -202,7 +210,7 @@ async def test_connection_test_reports_tool_support(servers, monkeypatch, status
     assert result["models"] == ["Qwen/Qwen3-Coder-30B", "gpt-oss-20b"]
     assert sent[0]["model"] == "Qwen/Qwen3-Coder-30B" and sent[0]["tool_choice"] == "auto"
     if tools == "unsupported":
-        # The server's own reason is shown, since the model itself may lack tools (Ollama says so).
+        # The model itself may lack tools, so the server's reason is shown.
         assert body["error"]["message"] in result["detail"]
         assert "--enable-auto-tool-choice" in result["detail"] and "Guided" in result["detail"]
 
@@ -393,3 +401,52 @@ async def test_a_down_server_is_retried_sooner_than_a_healthy_list_refreshes(ser
     clock[0] += 25
     await endpoints.refresh_discovered()
     assert len(calls) == 2
+
+
+def test_an_endpoint_at_ollamas_address_keeps_its_tool_mode(servers, monkeypatch):
+    from rune.agent.litellm_adapter import _guided_for_model
+
+    monkeypatch.delenv("RUNE_GUIDED_TOOLS", raising=False)
+    servers.endpoints["gpu"].base_url = "http://localhost:11434/v1"
+    target = resolve_target("gpu/qwen3-coder:30b", "openai_compatible")
+    extra = {**dict(target.options), "_rune_source_model": target.key}
+    assert not endpoints.is_ollama_request(target.wire_model, extra)
+    assert not _guided_for_model(target.wire_model, True, extra)
+    servers.endpoints["gpu"].tool_mode = "guided"
+    assert _guided_for_model(target.wire_model, True, extra)
+    # The Ollama provider itself is unchanged.
+    target = resolve_target("ollama/qwen3-coder:30b")
+    assert endpoints.is_ollama_request(target.wire_model, {**dict(target.options), "_rune_source_model": target.key})
+
+
+@pytest.mark.parametrize("model,anthropic", [
+    ("anthropic/claude-opus-5", True), ("claude-sonnet-5", True), ("anthropic/claude-haiku-4-5", True),
+    ("openai/Qwen3-14B-Claude-4.5-Opus-Distill", False), ("ollama/claude-distill:8b", False),
+    ("openai_compatible/gpu/Qwen3-Claude-Opus-Distill", False), ("openai/anthropic/claude-sonnet-4.5", False),
+])
+def test_only_anthropic_routes_get_anthropic_request_rewrites(servers, model, anthropic):
+    from rune.agent.litellm_adapter import _apply_anthropic_tool_cache
+    from rune.agent.model_traits import traits
+
+    assert traits(model).anthropic_wire is anthropic
+    tools = [{"type": "function", "function": {"name": "read_file"}}]
+    assert ("cache_control" in _apply_anthropic_tool_cache(model, tools)[-1]) is anthropic
+
+
+async def test_hosted_lookups_are_cached_and_async_callers_leave_the_event_loop(servers, monkeypatch):
+    import socket
+    import threading
+
+    lookups = []
+
+    def getaddrinfo(*args, **kwargs):
+        lookups.append(threading.current_thread() is threading.main_thread())
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+
+    servers.endpoints["router"].base_url = "https://models.example.com/v1"
+    monkeypatch.setenv("RUNE_CLOUD_WORKER", "1")
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    await endpoints.check_destination_async("https://models.example.com/v1")
+    resolve_target("router/m", "openai_compatible")
+    resolve_target("router/m", "openai_compatible")
+    assert lookups == [False]

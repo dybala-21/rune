@@ -46,18 +46,18 @@ EndpointName = Annotated[str, Field(min_length=1, max_length=40, pattern=r"^[a-z
 
 
 class CompatibleEndpoint(BaseModel):
-    """An OpenAI-compatible server such as vLLM, SGLang, LM Studio or llama.cpp."""
+    """An OpenAI-compatible server such as vLLM, LM Studio or llama.cpp."""
 
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
     base_url: str = Field(min_length=1, max_length=512, alias="baseUrl")
-    # Empty means the models the server lists at GET /models.
+    # Empty: use the models the server lists.
     models: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(default_factory=list, max_length=200)
-    # None infers from the host: loopback and private addresses are self-hosted and free.
+    # None: free when the host is private.
     free: bool | None = None
-    # Guided constrains output to a tool-call JSON schema for servers or models without native tool calls.
+    # Guided: schema-constrained JSON actions for servers or models without tool calls.
     tool_mode: Literal["native", "guided"] = Field(default="native", alias="toolMode")
-    # Server model ids that accept images; servers do not report this in GET /models.
+    # GET /models does not report image support.
     vision_models: list[Annotated[str, Field(min_length=1, max_length=200)]] = Field(
         default_factory=list, max_length=200, alias="visionModels")
 
@@ -72,18 +72,17 @@ class CompatibleEndpoint(BaseModel):
         from rune.cloud.boundary import hosted
         from rune.llm.endpoints import private_host
 
-        # A hosted worker must not reach its own host or the cloud metadata service.
-        # Names are resolved again before each connection (rune.llm.endpoints.check_destination).
+        # Keep hosted workers away from their own host and the metadata service.
         if hosted() and (url.scheme != "https" or private_host(url.hostname)):
             raise ValueError("Hosted Rune can only connect to public HTTPS endpoints.")
         path = url.path.rstrip("/")
-        # LiteLLM appends /chat/completions to the base; most servers mount the API under /v1.
+        # Most servers mount the API under /v1.
         self.base_url = f"{url.scheme}://{url.netloc}{path or '/v1'}"
         return self
 
 
 def _no_provider_names(endpoints: dict) -> dict:
-    # "<endpoint>/<model>" would otherwise read as a model of that provider.
+    # "<endpoint>/<model>" would read as that provider's model.
     from rune.llm.target import _PROVIDERS
 
     if clash := sorted(set(endpoints) & _PROVIDERS):
@@ -95,12 +94,7 @@ CompatibleEndpoints = Annotated[dict[EndpointName, CompatibleEndpoint], AfterVal
 
 
 def _usable_endpoints(value):
-    """Skip invalid entries from a config file, keeping the rest of the llm section.
-
-    Without this one hand-edited typo would reject the whole section, silently
-    reverting the provider and dropping the cost budget. Settings requests are
-    still validated strictly.
-    """
+    """Drop invalid entries so one typo does not discard the whole llm section."""
     if not isinstance(value, dict):
         return value
     from rune.utils.logger import get_logger

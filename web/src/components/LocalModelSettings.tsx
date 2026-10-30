@@ -18,8 +18,9 @@ const inputStyle = {
 const field = { ...inputStyle, margin: '4px 0 8px' };
 const muted = { color: 'var(--text-muted)', lineHeight: 1.5 };
 const TOOLS: Record<EndpointTestResult['tools'], string> = {
-  native: 'Tool calls work.', text: 'Reachable, but the model answered without a tool call.',
-  unsupported: 'Tool calls are turned off on the server.', unknown: 'Tool support is unknown.',
+  native: 'Tool calls work.', unparsed: 'The server is not parsing tool calls.',
+  text: 'Reachable, but the model answered without a tool call.',
+  unsupported: 'The server or model rejected tool calls.', unknown: 'Tool support is unknown.',
 };
 
 const rowsFrom = (state: State): Row[] => Object.entries(state.endpoints).map(([name, entry]) => ({
@@ -90,8 +91,8 @@ export function LocalModelSettings({ state, onSaved }: { state: State; onSaved: 
   return <details style={{ padding: '12px 14px', borderBottom: '1px solid var(--border-subtle)', fontSize: 12 }}>
     <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Open-weight model servers</summary>
     <p style={muted}>
-      Connect Ollama on another machine, or any server with an OpenAI-compatible API: vLLM, SGLang, LM Studio,
-      llama.cpp, or a hosted service. Models appear in the model picker as endpoint/model.
+      Connect Ollama on another machine or any OpenAI-compatible server, such as vLLM, LM Studio or llama.cpp.
+      Models appear in the model picker as endpoint/model.
     </p>
     <fieldset disabled={saving} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
       <label htmlFor="ollama-base">Ollama server</label>

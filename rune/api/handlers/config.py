@@ -461,7 +461,7 @@ class EndpointTestRequest(BaseModel):
 
 @router.post("/endpoints/{name}/test", dependencies=[Depends(auth)])
 async def test_endpoint(name: str, req: EndpointTestRequest) -> dict[str, Any]:
-    """List the server's models and send one small tool request (a real, billable call)."""
+    """List the server's models and send one tool request, which may be billed."""
     from rune.llm.endpoints import configured, diagnose
 
     if name not in configured():

@@ -509,7 +509,7 @@ export interface EndpointTestResult {
   reachable: boolean;
   models: string[];
   model?: string;
-  tools: 'native' | 'text' | 'unsupported' | 'unknown';
+  tools: 'native' | 'unparsed' | 'text' | 'unsupported' | 'unknown';
   detail: string;
 }
 
