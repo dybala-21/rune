@@ -38,10 +38,11 @@ def _key_id() -> str:
 
 def accelerator_status(selected=None) -> str:
     from rune.llm.context import llm_settings
+    from rune.llm.endpoints import self_hosted
     from rune.llm.model_selection import get_effective_model_selection
 
     selected = selected or get_effective_model_selection()
-    if selected.provider == "ollama":
+    if self_hosted(selected.provider, selected.model):
         return "local"
     llm = llm_settings()
     # Automatic model selection keeps its existing classifier and cost policy.

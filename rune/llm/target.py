@@ -11,7 +11,7 @@ _VERTEX_LOCATIONS = {
     "gemini-3.1-pro-preview-customtools": frozenset({"global"}),
 }
 _PROVIDERS = {"openai", "anthropic", "xai", "gemini", "vertex_ai", "azure", "ollama",
-              "mistral", "deepseek", "cohere"}
+              "openai_compatible", "mistral", "deepseek", "cohere"}
 
 
 class ModelCompatibilityError(ValueError):
@@ -74,9 +74,15 @@ def resolve_target(model: str, provider: str | None = None, *, options: dict | N
     provider = provider or next((p for stem, p in (
         ("claude-", "anthropic"), ("grok-", "xai"), ("gemini-", "gemini")) if name.startswith(stem)), "openai")
     if provider == "ollama":
-        extra.setdefault("api_base", "http://localhost:11434/v1")
+        from rune.llm.endpoints import ollama_v1
+        extra.setdefault("api_base", ollama_v1())
         extra.setdefault("api_key", "ollama")
         wire = f"openai/{name}"
+    elif provider == "openai_compatible":
+        from rune.llm.endpoints import connection_options, split_model
+        endpoint, server_model = split_model(name)
+        extra = connection_options(endpoint, extra)
+        wire = f"openai/{server_model}"
     elif provider == "vertex_ai" or provider == "gemini" and vertex_active():
         extra = vertex_options(name, extra)
         wire = f"vertex_ai/{name}"
@@ -87,7 +93,7 @@ def resolve_target(model: str, provider: str | None = None, *, options: dict | N
         wire = f"azure/{name}"
     else:
         wire = name if provider == "openai" and not separator else f"{provider}/{name}"
-    if provider != "ollama":
+    if provider not in {"ollama", "openai_compatible"}:
         key_names = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "xai": "XAI_API_KEY",
                      "gemini": "GEMINI_API_KEY", "mistral": "MISTRAL_API_KEY", "deepseek": "DEEPSEEK_API_KEY",
                      "cohere": "COHERE_API_KEY", "azure": "AZURE_API_KEY"}

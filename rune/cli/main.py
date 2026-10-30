@@ -1421,7 +1421,7 @@ def _ensure_llm_key() -> bool:
     from rune.config import get_config
     config = get_config()
     provider = config.llm.active_provider or config.llm.default_provider
-    if provider == "ollama":
+    if provider == "ollama" or (provider == "openai_compatible" and config.llm.endpoints):
         return True
     return bool(
         config.openai_api_key

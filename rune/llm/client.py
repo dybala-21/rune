@@ -55,7 +55,8 @@ async def _check_ollama(timeout: float = _DEFAULT_TIMEOUT) -> bool:
     global _ollama_installed
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.get("http://localhost:11434/api/tags")
+            from rune.llm.endpoints import ollama_root
+            resp = await client.get(f"{ollama_root()}/api/tags")
             if resp.status_code == 200:
                 try:
                     models = resp.json().get("models", [])
@@ -86,7 +87,8 @@ def refresh_ollama_installed_sync(timeout: float = 0.3) -> None:
     if _ollama_installed is not None:
         return
     try:
-        resp = httpx.get("http://localhost:11434/api/tags", timeout=timeout)
+        from rune.llm.endpoints import ollama_root
+        resp = httpx.get(f"{ollama_root()}/api/tags", timeout=timeout)
         if resp.status_code == 200:
             models = resp.json().get("models", [])
             _ollama_installed = [
@@ -194,8 +196,15 @@ class LLMClient:
             healthy = await _check_dns("api.x.ai")
             reason = "OK" if healthy else "DNS lookup failed for api.x.ai"
         elif provider == Provider.OLLAMA:
+            from rune.llm.endpoints import ollama_root
             healthy = await _check_ollama()
-            reason = "OK" if healthy else "Ollama not reachable at localhost:11434"
+            reason = "OK" if healthy else f"Ollama not reachable at {ollama_root()}"
+        elif provider == Provider.OPENAI_COMPATIBLE:
+            from rune.llm.endpoints import configured, model_ids, refresh_discovered
+            await refresh_discovered()
+            healthy = bool(model_ids())
+            reason = "OK" if healthy else (
+                "No model found on the configured endpoints" if configured() else "No endpoint configured")
         else:
             healthy = False
             reason = f"Unknown provider: {provider}"
@@ -250,6 +259,10 @@ class LLMClient:
             active = (getattr(settings, "active_model", None) or "").strip()
             if active:
                 return active
+
+        if provider == Provider.OPENAI_COMPATIBLE:
+            from rune.llm.endpoints import tier_model
+            return tier_model("")
 
         models_config = settings.models
         tier_models = getattr(models_config, provider.value, models_config.ollama)
@@ -326,8 +339,8 @@ class LLMClient:
         if response_format is not None:
             from rune.llm.structured import native_output_config, supported_format
             native_format = native_output_config(resolved_model, response_format)
-            # Ollama is reached through its OpenAI-compatible route; judge support by the source model.
-            format_model = target.key if target.key.startswith("ollama/") else resolved_model
+            # Local servers are reached through the OpenAI route; judge support by the source model.
+            format_model = target.key if target.provider in {"ollama", "openai_compatible"} else resolved_model
             selected_format = supported_format(format_model, response_format)
             if native_format is not None:
                 kwargs["output_config"] = native_format

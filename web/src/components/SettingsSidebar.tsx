@@ -17,6 +17,7 @@ import { SettingsSection, SettingsItem, MemoryField, memoryInputStyle } from './
 import { DecisionRoutingSettings } from './DecisionRoutingSettings';
 import { RunLimitSettings } from './RunLimitSettings';
 import { AzureSettings } from './AzureSettings';
+import { LocalModelSettings } from './LocalModelSettings';
 
 interface SettingsSidebarProps {
   onOpenSkillPanel: (selectedName?: string) => void;
@@ -605,6 +606,7 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
         <details className="advanced-settings">
           <summary>Advanced settings</summary>
         {config?.azure && <AzureSettings connection={config.azure} onSaved={load} />}
+        {config?.localModels && <LocalModelSettings state={config.localModels} onSaved={load} />}
         {config?.decisionRouting && (
           <DecisionRoutingSettings routing={config.decisionRouting}
             onSaved={load} />

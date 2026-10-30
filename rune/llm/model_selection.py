@@ -52,6 +52,9 @@ def get_effective_model_selection() -> ActiveModelSelection:
     if provider == Provider.AZURE:
         from rune.llm.azure import tier_deployment
         default_model = tier_deployment(default_model)
+    if provider == Provider.OPENAI_COMPATIBLE:
+        from rune.llm.endpoints import tier_model
+        default_model = tier_model(llm_cfg.default_model)
 
     return ActiveModelSelection(provider=provider, model=default_model)
 

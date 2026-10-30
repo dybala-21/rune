@@ -281,6 +281,7 @@ class Provider(StrEnum):
     XAI = "xai"
     AZURE = "azure"
     OLLAMA = "ollama"
+    OPENAI_COMPATIBLE = "openai_compatible"
 
 
 @dataclass(slots=True)

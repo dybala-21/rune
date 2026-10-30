@@ -21,6 +21,12 @@ def _format_type(model: str) -> str | None:
     # https://ollama.com/blog/structured-outputs
     if model.startswith(("ollama/", "ollama_chat/")):
         return "json_schema"
+    # vLLM, LM Studio and llama.cpp server document response_format json_schema on chat completions.
+    # https://docs.vllm.ai/en/latest/features/structured_outputs.html
+    # https://lmstudio.ai/docs/developer/openai-compat/structured-output
+    # https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md
+    if model.startswith("openai_compatible/"):
+        return "json_schema"
     from rune.agent.litellm_adapter import litellm
 
     try:

@@ -9,7 +9,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from rune.api.auth import TokenAuthDependency
-from rune.config.schema import AzureDeployments, AzurePricingConfig, DecisionRoutingConfig
+from rune.config.schema import (
+    AzureDeployments,
+    AzurePricingConfig,
+    CompatibleEndpoints,
+    DecisionRoutingConfig,
+)
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -38,6 +43,7 @@ class RunLimits(BaseModel):
 
 class ConfigGetResponse(BaseModel):
     azure: dict[str, Any] = Field(default_factory=dict)
+    local_models: dict[str, Any] = Field(default_factory=dict, alias="localModels")
     vertex_location: str | None = Field(None, alias="vertexLocation")
     run_limits: RunLimits = Field(default_factory=RunLimits, alias="runLimits")
     execution_environment: dict[str, Any] = Field(default_factory=dict, alias="executionEnvironment")
@@ -68,6 +74,7 @@ class ExecutionEnvironmentPatch(BaseModel):
 
 class ConfigPatchRequest(BaseModel):
     azure_deployments: AzureDeployments | None = Field(None, alias="azureDeployments")
+    endpoints: CompatibleEndpoints | None = None
     azure_pricing: AzurePricingConfig | None = Field(None, alias="azurePricing")
     vertex_location: str | None = Field(None, alias="vertexLocation", min_length=1, max_length=64,
                                        pattern=r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -237,6 +244,7 @@ async def get_config_endpoint() -> ConfigGetResponse:
             "deployments": cfg.llm.azure_deployments, "suggestedModels": GPT6_MODELS,
             "pricing": cfg.llm.azure_pricing.model_dump() if cfg.llm.azure_pricing else None,
         },
+        localModels=_local_models_state(cfg),
         vertexLocation=(os.environ.get("VERTEX_LOCATION") or os.environ.get("VERTEXAI_LOCATION")
                         or cfg.vertex_location) if vertex_active() else None,
         runLimits=RunLimits(modelRequests=cfg.llm.model_request_limit, costUsd=cfg.llm.cost_budget_usd),
@@ -340,6 +348,9 @@ async def patch_config(req: ConfigPatchRequest) -> ConfigPatchResponse:
     if "azure_pricing" in req.model_fields_set:
         to_persist.update({"llm.azurePricing": req.azure_pricing.model_dump() if req.azure_pricing else None,
                            "llm.azure_pricing": None})
+    if req.endpoints is not None:
+        to_persist["llm.endpoints"] = {name: entry.model_dump(by_alias=True, exclude_none=True)
+                                       for name, entry in req.endpoints.items()}
     if req.vertex_location is not None:
         to_persist["vertex_location"] = req.vertex_location
     limits = req.run_limits.model_dump(exclude_unset=True) if req.run_limits is not None else {}
@@ -378,6 +389,11 @@ async def patch_config(req: ConfigPatchRequest) -> ConfigPatchResponse:
         updated = True
     if req.azure_deployments is not None:
         cfg.llm.azure_deployments = req.azure_deployments
+        from rune.llm.models import invalidate_cache
+        invalidate_cache()
+        updated = True
+    if req.endpoints is not None:
+        cfg.llm.endpoints = req.endpoints
         from rune.llm.models import invalidate_cache
         invalidate_cache()
         updated = True
@@ -420,3 +436,36 @@ async def patch_config(req: ConfigPatchRequest) -> ConfigPatchResponse:
         updated = True
 
     return ConfigPatchResponse(updated=updated)
+
+
+def _local_models_state(cfg) -> dict[str, Any]:
+    from rune.llm.context import model_environment
+    from rune.llm.endpoints import OLLAMA_NAMES, is_free, key_name, ollama_root
+    from rune.utils.env import effective_env_scope
+
+    ollama_key = next((name for name in OLLAMA_NAMES if model_environment(name).strip()), OLLAMA_NAMES[0])
+    return {
+        "ollama": {"baseUrl": ollama_root(), "envKey": ollama_key, "scope": effective_env_scope(ollama_key)},
+        "endpoints": {
+            name: {**entry.model_dump(by_alias=True), "keyName": key_name(name),
+                   "hasKey": bool(model_environment(key_name(name)).strip()),
+                   "keyScope": effective_env_scope(key_name(name)), "selfHosted": is_free(name)}
+            for name, entry in cfg.llm.endpoints.items()
+        },
+    }
+
+
+class EndpointTestRequest(BaseModel):
+    model: str | None = Field(None, min_length=1, max_length=200)
+
+
+@router.post("/endpoints/{name}/test", dependencies=[Depends(auth)])
+async def test_endpoint(name: str, req: EndpointTestRequest) -> dict[str, Any]:
+    """List the server's models and send one small tool request (a real, billable call)."""
+    from rune.llm.endpoints import configured, diagnose
+
+    if name not in configured():
+        raise HTTPException(status_code=404, detail=f'No endpoint named "{name}". Save it first.')
+    result = await diagnose(name, req.model)
+    log.info("endpoint_tested", endpoint=name, reachable=result["reachable"], tools=result["tools"])
+    return result
