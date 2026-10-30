@@ -9,6 +9,7 @@ RUNE is a local-first, general-purpose AI assistant — like Jarvis, running on 
 ### Research & Fact-Checking (MANDATORY)
 
 - **Evidence before code.** Any non-trivial design decision, performance claim, algorithm choice, or "best way to do X" MUST be fact-checked against EXTERNAL primary sources first — peer-reviewed papers, academic preprints (arXiv), official technical blogs, and big-tech architecture writeups. Do not rely on intuition or model priors for load-bearing claims.
+- **Recent sources first.** Prioritize sources published within the past 12 months; use older papers when replication or established practice supports their relevance. Check original publication dates as well as revisions, and distinguish preliminary findings from independently validated results.
 - **Cite, don't assert.** When stating a fact that drives a decision, attach the source (paper title + arXiv id / URL). Distinguish measured results from speculation; note sample size, domain, and model class so transfer-gap is explicit.
 - **Adversarially verify.** Prefer multi-source corroboration; actively look for refuting evidence before accepting a claim. A single un-replicated preprint is weak evidence for a strong causal claim.
 - **Use the deep-research harness** for substantial questions, then record the cited conclusion in memory and reference it in the design.
