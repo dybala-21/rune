@@ -81,7 +81,7 @@ def selected_task(history: list[dict], classification) -> dict | None:
 def resume_message(task: dict | None, history: list[dict] | None = None) -> dict | None:
     if task is None:
         return None
-    state = {key: task.get(key, "") for key in ("status", "blocker", "files")}
+    state = {key: task.get(key, "") for key in ("status", "blocker", "files", "notes", "routine_id")}
     visible = {message.get("content") for message in history or []
                if message.get("role") == "user" and isinstance(message.get("content"), str)}
     state["requests"] = [request for request in task_requests(task) if request not in visible]
@@ -143,9 +143,16 @@ def capture(loop, goal: str, classification, history: list[dict], trace) -> None
     if outcome.completion == "completed" and not outcome.success:
         task_status = "verification_" + outcome.verification
     previous = selected_task(history, classification)
+    current = getattr(loop, "_task_context", None)
+    if previous and current and previous["id"] == current["id"]:
+        previous = current
     meaningful = (classification.goal_type != "chat" or classification.needs_web_evidence
                   or classification.requires_execution or bool(classification.intent_categories))
+    from rune.safety.task_inspection import inspecting_task
+
     scope = getattr(classification, "task_scope", "step") if previous else "task"
+    if inspecting_task():
+        scope = "inspect"
     meaningful = (meaningful and scope != "inspect") or scope == "amend"
     loop._task_updates = meaningful and scope == "task"
     if not meaningful and previous is None:
@@ -185,6 +192,9 @@ def capture(loop, goal: str, classification, history: list[dict], trace) -> None
     if isinstance(sources, SourceContext) and sources.entries:
         task["sources"] = sources.pack()
     loop._task_context = task
+    from rune.agent.task_continuity import checkpoint_task
+
+    checkpoint_task(task)
 
 
 def remember_task(conversation, loop) -> None:
@@ -218,7 +228,7 @@ def attach_tasks(messages: list[dict], conversation) -> None:
         return
     tasks = _saved_tasks(saved, conversation.id)
     if tasks:
-        # This carrier survives removal of the current user turn and never reaches the model.
+        # Keep task metadata separate from user turns; the loop removes this carrier.
         messages.insert(0, {"role": "system", "content": "", HISTORY_KEY: tasks})
 
 

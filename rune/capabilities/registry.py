@@ -65,6 +65,12 @@ class CapabilityRegistry:
     @timed("tool", name_arg=1)
     async def execute(self, name: str, params: dict[str, Any]) -> CapabilityResult:
         """Execute a capability by name."""
+        from rune.safety.task_inspection import inspection_blocker
+
+        if blocker := inspection_blocker(name, params):
+            return CapabilityResult(success=False, error=blocker, metadata={
+                "action_status": "not_executed", "failure_kind": "task_inspection_read_only",
+            })
         from rune.computer.session import current_desktop
         if desktop := current_desktop():
             blocker = desktop.tool_blocker(name, params)

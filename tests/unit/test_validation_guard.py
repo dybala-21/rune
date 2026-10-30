@@ -197,3 +197,58 @@ def test_goal_validate_restores_before_running(tmp_path):
     assert seen == [ORIGINAL]  # the command saw the canonical test, not the tampered one
     assert "test_discount.py" in detail
     assert f.read_text() == ORIGINAL
+
+
+def test_snapshot_limits_never_quarantine_existing_conftest(tmp_path, monkeypatch):
+    import rune.agent.validation_guard as guard
+
+    first = tmp_path / 'test_first.py'
+    first.write_text('assert True\n')
+    original = tmp_path / 'conftest.py'
+    original.write_text('# existing fixtures\n')
+    added = tmp_path / 'nested' / 'conftest.py'
+    monkeypatch.setattr(guard, '_MAX_FILES', 1)
+    monkeypatch.setattr(guard, '_walk_test_files', lambda root, **kwargs: iter(
+        [first, original] + ([added] if added.exists() else [])))
+    snap = guard.snapshot_tests(tmp_path)
+    added.parent.mkdir()
+    added.write_text('collect_ignore = ["test_first.py"]\n')
+    report = guard.restore_tests(snap)
+    assert original.read_text() == '# existing fixtures\n'
+    assert report.quarantined == ['nested/conftest.py']
+    assert report.uncopied == 1
+    assert 'originals were not restored' in guard.restoration_note(report)
+
+
+def test_oversized_existing_conftest_is_not_misreported_as_new(tmp_path, monkeypatch):
+    import rune.agent.validation_guard as guard
+
+    original = tmp_path / 'conftest.py'
+    content = '# fixture\n' * 10
+    original.write_text(content)
+    monkeypatch.setattr(guard, '_MAX_FILE_BYTES', 5)
+    report = guard.restore_tests(guard.snapshot_tests(tmp_path))
+    assert original.read_text() == content
+    assert not report.quarantined and report.uncopied == 1
+
+
+def test_truncated_inventory_does_not_guess_whether_files_are_new(tmp_path, monkeypatch):
+    import rune.agent.validation_guard as guard
+
+    original = tmp_path / 'conftest.py'
+    original.write_text('# existing\n')
+    monkeypatch.setattr(guard, '_MAX_TRACKED_FILES', 0)
+    snap = guard.snapshot_tests(tmp_path)
+    report = guard.restore_tests(snap)
+    assert not report.inventory_complete
+    assert original.is_file() and not report.quarantined
+    assert 'inventory is incomplete' in guard.restoration_note(report)
+
+
+def test_javascript_module_tests_are_restored(tmp_path):
+    module = tmp_path / 'invoice.test.mjs'
+    module.write_text('assert.equal(total(rows), 0.6);\n')
+    snap = snapshot_tests(tmp_path)
+    module.write_text('assert.ok(true);\n')
+    assert restore_tests(snap).restored == ['invoice.test.mjs']
+    assert module.read_text() == 'assert.equal(total(rows), 0.6);\n'

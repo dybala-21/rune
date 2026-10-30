@@ -1,12 +1,4 @@
-"""Agent context - shared pre/post-processing layer.
-
-Ported from src/agent/agent-context.ts (179 lines) - unified context
-preparation for TUI, CLI exec, and Gateway channels.
-
-prepareAgentContext(): @-reference expansion, identity, conversation management,
-    token budget, workspace CWD resolution.
-postProcessAgentResult(): assistant turn save + episodic memory persistence.
-"""
+"""Prepare run context and save conversation results across channels."""
 
 from __future__ import annotations
 
@@ -19,13 +11,9 @@ from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
 
-# Constants
-
 ASSISTANT_TURN_SAVE_MAX_ATTEMPTS = 3
 ASSISTANT_TURN_SAVE_RETRY_DELAY_S = 0.08
 
-
-# Types
 
 @dataclass(slots=True)
 class PrepareContextOptions:
@@ -44,15 +32,7 @@ class PrepareContextOptions:
 
 @dataclass(slots=True)
 class AgentContext:
-    """Runtime state for a single agent invocation.
-
-    Holds all pre-processed inputs needed by the agent loop:
-    - Sanitized goal text (with @-references expanded)
-    - Resolved workspace CWD
-    - Conversation history
-    - Identity context
-    - Token budget parameters
-    """
+    """Resolved inputs for one agent run."""
 
     goal: str = ""
     original_goal: str = ""
@@ -79,10 +59,10 @@ class PostProcessInput:
     error: str | None = None
     changed_files: list[str] = field(default_factory=list)
     duration_ms: float = 0.0
-    # From the loop's CompletionTrace, for crisp learning.
+    # Keep the completion reason for later learning.
     reason: str = ""
     evidence_gate: dict[str, Any] | None = None
-    # "pass"/"fail"/"" — whether anything executable vouched for the work.
+    # Executed check result: "pass", "fail", or empty when unchecked.
     mech_check: str = ""
     verification: dict[str, Any] | None = None
     table_acceptance: dict[str, Any] | None = None
@@ -90,12 +70,10 @@ class PostProcessInput:
     tests_passed_after_edit: bool | None = None
     tool_budget_exhausted: bool = False
     explanation_review: dict[str, Any] | None = None
-    # goal_type used as the rule domain, so learning matches injection.
+    # Match learned rules to the task domain.
     classification_hint: str | None = None
     wait_for_consolidation: bool = False
 
-
-# Helpers
 
 def _sanitize_goal_input(raw: str) -> str:
     """Strip invisible control chars that break short-intent matching."""
@@ -128,8 +106,6 @@ def _as_existing_workspace(candidate: str) -> str | None:
         return None
     return None
 
-
-# Workspace CWD resolution
 
 async def _resolve_workspace_cwd_for_turn(
     goal: str,
@@ -188,8 +164,6 @@ async def _resolve_workspace_cwd_for_turn(
     return workspace_root
 
 
-# @-reference expansion
-
 def _expand_at_references(goal: str, cwd: str) -> tuple[str, list[str]]:
     """Expand ``@path`` references in goal text by resolving their content.
 
@@ -239,25 +213,11 @@ def _expand_at_references(goal: str, cwd: str) -> tuple[str, list[str]]:
     return expanded, ref_paths
 
 
-# Public API
-
 async def prepare_agent_context(
     options: PrepareContextOptions,
     conversation_manager: Any | None = None,
 ) -> AgentContext:
-    """Prepare a full AgentContext for an agent invocation.
-
-    Steps:
-    1. Sanitize goal input
-    2. Resolve workspace CWD
-    3. Expand @-references (inject file/directory content)
-    4. Load conversation history from ConversationManager
-    5. Resolve identity context
-
-    If *conversation_manager* is provided along with a valid
-    ``conversation_id``, previous turns are loaded into the context
-    so the agent loop has multi-turn awareness.
-    """
+    """Resolve the workspace, references, conversation history and saved tasks for a run."""
     sanitized_goal = _sanitize_goal_input(options.goal)
 
     workspace_root = await _resolve_workspace_cwd_for_turn(
@@ -270,9 +230,7 @@ async def prepare_agent_context(
     # Expand @-references: resolve file/directory content and append to goal
     expanded_goal, at_refs = _expand_at_references(sanitized_goal, workspace_root)
 
-    # Load conversation history if a manager and conversation_id are available.
-    # We exclude the current (latest) user turn since the goal is passed
-    # separately to the agent loop - including it would cause duplication.
+    # The current user turn is passed separately as the goal.
     conversation_messages: list[dict[str, Any]] = []
     if conversation_manager is not None and options.conversation_id:
         try:
@@ -288,8 +246,13 @@ async def prepare_agent_context(
         except Exception as exc:
             log.debug("conversation_history_load_failed", error=str(exc)[:200])
 
-    # Pass attachments through metadata so the agent loop can include
-    # them as vision/document content alongside the goal text.
+        conversation = conversation_manager._active.get(options.conversation_id)
+        if conversation is not None:
+            from rune.agent.task_continuity import attach_shared_tasks
+
+            attach_shared_tasks(conversation_messages, conversation, workspace_root)
+
+    # The loop sends attachments alongside the goal as image or document content.
     metadata: dict[str, Any] = {}
     if options.attachments:
         metadata["attachments"] = options.attachments
@@ -310,13 +273,7 @@ async def prepare_agent_context(
 
 
 def resolve_assistant_answer(loop_answer: str, *fallbacks: str) -> str:
-    """Pick the assistant answer to persist for multi-turn history.
-
-    Prefer the loop's final answer, which is authoritative, over UI text that is
-    a render side effect and can be empty depending on the streaming path. A
-    missing assistant turn makes the next turn treat answered questions as
-    pending and re-run them.
-    """
+    """Prefer the final loop answer; streaming UI text may be incomplete."""
     for candidate in (loop_answer, *fallbacks):
         if candidate and candidate.strip():
             return candidate
@@ -324,14 +281,8 @@ def resolve_assistant_answer(loop_answer: str, *fallbacks: str) -> str:
 
 
 async def post_process_agent_result(inp: PostProcessInput) -> list[str]:
-    """Post-process agent result: save assistant turn + episodic memory.
-
-    Retries assistant turn save up to ASSISTANT_TURN_SAVE_MAX_ATTEMPTS times.
-    Returns the rule keys newly learned during this turn (for surfacing
-    "just learned X" to the user); empty when nothing was learned.
-    """
-    # Skip only an empty *successful* turn. An empty failed turn still carries a
-    # learning signal (failure reason / Evidence Gate verdict).
+    """Save the assistant turn and execution memory; return newly learned rule keys."""
+    # Keep failed turns even when no answer was produced.
     if not inp.answer and inp.success:
         return []
 

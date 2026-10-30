@@ -54,6 +54,11 @@ class TestClassificationReuse:
     async def test_classifies_when_none_passed(self):
         assert await _count_classify_calls() == 1
 
+    async def test_empty_task_metadata_does_not_repeat_classification(self):
+        assert await _count_classify_calls(
+            classification=_clf(), message_history=[{"role": "system", "content": "", "_task_context": []}],
+        ) == 0
+
 
 class TestBuildSystemPromptAsync:
     def test_build_system_prompt_is_coroutine(self):

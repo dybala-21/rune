@@ -1,13 +1,4 @@
-"""Preserve existing tests while the agent edits the workspace.
-
-Before verification, restore changed or deleted tests from the snapshot
-and quarantine new ``conftest.py`` files that could alter collection.
-Other new tests and changed runner configs are reported without reverting
-them. Directory, file-count and byte limits bound the snapshot work.
-
-Protection is on by default. Set ``RUNE_PROTECT_TESTS=0`` for tasks that
-intentionally change existing tests.
-"""
+"""Restore captured test inputs and report changes before verification."""
 from __future__ import annotations
 
 import fnmatch
@@ -23,13 +14,15 @@ from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
 
+# Set to 0 only when the task intentionally changes existing tests.
 _ENV_FLAG = "RUNE_PROTECT_TESTS"
 
-# File-name conventions across the ecosystems RUNE drives.
 _TEST_FILE_GLOBS: tuple[str, ...] = (
     "test_*.py", "*_test.py", "conftest.py",
     "*.test.js", "*.test.jsx", "*.test.ts", "*.test.tsx",
     "*.spec.js", "*.spec.jsx", "*.spec.ts", "*.spec.tsx",
+    "*.test.mjs", "*.test.cjs", "*.test.mts", "*.test.cts",
+    "*.spec.mjs", "*.spec.cjs", "*.spec.mts", "*.spec.cts",
     "*_test.go", "*Test.java", "*Tests.java", "*_spec.rb",
 )
 _TEST_DIR_NAMES = frozenset({"tests", "test", "__tests__", "spec"})
@@ -37,14 +30,14 @@ _SKIP_DIR_NAMES = frozenset({
     ".git", ".hg", ".svn", ".venv", "venv", "node_modules", "__pycache__",
     ".rune", "dist", "build", ".pytest_cache", ".mypy_cache", ".ruff_cache",
 })
-# Root-level files that steer test collection (addopts, testpaths, markers).
-# Report config changes without restoring them; they may include dependency edits.
+# Report runner config changes; restoring them could undo dependency edits.
 _CONFIG_FILES = ("pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini")
 
 _MAX_FILE_BYTES = 256 * 1024
 _MAX_FILES = 500
 _MAX_TOTAL_BYTES = 8 * 1024 * 1024
-_MAX_DIRS = 8_000  # a mis-pinned home-dir workspace must not stall the run
+_MAX_DIRS = 8_000  # Bound scanning when the workspace points at a home directory.
+_MAX_TRACKED_FILES = 20_000
 _QUARANTINE_SUFFIX = ".rune-quarantined"
 _authored: ContextVar[dict[str, str] | None] = ContextVar("authored_tests", default=None)
 
@@ -93,7 +86,7 @@ def protect_tests_enabled() -> bool:
 
 def _is_test_file(path: Path, under_test_dir: bool) -> bool:
     if under_test_dir and path.suffix in {
-        ".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".java", ".rb"
+        ".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts", ".go", ".java", ".rb"
     }:
         return True
     return any(fnmatch.fnmatch(path.name, g) for g in _TEST_FILE_GLOBS)
@@ -123,32 +116,36 @@ def _walk_test_files(root: Path, *, strict: bool = False) -> Iterator[Path]:
 
 @dataclass(slots=True)
 class TestSnapshot:
-    """Pre-run byte-exact copies of the workspace's test files + configs."""
+    """Captured test bytes and an inventory of files present before the run."""
 
     root: str
     files: dict[str, bytes] = field(default_factory=dict)
     configs: dict[str, bytes] = field(default_factory=dict)
+    known_files: set[str] = field(default_factory=set)
+    inventory_complete: bool = True
 
 
 @dataclass(slots=True)
 class RestoreReport:
-    """What the guard had to do right before a verification ran."""
+    """Restored files, observed changes and gaps in snapshot coverage."""
 
-    restored: list[str] = field(default_factory=list)  # rewritten to canonical
-    quarantined: list[str] = field(default_factory=list)  # new conftest moved aside
-    created: list[str] = field(default_factory=list)  # new test files (disclosed)
-    configs_changed: list[str] = field(default_factory=list)  # disclosed only
+    restored: list[str] = field(default_factory=list)
+    quarantined: list[str] = field(default_factory=list)
+    created: list[str] = field(default_factory=list)
+    configs_changed: list[str] = field(default_factory=list)
+    uncopied: int = 0
+    inventory_complete: bool = True
 
     def tampering(self) -> bool:
         return bool(self.restored or self.quarantined)
 
     def anything(self) -> bool:
         return bool(self.restored or self.quarantined or self.created
-                    or self.configs_changed)
+                    or self.configs_changed or self.uncopied or not self.inventory_complete)
 
 
 def snapshot_tests(cwd: str | os.PathLike[str]) -> TestSnapshot | None:
-    """Capture pre-run test files under *cwd*. ``None`` when disabled/invalid."""
+    """Capture test inputs within the limits; return None when disabled or outside a directory."""
     if not protect_tests_enabled():
         return None
     root = Path(cwd or ".").resolve()
@@ -156,18 +153,32 @@ def snapshot_tests(cwd: str | os.PathLike[str]) -> TestSnapshot | None:
         return None
     snap = TestSnapshot(root=str(root))
     total = 0
-    for p in _walk_test_files(root):
-        try:
-            if p.stat().st_size > _MAX_FILE_BYTES:
+    try:
+        for p in _walk_test_files(root, strict=True):
+            if len(snap.known_files) >= _MAX_TRACKED_FILES:
+                snap.inventory_complete = False
+                break
+            relative = str(p.relative_to(root))
+            snap.known_files.add(relative)
+            if len(snap.files) >= _MAX_FILES:
                 continue
-            data = p.read_bytes()
-        except OSError:
-            continue
-        total += len(data)
-        if len(snap.files) >= _MAX_FILES or total > _MAX_TOTAL_BYTES:
-            log.warning("test_snapshot_truncated", files=len(snap.files))
-            break
-        snap.files[str(p.relative_to(root))] = data
+            try:
+                size = p.stat().st_size
+                if size > _MAX_FILE_BYTES or total + size > _MAX_TOTAL_BYTES:
+                    continue
+                data = p.read_bytes()
+            except OSError as exc:
+                log.debug("test_snapshot_read_failed", path=relative, error=str(exc))
+                continue
+            if total + len(data) > _MAX_TOTAL_BYTES:
+                continue
+            total += len(data)
+            snap.files[relative] = data
+    except (OSError, ValueError) as exc:
+        snap.inventory_complete = False
+        log.warning("test_inventory_incomplete", error=str(exc))
+    if len(snap.known_files) > len(snap.files):
+        log.warning("test_snapshot_truncated", copied=len(snap.files), known=len(snap.known_files))
     for name in _CONFIG_FILES:
         p = root / name
         try:
@@ -179,16 +190,13 @@ def snapshot_tests(cwd: str | os.PathLike[str]) -> TestSnapshot | None:
 
 
 def restore_tests(snap: TestSnapshot | None) -> RestoreReport:
-    """Put the verification inputs back into their pre-run state.
-
-    Restores tampered/deleted pre-existing test files, quarantines newly
-    created ``conftest.py`` files (collection attack), and detects — without
-    reverting — new test files and modified runner configs.
-    """
+    """Restore captured originals and quarantine conftest files proven to be new."""
     report = RestoreReport()
     if snap is None or not protect_tests_enabled():
         return report
     root = Path(snap.root)
+    report.uncopied = len(snap.known_files - snap.files.keys())
+    report.inventory_complete = snap.inventory_complete
 
     for rel, data in snap.files.items():
         p = root / rel
@@ -205,10 +213,10 @@ def restore_tests(snap: TestSnapshot | None) -> RestoreReport:
         except OSError as exc:
             log.warning("test_restore_failed", path=rel, error=str(exc)[:120])
 
-    # Rescan for files that did not exist at snapshot time.
+    # A missing snapshot copy does not prove the file is new.
     for p in _walk_test_files(root):
         rel = str(p.relative_to(root))
-        if rel in snap.files:
+        if rel in snap.files or rel in snap.known_files or not snap.inventory_complete:
             continue
         if p.name == "conftest.py":
             target = p.with_name(p.name + _QUARANTINE_SUFFIX)
@@ -245,8 +253,12 @@ def _shown(paths: list[str], cap: int = 5) -> str:
 
 
 def restoration_note(report: RestoreReport) -> str:
-    """Disclosure for verdict evidence/transcripts. Empty when nothing happened."""
+    """Describe input changes and snapshot limits for the verification result."""
     lines: list[str] = []
+    if report.uncopied:
+        lines.append(f"note: {report.uncopied} existing test file(s) exceeded snapshot limits or could not be read; their originals were not restored.")
+    if not report.inventory_complete:
+        lines.append("note: the test inventory is incomplete; unrecorded files were left in place because their creation could not be established.")
     if report.restored:
         lines.append(
             f"⚠ the agent modified {len(report.restored)} pre-existing test "

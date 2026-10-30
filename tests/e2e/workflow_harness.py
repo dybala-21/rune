@@ -101,7 +101,7 @@ class Workflow:
                     and target.name.startswith("test_") and target.suffix == ".py")
         return target.is_relative_to(self.workspace) and (named or new_test)
 
-    def write_report(self, outcome: str):
+    def write_report(self, outcome: str, *, checks: dict | None = None):
         from scripts.e2e_report import metrics
 
         artifacts = {p.name: p.read_text() for p in self.workspace.iterdir()
@@ -110,7 +110,7 @@ class Workflow:
                   "decision_backend": getattr(self, "decision_backend", None),
                   "scope": "Web API, real model, managed browser. Background learning disabled; no cross-model fallback.",
                   "runs": self.runs, "decisions": self.decisions, "artifacts": artifacts,
-                  "metrics": metrics(self.runs)}
+                  "metrics": metrics(self.runs), "checks": checks or {}}
         path = self.reporter(report, settings={"max_iterations": 16, "timeout_seconds": 180,
                                              "cross_provider_failover": False, "browser_profile": "managed",
                                              **getattr(self, "settings", {})})

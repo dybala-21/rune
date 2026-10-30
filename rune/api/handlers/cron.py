@@ -226,7 +226,8 @@ async def update_cron_job(job_id: str, req: CronUpdateRequest) -> CronUpdateResp
             raise HTTPException(status_code=400, detail="Provide one goal or shell command")
         channel = current.notify_channel if req.notify_channel is None else req.notify_channel.strip()
         kwargs["command"] = _pack_command(command, goal, channel,
-                                           current.description, current.policy.patched(req.policy) if req.policy else current.policy)
+                                        current.description, current.policy.patched(req.policy) if req.policy else current.policy,
+                                        owner=current.owner)
     if req.enabled is not None:
         kwargs["enabled"] = req.enabled
     if "max_runs" in req.model_fields_set:

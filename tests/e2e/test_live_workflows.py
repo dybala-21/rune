@@ -74,7 +74,7 @@ def workflow(live_model, live_report, monkeypatch, tmp_path, request):
         result.settings = limits
         yield result
         outcome = "passed" if getattr(request.node, "live_passed", False) else "failed"
-        result.write_report(outcome)
+        result.write_report(outcome, checks=getattr(request.node, "live_checks", None))
     conversation_wiring._reset_for_tests()
 
 

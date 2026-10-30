@@ -192,7 +192,7 @@ class TestChannelMultiTurnRoundTrip:
             )
             mgr.add_turn(conv_id, "assistant", assistant_text)
             await store.save(mgr._active[conv_id])
-            return ctx.messages
+            return [message for message in ctx.messages if message.get("content")]
 
         h1 = await one_message("first question", "first answer")
         assert h1 == []  # nothing before the first message
