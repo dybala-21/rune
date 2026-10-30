@@ -99,7 +99,13 @@ jobs:
           PY
       - name: Run tests
         # Browser action regressions use Chromium, including its actionability checks.
-        run: uv run pytest tests/ -q --tb=short -n auto --dist worksteal --cov=rune --cov-report=term-missing:skip-covered
+        # sysmon keeps coverage overhead low; branch coverage is not collected.
+        env:
+          COVERAGE_CORE: sysmon
+        run: uv run pytest tests/ -q --tb=short -n auto --dist worksteal -m "not perf" --cov=rune --cov-report=term-missing:skip-covered
+      - name: Run timing tests
+        # Wall-clock budgets need an uncontended, untraced process.
+        run: uv run pytest tests/ -q --tb=short -m perf -p no:xdist
       - name: Run web regression tests
         env:
           RUNE_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python

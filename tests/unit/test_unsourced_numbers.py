@@ -234,6 +234,7 @@ def test_corrected_answer_clears_old_figures_even_after_nudge_budget(monkeypatch
     assert loop._unsourced_numbers == []
 
 
+@pytest.mark.perf
 def test_a_number_dump_cannot_blow_up_the_check():
     """Scanning is linear in source text and deriving is quadratic in values.
 
@@ -264,6 +265,7 @@ def test_a_derived_percentage_needs_real_magnitude():
     assert _derivable("22", known) is False
 
 
+@pytest.mark.perf
 def test_the_check_stays_on_the_fast_path():
     """This runs at finalize on every answer; CLAUDE.md wants hot paths sub-ms."""
     import time
