@@ -75,3 +75,31 @@ def preserve_responses_cache_usage() -> None:
 
     normalize._rune_cache_usage = True
     ResponseAPILoggingUtils._transform_response_api_usage_to_chat_usage = staticmethod(normalize)
+
+
+def preserve_responses_terminal_events() -> None:
+    """Preserve usage and failure status in Responses streams."""
+    from litellm.completion_extras.litellm_responses_transformation.transformation import (
+        OpenAiResponsesToChatCompletionStreamIterator as Bridge,
+    )
+
+    original = Bridge.translate_responses_chunk_to_openai_stream
+    if getattr(original, "_rune_terminal_events", False):
+        return
+
+    @wraps(original)
+    def translate(event):
+        data = event.model_dump() if hasattr(event, "model_dump") else event
+        if not isinstance(data, dict) or data.get("type") not in {"response.incomplete", "response.failed"}:
+            return original(event)
+        # Reuse the SDK's usage conversion, then restore the finish reason.
+        chunk = original({**data, "type": "response.completed"})
+        reason = ((data.get("response") or {}).get("incomplete_details") or {}).get("reason")
+        finish = "length" if data["type"] == "response.incomplete" and reason == "max_output_tokens" else (
+            "content_filter" if reason == "content_filter" else "error")
+        for choice in chunk.choices:
+            choice.finish_reason = finish
+        return chunk
+
+    translate._rune_terminal_events = True
+    Bridge.translate_responses_chunk_to_openai_stream = staticmethod(translate)

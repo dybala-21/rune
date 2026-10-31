@@ -103,9 +103,8 @@ async def test_frame_research_preserves_source_body_and_stops_without_an_extra_m
     request = requests[0]
     effort = (request.get("output_config", {}).get("effort") if provider == "anthropic" else
               request.get("thinkingConfig", {}).get("thinkingLevel") if provider == "gemini" else
-              request.get("extra_body", {}).get("reasoning_effort") if provider == "xai" else
               request.get("reasoning_effort", request.get("extra_body", {}).get("reasoning", {}).get("effort")))
-    assert effort == ("low" if lookup or not rebuild else None)
+    assert effort == ("low" if lookup or not rebuild else "medium")
     assert "https://research.example/news" in loop._citation_urls
     assert not checkpoints and not loop._rollover_phase_done
     payload = build_trust_payload(trace)
@@ -353,4 +352,4 @@ async def test_sources_are_required_without_redundant_model_calls(monkeypatch, t
         assert payload["sourceReview"]["excerptOnlyNumbers"] == ["120"]
         assert not payload["verified"]
     efforts = [call.get("reasoning_effort", call.get("extra_body", {}).get("reasoning", {}).get("effort")) for call in requests]
-    assert efforts == [("low" if case in {"fetch", "web_lookup"} else None)] * len(requests)
+    assert efforts == [("low" if case in {"fetch", "web_lookup"} else "medium")] * len(requests)

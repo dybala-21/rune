@@ -167,7 +167,7 @@ class TestResolveIntentContract:
         assert contract.kind == "code_read"
         assert contract.tool_requirement == "read"
 
-    def test_full_analyze_complex_requires_grounding(self):
+    def test_complex_local_analysis_does_not_require_web_sources(self):
         cls = FakeClassification(
             category="full",
             action_type="analyze",
@@ -177,7 +177,7 @@ class TestResolveIntentContract:
         contract = resolve_intent_contract(cls, 0.9)
         assert contract.kind == "research"
         assert contract.tool_requirement == "read"
-        assert contract.grounding_requirement == "required"
+        assert contract.grounding_requirement == "recommended"
 
     def test_full_analyze_simple_recommends_grounding(self):
         cls = FakeClassification(

@@ -44,3 +44,18 @@ def test_a_run_that_ran_nothing_after_a_covering_pass_changes_nothing():
     # A real failure afterwards still counts.
     state.observe_command("python3 -m pytest -v tests/test_slug.py", False, "1 failed, 2 passed", "/w")
     assert state.pending
+
+
+
+def test_passing_checks_do_not_claim_requirement_coverage_or_force_completion():
+    from rune.agent.verification_state import VerificationState
+
+    state = VerificationState()
+    state.changed()
+    state.observe_command("python3 -m pytest -q tests", True, PASSING, "/w")
+    assert state.passed
+    context = state.model_context()
+    assert "Recorded checks passed" in context
+    assert "uncovered requirements" in context
+    assert "compose the final answer" not in context
+    assert state.model_context(since_sequence=state.history[-1].sequence) == ""

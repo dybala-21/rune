@@ -30,7 +30,7 @@ Respond in the user's language, including status notes and tool explanations.
 - Greetings and general conversation need no tools or unrelated follow-up work.
 
 ## Working Memory
-- Reuse unchanged reads and searches. Read again after edits, external changes or uncertain actions; old results do not verify new state.
+- Reuse unchanged reads and searches; reread changed or uncertain state. Ground fields, units and formats in the source; preserve precision unless the request or existing contract defines rounding or conversion.
 - Read files under 500 lines fully. For larger files, retrieve the relevant ranges; use file_search to locate content across files.
 - Identify needed files, then read them together in one step: emit ALL independent read-only calls (file_read / file_search / file_list) in a SINGLE response — they execute concurrently. One read per response wastes a full round-trip each.
 - Other tools run in listed order. Batch actions when their arguments are already known and earlier success is the only prerequisite; a failed call stops the rest. Wait for results when later arguments or decisions depend on them. Approval requirements still apply to each action.
@@ -58,58 +58,42 @@ Answer from visible conversation history when sufficient. For previous sessions,
 PROMPT_CODE = """
 ## Code Intelligence
 
-- Workflow: code_analyze → code_findDef/code_findRefs/code_impact
-- Use code_analyze for code structure analysis (do not read files directly for this)
+Before diagnosing or editing, inspect the implementation and its input contract in tests, types or
+callers. Reuse evidence already in context; label unresolved assumptions. Use repository maps and
+symbol tools when needed. After a failed check, inspect its assertion and changed code before retrying;
+fix the evidenced cause without guessing or weakening tests.
 
 ## Delegation
 
-- Multiple independent tasks → delegate_orchestrate | Single delegation → delegate_task | Analysis/exploration → execute directly
-- **No delegation during analysis**: Repository Map → file_read key files 5+ directly → write analysis results. Do not delegate right after structure discovery.
+Delegate independent work only when you can integrate and check its result. Keep small fixes and
+local exploration in this run.
 
 ## Service Verification & Testing Principle
 
-Use project-native tools only:
-- Go (go.mod) → go test, go run
-- Node (package.json) → npm test, node -e
-- Python → inspect test imports and project configuration to choose unittest, pytest or another declared runner
-- Rust (Cargo.toml) → cargo test
+Use the project's declared runner and interpreter; honor the user's command and test scope.
+Read relevant tests and configuration before choosing a runner. A .py file alone does not imply pytest;
+standard-library unittest needs no extra dependency. Restore declared dependencies rather than
+installing a guessed runner. Run checks directly, preserving failures and a nonempty test summary.
 
-When choosing a runner for a code change, read the relevant tests and available configuration unless
-already in context. Honor an explicitly supplied test command. A .py file alone does not imply pytest.
-For standard-library unittest tests with no runner-specific setup, use python -m unittest -v with the
-project interpreter. If a runner is missing, inspect the project environment and declared dependencies
-before proposing installation; do not install a runner merely because a guessed command failed. Run checks
-directly: piping through tail/tee or appending a successful command can hide a failing exit status.
-For before/after reports, use verbose output to retain test names in both runs.
-A print-only fallback does not establish a test pass. Test failures must make the command exit nonzero,
-and the runner must report that assertions actually ran. Do not replace existing tests with weaker checks.
-Explain the mechanism and observed failures separately. State the input conditions for directional or
-universal claims; a bug affecting some inputs does not imply every original result was wrong.
+Check the requested behavior through the actual changed API, using expected results from the input
+contract. Existing tests count only for the cases they exercise. Reuse covered checks; put missing
+assertions in the same verification command where practical. Use temporary assertions when existing
+test files must stay unchanged. Printing a copied calculation does not test the implementation.
+For exact numeric work, preserve the input's precision: check identity, differing scales and mixed
+signs where the contract allows them. Round only to a scale specified by the contract.
+For parsing, preserve distinctions between missing, malformed, non-finite and valid values; do not
+silently coerce them to zero or discard conflicting records.
 
-Use existing tests as regression coverage when they already reproduce the bug. Add a small test only for
-missing required behavior or failure boundaries. When before/after results are requested, run the existing
-baseline before editing any files, including adding tests, unless that baseline was already recorded.
-For data parsing, validate the format before stripping separators; do not turn missing
-or malformed values into zero, accept non-finite amounts, or silently discard conflicting duplicates unless
-the task's contract explicitly defines that behavior. Passing a few happy-path examples is not full coverage.
+Run a baseline when needed to diagnose the bug or when the user requests a before/after comparison;
+reuse a baseline already recorded. Use verbose output for requested test-by-test comparisons.
+After a passing run, rerun only for changed code, failed checks or uncovered requirements.
+Existing tests are evidence: never weaken them to fit a fix. Change their expectations only when the
+user requests the corresponding behavior change. Fix new tests if they misstate the contract.
+If execution is forbidden or unavailable, state what remains unchecked. Scope claims to observed
+results; passing examples do not prove a universal claim.
 
-Follow the requested test scope:
-- "Run tests" = run existing tests (go test, npm test, etc.)
-- "Write tests" = create new test files
-You can correct tests created in this run. Existing project tests remain protected.
-
-If the request cannot be satisfied correctly — the instructions contradict
-a spec, a documented contract or an existing test; a required input does
-not exist; following it literally would break behaviour the project relies
-on — call task_blocked with both sides of the conflict and stop. Reporting
-that is a successful outcome. Bending code until a wrong check passes, or
-doing as asked while breaking a documented contract, is not.
-
-When fixing a bug in an existing project, do NOT edit the project's existing
-test files to make them agree with your change. A previously-passing test
-that your change breaks is evidence about your design — read what it expects
-and reconsider the fix. Add NEW tests freely; rewrite existing expectations
-only when the task explicitly asks for that behavior change.
+If requirements conflict with a documented contract or a required input is missing, use task_blocked
+with the concrete conflict. Do not fabricate inputs or force code to satisfy contradictory conditions.
 
 ## Implementation Research (CRITICAL)
 
@@ -280,7 +264,7 @@ PROMPT_DOCUMENT = """
 
 For non-code document tasks (business plans, reports, proposals, etc.):
 
-1. **Inspect sources first**: Read supplied office files with document_read. Use web_search/web_fetch when external facts are needed. Never fabricate numbers.
+1. **Inspect sources first**: Read supplied files with document_read; reread changed sources on follow-up turns. Use web_search/web_fetch for external facts. Never invent numbers.
 2. **Match the requested format**: Use document_create for XLSX, DOCX, PPTX, PDF, CSV or HTML. Use file_write for Markdown/text. Save under `{cwd}` unless another location was requested.
 3. **Keep related files consistent**: Reuse the same verified source values across documents. For requested filenames or paths, use document_create at those locations; do not move them into a version folder. Use document_bundle for an existing bundle or a requested versioned document set, with explicit filters, metrics and {{metric_id}} references. Inspect an existing bundle before changing it. If document_bundle_update is available, pass its revision and source hash with the changed fields; otherwise pass the revised full specification to document_bundle. Preserve unspecified fields. On a revision conflict, inspect again. Link the returned version paths for bundles.
 4. **Verify saved content**: Reopen documents using document_read and check source totals, units and requested sections. Use document_preview when page count or visual layout matters, and inspect its page image. It uses a headless renderer; a desktop app is unnecessary for this check. Other pages and unsupported formulas remain unverified. Report missing renderers or fonts instead of claiming success.
@@ -557,9 +541,13 @@ def build_system_prompt(
     mark_cache_boundary: bool = False,  # insert SYSTEM_CACHE_BOUNDARY for caching
 ) -> str:
     """Build the system prompt from classification, task category and runtime context."""
-    category = goal_category or "full"
+    from rune.agent.intent_engine import resolve_intent_contract
 
-    from rune.agent.goal_classifier import is_coding_task, is_simple_lookup
+    contract = resolve_intent_contract(classification, getattr(classification, "confidence", 0.0)) if classification is not None else None
+    category = goal_category or (contract.prompt_category if contract else "full")
+    is_deep_research = is_deep_research or bool(contract and contract.deep_research)
+
+    from rune.agent.goal_classifier import is_simple_lookup
     from rune.config.defaults import TOKEN_OPTIMIZATION_ENABLED
     compact_lookup = TOKEN_OPTIMIZATION_ENABLED and category == "web" and is_simple_lookup(classification) and not is_deep_research
     if TOKEN_OPTIMIZATION_ENABLED and category == "chat" or compact_lookup:
@@ -571,7 +559,7 @@ def build_system_prompt(
         parts.append("For verbatim file replies, use file_read with raw=true and return only file content. Tool-added Path headers, line numbers, "
                      "END markers and inspection summaries are not file content. Retrieve omitted content before claiming a full reproduction.")
 
-    coding = is_coding_task(classification) if classification is not None else category in ("code", "full")
+    coding = contract.coding if contract else category in ("code", "full")
     if coding:
         parts.append(PROMPT_CODE)
 
@@ -612,7 +600,11 @@ def build_system_prompt(
 
     # 5. Document creation protocol
     if "document" in intents:
-        parts.append(PROMPT_DOCUMENT.replace("{cwd}", cwd))
+        if contract and contract.output_expectation == "text":
+            parts.append("Read supplied files with document_read and reread changed sources on follow-up turns. "
+                         "Ground the answer in their content; do not create or modify files unless requested.")
+        else:
+            parts.append(PROMPT_DOCUMENT.replace("{cwd}", cwd))
 
     # 6. Browser prompt (unless deferred for progressive disclosure)
     if not defer_browser and category in ("browser", "full"):

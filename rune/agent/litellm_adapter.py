@@ -40,9 +40,13 @@ def _litellm() -> Any:
         _ll.suppress_debug_info = True
         # Let LiteLLM omit unsupported parameters so parameter errors do not trigger failover.
         _ll.drop_params = True
-        from rune.llm.usage import preserve_responses_cache_usage
+        from rune.llm.usage import (
+            preserve_responses_cache_usage,
+            preserve_responses_terminal_events,
+        )
 
         preserve_responses_cache_usage()
+        preserve_responses_terminal_events()
         _litellm_mod = _ll
     return _litellm_mod
 
@@ -120,9 +124,10 @@ from rune.agent.bash_parsing import is_test_command as _is_test_command
 
 _VERIFY_ON_STOP_MSG = (
     "You edited code this run but have not run any test since the last edit. "
-    "Before finishing: run the tests that cover the files you changed "
-    "(bash_execute), read any failure, repair the code if needed, then give "
-    "the final summary stating what passed."
+    "Before finishing: run the relevant existing tests and focused checks "
+    "for uncovered requirements within the user's test scope (bash_execute). "
+    "Read failures and repair the code if needed. Summarize what was checked "
+    "and leave unverified behavior explicit."
 )
 
 # Run the check ourselves at the stop instead of asking the model to.
@@ -576,8 +581,8 @@ def _build_action_schema(
     }
 
 
-def _answer_request(params: dict, tools: list | None, limit: str, *, guided: bool = False, continuation: bool = False) -> dict:
-    """Build the final request used for both reservation and dispatch."""
+def _answer_request(params: dict, tools: list | None, limit: str, *, guided: bool = False, continuation: bool = False, task: bool = False) -> dict:
+    """Use the same final request for budget checks and dispatch."""
     from rune.agent.prompts import SOURCE_GAP_GUIDANCE
 
     result = dict(params)
@@ -600,6 +605,15 @@ def _answer_request(params: dict, tools: list | None, limit: str, *, guided: boo
     if report_tools:
         note += (" Use task_blocked only if an unmet prerequisite prevents the requested outcome; "
                  "uncertain research findings alone are not a blocker.")
+    if task:
+        note = (
+            "The remaining budget cannot cover another work round. Answer from the recorded results. "
+            "State what changed, which checks ran, and any unfinished requirements. "
+            "Passing checks alone do not establish that the whole request is complete. "
+            "Do not invent evidence, repeat actions, or promise further work in this run."
+        )
+        if report_tools:
+            note += " If requested work remains, use task_blocked to report it."
     result["messages"] = [*params["messages"], {"role": "user", "content": note}]
     result.pop("tools", None)
     result.pop("tool_choice", None)
@@ -855,16 +869,17 @@ class StreamResult:
         default_reasoning_effort: str | None = None,
     ) -> None:
         self._model = model
+        from uuid import uuid4
+        self._prompt_cache_key = uuid4().hex
         self._request_deadline = request_deadline
         self._tool_catalog = tool_catalog
         if tool_catalog is not None:
             tool_catalog.reset_recovery()
         self._reserve_answer = reserve_answer
-        from rune.llm.reasoning import configured_reasoning_effort, reasoning_control
+        from rune.llm.reasoning import configured_reasoning_effort, supported_reasoning_default
         self._reasoning_effort = configured_reasoning_effort(model)
-        if (self._reasoning_effort is None and default_reasoning_effort is not None
-                and default_reasoning_effort in reasoning_control(model).efforts):
-            self._reasoning_effort = default_reasoning_effort
+        if self._reasoning_effort is None:
+            self._reasoning_effort = supported_reasoning_default(model, default_reasoning_effort)
         self._verification_callback = verification_callback
         self._verification_state = verification_state
         self._tool_recovery = tool_recovery
@@ -1109,6 +1124,8 @@ class StreamResult:
                 self._model,
                 min(self._max_tokens, self._response_tokens_limit, remaining_tokens),
             )
+            from rune.llm.stream_state import continuation_messages
+            state_model = self._provider_extra.get("_rune_source_model", self._model)
             _acompletion_kwargs: dict[str, Any] = {
                 "model": self._model,
                 # Compact the outgoing history; retain full messages for rollover.
@@ -1119,7 +1136,7 @@ class StreamResult:
                         _apply_anthropic_cache_control(
                             self._model,
                             mask_stale_tool_messages(
-                                validate_tool_pairs(self._messages)
+                                validate_tool_pairs(continuation_messages(self._messages, state_model))
                             ),
                         ),
                     ),
@@ -1133,6 +1150,8 @@ class StreamResult:
                 "max_retries": 0,
             }
             _traits = traits(self._model)
+            if _traits.responses_api:
+                _acompletion_kwargs["prompt_cache_key"] = self._prompt_cache_key
             if not _traits.temperature:
                 _acompletion_kwargs.pop("temperature", None)
             _effort = self._reasoning_effort
@@ -1200,10 +1219,41 @@ class StreamResult:
             _ll = _litellm()
             from rune.llm.request_params import compatible_completion
 
+            budget_reply = False
+
+            def prepare_request(params, tools=_tools, allow_reply=bool(_tool_round and not verification_pending and not recovery_tools)):
+                nonlocal _answer_only, budget_reply
+                from rune.agent.reobservation import repeated_mutation_dirs
+                from rune.agent.timing import request_fits
+
+                tools = tools if self._guided else params.get("tools")
+                if budget_reply:
+                    return _answer_request(params, tools, "budget", guided=self._guided, task=True)
+                if _answer_only or not allow_reply:
+                    return params
+                if request_fits(params):
+                    return params
+                unobserved = not self._reobs_nudges and (self._reobs_dirs or repeated_mutation_dirs(self._reobs_removed))
+                if (self._vos_edited or unobserved or self._unmet_postconditions()
+                        or self._unresolved_artifacts()):
+                    return params
+                answer = _answer_request(params, tools, "budget", guided=self._guided, task=True)
+                if not request_fits(answer):
+                    return params
+                # Keep cached tool definitions until a work request no longer fits.
+                budget_reply = _answer_only = True
+                self.answer_reserve_reason = "budget"
+                return answer
+
             self._round_usage = None
             self.response_started = False
-            self._stream = await compatible_completion(_ll.acompletion, _ll.BadRequestError, _acompletion_kwargs)
+            self._stream = await compatible_completion(
+                _ll.acompletion, _ll.BadRequestError, _acompletion_kwargs, prepare_request=prepare_request,
+            )
 
+            from rune.llm.stream_state import StreamState, provider_fields
+
+            response_state = StreamState(state_model)
             text_this_turn = ""
             tool_calls_by_index: dict[int, dict[str, Any]] = {}
             _batch_overflow = False
@@ -1224,6 +1274,7 @@ class StreamResult:
                     continue
 
                 choice = chunk.choices[0]
+                response_state.observe(choice.delta)
 
                 # Track finish_reason from final chunk
                 if choice.finish_reason:
@@ -1280,9 +1331,11 @@ class StreamResult:
                                 "function": {"name": "", "arguments": ""},
                             }
                         entry = tool_calls_by_index[idx]
+                        provider_fields(tc, entry)
                         if tc.id:
                             entry["id"] = tc.id
                         if hasattr(tc, "function") and tc.function:
+                            provider_fields(tc.function, entry["function"])
                             if tc.function.name:
                                 entry["function"]["name"] = tc.function.name
                             if tc.function.arguments:
@@ -1295,6 +1348,10 @@ class StreamResult:
                     if close := getattr(self._stream, "aclose", None):
                         await close()
                     break
+
+            if _finish_reason in {"error", "content_filter"}:
+                self._collected_text = self._collected_text[:_collected_len_before]
+                raise RuntimeError(f"Model response ended with {_finish_reason}; no tools from this response ran.")
 
             if control is not None and plan_revision != control.revision:
                 # No tool calls from this response have entered the history yet.
@@ -1396,55 +1453,24 @@ class StreamResult:
                     rolled_back=_rolled_back,
                 )
 
-            # Tool-call truncation recovery: the turn hit the output limit
-            # mid-arguments (a large tool argument such as a file_write body, or
-            # reasoning tokens consuming the budget). The partial arguments do not
-            # parse, so the call would run with empty args and fail, then the
-            # model retries and truncates again, looping to the tool-round cap.
-            # Raise BOTH caps (response_tokens_limit re-clamps max_tokens, so
-            # bumping only max_tokens has no effect) and re-prompt to retry the
-            # call, instead of executing the broken one.
-            if (
-                _finish_reason == "length"
-                and tool_calls_by_index
-                and _output_recovery_count < _MAX_OUTPUT_RECOVERY
-            ):
-                _truncated_tool = False
-                for _tc in tool_calls_by_index.values():
-                    _args = _tc["function"].get("arguments") or ""
-                    try:
-                        if _args:
-                            json.loads(_args)
-                    except (ValueError, TypeError):
-                        _truncated_tool = True
-                        break
-                if _truncated_tool:
-                    _output_recovery_count += 1
-                    _bumped = _clamp_max_tokens(
-                        self._model,
-                        min(max(self._max_tokens, self._response_tokens_limit) * 2,
-                            64_000),
-                    )
-                    self._max_tokens = _bumped
-                    self._response_tokens_limit = max(
-                        self._response_tokens_limit, _bumped
-                    )
-                    log.info(
-                        "tool_call_truncation_escalate",
-                        new_max=_bumped,
-                        attempt=_output_recovery_count,
-                    )
-                    self._messages.append({
-                        "role": "user",
-                        "content": (
-                            "Your previous tool call was cut off by the output "
-                            "limit before its arguments finished, so it could not "
-                            "run. The limit has been raised. Call the tool again, "
-                            "in full."
-                        ),
-                    })
-                    self._collected_text = ""
-                    continue
+            # Even valid JSON may be only part of an unfinished tool batch.
+            if _finish_reason == "length" and tool_calls_by_index:
+                self._collected_text = self._collected_text[:_collected_len_before]
+                if _output_recovery_count >= _MAX_OUTPUT_RECOVERY:
+                    self.tool_budget_exhausted = True
+                    break
+                _output_recovery_count += 1
+                _bumped = _clamp_max_tokens(
+                    self._model, min(max(self._max_tokens, self._response_tokens_limit) * 2, 64_000),
+                )
+                self._max_tokens = _bumped
+                self._response_tokens_limit = max(self._response_tokens_limit, _bumped)
+                log.info("tool_call_truncation_escalate", new_max=_bumped, attempt=_output_recovery_count)
+                self._messages.append({"role": "user", "content": (
+                    "The response was cut off by the output limit. None of its tool calls ran. "
+                    "Retry with a smaller, complete call. The remaining request budget still applies."
+                )})
+                continue
 
             if not tool_calls_by_index:
                 # Retry empty responses, but keep answers that do not need tools.
@@ -1477,10 +1503,7 @@ class StreamResult:
                             new_max=self._max_tokens,
                             attempt=_output_recovery_count,
                         )
-                    self._messages.append({
-                        "role": "assistant",
-                        "content": text_this_turn,
-                    })
+                    self._messages.append(response_state.message(text_this_turn))
                     # The next response resumes this text; retain the prefix in the saved answer.
                     if not _streamed_live and not _suppress_yield:
                         self._collected_text += text_this_turn
@@ -1492,9 +1515,7 @@ class StreamResult:
                 if _finish_reason == "length":
                     self.tool_budget_exhausted = True
 
-            # Yield (only reached if no continuation path triggered). If the text
-            # was already streamed live it is on screen and in collected_text, so
-            # don't emit it a second time.
+            # Emit buffered text once; live text has already been delivered.
             if not _discard and text_this_turn and not _streamed_live:
                 if delta and not _suppress_yield:
                     yield text_this_turn
@@ -1502,9 +1523,7 @@ class StreamResult:
                 elif not _suppress_yield:
                     self._collected_text += text_this_turn
 
-            # Pure text, no continuations — done (unless code was edited and
-            # never tested: inject ONE verify-on-stop reminder, then finish
-            # regardless of what the model does next time).
+            # Check untested code changes before accepting a final answer.
             if not tool_calls_by_index:
                 if (
                     getattr(self, "_vos_edited", False)
@@ -1516,15 +1535,8 @@ class StreamResult:
                 ):
                     self._vos_nudges = 1
                     if text_this_turn:
-                        self._messages.append({
-                            "role": "assistant",
-                            "content": text_this_turn,
-                        })
-                    # Run the check here rather than asking for it: the
-                    # asked-for version costs two extra rounds and can be
-                    # ignored; the executed version can be neither skipped
-                    # nor misreported. Falls back to the words when there is
-                    # nothing runnable.
+                        self._messages.append(response_state.message(text_this_turn))
+                    # Run a matching check directly to avoid a separate verification round.
                     _stop_check = None
                     if os.environ.get(_VOS_EXEC_ENV, "1") != "0":
                         _stop_check = await _run_stop_check(
@@ -1537,13 +1549,14 @@ class StreamResult:
                         self._messages.append({
                             "role": "user", "content": (
                                 "You edited code and stopped without running "
-                                "any test since the last edit. The covering "
-                                "tests have ALREADY been run for you — this "
-                                "is their authoritative result, do NOT run "
+                                "any test since the last edit. Matching "
+                                "tests have already been run for you; this "
+                                "is their recorded result. Do not run "
                                 f"them again: `{_cmd}`\n```\n{_out}\n```\n"
                                 "If it failed, fix the code (then you may "
-                                "re-test). If it passed, give the final "
-                                "summary now, stating exactly what passed."
+                                "re-test). If it passed, check any requested "
+                                "behavior those assertions did not cover before "
+                                "finalizing. State exactly what was checked."
                             ),
                         })
                         log.info("verify_on_stop_executed", round=_tool_round,
@@ -1552,14 +1565,12 @@ class StreamResult:
                         self._messages.append({
                             "role": "user", "content": _VERIFY_ON_STOP_MSG,
                         })
-                    # The pre-verification answer is superseded; without this
-                    # reset the early-stop guard would kill the next round.
+                    # Clear the draft so the next response can use the check result.
                     self._collected_text = ""
                     log.info("verify_on_stop_nudge", round=_tool_round)
                     continue
 
-                # Conditions fixed before the work started, checked against
-                # the filesystem rather than against the summary.
+                # Check the original conditions against the current filesystem.
                 _unmet = self._unmet_postconditions()
                 if (
                     _unmet
@@ -1569,9 +1580,7 @@ class StreamResult:
                     from rune.agent.postconditions import unmet_note
                     self._postcondition_nudges = 1
                     if text_this_turn:
-                        self._messages.append({
-                            "role": "assistant", "content": text_this_turn,
-                        })
+                        self._messages.append(response_state.message(text_this_turn))
                     self._messages.append({
                         "role": "user", "content": unmet_note(_unmet),
                     })
@@ -1591,9 +1600,7 @@ class StreamResult:
                     from rune.agent.provenance import unresolved_stop_note
                     self._artifact_nudges = 1
                     if text_this_turn:
-                        self._messages.append({
-                            "role": "assistant", "content": text_this_turn,
-                        })
+                        self._messages.append(response_state.message(text_this_turn))
                     self._messages.append({
                         "role": "user", "content": unresolved_stop_note(_missing, self._request),
                     })
@@ -1622,9 +1629,7 @@ class StreamResult:
                     _note = observation_note(_reobs, self._workspace_root)
                     if _note:
                         if text_this_turn:
-                            self._messages.append({
-                                "role": "assistant", "content": text_this_turn,
-                            })
+                            self._messages.append(response_state.message(text_this_turn))
                         self._messages.append({
                             "role": "user", "content": _note,
                         })
@@ -1633,10 +1638,7 @@ class StreamResult:
                                  dirs=sorted(_reobs)[:_REOBS_LOG_DIRS])
                         continue
                 if text_this_turn:
-                    self._messages.append({
-                        "role": "assistant",
-                        "content": text_this_turn,
-                    })
+                    self._messages.append(response_state.message(text_this_turn))
                 break
 
             # Safety: if we already collected a substantial text answer
@@ -1658,14 +1660,8 @@ class StreamResult:
                 self.tool_budget_exhausted = True
                 log.warning("stream_text_max_tool_rounds", rounds=_tool_round)
 
-            # Always append assistant message WITH tool_calls and execute
-            # them. This keeps the message history valid for both the
-            # current provider (Anthropic requires tool_result immediately
-            # after tool_use) and OpenAI (requires tool response for each
-            # tool_call_id).
-            assistant_msg: dict[str, Any] = {"role": "assistant"}
-            if text_this_turn:
-                assistant_msg["content"] = text_this_turn
+            # Keep each assistant tool call adjacent to its results.
+            assistant_msg = response_state.message(text_this_turn)
             assistant_msg["tool_calls"] = list(tool_calls_by_index.values())
             self._messages.append(assistant_msg)
 
@@ -2635,14 +2631,18 @@ class LiteLLMAgent:
         deferred = {name.replace(".", "__") for name in self._deferred_tools}
         has_deferred = any(tool.get("type") == "function" and tool["function"]["name"] in deferred
                            for tool in self._tool_schemas)
-        if os.environ.get("RUNE_TOOL_SEARCH", "1") != "0" and (ToolCatalog.needed(self._tool_schemas) or self._compact_tools and has_deferred):
+        large_catalog = ToolCatalog.needed(self._tool_schemas)
+        if os.environ.get("RUNE_TOOL_SEARCH", "1") != "0" and (large_catalog or has_deferred):
             from rune.agent.prompts import PROMPT_BROWSER, PROMPT_TABLE
 
             initial = None
-            if self._compact_tools:
+            if self._compact_tools or not large_catalog:
                 initial = {tool["function"]["name"] for tool in self._tool_schemas
                            if tool.get("type") == "function"} - deferred
-            self._tool_catalog = ToolCatalog(self._tool_schemas, deferred_tools=deferred, initial_tools=initial)
-            self._tool_schemas = self._tool_catalog.schemas
-            self._tool_lookup["tool_search"] = self._tool_catalog.search
-            self._system_prompt = self._system_prompt.replace(PROMPT_BROWSER, "").replace(PROMPT_TABLE, "")
+            catalog = ToolCatalog(self._tool_schemas, deferred_tools=deferred, initial_tools=initial)
+            # Small toolsets may cost less without discovery.
+            if self._compact_tools or len(json.dumps(catalog.schemas, ensure_ascii=False)) < len(json.dumps(self._tool_schemas, ensure_ascii=False)):
+                self._tool_catalog = catalog
+                self._tool_schemas = catalog.schemas
+                self._tool_lookup["tool_search"] = catalog.search
+                self._system_prompt = self._system_prompt.replace(PROMPT_BROWSER, "").replace(PROMPT_TABLE, "")

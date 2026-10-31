@@ -84,16 +84,12 @@ from rune.safety.guardian import Guardian
 
 
 class TestDeepResearchPipeline:
-    """Simulate a deep research request flowing through the entire pipeline:
-    classify → intent contract → budget scaling → prompt assembly → evidence
-    tracking → completion gate verification.
-    """
+    """Check research routing, budgets, evidence and completion gates."""
 
     def test_deep_research_goal_classification_chain(self) -> None:
-        """'analyze the entire codebase architecture' should classify as
-        research, produce a read-only intent contract with grounding, and
-        scale budget to 300K tokens."""
-        result = ClassificationResult(goal_type="research", confidence=0.9, tier=2, reason="test")
+        """Keep repository analysis read-only and apply the research budget."""
+        result = ClassificationResult(goal_type="research", confidence=0.9, tier=2, reason="test",
+                                      intent_categories=frozenset({"coding"}))
         assert result is not None
         assert result.goal_type == "research"
 
@@ -102,7 +98,6 @@ class TestDeepResearchPipeline:
         assert contract.tool_requirement == "read"
         assert contract.requires_code_verification is False
 
-        # Budget: research intent → 300K
         budget_key = "research"
         budget = _BUDGET_BY_INTENT[budget_key]
         assert budget == 300_000
@@ -913,24 +908,20 @@ class TestIntentEnginePipeline:
         assert contract.kind == "research"
         assert contract.grounding_requirement == "required"
 
-    def test_full_goal_analyze_type_produces_research(self) -> None:
-        """Full goal with default action (unspecified) and non-simple complexity
-        → research contract with grounding.
-
-        ClassificationResult uses __slots__, so we can't set 'action_type'.
-        The resolve_intent_contract reads getattr(cls, 'action_type', 'unspecified')
-        which defaults to 'unspecified' (treated as 'analyze').
-        """
+    @pytest.mark.parametrize("needs_web,grounding", [(False, "recommended"), (True, "required")])
+    def test_complex_analysis_keeps_the_source_requirement(self, needs_web, grounding) -> None:
+        """Source requirements come from the task, not its difficulty."""
         cls = ClassificationResult(
             goal_type="full",
             confidence=0.9,
             tier=1,
             complexity="complex",
+            needs_web_evidence=needs_web,
         )
-        # getattr(cls, 'action_type', 'unspecified') → 'unspecified' → is_analyze=True
         contract = resolve_intent_contract(cls, 0.9)
         assert contract.kind == "research"
-        assert contract.grounding_requirement == "required"
+        assert contract.tool_requirement == "read"
+        assert contract.grounding_requirement == grounding
 
 
 # =========================================================================

@@ -1555,42 +1555,18 @@ class NativeAgentLoop(EventEmitter):
         classification: ClassificationResult,
         context: dict[str, Any] | None = None,
     ) -> str:
-        """Build the system prompt for the agent using the canonical prompt builder."""
-        # Map GoalType → goal_category for prompt assembly
+        """Build the task prompt from its intent contract and runtime context."""
         from rune.config.defaults import TOKEN_OPTIMIZATION_ENABLED
 
         workspace_root = (context or {}).get("workspace_root") or self._workspace_root or os.getcwd()
-
-        if TOKEN_OPTIMIZATION_ENABLED:
-            _CATEGORY_MAP: dict[str, str] = {
-                "code_modify": "code",
-                "artifact": "artifact",
-                "research": "code",
-                "execution": "code",
-                "web": "web",
-                "browser": "browser",
-                "full": "full",
-                "chat": "chat",  # optimized: lightweight chat prompt
-            }
-        else:
-            _CATEGORY_MAP: dict[str, str] = {
-                "code_modify": "code",
-                "artifact": "artifact",
-                "research": "code",
-                "execution": "code",
-                "web": "web",
-                "browser": "browser",
-                "full": "full",
-                "chat": "full",  # original: full prompt for chat
-            }
-        goal_category = _CATEGORY_MAP.get(classification.goal_type, "full")
-
-        goal_type = getattr(classification, "goal_type", "")
-        is_deep = goal_type == "research" and not classification.intent_categories & {"desktop", "calculation"}
+        contract = resolve_intent_contract(classification, classification.confidence)
+        goal_category = contract.prompt_category
+        if not TOKEN_OPTIMIZATION_ENABLED and goal_category == "chat":
+            goal_category = "full"
 
         # Only coding tasks need repository context.
         repo_map_text: str | None = None
-        if is_coding_task(classification):
+        if contract.coding:
             try:
                 from rune.intelligence.repo_map import build_repo_map_sync
 
@@ -1622,7 +1598,7 @@ class NativeAgentLoop(EventEmitter):
                 "home": os.path.expanduser("~"),
             },
             repo_map=repo_map_text,
-            is_deep_research=is_deep,
+            is_deep_research=contract.deep_research,
             browser_state=(context or {}).get("browser_state"),
             has_mcp_services=bool(_mcp_servers),
             mcp_server_names=_mcp_servers,
@@ -2104,7 +2080,8 @@ class NativeAgentLoop(EventEmitter):
         )
         from rune.agent.prompts import PROMPT_TABLE
 
-        system_prompt += PROMPT_TABLE
+        if not _desktop_mode and (self._table_acceptance.required or {"table_requirements", "table_verify"} & set(tools)):
+            system_prompt += PROMPT_TABLE
         adapter_opts = ToolAdapterOptions(
             cognitive_cache=cache,
             stall_state=self._stall,
@@ -2172,16 +2149,17 @@ class NativeAgentLoop(EventEmitter):
         reserve_answer = simple_lookup or is_web_research(classification) or classification.goal_type == "chat" and set(tools) <= {
             "think", "ask_user", "task_blocked", "memory_search", "memory_save", "web_search", "web_fetch",
         }
+        from rune.agent.goal_classifier import task_reasoning_effort
         from rune.agent.tool_catalog import deferred_for_task
 
         deferred_tools = deferred_for_task(tools, classification)
+        if _desktop_mode:
+            deferred_tools.difference_update(DESKTOP_TOOLS)
         task_agent_options = {
             "deferred_tools": deferred_tools,
             "compact_tools": simple_lookup or is_web_research(classification) or classification.goal_type == "browser",
             "reserve_answer": reserve_answer,
-            "default_reasoning_effort": "low" if simple_lookup or (
-                is_web_research(classification) and classification.complexity == "simple"
-            ) else None,
+            "default_reasoning_effort": task_reasoning_effort(classification),
         }
         agent = LiteLLMAgent(
             model=model,

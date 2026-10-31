@@ -195,3 +195,23 @@ def test_explicit_default_wins_over_legacy_global_setting():
     cfg = LLMConfig(activeProvider='openai', activeModel='gpt-6-astra', reasoningEffort='high',
                     reasoningEfforts={'openai/gpt-6-astra': None})
     assert cfg.reasoning_efforts == {'openai/gpt-6-astra': None}
+
+
+
+@pytest.mark.parametrize("model,expected", [
+    ("openai/gpt-6-astra", "medium"), ("xai/grok-4.7", "medium"),
+    ("anthropic/claude-opus-5", "medium"), ("gemini/gemini-2.5-flash", "medium"),
+    ("gemini/gemini-3-pro-preview", "high"), ("ollama/private-model", None),
+])
+@pytest.mark.parametrize("preference", [None, "high"])
+async def test_task_reasoning_respects_capabilities_and_user_preference(monkeypatch, model, expected, preference):
+    from rune.agent.litellm_adapter import LiteLLMAgent
+    from rune.llm.reasoning import ReasoningControl
+
+    monkeypatch.setattr("rune.llm.reasoning.configured_reasoning_effort", lambda _: preference)
+    monkeypatch.setattr("rune.llm.target.vertex_active", lambda: False)
+    if expected is None:
+        monkeypatch.setattr("rune.llm.reasoning.reasoning_control", lambda _: ReasoningControl())
+    agent = LiteLLMAgent(model=model, default_reasoning_effort="medium")
+    async with agent.run_stream("Apply the requested change") as result:
+        assert result._reasoning_effort == (preference or expected)

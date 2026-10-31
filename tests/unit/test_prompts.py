@@ -145,7 +145,7 @@ class TestBuildSystemPrompt:
         from rune.agent.prompts import PROMPT_CHAT
 
         classification = ClassificationResult(goal_type="web", confidence=.99, tier=2,
-                                             needs_web_evidence=True, lookup_only=True)
+                                             needs_web_evidence=True, lookup_only=True, complexity="simple")
         prompt = build_system_prompt(goal="Read the current value", classification=classification,
                                      goal_category="web", is_deep_research=deep)
         if deep:
@@ -238,7 +238,7 @@ class TestBuildSystemPrompt:
 
     def test_document_intent_includes_document_protocol(self):
         classification = ClassificationResult(
-            goal_type="full", confidence=0.9, tier=2,
+            goal_type="full", confidence=0.9, tier=2, output_expectation="file",
             intent_categories=frozenset({"document"}),
         )
         prompt = build_system_prompt(
@@ -498,6 +498,9 @@ async def test_mixed_document_work_does_not_require_deep_research(tmp_path, monk
     assert PROMPT_DOCUMENT.replace("{cwd}", str(tmp_path)) in prompt
     classification.goal_type = "research"
     research = await loop._build_system_prompt("Compare source documents", classification, context)
+    assert PROMPT_WEB_DEEP not in research
+    classification.needs_web_evidence = True
+    research = await loop._build_system_prompt("Compare these documents with published sources", classification, context)
     assert PROMPT_WEB_DEEP in research
 
 
@@ -511,7 +514,7 @@ class TestClassificationResultExtendedFields:
         assert cls.is_multi_task is False
         assert cls.requires_code is False
         assert cls.requires_execution is False
-        assert cls.complexity == "simple"
+        assert cls.complexity == "moderate"
         assert cls.output_expectation == "text"
 
     def test_custom_values(self):
@@ -532,3 +535,13 @@ class TestClassificationResultExtendedFields:
         assert cls.requires_code is True
         assert cls.complexity == "complex"
         assert cls.output_expectation == "file"
+
+
+@pytest.mark.parametrize("goal_type,execute", [("research", False), ("research", True), ("full", False)])
+def test_document_analysis_does_not_request_an_unasked_deliverable(goal_type, execute):
+    c = ClassificationResult(goal_type, .99, 2, intent_categories=frozenset({"document"}),
+                             requires_execution=execute, output_expectation="text")
+    prompt = build_system_prompt("Compare the supplied reports in your answer", classification=c)
+    assert "Document Creation Protocol" not in prompt
+    assert "Read supplied files with document_read" in prompt
+    assert "Code Intelligence" not in prompt

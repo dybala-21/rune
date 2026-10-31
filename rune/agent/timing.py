@@ -43,6 +43,35 @@ def remaining_tokens() -> int | None:
     return min(values) if values else None
 
 
+def request_fits(params: dict) -> bool:
+    """Check run limits without reserving budget."""
+    from rune.agent.request_budget import (
+        BudgetExceeded,
+        admit,
+        calibrated_input,
+        check_request_budget,
+        input_estimate,
+    )
+
+    run = _current.get()
+    if run is None:
+        return True
+    parents = tuple(scopes(run))
+    try:
+        for scope in parents:
+            check_request_budget(scope)
+        if not any(getattr(bound_budget(scope), "total", None) is not None
+                   or getattr(getattr(scope["owner"], "_config", None), "cost_budget_usd", None) is not None
+                   for scope in parents):
+            return True
+        estimated = calibrated_input(run, params, input_estimate(params))
+        for scope in parents:
+            params, _ = admit(scope, params, estimated)
+    except BudgetExceeded:
+        return False
+    return True
+
+
 def needs_answer_reserve(params: dict, tokens_left: int, *, answer_params: dict | None = None) -> bool:
     """Reserve enough budget for a final answer."""
     from rune.agent.request_budget import calibrated_input, input_estimate

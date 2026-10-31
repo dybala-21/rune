@@ -25,6 +25,29 @@ def _saved_task(workflow):
     return tasks[0]['id']
 
 
+def _check_invoice_precision(workspace):
+    checked = subprocess.run(['node', '--input-type=module', '-e', """
+import assert from 'node:assert/strict';
+import {total} from './invoice.mjs';
+const cases = [
+  [[.2, .4], .6], [[.001, .002], .003], [[1.234], 1.234],
+  [[-.001, .004], .003], [[.002, .001], .003],
+];
+for (let scale = 1; scale <= 16; scale++) {
+  for (const sign of [1, -1]) {
+    cases.push([[Number(`${sign}e-${scale}`), Number(`2e-${scale}`)], Number(`${sign + 2}e-${scale}`)]);
+  }
+}
+cases.push([[1.23456789012345], 1.23456789012345], [[1e15, .001, -1e15], .001]);
+for (const [amounts, expected] of cases) {
+  const rows = amounts.map(amount => ({status: 'paid', amount}));
+  rows.push({status: 'refunded', amount: 99});
+  assert.equal(total(rows), expected, `Precision changed for ${amounts}`);
+}
+"""], cwd=workspace, capture_output=True, text=True, timeout=20)
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+
+
 @pytest.mark.parametrize('workflow', [{'max_iterations': 14, 'timeout_seconds': 180,
                                        'cost_budget_usd': .30}], indirect=True)
 def test_javascript_fix_keeps_the_task_across_chats(workflow, request):
@@ -58,6 +81,7 @@ test('integer total', () => assert.equal(total([{status:'paid', amount:20}, {sta
     checked = subprocess.run(['node', '--test', 'invoice.test.mjs'], cwd=workflow.workspace,
                              capture_output=True, text=True, timeout=20)
     assert checked.returncode == 0, checked.stdout + checked.stderr
+    _check_invoice_precision(workflow.workspace)
     assert _saved_task(workflow) == task_id
     assert not gui_calls(first) and not gui_calls(second)
     request.node.live_passed = True

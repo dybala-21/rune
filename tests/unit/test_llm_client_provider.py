@@ -247,8 +247,9 @@ async def test_auxiliary_reasoning_override_reaches_provider_without_becoming_a_
     for effort in ("low", None):
         await client.completion(messages=[{"role": "user", "content": "route"}],
                                 model="grok-4.6", provider=Provider.XAI, reasoning_effort=effort)
-    assert seen[0]["extra_body"]["reasoning_effort"] == "low"
-    assert "reasoning_effort" not in seen[1].get("extra_body", {})
+    assert all(request["model"] == "xai/responses/grok-4.6" for request in seen)
+    assert seen[0]["extra_body"]["reasoning"]["effort"] == "low"
+    assert "reasoning" not in seen[1].get("extra_body", {})
 
 
 @pytest.mark.parametrize("model", ["grok-4.6", "grok-4.7"])
@@ -268,7 +269,8 @@ async def test_grok_structured_checks_use_low_effort_unless_explicitly_overridde
             model=model, provider=Provider.XAI, response_format=RESPONSE_FORMAT, reasoning_effort=effort)
     await LLMClient().completion(messages=[{"role": "user", "content": "table requirements"}],
         model=model, provider=Provider.XAI, timeout=30)
-    assert [p["extra_body"]["reasoning_effort"] for p in seen] == ["low", "xhigh", "low"]
+    assert all(request["model"] == f"xai/responses/{model}" for request in seen)
+    assert [request["extra_body"]["reasoning"]["effort"] for request in seen] == ["low", "xhigh", "low"]
 
 
 def test_ollama_routes_keep_the_json_schema_constraint():

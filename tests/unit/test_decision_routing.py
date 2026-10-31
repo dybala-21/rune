@@ -39,7 +39,7 @@ def setup(monkeypatch):
 
 
 def payload(questions, **picks):
-    defaults = {"goal_type": "chat", "desktop": "none", "calculation": "none", "table_output": "none", "source_output": "none", "browser_effect": "change", "resume_task": "none", "task_scope": "step"}
+    defaults = {"complexity": "simple", "goal_type": "chat", "desktop": "none", "calculation": "none", "table_output": "none", "source_output": "none", "browser_effect": "change", "resume_task": "none", "task_scope": "step"}
     answers = {}
     for name, question in questions.items():
         choice = picks.get(name, defaults.get(name, "no"))

@@ -437,3 +437,67 @@ async def test_failed_routing_clears_prior_domain_and_never_selects_tools(monkey
     assert 'read_timeout' in trace.reason
     assert loop._last_goal_type == ''
     select.assert_not_called()
+
+
+@pytest.mark.parametrize("intents", [[], ["document"], ["coding"], ["table", "calculation"]])
+async def test_local_research_does_not_inherit_web_research(monkeypatch, intents):
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.agent.intent_engine import resolve_intent_contract
+    from rune.agent.loop import NativeAgentLoop
+    from rune.agent.prompts import PROMPT_WEB_BASE, PROMPT_WEB_DEEP
+
+    monkeypatch.setattr("rune.intelligence.repo_map.build_repo_map_sync", lambda *a, **k: "")
+    result = ClassificationResult("research", .99, 2, intent_categories=frozenset(intents))
+    prompt = await NativeAgentLoop()._build_system_prompt("Inspect supplied files", result)
+    assert PROMPT_WEB_DEEP not in prompt and PROMPT_WEB_BASE not in prompt
+    contract = resolve_intent_contract(result, .99)
+    assert contract.kind == ("code_read" if "coding" in intents else "research")
+    assert not contract.requires_code_verification
+
+
+
+@pytest.mark.parametrize("complexity,effort", [("simple", "low"), ("moderate", "medium"), ("complex", "high")])
+async def test_task_difficulty_reuses_routing_and_survives_handoff(monkeypatch, complexity, effort):
+    from rune.agent.goal_classifier import task_reasoning_effort
+
+    stub = client(monkeypatch, response(verdict(goal_type="code_modify", intent_categories=["coding"], complexity=complexity)))
+    result = await classify_goal("Continue the change with the original constraints")
+    assert result.available and result.complexity == complexity
+    assert task_reasoning_effort(result) == effort
+    assert task_reasoning_effort(from_wire(to_wire(result))) == effort
+    assert stub.completion.await_count == 1
+
+
+async def test_legacy_routing_does_not_assume_all_work_is_simple(monkeypatch):
+    from rune.agent.classification_response import InvalidClassification, validate_decision
+    from rune.agent.goal_classifier import ClassificationResult, task_reasoning_effort
+
+    stub = client(monkeypatch, response(verdict()),
+                  response(verdict(goal_type="web", lookup_only=True, needs_web_evidence=True)))
+    assert (await classify_goal("Continue the work")).complexity == "moderate"
+    assert (await classify_goal("Look up the current value")).complexity == "simple"
+    assert stub.completion.await_count == 2
+    legacy = verdict()
+    assert validate_decision(legacy) == legacy
+    for invalid in ("unknown", None, [], 3):
+        with pytest.raises(InvalidClassification):
+            validate_decision(verdict(complexity=invalid))
+    task = ClassificationResult("code_modify", .95, 2)
+    assert task_reasoning_effort(task) == "medium"
+    task.available = False
+    assert task_reasoning_effort(task) is None
+    task.available, task.confidence = True, .5
+    assert task_reasoning_effort(task) is None
+
+
+
+@pytest.mark.parametrize("complexity", ["simple", "moderate", "complex"])
+@pytest.mark.parametrize("needs_web", [False, True])
+def test_task_difficulty_cannot_create_or_remove_a_source_requirement(complexity, needs_web):
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.agent.intent_engine import resolve_intent_contract
+
+    task = ClassificationResult("full", .95, 2, complexity=complexity, needs_web_evidence=needs_web)
+    contract = resolve_intent_contract(task, task.confidence)
+    assert (contract.grounding_requirement == "required") is needs_web
+    assert contract.tool_requirement == "read"

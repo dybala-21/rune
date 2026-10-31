@@ -117,5 +117,61 @@ def test_requirement_outside_title_is_visible_to_router(tmp_path):
     history = []
     attach_shared_tasks(history, Conversation(user_id="web:session"), str(tmp_path), "Continue the zirconia appendix")
     routed = next(item for item in routing_context(history) if item["id"] == wanted["id"])
-    assert "zirconia" in routed["request"]
-    assert len(routed["request"]) <= 240
+    assert routed["request"] == wanted["goal"]
+    assert "zirconia" in routed["matched_context"]
+    assert len(routed["matched_context"]) <= 160
+
+
+@pytest.mark.parametrize("goal,query", [
+    ("invoice.mjs의 청구 합계 버그를 맡아줘. paid 행만 합산하고 공개 함수 이름과 인자를 유지해야 해. "
+     "지금은 파일을 읽고 수정할 사항만 파악해. 코드와 테스트 파일은 아직 변경하지 마.",
+     "앞서 맡긴 청구 합계 수정을 이제 진행해. 추가로 소수 금액도 정확히 계산돼야 해. "
+     "기존 테스트는 변경하지 말고 node --test로 실행해서 결과를 확인해."),
+    ("Prepare the release plan; preserve the original source. Inspect it first without creating a document.",
+     "Continue the release plan with the updated source and preserve the original."),
+])
+def test_retrieved_task_keeps_its_identity_beside_matching_constraints(tmp_path, goal, query):
+    wanted = record(goal, status="completed", kind="conversation", category="research")
+    wanted["checkpoint"] = {"id": wanted["id"], "request": goal, "requests": [goal],
+                            "status": "completed", "goal_type": "research"}
+    store = TaskStore()
+    store.create("local", str(tmp_path), [wanted, *[record(f"Unrelated presentation {i}") for i in range(8)]])
+    history = []
+    attach_shared_tasks(history, Conversation(user_id="web:session"), str(tmp_path), query)
+    routed = routing_context(history)
+    selected = next(task for task in routed if task["id"] == wanted["id"])
+    assert selected["request"] == goal[:240]
+    assert selected["status"] == "completed"
+    assert len(routed) <= 4
+    assert count_tokens(json.dumps(routed, ensure_ascii=False)) <= 600
+    assert next(task for task in from_history(history) if task["id"] == wanted["id"])["requests"] == [goal]
+
+
+def test_matching_excerpt_is_not_repeated_when_the_request_contains_it():
+    from rune.agent.task_context import HISTORY_KEY
+
+    history = [{HISTORY_KEY: [{"id": "abcdef123456", "request": "Keep the complete source precision",
+                              "_match": "complete source precision"}]}]
+    assert "matched_context" not in routing_context(history)[0]
+
+
+@pytest.mark.parametrize("excerpt", [None, False, 1, [], {}])
+def test_invalid_search_excerpt_cannot_hide_a_valid_task(excerpt):
+    from rune.agent.task_context import HISTORY_KEY
+
+    history = [{HISTORY_KEY: [{"id": "abcdef123456", "request": "Update the report", "_match": excerpt}]}]
+    task = routing_context(history)[0]
+    assert task["request"] == "Update the report"
+    assert "matched_context" not in task
+
+
+@pytest.mark.parametrize("excerpt", ["Matching source context " * 20, "관련 검색 발췌문 " * 20])
+def test_optional_excerpts_do_not_displace_task_candidates(excerpt):
+    from rune.agent.task_context import HISTORY_KEY
+
+    tasks = [{"id": f"{index:012x}", "request": f"Job {index}: " + "요구 사항 " * 30,
+              "_match": excerpt} for index in range(4)]
+    routed = routing_context([{HISTORY_KEY: tasks}])
+    assert [task["id"] for task in routed] == [task["id"] for task in tasks]
+    assert [task["request"] for task in routed] == [task["request"][:240] for task in tasks]
+    assert count_tokens(json.dumps(routed, ensure_ascii=False)) <= 600

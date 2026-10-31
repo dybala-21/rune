@@ -42,3 +42,47 @@ test('formatted file links remain clickable in lists and table cells', () => {
   const code = renderToStaticMarkup(createElement(Markdown, { content: '`[PDF](office/briefing.pdf)`', sessionId: 'office' }));
   assert.ok(!code.includes('<a '));
 });
+
+
+test('office outputs open as files while changes remain available', async () => {
+  const { WorkbenchPanel } = await server.ssrLoadModule('/src/components/WorkbenchPanel.tsx');
+  const { shouldOpenWorkbench, preferredWorkbenchTab } = await server.ssrLoadModule('/src/utils/workbench.ts');
+  const calls = [{ id: 'doc', toolName: 'document_create', args: { path: 'office/보고서.docx' }, result: 'Created', success: true, timestamp: 1 }];
+  assert.equal(shouldOpenWorkbench(calls, []), true);
+  assert.equal(preferredWorkbenchTab(calls, []), 'outputs');
+  const html = renderToStaticMarkup(createElement(WorkbenchPanel, { sessionId: 'office', toolCalls: calls,
+    fileChanges: [{ id: 'c', path: 'helper.py', kind: 'modified', patch: '+x' }],
+    isRunning: false, activitySummary: null, onClose() {} }));
+  assert.match(html, /Files from this task/);
+  assert.match(html, /sessionId=office/);
+  assert.match(html, />Changes</);
+  assert.doesNotMatch(html, /Checks passed|Content verified/);
+});
+
+test('failed, interrupted and unknown document writes do not become download links', async () => {
+  const { workbenchOutputs } = await server.ssrLoadModule('/src/utils/workbench.ts');
+  const { OutputsPane } = await server.ssrLoadModule('/src/components/OutputsPane.tsx');
+  for (const state of [{ success: false, result: 'error' }, {}, { result: 'unknown' }]) {
+    const calls = [{ id: 'doc', toolName: 'document_create', args: { path: 'report.pdf' }, timestamp: 1, ...state }];
+    const html = renderToStaticMarkup(createElement(OutputsPane, { outputs: workbenchOutputs(calls, 'office'), isRunning: false }));
+    assert.doesNotMatch(html, /href=|Creating|Created/);
+  }
+  const html = renderToStaticMarkup(createElement(OutputsPane, { isRunning: false, outputs: [
+    { path: 'javascript:alert(1)', state: 'created', sessionId: 'office' },
+    { path: 'https://example.com/unsafe', state: 'created', sessionId: 'office' },
+  ] }));
+  assert.doesNotMatch(html, /href=/);
+});
+
+
+test('bundle files keep their session and unpublished downloads remain unconfirmed', async () => {
+  const { workbenchOutputs } = await server.ssrLoadModule('/src/utils/workbench.ts');
+  const outputs = workbenchOutputs([], 'office', { artifactReceipts: [
+    { kind: 'document_bundle', artifacts: [{ path: 'bundle/report.docx', sha256: 'hash' }], checks: { native_content: 'pass' } },
+    { scope: 'download', path: '/Desktop/report.pdf', sessionId: 'native', verified: false },
+  ] });
+  assert.deepEqual(outputs, [
+    { path: 'bundle/report.docx', sessionId: 'office', state: 'created' },
+    { path: '/Desktop/report.pdf', sessionId: 'native', state: 'unknown' },
+  ]);
+});

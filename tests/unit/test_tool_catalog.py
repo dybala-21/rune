@@ -81,9 +81,9 @@ async def test_small_lookup_catalog_keeps_rendering_tools_available_on_demand():
 
     names = ["web_search", "web_fetch", "task_blocked", "file_read", "browser_observe", "browser_navigate"]
     tools = [ToolWrapper(name=name, description="x" * 1000, function=AsyncMock()) for name in names]
-    classification = ClassificationResult(goal_type="web", confidence=.99, tier=2, needs_web_evidence=True, lookup_only=True)
+    classification = ClassificationResult(goal_type="web", confidence=.99, tier=2, needs_web_evidence=True, lookup_only=True, complexity="simple")
     deferred = deferred_for_task(names, classification)
-    full = LiteLLMAgent("openai/gpt-5.4", tools=tools, deferred_tools=deferred)
+    full = LiteLLMAgent("openai/gpt-5.4", tools=tools)
     agent = LiteLLMAgent("openai/gpt-5.4", tools=tools, deferred_tools=deferred, compact_tools=True)
     assert agent._tool_catalog.loaded == {"web_search", "web_fetch", "task_blocked", "tool_search"}
     assert len(json.dumps(agent._tool_schemas)) < len(json.dumps(full._tool_schemas))
@@ -153,14 +153,11 @@ async def test_native_tools_pass_through_with_or_without_discovery(compact, coun
     agent = LiteLLMAgent("anthropic/claude-sonnet-4-6", tools=[*tools, advisor],
                         deferred_tools={"service_0", "advisor"}, compact_tools=compact)
     assert [tool for tool in agent._tool_schemas if tool.get("type") != "function"] == [native_schema]
-    if compact or count > 24:
-        assert "advisor" not in agent._tool_catalog.all
-        assert "service_0" not in agent._tool_catalog.loaded
-        await agent._tool_catalog.search("service_0")
-        assert "service_0" in agent._tool_catalog.loaded
-        assert agent._tool_schemas.count(native_schema) == 1
-    else:
-        assert agent._tool_catalog is None
+    assert "advisor" not in agent._tool_catalog.all
+    assert "service_0" not in agent._tool_catalog.loaded
+    await agent._tool_catalog.search("service_0")
+    assert "service_0" in agent._tool_catalog.loaded
+    assert agent._tool_schemas.count(native_schema) == 1
 
 
 async def test_browser_guidance_loads_with_browser_tools_and_returns_when_discovery_is_disabled():
@@ -536,11 +533,11 @@ async def test_required_reads_are_loaded_and_completion_restores_task_tools(monk
 
 
 @pytest.mark.parametrize('goal_type,intents,execute', [
-    ('artifact', {'document'}, False), ('full', set(), False),
+    ('artifact', {'document'}, False), ('full', set(), False), ('full', {'document'}, False),
     ('code_modify', {'coding'}, False), ('execution', set(), False),
     ('artifact', {'document'}, True), ('research', {'calculation'}, False),
 ])
-async def test_shell_is_loaded_on_demand_unless_the_task_needs_execution(goal_type, intents, execute):
+async def test_shell_deferral_preserves_execution_and_unknown_workflows(goal_type, intents, execute):
     from rune.agent.goal_classifier import ClassificationResult
     from rune.agent.tool_catalog import deferred_for_task
 
@@ -549,7 +546,7 @@ async def test_shell_is_loaded_on_demand_unless_the_task_needs_execution(goal_ty
     classification = ClassificationResult(goal_type=goal_type, confidence=.9, tier=2,
                                          intent_categories=frozenset(intents), requires_execution=execute)
     catalog = ToolCatalog(schemas, deferred_tools=deferred_for_task(names, classification))
-    needs_shell = execute or goal_type in {'code_modify', 'execution'} or 'calculation' in intents
+    needs_shell = execute or goal_type in {'code_modify', 'execution'} or 'calculation' in intents or (goal_type == 'full' and not intents)
     assert ('bash_execute' in catalog.loaded) is needs_shell
     assert {'file_read', 'file_write'} <= catalog.loaded
     for name in names:
@@ -576,4 +573,79 @@ async def test_table_guidance_follows_discovery_and_is_not_duplicated():
     await agent._tool_catalog.search('table_verify')
     assert agent._tool_catalog.with_guidance(messages) is messages
     agent.update_tools(tools[:3])
-    assert PROMPT_TABLE in agent._system_prompt
+    assert PROMPT_TABLE not in agent._system_prompt
+    assert agent._tool_catalog.loaded == {"file_read", "tool_search"}
+    await agent._tool_catalog.search("table_verify")
+    assert PROMPT_TABLE in agent._tool_catalog.with_guidance([])[-1]["content"]
+
+
+@pytest.mark.parametrize("goal_type,intents", [("artifact", {"document"}), ("code_modify", {"coding"}),
+                                             ("research", set()), ("execution", {"coding"})])
+async def test_local_work_defers_web_and_desktop_without_losing_discovery(goal_type, intents):
+    from dataclasses import replace
+
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.agent.tool_catalog import deferred_for_task
+
+    names = ["file_read", "web_search", "web_fetch", "desktop_open", "desktop_act"]
+    c = ClassificationResult(goal_type, .99, 2, intent_categories=frozenset(intents))
+    schemas = [{"type": "function", "function": {"name": name}} for name in names]
+    catalog = ToolCatalog(schemas, deferred_tools=deferred_for_task(names, c))
+    assert catalog.loaded == {"file_read", "tool_search"}
+    for name in names[1:]:
+        await catalog.search(name)
+        assert name in catalog.loaded
+    assert not deferred_for_task(names, replace(c, needs_web_evidence=True, requires_desktop_input=True))
+
+
+
+async def test_small_local_catalog_honors_deferral_and_keeps_specialized_tools_discoverable():
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.agent.litellm_adapter import LiteLLMAgent
+    from rune.agent.prompts import PROMPT_TABLE
+    from rune.agent.tool_adapter import ToolWrapper
+    from rune.agent.tool_catalog import deferred_for_task
+
+    names = ["file_read", "code_analyze", "project_map", "web_fetch", "document_read", "table_verify", "memory_search"]
+    wrappers = [ToolWrapper(name=name, description=name * 30, function=AsyncMock()) for name in names]
+    task = ClassificationResult("research", .95, 2, intent_categories=frozenset({"coding"}))
+    agent = LiteLLMAgent("openai/gpt-6-astra", tools=wrappers, system_prompt="Core" + PROMPT_TABLE,
+                        deferred_tools=deferred_for_task(names, task))
+    assert agent._tool_catalog.loaded == {"file_read", "code_analyze", "project_map", "memory_search", "tool_search"}
+    assert PROMPT_TABLE not in agent._system_prompt
+    original = json.dumps(agent._tool_schemas)
+    agent.update_tools(wrappers)
+    assert json.dumps(agent._tool_schemas) == original
+    for name in ("web_fetch", "document_read", "table_verify"):
+        await agent._tool_catalog.search(name)
+        assert agent._tool_lookup[name] is next(w.function for w in wrappers if w.name == name)
+    assert PROMPT_TABLE in agent._tool_catalog.with_guidance([])[-1]["content"]
+
+
+
+def test_discovery_does_not_add_overhead_to_a_minimal_toolset():
+    from rune.agent.litellm_adapter import LiteLLMAgent
+    from rune.agent.tool_adapter import ToolWrapper
+
+    tools = [ToolWrapper(name=name, description=name, function=AsyncMock()) for name in ("file_write", "bash_execute")]
+    agent = LiteLLMAgent("openai/gpt-6-astra", tools=tools, deferred_tools={"bash_execute"})
+    assert agent._tool_catalog is None
+    assert {tool["function"]["name"] for tool in agent._tool_schemas} == {"file_write", "bash_execute"}
+
+
+
+def test_mixed_file_work_keeps_its_execution_fallback():
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.agent.litellm_adapter import LiteLLMAgent
+    from rune.agent.tool_adapter import ToolWrapper
+    from rune.agent.tool_catalog import deferred_for_task
+    from rune.capabilities.bash import BashParams
+
+    task = ClassificationResult("full", .99, 2, output_expectation="file")
+    tools = [ToolWrapper(name="file_write", description="Write a file", function=AsyncMock()),
+             ToolWrapper(name="bash_execute", description="Run a command", function=AsyncMock(),
+                         json_schema=BashParams.model_json_schema())]
+    agent = LiteLLMAgent("openai/gpt-6-astra", tools=tools,
+                        deferred_tools=deferred_for_task([tool.name for tool in tools], task))
+    assert agent._tool_catalog is None
+    assert {tool["function"]["name"] for tool in agent._tool_schemas} == {"file_write", "bash_execute"}

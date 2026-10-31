@@ -487,7 +487,7 @@ async def test_auxiliary_calls_share_the_run_limit_and_usage(monkeypatch, caller
     assert measured["usage"]["calls"] == 1
     assert measured["usage"]["total_tokens"] == 110
     assert measured["usage"]["cost_usd"] > 0
-    assert request.call_args.kwargs["model"] == "xai/grok-4.6"
+    assert request.call_args.kwargs["model"] == "xai/responses/grok-4.6"
 
 
 @pytest.mark.parametrize("consume", [False, True])

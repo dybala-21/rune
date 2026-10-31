@@ -66,9 +66,10 @@ def traits(model: str, *, cache_key: Hashable | None = None) -> ModelTraits:
         if all(n in m for n in needles):
             found = entry
             break
+    from rune.llm.xai import REASONING
     from rune.llm.xai import model_name as xai_model_name
     if xai_model_name(model) is not None:
-        found = replace(found, vision=True)
+        found = replace(found, vision=True, responses_api=xai_model_name(model) in REASONING)
     key = model if cache_key is None else cache_key
     if found.temperature and key in _TEMPERATURE_REJECTED:
         found = replace(found, temperature=False)

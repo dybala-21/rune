@@ -14,11 +14,18 @@ from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
 
+COMPLEXITY_CRITERIA = {
+    "simple": "A bounded lookup, inspection, routine edit or known procedure with few constraints.",
+    "moderate": "A local algorithm change, numerical precision, or several interacting requirements. Use this when difficulty is unclear.",
+    "complex": "Architecture, repository-wide changes, difficult diagnosis or dependent outcomes spanning several systems.",
+}
+
 # Shared routing rules live in the prompt.
 _PROPERTIES = {
     "goal_type": {"type": "string", "enum": ["chat", "web", "research", "code_modify", "execution", "browser", "full", "artifact"]},
     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
     "reason": {"type": "string"},
+    "complexity": {"type": "string", "enum": list(COMPLEXITY_CRITERIA)},
     "requires_execution": {"type": "boolean"},
     "needs_web_evidence": {"type": "boolean"},
     "needs_current_source": {"type": "boolean"},
@@ -96,8 +103,10 @@ def decode_response(response: Any) -> dict[str, Any]:
 
 
 def validate_decision(data: dict[str, Any]) -> dict[str, Any]:
-    if set(data) - {"resume_task", "task_scope", "browser_requirements"} != set(_PROPERTIES) - {"browser_requirements"}:
+    if set(data) - {"resume_task", "task_scope", "browser_requirements", "complexity"} != set(_PROPERTIES) - {"browser_requirements", "complexity"}:
         raise InvalidClassification("invalid_fields")
+    if "complexity" in data and (not isinstance(data["complexity"], str) or data["complexity"] not in COMPLEXITY_CRITERIA):
+        raise InvalidClassification("invalid_complexity")
     if data["goal_type"] not in _PROPERTIES["goal_type"]["enum"]:
         raise InvalidClassification("invalid_goal_type")
     if type(data["confidence"]) not in (int, float) or not math.isfinite(data["confidence"]) or not 0 <= data["confidence"] <= 1:

@@ -62,16 +62,26 @@ def from_history(history: list[dict]) -> list[dict]:
 
 
 def routing_context(history: list[dict]) -> list[dict]:
-    tasks = [{**{key: task.get(key, "") for key in ("id", "request", "followup", "status", "goal_type")},
-              "has_sources": bool(SourceContext.unpack(task.get("sources", "")).entries),
-              **({"request": task["_match"]} if task.get("_match") else {})}
-             for task in sorted(from_history(history), key=lambda task: (task.get("_routing_priority", 0),
-                 task.get("status") not in {"completed", "verified"}))[-MAX_TASKS:]]
-    for task in tasks:
-        task["request"] = task["request"][:240]
-        task["followup"] = str(task["followup"])[:160]
+    candidates = sorted(from_history(history), key=lambda task: (task.get("_routing_priority", 0),
+                        task.get("status") not in {"completed", "verified"}))[-MAX_TASKS:]
+    tasks = []
+    for task in candidates:
+        row = {key: task.get(key, "") for key in ("id", "request", "followup", "status", "goal_type")}
+        row["request"] = row["request"][:240]
+        row["followup"] = row["followup"][:160]
+        row["has_sources"] = bool(SourceContext.unpack(task.get("sources", "")).entries)
+        # Keep the original request alongside the search excerpt.
+        match = task.get("_match")
+        excerpt = match[:160] if isinstance(match, str) else ""
+        if excerpt and excerpt not in row["request"] and excerpt not in row["followup"]:
+            row["matched_context"] = excerpt
+        tasks.append(row)
     while tasks and count_tokens(json.dumps(tasks, ensure_ascii=False)) > 600:
-        tasks.pop(0)
+        with_excerpt = next((task for task in tasks if "matched_context" in task), None)
+        if with_excerpt is not None:
+            del with_excerpt["matched_context"]
+        else:
+            tasks.pop(0)
     return tasks
 
 
