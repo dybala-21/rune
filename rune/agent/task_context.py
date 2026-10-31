@@ -63,8 +63,10 @@ def from_history(history: list[dict]) -> list[dict]:
 
 def routing_context(history: list[dict]) -> list[dict]:
     tasks = [{**{key: task.get(key, "") for key in ("id", "request", "followup", "status", "goal_type")},
-              "has_sources": bool(SourceContext.unpack(task.get("sources", "")).entries)}
-             for task in sorted(from_history(history), key=lambda task: task.get("status") not in {"completed", "verified"})[-MAX_TASKS:]]
+              "has_sources": bool(SourceContext.unpack(task.get("sources", "")).entries),
+              **({"request": task["_match"]} if task.get("_match") else {})}
+             for task in sorted(from_history(history), key=lambda task: (task.get("_routing_priority", 0),
+                 task.get("status") not in {"completed", "verified"}))[-MAX_TASKS:]]
     for task in tasks:
         task["request"] = task["request"][:240]
         task["followup"] = str(task["followup"])[:160]

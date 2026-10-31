@@ -50,6 +50,9 @@ def stored_context(record: dict) -> dict:
         "status": record["status"], "goal_type": "",
     })
     task.update(_revision=record["revision"], updated_at=record["updated_at"])
+    for key in ("_routing_priority", "_match"):
+        if key in record:
+            task[key] = record[key]
     if record.get("notes"):
         task["notes"] = record["notes"]
     if record.get("routine_id"):
@@ -57,7 +60,7 @@ def stored_context(record: dict) -> dict:
     return task
 
 
-def attach_shared_tasks(messages: list[dict], conversation, workspace: str) -> None:
+def attach_shared_tasks(messages: list[dict], conversation, workspace: str, goal: str = "") -> None:
     from rune.agent.task_context import HISTORY_KEY, _tasks, from_history, routing_context
 
     owner = task_owner(conversation.user_id)
@@ -68,8 +71,8 @@ def attach_shared_tasks(messages: list[dict], conversation, workspace: str) -> N
     except (TypeError, ValueError, AttributeError):
         previous_workspace = ""
     store = TaskStore()
-    # Fetch a bounded candidate set; routing sends only their summaries.
-    records = store.list(owner, workspace, limit=4, unfinished_first=True)
+    # Only candidate summaries enter the routing prompt.
+    records = store.candidates(owner, workspace, goal)
     shared = {record["id"]: stored_context(record) for record in records}
     visible = {task["id"] for task in routing_context(messages)}
     for task in local:
@@ -85,7 +88,8 @@ def attach_shared_tasks(messages: list[dict], conversation, workspace: str) -> N
             except TaskConflict:
                 log.debug("task_import_raced", task_id=task["id"])
             record = store.get(owner, workspace, task["id"])
-        shared[task["id"]] = stored_context(record) if record else task
+        if task["id"] not in shared:
+            shared[task["id"]] = stored_context(record) if record else task
     messages[:] = [message for message in messages if HISTORY_KEY not in message]
     ordered = sorted(shared.values(), key=lambda task: task.get("updated_at", 0)
                      if isinstance(task.get("updated_at", 0), (int, float)) else 0)

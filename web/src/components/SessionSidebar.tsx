@@ -1,3 +1,4 @@
+import { SavedTasks } from './SavedTasks';
 import { useEffect, useState } from 'react';
 import { fetchSessions, getLiveSessionId, type SessionInfo } from '../api';
 
@@ -7,6 +8,8 @@ interface SessionSidebarProps {
   onNewChat?: () => void;
   liveTitle?: string;
   onOpenSchedule?: () => void;
+  onSelectTask?: (id: string) => void;
+  taskSelectionDisabled?: boolean;
 }
 
 type DateGroup = 'Today' | 'Yesterday' | 'Previous 7 days' | 'Earlier';
@@ -27,7 +30,7 @@ function dateLabel(iso: string): string {
   return new Intl.DateTimeFormat('en', { month: 'short', day: 'numeric' }).format(date);
 }
 
-export function SessionSidebar({ currentSessionId, onSelectSession, onNewChat, liveTitle, onOpenSchedule }: SessionSidebarProps) {
+export function SessionSidebar({ currentSessionId, onSelectSession, onNewChat, liveTitle, onOpenSchedule, onSelectTask, taskSelectionDisabled }: SessionSidebarProps) {
   const [sessions, setSessions] = useState<SessionInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
@@ -66,6 +69,8 @@ export function SessionSidebar({ currentSessionId, onSelectSession, onNewChat, l
         <span className="session-meta"><span className="session-current-dot" /> Current conversation</span>
       </button>
     </div>
+    {onSelectTask && <SavedTasks sessionId={currentSessionId || liveSessionId}
+      onSelect={onSelectTask} disabled={!!taskSelectionDisabled} />}
     <div className="session-list">
       {error && <div className="session-error" role="status">Couldn’t load tasks.
         <button type="button" onClick={() => setRetry(value => value + 1)}>Try again</button>

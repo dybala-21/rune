@@ -1,0 +1,15 @@
+.saved-tasks { margin: 0 12px 8px; border-block: 1px solid var(--border-subtle); font-size: 12px; }
+.saved-tasks button { cursor: pointer; color: var(--text-primary); background: none; border: 1px solid var(--border-subtle); border-radius: 6px; padding: 5px 8px; font: inherit; }
+.saved-tasks button:disabled { opacity: .45; cursor: default; }
+.saved-tasks button:focus-visible, .saved-tasks input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.saved-tasks .saved-tasks-toggle { width: 100%; display: flex; justify-content: space-between; border: 0; padding: 12px 4px; text-align: left; }
+.saved-tasks-content { padding: 0 4px 12px; }
+.saved-tasks-content form { display: flex; gap: 6px; }
+.saved-tasks input { width: 100%; min-width: 0; border: 1px solid var(--border-subtle); border-radius: 6px; padding: 6px; background: var(--bg-surface); color: var(--text-primary); font: inherit; }
+.saved-tasks p { margin: 7px 0; overflow-wrap: anywhere; }
+.saved-tasks-hint, .saved-tasks-files, .saved-tasks-workspace { color: var(--text-muted); font-size: 11px; }
+.saved-tasks-workspace { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.saved-tasks-list { max-height: 36vh; overflow-y: auto; }
+.saved-tasks-list article { padding: 10px 0; border-bottom: 1px solid var(--border-subtle); }
+.saved-tasks-title, .saved-tasks-blocker { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.saved-tasks-pages { display: flex; justify-content: space-between; margin-top: 8px; }

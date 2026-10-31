@@ -351,6 +351,8 @@ def create_app() -> Any:
     app.include_router(mcp_router, prefix="/api/v1")
     from rune.api.handlers.proactive import router as proactive_router
     app.include_router(proactive_router, prefix="/api/v1")
+    from rune.api.tasks import task_router
+    app.include_router(task_router(auth))
 
     # Request / Response models
 

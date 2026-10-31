@@ -37,6 +37,11 @@ class TaskStore:
                 lease TEXT NOT NULL DEFAULT '', pid INTEGER,
                 PRIMARY KEY (owner, workspace, id))""")
             db.execute("CREATE INDEX IF NOT EXISTS task_recent ON tasks(owner, workspace, updated DESC)")
+            db.execute("CREATE INDEX IF NOT EXISTS task_unfinished ON tasks(owner, workspace, "
+                       "json_extract(data, '$.status') IN ('completed','verified'), updated DESC, id)")
+            from rune.memory.task_search import ensure_index
+
+            ensure_index(db)
             yield db
         finally:
             db.close()
@@ -73,6 +78,30 @@ class TaskStore:
         args.extend((max(1, min(limit, 100)), max(0, offset)))
         with self._connect() as db:
             return [self._record(row) for row in db.execute(query, args)]
+
+    def search(self, owner: str, workspace: str, query: str, *, limit: int = 4, offset: int = 0,
+               status: str = "", category: str = "", selective: bool = False) -> list[dict]:
+        if not self.path.exists():
+            return []
+        from rune.memory.task_search import search
+
+        with self._connect() as db:
+            rows = search(db, owner, workspace, query, limit=limit, offset=offset,
+                          status=status, category=category, selective=selective)
+            return [{**self._record(row), "_match": row["matched_text"][:160]} for row in rows]
+
+    def candidates(self, owner: str, workspace: str, query: str = "") -> list[dict]:
+        from rune.memory.task_search import referenced_ids
+
+        recent = self.list(owner, workspace, limit=5, unfinished_first=True)
+        candidates = {record["id"]: record for record in recent[:4]}
+        if len(recent) > 4 and query:
+            for rank, record in enumerate(self.search(owner, workspace, query, limit=2, selective=True)):
+                candidates[record["id"]] = {**record, "_routing_priority": 2 - rank}
+        for identity in referenced_ids(query):
+            if record := self.get(owner, workspace, identity):
+                candidates[identity] = {**record, "_routing_priority": 3}
+        return list(candidates.values())
 
     def create(self, owner: str, workspace: str, records: Sequence[dict]) -> None:
         with self._connect() as db, db:

@@ -371,6 +371,11 @@ export function App() {
                   onNewChat={handleNewChat}
                   liveTitle={liveTitle}
                   onOpenSchedule={() => setCronPanelOpen(true)}
+                  taskSelectionDisabled={agent.state !== 'idle' || agent.loadingConversation}
+                  onSelectTask={id => {
+                    inputAreaRef.current?.setDraft(`Continue saved task ${id}.`);
+                    if (compact) setSidebarOpen(false);
+                  }}
                 />
               )}
               {sidebarTab === 'settings' && (
