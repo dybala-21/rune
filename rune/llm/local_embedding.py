@@ -108,9 +108,13 @@ class LocalEmbeddingEngine:
             return False, time.monotonic()
 
     def _schedule_download(self) -> None:
+        if self._download is not None and not self._download.done():
+            return
+        # The download may have finished since the caller checked the cache.
+        path = _models_dir() / EMBEDDING_MODELS[self._model_id].file
+        if path.is_file() and path.stat().st_size > 0:
+            return
         if self._download is not None:
-            if not self._download.done():
-                return
             succeeded, finished = self._download.result()
             self._download = None
             if self._download_model_id == self._model_id:
@@ -149,8 +153,9 @@ class LocalEmbeddingEngine:
                 path = self._download_model(self._model_id)
             else:
                 self._schedule_download()
-                self._worker.last_error = "model_not_cached"
-                raise WorkerUnavailable("Embedding model is not cached; download pending or waiting to retry")
+                if not path.is_file() or path.stat().st_size == 0:
+                    self._worker.last_error = "model_not_cached"
+                    raise WorkerUnavailable("Embedding model is not cached; download pending or waiting to retry")
         stat = path.stat()
         stamp = (stat.st_ino, stat.st_size, stat.st_mtime_ns)
         if stamp != self._model_stamp:

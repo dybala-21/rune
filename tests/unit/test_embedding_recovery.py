@@ -1,6 +1,7 @@
 """Memory revisions remain searchable and transient download errors recover."""
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -107,6 +108,70 @@ def test_transient_download_recovers_once_after_cooldown(recovery_engine, monkey
     engine._download.result(timeout=2)
     assert len(engine.embed_sync("recovered")) == 768
     assert attempts == [DEFAULT_MODEL, DEFAULT_MODEL] and calls
+
+
+@pytest.mark.embedding_engine
+@pytest.mark.parametrize("finish_at", ["schedule", "status"])
+def test_completed_download_is_used_without_rescheduling(recovery_engine, monkeypatch, finish_at):
+    engine, _, root, calls = recovery_engine
+    release = Event()
+    attempts = []
+
+    def download(model):
+        attempts.append(model)
+        assert release.wait(2)
+        path = root / EMBEDDING_MODELS[model].file
+        temporary = root / "model.part"
+        temporary.write_bytes(b"cached-model")
+        temporary.replace(path)
+        return path
+
+    monkeypatch.setattr(engine, "_download_model", download)
+    with pytest.raises(WorkerUnavailable):
+        engine.embed_sync("start download")
+    pending = engine._download
+    target = engine if finish_at == "schedule" else pending
+    attribute = "_schedule_download" if finish_at == "schedule" else "done"
+    original = getattr(target, attribute)
+
+    def finish_download():
+        release.set()
+        assert pending.result(timeout=2)[0]
+        return original()
+
+    monkeypatch.setattr(target, attribute, finish_download)
+    try:
+        assert len(engine.embed_sync("overlapping request")) == EMBEDDING_MODELS[DEFAULT_MODEL].dimensions
+        assert attempts == [DEFAULT_MODEL]
+        assert [call["texts"] for call in calls] == [["overlapping request"]]
+    finally:
+        release.set()
+        engine._download.result(timeout=2)
+
+
+@pytest.mark.embedding_engine
+@pytest.mark.parametrize("empty", [False, True])
+def test_completed_download_retries_if_cache_is_missing_or_empty(recovery_engine, monkeypatch, empty):
+    engine, _, root, _ = recovery_engine
+    path = root / EMBEDDING_MODELS[DEFAULT_MODEL].file
+    if empty:
+        path.touch()
+    completed = Future()
+    completed.set_result((True, 100.0))
+    engine._download = completed
+    engine._download_model_id = DEFAULT_MODEL
+    attempts = []
+
+    def download(model):
+        attempts.append(model)
+        path.write_bytes(b"cached-model")
+        return path
+
+    monkeypatch.setattr(engine, "_download_model", download)
+    engine._schedule_download()
+    engine._download.result(timeout=2)
+    assert attempts == [DEFAULT_MODEL]
+    assert len(engine.embed_sync("recovered")) == EMBEDDING_MODELS[DEFAULT_MODEL].dimensions
 
 
 @pytest.mark.embedding_engine
