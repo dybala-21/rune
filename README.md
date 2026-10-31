@@ -9,9 +9,10 @@
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> ·
-  <a href="#what-rune-can-do">Features</a> ·
-  <a href="#computer">Computer</a> ·
   <a href="#architecture">Architecture</a> ·
+  <a href="#design-decisions">Design</a> ·
+  <a href="#validation">Validation</a> ·
+  <a href="#what-rune-can-do">Features</a> ·
   <a href="#development">Development</a>
 </p>
 
@@ -26,6 +27,69 @@
 </p>
 
 > Recorded from the current app using sample conversations. The coding example includes real local test output, and the browser is operated through the Computer panel. This is a UI walkthrough with shortened pauses, not a live-model run or a speed benchmark.
+
+## Architecture
+
+RUNE puts model calls, tool execution, approvals, and result checks in a shared Python runtime. The web app and Electron desktop shell use a FastAPI gateway; the CLI, channels, and scheduled jobs also use the runtime. Provider handling and execution policy live in the backend rather than in each client.
+
+```mermaid
+flowchart TD
+    UI["React web UI / Electron desktop"] --> API["FastAPI gateway"]
+    API --> Runtime["Agent runtime"]
+    Entry["CLI / channels / scheduled jobs"] --> Runtime
+    API <--> Runs["SQLite run events and recovery"]
+    Runtime <--> Context["Conversations / saved tasks / memory / skills"]
+    Runtime --> Requests["Request budgets and provider adapters"]
+    Requests <--> Models["Cloud model APIs / Ollama"]
+    Runtime --> Policy["Tool policy and approval checks"]
+    Policy --> Tools["Files / commands / web / MCP / connectors"]
+    Policy --> Computer["Managed browser / macOS apps"]
+    Tools --> Evidence["Tool results and verification state"]
+    Computer --> Evidence
+    Evidence --> Runtime
+```
+
+The [agent loop](rune/agent/loop.py) selects tools, calls the model, and processes tool results. The gateway persists web execution events in a [run store](rune/api/run_store.py) and builds [snapshots](rune/api/run_snapshot.py) for reconnecting clients. This durable web execution path is separate from CLI conversation history.
+
+| Layer | Stack |
+|---|---|
+| Backend | Python 3.13, FastAPI, Pydantic, LiteLLM |
+| Interface | React, TypeScript, Vite; Electron desktop shell |
+| Storage | SQLite through APSW; FTS5 for saved-task search; Markdown memory files; optional FAISS index |
+| Tools | Playwright, MCP, document libraries, macOS native helper |
+| Tests | pytest, Node.js test runner, Playwright, opt-in live-model workflows |
+
+See the [Python dependencies](pyproject.toml), [web dependencies](web/package.json), and [desktop package](desktop/package.json) for versions. Provider adapters handle API differences and reasoning options; configured profiles determine failover.
+
+## Design decisions
+
+### Check the budget before making a model call
+
+The [request budget](rune/agent/request_budget.py) checks call, token, and cost limits before sending a request. Concurrent calls reserve their estimated usage, and delegated work shares the parent budget. Auxiliary classification and review calls count too. When a cost limit is enforced, unknown pricing blocks further calls.
+
+The limit relies on token estimates, configured prices, and provider usage reports. The provider invoice remains the billing source of truth.
+
+### Recover recorded work before retrying it
+
+The [execution journal](rune/agent/execution_journal.py) records tool attempts and file revisions. [Recovery](rune/api/run_recovery.py) reconciles those records with the current workspace before continuing an interrupted web run. A timeout can leave an external action in an unknown state: it may have succeeded even though no response arrived. In that case, recovery stops for inspection instead of submitting the action again.
+
+### Keep execution, verification, and explanation separate
+
+[Verification state](rune/agent/verification_state.py) records which checks ran and whether they followed the latest tracked edit. Earlier passing tests become stale after another edit; a successful command that ran no tests does not become a test pass. The final answer is not a substitute for these records.
+
+Checks have a scope. Passing tests, saving a file, checking its contents, and reviewing its layout establish different things. The runtime records that distinction; it cannot prove arbitrary work correct.
+
+### Retrieve saved work without replaying the whole history
+
+[Saved-task search](rune/memory/task_search.py) uses SQLite FTS5 to retrieve a bounded set of candidates within an owner and workspace. It indexes requirements and checkpoint details as well as task titles. [Task context](rune/agent/task_context.py) connects the selected task to the next run.
+
+Retrieval avoids sending every previous conversation to the model. Choosing the right task and interpreting changed requirements still depend on the model, so cross-chat continuation is tested separately from storage and search.
+
+### Approve a concrete action
+
+[Approval requests](rune/safety/approval_request.py) carry the tool, arguments, and relevant file revisions. A change to a tracked file revision invalidates the pending approval. Configured connectors use a [separate broker](rune/connectors/broker.py) with signed, single-use requests and policy checks; its [transport](rune/connectors/transport.py) restricts destinations and does not forward credentials through redirects.
+
+These checks constrain tool use. Local execution still has the host process's permissions; it is not a VM isolation boundary. See [execution modes](#execution-boundaries) below.
 
 ## Quick Start
 
@@ -170,27 +234,25 @@ The connector broker can keep service credentials outside the command workspace 
 
 Local policies are not a VM security boundary. Hosted deployments need authentication and a properly configured TLS endpoint. Mobile access can use a hosted web UI; the execution environment remains on the host.
 
-## Architecture
+## Validation
 
-```mermaid
-flowchart TD
-    UI[Web / desktop / CLI / channels] --> Runtime[Shared agent runtime]
-    Schedule[Schedules and proactive suggestions] --> Runtime
-    Models[Cloud providers / Ollama] <--> Runtime
-    Context[Conversation / memory / skills] <--> Runtime
-    Runtime --> Policy[Tool policy and approvals]
-    Policy --> Tools[Files / documents / web / MCP / connectors]
-    Policy --> Computer[Managed browser / macOS apps]
-    Policy --> Execution[Local or container commands]
-    Tools --> Evidence[Execution records and verification]
-    Computer --> Evidence
-    Execution --> Evidence
-    Evidence --> State[Persistent run state and recovery]
-    State --> Runtime
-    State --> UI
-```
+Local tests exercise failure cases in storage, policy, and execution with controlled inputs. Live-model tests exercise coding and document workflows through the web API. Their outcomes depend on the selected model and are recorded per trial.
 
-The web and desktop clients use the same engine. Hosting places that engine behind a separate owner boundary rather than creating a second agent implementation.
+| Area | What the tests check | Evidence |
+|---|---|---|
+| Request budgets | Parallel reservations, shared child limits, missing usage, and stopping before another call | [Budget tests](tests/unit/test_request_budget.py) |
+| Restart and recovery | Committed state survives process termination; recorded effects are reconciled before continuation | [Run store](tests/unit/test_run_store.py), [execution journal](tests/unit/test_execution_journal.py) |
+| Verification | A later edit invalidates earlier checks; an action claim alone cannot establish completion | [Verification integration tests](tests/integration/test_verification_freshness.py) |
+| Connector access | Replayed or expired signatures, changed policies, private destinations, and redirects are rejected | [Broker tests](tests/unit/test_connector_broker.py) |
+| Task retrieval | Owner/workspace isolation, index updates, and bounded search over older tasks | [Task search tests](tests/unit/test_task_search.py) |
+| Live coding | Continue a JavaScript fix in a new chat, preserve existing tests, and run them against the result | [Coding scenario](tests/e2e/test_live_task_continuity.py) |
+| Live document work | Continue a Word document task after its source changes; inspect the saved table and preserve the source | [Document scenario](tests/e2e/test_live_task_continuity.py) |
+
+The live workflows submit requests through the web API with isolated conversation state and a temporary workspace. They inspect the resulting files or run their own checks, beyond reading the agent's answer. Cross-provider fallback and background learning are disabled for these trials. They test the API-to-runtime path, not every interaction in the desktop UI.
+
+With `--live-report-dir`, the [report writer](scripts/e2e_provenance.py) saves the commit, source fingerprint, scenario, model, settings, environment, and outcome. The [summary script](scripts/e2e_report.py) reports duration, model/tool calls, token usage, cache usage, and model-token cost. Missing usage stays unknown rather than counting as zero. These are model-token charges based on known rates, not a full bill for host resources and external services.
+
+Compare matching scenarios and report the number of trials alongside accuracy, time, and cost. A single successful run or a UI recording does not establish reliability or a performance improvement. See [Development](#development) for local checks and an explicit live-test command.
 
 ## CLI
 
@@ -222,7 +284,7 @@ A single `--message` run exits with its verdict, so scripts can trust `&&`:
 From a source checkout, install development dependencies and build the web app:
 
 ```bash
-uv sync --extra dev
+uv sync --extra dev --extra browser
 npm --prefix web ci
 npm --prefix web run build
 uv run playwright install chromium
@@ -238,14 +300,19 @@ npm --prefix web test
 npm --prefix web run build
 ```
 
-The default suite skips paid live-model tests. To run the workflow tests against a configured provider explicitly:
+The default suite skips paid live-model tests. To run one two-turn coding scenario against a configured provider and save its report:
 
 ```bash
-uv run pytest tests/e2e/test_live_workflows.py --run-live \
-  --live-provider anthropic --live-model MODEL_ID
+uv run pytest tests/e2e/test_live_task_continuity.py::test_javascript_fix_keeps_the_task_across_chats \
+  --run-live --live-provider anthropic --live-model MODEL_ID \
+  --decision-backend connected --live-repeat 1 \
+  --live-report-dir /tmp/rune-live-reports
+uv run python scripts/e2e_report.py /tmp/rune-live-reports
 ```
 
-These tests make real provider calls and incur usage charges. CI also checks shell-policy regressions and a fresh CLI installation. See [the workflow](.github/workflows/ci.yml) for the full checks.
+This scenario makes paid provider calls and sets a $0.30 model-token budget per turn. Check credentials and pricing before running it. `--live-repeat` adds independent trials; `--decision-backend` selects `connected`, `jev`, or `microsoft`. `paired` compares the connected model with Jev in alternating order. Each added trial or backend adds usage.
+
+[CI](.github/workflows/ci.yml) runs backend tests, frontend tests and builds, shell-policy regressions, and a fresh CLI installation. Paid live-model evaluations run separately from CI.
 
 ## License
 
