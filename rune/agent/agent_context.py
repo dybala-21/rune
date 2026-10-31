@@ -250,7 +250,7 @@ async def prepare_agent_context(
         if conversation is not None:
             from rune.agent.task_continuity import attach_shared_tasks
 
-            attach_shared_tasks(conversation_messages, conversation, workspace_root)
+            attach_shared_tasks(conversation_messages, conversation, workspace_root, sanitized_goal)
 
     # The loop sends attachments alongside the goal as image or document content.
     metadata: dict[str, Any] = {}

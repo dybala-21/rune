@@ -298,3 +298,35 @@ async def test_inspection_can_read_a_running_task_without_changing_it(flow):
             store.claim('local', str(flow.root), task_id, before['revision'], 'second-writer')
     finally:
         store.release('local', str(flow.root), 'background-run')
+
+
+async def test_named_old_task_is_available_without_growing_routing_context(flow):
+    original = flow.manager.start_conversation("web:session")
+    first, _ = await run(flow, original, "Fix invoice.mjs; preserve the public API and exclude refunded invoices")
+    identity = first._task_context["id"]
+    for index in range(8):
+        await run(flow, flow.manager.start_conversation("web:session"), f"Prepare unrelated presentation {index}")
+    flow.requested["id"] = identity
+    continued, trace = await run(flow, flow.manager.start_conversation("web:session"),
+                                "Continue the invoice.mjs change; preserve the public API")
+    assert trace.reason == "completed", trace.reason
+    assert continued._task_context["id"] == identity
+    assert "exclude refunded invoices" in continued._task_context["requests"][0]
+    assert len(flow.decisions) == 10
+    assert len(flow.decisions[-1]) <= 4
+    assert count_tokens(json.dumps(flow.decisions[-1], ensure_ascii=False)) <= 600
+
+
+async def test_explicit_old_task_id_can_be_loaded_without_scanning_other_owners(flow):
+    first, _ = await run(flow, flow.manager.start_conversation("web:session"), "Prepare the release report")
+    identity = first._task_context["id"]
+    for index in range(5):
+        await run(flow, flow.manager.start_conversation("web:session"), f"Independent work {index}")
+    flow.requested["id"] = identity
+    restored, trace = await run(flow, flow.manager.start_conversation("web:session"), f"Continue task {identity}")
+    assert trace.reason == "completed", trace.reason
+    assert restored._task_context["id"] == identity
+    context = await prepare_agent_context(PrepareContextOptions(
+        goal=f"Continue task {identity}", cwd=str(flow.root),
+        conversation_id=flow.manager.start_conversation("slack:other").id), flow.manager)
+    assert not from_history(context.messages)

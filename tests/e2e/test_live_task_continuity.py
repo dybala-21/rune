@@ -19,7 +19,8 @@ def _limits():
 
 
 def _saved_task(workflow):
-    tasks = TaskStore().list('local', str(workflow.workspace.resolve()))
+    tasks = [task for task in TaskStore().list('local', str(workflow.workspace.resolve()))
+             if task.get('kind') == 'conversation']
     assert len(tasks) == 1, tasks
     return tasks[0]['id']
 
@@ -44,6 +45,10 @@ test('integer total', () => assert.equal(total([{status:'paid', amount:20}, {sta
     completed(first)
     assert path.read_text() == source
     task_id = _saved_task(workflow)
+    TaskStore().create('local', str(workflow.workspace.resolve()), [
+        {'id': uuid4().hex[:12], 'goal': f'Prepare unrelated presentation {index}',
+         'status': 'pending', 'kind': 'manual'} for index in range(8)
+    ])
     workflow.session = uuid4().hex
     second = workflow.submit('앞서 맡긴 청구 합계 수정을 이제 진행해. 추가로 소수 금액도 정확히 계산돼야 해. '
                              '기존 테스트는 변경하지 말고 node --test로 실행해서 결과를 확인해.',
@@ -74,6 +79,10 @@ def test_office_document_uses_revised_source_in_a_new_chat(workflow, request):
     task_id = _saved_task(workflow)
     updated = original.replace('서준 | 2026-11-07', '민서 | 2026-11-09')
     path.write_text(updated)
+    TaskStore().create('local', str(workflow.workspace.resolve()), [
+        {'id': uuid4().hex[:12], 'goal': f'Prepare unrelated presentation {index}',
+         'status': 'pending', 'kind': 'manual'} for index in range(8)
+    ])
     workflow.session = uuid4().hex
     second = workflow.submit('앞서 맡긴 출시 계획 문서를 이제 launch.docx로 만들어줘. 원본 자료를 갱신했으니 다시 읽고 '
                              '최신 담당자와 기한을 반영해. 추가 조건은 취소된 업무를 표에서 제외하는 거야. '

@@ -359,6 +359,25 @@ export function sendQuestion(id: string, answer: string, selectedIndex?: number)
 
 // Sessions API
 
+export interface SavedTask {
+  id: string;
+  goal: string;
+  status: string;
+  updatedAt: number;
+  blocker: string;
+  files: string[];
+}
+
+export async function fetchSavedTasks(sessionId: string, query: string, offset: number, signal?: AbortSignal): Promise<{
+  tasks: SavedTask[]; workspace: string; hasMore: boolean;
+}> {
+  await ensureWebAuth();
+  const params = new URLSearchParams({ sessionId, query, offset: String(offset) });
+  const response = await fetch(`/api/tasks?${params}`, { credentials: 'include', cache: 'no-store', signal });
+  if (!response.ok) throw new Error('Couldn’t load saved work. Try again.');
+  return response.json();
+}
+
 export interface SessionInfo {
   id: string;
   userId: string;

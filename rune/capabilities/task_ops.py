@@ -34,6 +34,7 @@ class TaskListParams(BaseModel):
     source: Literal["tasks", "scheduled"] = Field(default="tasks", description="Saved tasks or scheduled work and its latest run")
     status: str = Field(default="", description="Filter by status")
     category: str = Field(default="", description="Filter by category")
+    query: str = Field(default="", max_length=2000, description="Search saved requirements and artifact names")
     task_id: str = Field(default="", description="Read one task's saved requirements and result references")
     limit: int = Field(default=20, ge=1, le=100)
     offset: int = Field(default=0, ge=0)
@@ -82,6 +83,8 @@ async def task_update(params: TaskUpdateParams) -> CapabilityResult:
 async def task_list(params: TaskListParams) -> CapabilityResult:
     owner, workspace = current_scope()
     store = TaskStore()
+    if params.source == "scheduled" and params.query.strip():
+        return CapabilityResult(success=False, error="Search applies to saved tasks. Use a schedule ID or status filter for scheduled work.")
     if params.source == "scheduled":
         from rune.proactive.task_history import scheduled_tasks
 
@@ -97,6 +100,9 @@ async def task_list(params: TaskListParams) -> CapabilityResult:
         if task is None:
             return CapabilityResult(success=False, error=f"Task not found: {params.task_id}")
         tasks = [task]
+    elif params.query.strip():
+        tasks = store.search(owner, workspace, params.query, status=params.status, category=params.category,
+                             limit=params.limit, offset=params.offset)
     else:
         tasks = store.list(owner, workspace, status=params.status, category=params.category,
                            limit=params.limit, offset=params.offset)
