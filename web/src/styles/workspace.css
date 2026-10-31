@@ -294,3 +294,11 @@
   .composer-shell textarea { font-size: 16px !important; }
 }
 @media (prefers-reduced-motion: reduce) { .app-sidebar { transition: none !important; } }
+
+.workbench-outputs { padding: 16px; overflow: auto; min-width: 0; }
+.workbench-outputs h3 { margin: 0 0 16px; font-size: 14px; font-weight: 600; }
+.workbench-outputs p { color: var(--text-secondary); font-size: 12px; line-height: 1.6; }
+.workbench-output { display: flex; align-items: baseline; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.workbench-output > div { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.workbench-output small { display: block; margin-top: 4px; color: var(--text-muted); font-size: 11px; }
+.workbench-output > span { flex-shrink: 0; color: var(--text-secondary); font-size: 11px; }

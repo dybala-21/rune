@@ -39,7 +39,7 @@ def model_name(model: str) -> str | None:
     provider, separator, name = model.partition("/")
     if separator and provider != "xai":
         return None
-    name = name if separator else model
+    name = (name if separator else model).removeprefix("responses/")
     name = _ALIASES.get(name, name)
     return name if name in MODELS else None
 

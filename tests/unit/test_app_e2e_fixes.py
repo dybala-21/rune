@@ -297,5 +297,6 @@ async def test_file_role_classification_uses_bounded_grok_reasoning(monkeypatch)
     monkeypatch.setattr(litellm, "acompletion", complete)
     roles = await classify_roles("Summarize source.csv into summary.csv", ["source.csv", "summary.csv"], "grok-4.6", "xai")
     assert roles == {"source.csv": "input", "summary.csv": "output"}
-    assert requests[0]["extra_body"]["reasoning_effort"] == "low"
+    assert requests[0]["model"] == "xai/responses/grok-4.6"
+    assert requests[0]["extra_body"]["reasoning"]["effort"] == "low"
     assert requests[0]["timeout"] == 20

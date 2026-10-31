@@ -10,9 +10,10 @@ import { langFromPath } from '../utils/highlight';
 const TerminalPane = lazy(() => import('./TerminalPane').then(m => ({ default: m.TerminalPane })));
 import { ProgressPane } from './ProgressPane';
 import { DiffText, FileChangesPane } from './FileChangesPane';
-import { desktopAttention, hasFileEdits, preferredWorkbenchTab } from '../utils/workbench';
+import { desktopAttention, hasFileEdits, preferredWorkbenchTab, workbenchOutputs } from '../utils/workbench';
 import { RetainedPane } from './RetainedPane';
 import { ComputerPane } from './ComputerPane';
+import { OutputsPane } from './OutputsPane';
 import { ComputerIcon } from './ComputerIcon';
 import { PickerPopover, SelectedCheck } from './PickerPopover';
 
@@ -199,10 +200,11 @@ function Elapsed({ startedAt }: { startedAt: number }) {
   );
 }
 
-export type BenchTab = 'progress' | 'activity' | 'diff' | 'file' | 'terminal' | 'computer';
+export type BenchTab = 'progress' | 'outputs' | 'activity' | 'diff' | 'file' | 'terminal' | 'computer';
 
 const TABS: Array<[BenchTab, string]> = [
   ['progress', 'Progress'],
+  ['outputs', 'Files'],
   ['computer', 'Computer'],
   ['activity', 'Commands'],
   ['diff', 'Changes'],
@@ -228,7 +230,8 @@ export function WorkbenchPanel({ sessionId, active = true, toolCalls, fileChange
     [toolCalls],
   );
 
-  const preferredTab = preferredWorkbenchTab(toolCalls, fileChanges);
+  const outputs = useMemo(() => workbenchOutputs(toolCalls, sessionId, trust), [toolCalls, sessionId, trust]);
+  const preferredTab = outputs.length ? 'outputs' : preferredWorkbenchTab(toolCalls, fileChanges);
   const [tab, setTab] = useState<BenchTab>(computerRequest && !historical ? 'computer' : preferredTab);
   const [terminalConnected, setTerminalConnected] = useState(false);
   const [workspaceDiff, setWorkspaceDiff] = useState(false);
@@ -296,6 +299,7 @@ export function WorkbenchPanel({ sessionId, active = true, toolCalls, fileChange
   const verdictTitle = trustView?.title ?? (verdictOk ? 'Completed' : 'Failed');
   const verdictColors = trustColors(trustView?.tone ?? (verdictOk ? 'neutral' : 'danger'));
   const visibleTabs = TABS.filter(([key]) => key === 'progress'
+    || key === 'outputs' && (outputs.length > 0 || preferredTab === 'outputs')
     || key === 'computer' && !historical || key === 'diff' && showDiffTab || key === 'terminal' && terminalConnected || key === tab);
   const selectTab = (next: BenchTab) => { setTab(next); setFollow(false); };
 
@@ -386,7 +390,8 @@ export function WorkbenchPanel({ sessionId, active = true, toolCalls, fileChange
         />
       )}
 
-      {/* Diff view */}
+      {tab === 'outputs' && <OutputsPane outputs={outputs} trust={trust} isRunning={isRunning} />}
+
       {!historical && <RetainedPane active={active && tab === 'computer'}><ComputerPane key={sessionId} sessionId={sessionId} active={active && tab === 'computer'} /></RetainedPane>}
       {tab === 'diff' && !workspaceDiff && <FileChangesPane changes={fileChanges} toolCalls={toolCalls} historical={historical} />}
       {tab === 'diff' && workspaceDiff && !historical && (

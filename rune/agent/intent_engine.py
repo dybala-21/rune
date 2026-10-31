@@ -77,6 +77,9 @@ class IntentContract:
     output_expectation: OutputExpectation
     requires_code_verification: bool
     requires_code_write_artifact: bool = False
+    coding: bool = False
+    prompt_category: str = "full"
+    deep_research: bool = False
 
 
 # IntentMessage / Options
@@ -132,6 +135,15 @@ def resolve_intent_contract(
     tier1_confidence: float,
 ) -> IntentContract:
     contract = _resolve_intent_contract(classification, tier1_confidence)
+    goal_type = getattr(classification, "goal_type", "") or getattr(classification, "category", "full")
+    coding = is_coding_task(classification) or goal_type == "code"
+    intents = getattr(classification, "intent_categories", ())
+    category = "code" if coding else goal_type
+    if category in {"research", "execution", "code_modify"}:
+        category = "artifact" if set(intents) & {"document", "table"} else "research"
+    contract = replace(contract, coding=coding, prompt_category=category,
+                       deep_research=goal_type == "research" and getattr(classification, "needs_web_evidence", False)
+                       and not set(intents) & {"desktop", "calculation"})
     if getattr(classification, "needs_web_evidence", False):
         return replace(contract, grounding_requirement="required",
                        tool_requirement="read" if contract.tool_requirement == "none" else contract.tool_requirement)
@@ -164,7 +176,7 @@ def _resolve_intent_contract(
     _gt = getattr(classification, "goal_type", "") or getattr(classification, "category", "")
     _CATEGORY_MAP = {
         "code_modify": "code",
-        "research": "code",
+        "research": "research",
         "execution": "code",
         "chat": "chat",
         "web": "web",
@@ -208,7 +220,7 @@ def _resolve_intent_contract(
         code_write = getattr(classification, "requires_code", False) or _gt == "code" or (
             _gt == "code_modify" and is_coding_task(classification)
         )
-        if category == "code" and code_write:
+        if category in {"code", "research"} and code_write:
             return IntentContract(
                 kind="code_write",
                 tool_requirement="write",
@@ -235,9 +247,9 @@ def _resolve_intent_contract(
             requires_code_verification=False,
         )
 
-    if category == "code":
+    if category in {"code", "research"}:
         return IntentContract(
-            kind="code_read",
+            kind="code_read" if is_coding_task(classification) or _gt == "code" else "research",
             tool_requirement="read",
             grounding_requirement="none",
             output_expectation="text",
@@ -267,15 +279,13 @@ def _resolve_intent_contract(
                 requires_code_write_artifact=requires_code,
             )
         action_type = getattr(classification, "action_type", "unspecified")
-        complexity = getattr(classification, "complexity", "simple")
         is_analyze = action_type in ("analyze", "unspecified")
-        is_non_simple = complexity != "simple"
 
         if is_analyze:
             return IntentContract(
                 kind="research",
                 tool_requirement="read",
-                grounding_requirement="required" if is_non_simple else "recommended",
+                grounding_requirement="recommended",
                 output_expectation=output_expectation,
                 requires_code_verification=False,
             )

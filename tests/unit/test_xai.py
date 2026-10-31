@@ -96,7 +96,7 @@ async def test_selection_survives_reload_and_auxiliary_calls_stay_on_xai(monkeyp
     completion = AsyncMock(return_value={"choices": []})
     monkeypatch.setattr(adapter.litellm, "acompletion", completion)
     await client.completion([{"role": "user", "content": "classify"}], tier=ModelTier.FAST)
-    assert completion.call_args.kwargs["model"] == "xai/grok-4.3"
+    assert completion.call_args.kwargs["model"] == "xai/responses/grok-4.3"
     assert completion.call_args.kwargs["api_key"] == "test-key"
     assert "_rune_source_model" not in completion.call_args.kwargs
 

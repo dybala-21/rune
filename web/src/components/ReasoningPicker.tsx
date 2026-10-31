@@ -52,9 +52,9 @@ export function ReasoningPicker({ effort, options, model, budgets = {} }: {
   const selected = current && options.includes(current) ? current : null;
   const choices: Array<ReasoningEffort | null> = [null, ...options];
   return <PickerPopover
-    label={`Reasoning depth: ${selected ? LABEL[selected] : 'Default'}`}
+    label={`Reasoning depth: ${selected ? LABEL[selected] : 'Auto'}`}
     className="reasoning-trigger" busy={busy}
-    trigger={<><EffortBars level={selected} /><span>{selected ? LABEL[selected] : 'Default'}</span></>}
+    trigger={<><EffortBars level={selected} /><span>{selected ? LABEL[selected] : 'Auto'}</span></>}
   >
     {close => <>
       <div className="picker-heading">
@@ -68,10 +68,10 @@ export function ReasoningPicker({ effort, options, model, budgets = {} }: {
       >
         <span className="picker-option-icon"><EffortBars level={level} /></span>
         <span className="picker-option-copy">
-          <strong>{level ? LABEL[level] : 'Default'}</strong>
+          <strong>{level ? LABEL[level] : 'Auto'}</strong>
           <small>{level && budgets[level] !== undefined
             ? `${budgets[level]?.toLocaleString()} thinking tokens`
-            : level ? DETAIL[level] : 'Use the model’s default depth'}</small>
+            : level ? DETAIL[level] : 'Match reasoning depth to the task'}</small>
         </span>
         {selected === level && <SelectedCheck />}
       </button>)}

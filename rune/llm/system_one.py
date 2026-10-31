@@ -9,7 +9,11 @@ from typing import Any
 
 import httpx
 
-from rune.agent.classification_response import InvalidClassification, validate_decision
+from rune.agent.classification_response import (
+    COMPLEXITY_CRITERIA,
+    InvalidClassification,
+    validate_decision,
+)
 from rune.agent.provenance import ArtifactRoleHints, role_hint_names
 from rune.llm.decision_backends import JEV, DecisionTarget
 
@@ -19,7 +23,7 @@ ENDPOINT = JEV.endpoint
 MIN_CONFIDENCE = 0.8
 # Uncertain file roles stay with the main classifier.
 MIN_ROLE_CONFIDENCE = 0.9
-_CONSERVATIVE_FIELDS = {"lookup_only", "needs_current_source", "source_output", "browser_effect", "resume_task", "task_scope"}
+_CONSERVATIVE_FIELDS = {"complexity", "lookup_only", "needs_current_source", "source_output", "browser_effect", "resume_task", "task_scope"}
 
 
 @dataclass(frozen=True)
@@ -54,6 +58,7 @@ def build_questions(state: dict) -> tuple[dict, dict[str, str]]:
     expressions = {f"expression_{i}": value for i, value in enumerate(
         expression_candidates(state["request_to_classify"]))}
     questions = {
+        "complexity": _choice("Classify the current work's difficulty, including constraints inherited from the referenced task.", COMPLEXITY_CRITERIA),
         "browser_effect": _choice("What result does the user require from browser interaction?", {
             "view": "Only scroll or navigate; no edits, submission or saved app state.",
             "edit": "Only change a local control value or draft, without submitting, saving, booking or another persistent effect.",
@@ -201,6 +206,8 @@ def _routing_values(picked: dict[str, str], confidences: dict[str, float], expre
         intents.append("calculation")
     values = {
         "goal_type": picked["goal_type"],
+        "complexity": (picked["complexity"] if picked.get("complexity") in COMPLEXITY_CRITERIA
+                       and confidences.get("complexity", 0) >= MIN_CONFIDENCE else "moderate"),
         # Choice confidence differs from the main model's self-reported score.
         "confidence": min(confidences[name] for name in routing_fields), "reason": "Structured routing decision",
         "requires_execution": picked["requires_execution"] == "yes",

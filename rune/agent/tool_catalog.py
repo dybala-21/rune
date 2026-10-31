@@ -11,7 +11,8 @@ _BROWSER = ("browser_observe", "browser_act", "browser_navigate", "browser_extra
 
 
 def deferred_for_task(names: list[str], classification) -> set[str]:
-    from rune.agent.goal_classifier import is_coding_task, is_simple_lookup, is_web_research
+    from rune.agent.goal_classifier import is_simple_lookup, is_web_research
+    from rune.agent.intent_engine import resolve_intent_contract
 
     if is_simple_lookup(classification) or is_web_research(classification):
         return set(names) - {"web_search", "web_fetch", "ask_user", "task_blocked"}
@@ -21,12 +22,17 @@ def deferred_for_task(names: list[str], classification) -> set[str]:
             immediate.update(("web_search", "web_fetch"))
         return set(names) - immediate
     intents = classification.intent_categories
-    coding = is_coding_task(classification)
+    coding = resolve_intent_contract(classification, classification.confidence).coding
     execution = coding or classification.requires_execution or classification.goal_type == "execution" or "calculation" in intents
+    local_work = classification.goal_type in {"research", "artifact", "code_modify", "execution"}
+    desktop = "desktop" in intents or classification.requires_desktop_input
     return {name for name in names
-            if (not coding and (name.startswith("code_") or name == "project_map"))
+            if (local_work and not classification.needs_web_evidence and name.startswith("web_"))
+            or (local_work and not desktop and name.startswith("desktop_"))
+            or (not coding and (name.startswith("code_") or name == "project_map"))
+            or (local_work and coding and not intents & {"document", "table"} and name.startswith("document_"))
             or (not coding and name in {"think", "file_delete"})
-            or (not execution and name == "bash_execute")
+            or ((local_work or intents) and not execution and name == "bash_execute")
             or ("calculation" not in intents and name == "file_query")
             or ("table" not in intents and name in {"table_requirements", "table_verify"})}
 

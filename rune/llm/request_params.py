@@ -66,16 +66,29 @@ def _route_responses(params: dict[str, Any]) -> bool:
     provider, separator, name = model.partition("/")
     if not separator:
         params["model"] = f"openai/responses/{model}"
-    elif provider in {"openai", "azure"}:
+    elif provider in {"openai", "azure", "xai"}:
         if not name.startswith("responses/"):
             params["model"] = f"{provider}/responses/{name}"
     else:
         return False
+    if provider == "xai" and "messages" in params:
+        # Keep system messages in input because the xAI SDK drops instructions.
+        params["messages"] = [
+            {**message, "content": [{"type": "text", "text": message["content"]}]}
+            if message.get("role") == "system" and isinstance(message.get("content"), str) else message
+            for message in params["messages"]
+        ]
     params.setdefault("store", False)
     # Pass newer reasoning levels through Responses fields to avoid LiteLLM chat filtering.
     body = dict(params.get("extra_body") or {})
     body["store"] = params["store"]
-    effort = params.pop("reasoning_effort", None)
+    if not params["store"]:
+        body["include"] = list(dict.fromkeys([*(params.pop("include", []) or []), *(body.get("include") or []),
+                                              "reasoning.encrypted_content"]))
+    if cache_key := params.pop("prompt_cache_key", None):
+        body["prompt_cache_key"] = cache_key
+    body_effort = body.pop("reasoning_effort", None)
+    effort = params.pop("reasoning_effort", None) or body_effort
     if effort is not None:
         body["reasoning"] = {**(body.get("reasoning") or {}), "effort": effort}
     params["extra_body"] = body
@@ -85,6 +98,7 @@ def _route_responses(params: dict[str, Any]) -> bool:
 async def compatible_completion(
     completion: Callable[..., Awaitable[Any]], bad_request: type[Exception],
     kwargs: dict[str, Any],
+    *, prepare_request: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> Any:
     params = dict(kwargs)
     model = params["model"]
@@ -110,7 +124,7 @@ async def compatible_completion(
     retries_left = 3
     while True:
         try:
-            return await timed_completion(completion, params)
+            return await timed_completion(completion, prepare_request(params) if prepare_request else params)
         except bad_request as exc:
             if retries_left == 0:
                 raise

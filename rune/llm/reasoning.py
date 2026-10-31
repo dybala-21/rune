@@ -119,6 +119,14 @@ def _reasoning_control(model: str) -> ReasoningControl:
     return ReasoningControl()
 
 
+def supported_reasoning_default(model: str, effort: str | None) -> str | None:
+    if effort not in _LEVELS:
+        return None
+    supported = reasoning_control(model).efforts
+    # Use the next supported level rather than lowering effort.
+    return next((level for level in _LEVELS[_LEVELS.index(effort):] if level in supported), None)
+
+
 def configured_reasoning_effort(model: str) -> str | None:
     from rune.llm.context import llm_settings
 

@@ -292,7 +292,10 @@ class VerificationState:
                 "A failure count includes subtest failures; it is not the number of failing methods. "
                 "Do not infer unobserved before/after statuses. Preserve unknowns. " +
                 (self.guidance() if self.pending else
-                 "Required recorded checks have passed; compose the final answer without rerunning unchanged checks. "
+                 "Recorded checks passed; reuse them without rerunning unchanged checks. "
+                 "Their assertions do not establish coverage of every requested behavior. "
+                 "Before finalizing, check uncovered requirements with focused assertions when execution is authorized; "
+                 "otherwise report what remains unverified. "
                  "Describe the observed code change and its purpose. Add return values or examples only when needed to explain it. "
                  "Do not infer a test's inputs or assertions from its name and status; omit those details unless observed. "
                  "Keep numerical comparisons scoped to observed inputs; state broader conditions only when derived from code."))

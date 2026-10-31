@@ -244,3 +244,62 @@ async def test_running_request_keeps_its_connection_when_settings_change(routing
     assert params["target"].deployment == "Decision-1" and params["api_key"] == "decision-test-key"
     cfg.llm.decision_routing.backend = "microsoft"
     assert decision_router.accelerator_status() == "unverified"
+
+
+
+@pytest.mark.parametrize("backend", ["connected", "jev", "microsoft"])
+@pytest.mark.parametrize("complexity", ["simple", "moderate", "complex"])
+async def test_difficulty_uses_the_selected_backend_without_a_second_call(routing, monkeypatch, backend, complexity):
+    from tests.unit.test_goal_classifier import response, verdict
+
+    cfg, client = routing
+    cfg.llm.decision_routing.backend = backend
+    client.completion.return_value = response(verdict(complexity=complexity))
+    request = AsyncMock(side_effect=lambda **kw: {**payload(kw["questions"], complexity=complexity), "model": kw["target"].model})
+    monkeypatch.setattr(system_one, "_request", request)
+    result = await classify_goal("Continue the requested change")
+    assert result.available and result.complexity == complexity
+    assert result.decision_backend == backend
+    assert client.completion.await_count == int(backend == "connected")
+    assert request.await_count == int(backend != "connected")
+
+
+@pytest.mark.parametrize("choice,confidence", [("unknown", .99), ("simple", .5)])
+async def test_uncertain_difficulty_does_not_trigger_a_paid_fallback(routing, monkeypatch, choice, confidence):
+    cfg, client = routing
+    cfg.llm.decision_routing.backend = "jev"
+
+    async def respond(**kwargs):
+        result = payload(kwargs["questions"], complexity=choice)
+        result["answers"]["complexity"]["confidence"] = confidence
+        return result
+
+    request = AsyncMock(side_effect=respond)
+    monkeypatch.setattr(system_one, "_request", request)
+    result = await classify_goal("Apply the requested change")
+    assert result.available and result.complexity == "moderate"
+    assert request.await_count == 1 and client.completion.await_count == 0
+
+
+@pytest.mark.parametrize("backend", ["connected", "jev", "microsoft"])
+async def test_saved_task_identity_and_excerpt_reach_every_backend(routing, monkeypatch, backend):
+    from rune.agent.task_context import HISTORY_KEY, routing_context
+    from tests.unit.test_goal_classifier import response, verdict
+
+    cfg, client = routing
+    cfg.llm.decision_routing.backend = backend
+    tasks = routing_context([{HISTORY_KEY: [{"id": "abcdef123456", "request": "Repair the invoice total",
+                            "status": "completed", "_match": "Keep the original tests unchanged"}]}])
+    client.completion.return_value = response(verdict(resume_task="abcdef123456", task_scope="task"))
+    request = AsyncMock(side_effect=lambda **kw: {
+        **payload(kw["questions"], resume_task="abcdef123456", task_scope="task"), "model": kw["target"].model})
+    monkeypatch.setattr(system_one, "_request", request)
+    result = await classify_goal("Continue the invoice fix", saved_tasks=tasks)
+    if backend == "connected":
+        state = json.loads(client.completion.call_args.kwargs["messages"][-1]["content"])
+    else:
+        state = request.call_args.kwargs["state"]
+    assert state["saved_tasks"][0]["request"] == "Repair the invoice total"
+    assert state["saved_tasks"][0]["matched_context"] == "Keep the original tests unchanged"
+    assert result.resume_task == "abcdef123456"
+    assert client.completion.await_count + request.await_count == 1

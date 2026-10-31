@@ -76,6 +76,15 @@ def input_estimate(params: dict) -> int:
                  and message.get("role") == "assistant" for call in message.get("tool_calls") or []
                  if isinstance(call, dict) and isinstance(call.get("id"), str)}
         for message in messages:
+            if isinstance(message, dict) and message.get("role") == "assistant":
+                for call in message.get("tool_calls") or []:
+                    if not isinstance(call, dict) or not isinstance(call.get("id"), str):
+                        continue
+                    base, separator, signature = call["id"].partition("__thought__")
+                    metadata = call.get("provider_specific_fields") or {}
+                    if separator and metadata.get("thought_signature") == signature:
+                        # Count the signature once; the SDK also embeds it in the call ID.
+                        call["id"] = base
             if not isinstance(message, dict) or message.get("role") != "tool":
                 continue
             call_id = message.get("tool_call_id")
