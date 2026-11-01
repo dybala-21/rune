@@ -218,8 +218,8 @@ async def get_config_endpoint() -> ConfigGetResponse:
     from rune.cloud.boundary import hosted
     from rune.llm.azure import (
         ENDPOINT_NAMES,
-        GPT6_MODELS,
         KEY_NAMES,
+        SUGGESTED_MODELS,
         endpoint,
         environment_name,
     )
@@ -250,7 +250,7 @@ async def get_config_endpoint() -> ConfigGetResponse:
             "hasKey": bool(model_environment(environment_name(KEY_NAMES)).strip()),
             "keyName": environment_name(KEY_NAMES),
             "keyScope": effective_env_scope(environment_name(KEY_NAMES)),
-            "deployments": cfg.llm.azure_deployments, "suggestedModels": GPT6_MODELS,
+            "deployments": cfg.llm.azure_deployments, "suggestedModels": SUGGESTED_MODELS,
             "pricing": cfg.llm.azure_pricing.model_dump() if cfg.llm.azure_pricing else None,
         },
         localModels=_local_models_state(cfg),

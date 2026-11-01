@@ -68,9 +68,9 @@ export function AzureSettings({ connection, onSaved }: {
   };
 
   return <details style={{ padding: '12px 14px', borderBottom: '1px solid var(--border-subtle)', fontSize: 12 }}>
-    <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Azure OpenAI</summary>
+    <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Azure Foundry</summary>
     <p style={{ color: 'var(--text-muted)', lineHeight: 1.5 }}>
-      Register deployments from your Azure resource. Saving settings does not create a deployment or call a model.
+      Register OpenAI or Kimi deployments from your Azure resource. Saving settings does not create a deployment or call a model.
     </p>
     <p style={{ color: 'var(--text-muted)', lineHeight: 1.5 }}>
       For cost estimates, select the deployment type shown in Foundry. Rates cover GPT-6 Astra, Sol and Luna.
@@ -78,7 +78,7 @@ export function AzureSettings({ connection, onSaved }: {
     </p>
     <fieldset disabled={saving} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
       <label htmlFor="azure-endpoint">Endpoint</label>
-      <input id="azure-endpoint" value={endpoint} placeholder="https://your-resource.openai.azure.com/"
+      <input id="azure-endpoint" value={endpoint} placeholder="https://your-resource.services.ai.azure.com/openai/v1"
         disabled={connection.endpointScope === 'process'} style={{ ...inputStyle, margin: '5px 0 10px' }}
         onChange={event => { change(); setEndpoint(event.target.value); setPricing({}); }} />
       <label htmlFor="azure-key">{connection.hasKey ? 'Replace API key (optional)' : 'API key'}</label>

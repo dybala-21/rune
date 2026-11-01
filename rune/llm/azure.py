@@ -5,6 +5,7 @@ from urllib.parse import urlsplit
 from rune.llm.context import llm_settings, model_environment
 
 GPT6_MODELS = ("gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6-astra")
+SUGGESTED_MODELS = (*GPT6_MODELS, "Kimi-K2.7-Code")
 KEY_NAMES = ("AZURE_API_KEY", "AZURE_OPENAI_API_KEY")
 ENDPOINT_NAMES = ("AZURE_API_BASE", "AZURE_OPENAI_ENDPOINT")
 

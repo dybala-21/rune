@@ -151,6 +151,42 @@ rune --provider ollama --model MODEL_NAME
 
 Local-first describes where RUNE runs and stores its state. Requests sent to a cloud model, search service, or connector still leave your machine.
 
+### Azure Foundry: Kimi K2.7 Code
+
+In **Settings → Azure Foundry**, save your resource endpoint (for example,
+`https://YOUR-RESOURCE.services.ai.azure.com/openai/v1`) and API key. Add a row
+with the exact deployment name from Foundry and model ID `Kimi-K2.7-Code`,
+then select that Azure deployment in the model picker.
+
+For project-scoped configuration, put credentials in the ignored `.rune/.env`:
+
+```dotenv
+AZURE_API_BASE=https://YOUR-RESOURCE.services.ai.azure.com/openai/v1
+AZURE_API_KEY=YOUR_AZURE_KEY
+AZURE_API_VERSION=v1
+```
+
+Register the deployment in `.rune/config.yaml` (replace `my-kimi` with your deployment name):
+
+```yaml
+llm:
+  activeProvider: azure
+  activeModel: my-kimi
+  azureDeployments:
+    my-kimi: Kimi-K2.7-Code
+```
+
+```bash
+rune --provider azure --model my-kimi --message "Explain this project's auth flow."
+```
+
+Launch Rune from this directory to load the project settings. Existing launch
+environment variables take precedence over `.env` files. Keep API keys out of
+tracked files. Kimi uses the [Foundry v1 Chat Completions API](https://learn.microsoft.com/en-us/azure/ai-foundry/openai/api-version-lifecycle?tabs=key),
+including streamed responses and native tool calls. Its [Azure model card](https://ai.azure.com/catalog/models/Kimi-K2.7-Code)
+lists text and image input. Leave deployment pricing unknown for Kimi; the
+GPT-6 rates in Rune do not apply, and configured cost limits block unpriced calls.
+
 ## What RUNE can do
 
 | Work | Example request | What you can inspect |
