@@ -92,6 +92,24 @@ async def test_small_lookup_catalog_keeps_rendering_tools_available_on_demand():
     assert set(agent._tool_lookup) == set(names) | {"tool_search"}
 
 
+async def test_browser_read_defers_large_batch_schema_but_keeps_it_discoverable():
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.agent.litellm_adapter import LiteLLMAgent
+    from rune.agent.tool_adapter import ToolWrapper
+    from rune.agent.tool_catalog import deferred_for_task
+
+    names = ["browser_navigate", "browser_act", "browser_stay_evidence", "browser_batch"]
+    wrappers = [ToolWrapper(name=name, description=name, function=AsyncMock()) for name in names]
+    read = ClassificationResult("browser", .99, 2, browser_effect="view")
+    deferred = deferred_for_task(names, read)
+    agent = LiteLLMAgent("anthropic/claude-opus-5", tools=wrappers, deferred_tools=deferred, compact_tools=True)
+    assert "browser_batch" not in agent._tool_catalog.loaded
+    assert "browser_act" in agent._tool_catalog.loaded
+    await agent._tool_catalog.search("browser_batch")
+    assert "browser_batch" in agent._tool_catalog.loaded
+    assert "browser_batch" not in deferred_for_task(names, ClassificationResult("browser", .99, 2, browser_effect="change"))
+
+
 @pytest.mark.parametrize("needs_sources", [False, True])
 async def test_browser_catalog_starts_with_working_tools_and_preserves_discovery(needs_sources):
     from rune.agent.goal_classifier import ClassificationResult

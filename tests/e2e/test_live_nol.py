@@ -19,6 +19,38 @@ from tests.e2e.test_live_workflows import workflow as workflow
 
 
 @pytest.fixture
+def nol_contexts(monkeypatch, request):
+    from copy import deepcopy
+
+    from rune.agent import browser_context
+
+    original = browser_context.compact_browser_history
+    directory = request.config.getoption("--live-report-dir")
+    path = Path(directory).resolve() / ("context-" + uuid4().hex + ".json") if directory else None
+    observations = []
+
+    def compact(messages, **kwargs):
+        result = original(messages, **kwargs)
+        progress = kwargs.get("retrieval_progress") or {}
+        observations.append({"before_chars": len(json.dumps(messages, ensure_ascii=False)),
+                             "after_chars": len(json.dumps(result, ensure_ascii=False)),
+                             "removed_messages": len(messages) - len(result),
+                             "complete_properties": progress.get("complete_properties"),
+                             "has_trusted_progress": bool(progress)})
+        if path:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(json.dumps({"observations": observations, "last_messages": deepcopy(result)},
+                                           ensure_ascii=False))
+            temporary.chmod(0o600)
+            temporary.replace(path)
+        return result
+
+    monkeypatch.setattr(browser_context, "compact_browser_history", compact)
+    return {"observations": observations, "path": str(path) if path else None}
+
+
+@pytest.fixture
 def nol_observations(monkeypatch, request):
     from rune.capabilities.browser.session import current_session
     from rune.capabilities.registry import CapabilityRegistry
@@ -40,6 +72,7 @@ def nol_observations(monkeypatch, request):
             page = session.page
             if page is not None and not page.is_closed() and nol_url(page.url):
                 capture = {"tool": name, "url": page.url, "success": result.success,
+                           "output_chars": len(result.output or ""),
                            "profile": session.profile,
                            "observed_at": datetime.now(ZoneInfo("Asia/Seoul")).isoformat()}
                 response = session.navigation_response
@@ -73,7 +106,7 @@ def pytest_generate_tests(metafunc):
                                            "token_budget_override": 2_500_000 if extended else 1_500_000}], indirect=True)
 
 
-def test_nol_comparison_from_one_request(nol_observations, workflow, request):
+def test_nol_comparison_from_one_request(nol_observations, nol_contexts, workflow, request):
     from rune.config import get_config
 
     cfg = get_config()
@@ -114,12 +147,19 @@ def test_nol_comparison_from_one_request(nol_observations, workflow, request):
         "확인할 수 없는 후보는 넣지 말고 limitations에 이유를 남겨줘. "
         "접속 오류나 인증 요구가 나오면 무리하게 반복하거나 우회하지 말고 확인하지 못한 범위를 보고해줘."
     )
+    wording = request.config.getoption("--nol-request")
+    if wording == "short":
+        goal = (f"NOL에서 {stay.check_in}~{stay.check_out} {stay.city} 숙소 3곳 비교해줘. "
+                f"성인 {stay.adults}명, 객실 1개, 숙박요금 {stay.max_total_krw // 10000}만원 이하로 "
+                "객실·가격·취소조건·할인조건·별도 세금까지 확인해줘. 예약은 하지 마.")
+    workflow.settings = {**workflow.settings, "nol_request": wording, "request_chars": len(goal)}
     run = workflow.submit(goal, wait_seconds=630)
     answer = run.get("answer") or run.get("text") or ""
     checks = verify_comparison(answer, stay, nol_observations)
     http_errors = [{"url": page["url"], "status": page["http_status"]} for page in nol_observations
                    if page.get("http_status", 0) >= 400]
     checks.update({"request": stay.model_dump(mode="json"), "snapshots": nol_observations,
+                   "contexts": nol_contexts,
                    "http_errors": http_errors,
                    "failure_stage": ("site_access" if http_errors and not checks["offers_checked"]
                                      else "comparison") if not checks["passed"] else None,

@@ -188,6 +188,33 @@ class StayEvidence(BaseModel):
                 "next_match_line": matches[consumed] + 1 if len(matches) > consumed else None,
                 "guidance": "Use these exact line numbers to record missing fields; read a wider range only if needed."}
 
+    def preview(self, source_id: str) -> dict[str, Any]:
+        """Show the page header and trailing details without changing stored line numbers."""
+        source = self.sources[source_id]
+        lines = source.text.splitlines()
+        ranges = [(1, min(80, len(lines)))]
+        if len(lines) > 80:
+            ranges.append((max(81, len(lines) - 119), len(lines)))
+        excerpts, shown = [], set()
+        for start, end in ranges:
+            selected = []
+            size = 0
+            for index in range(start, end + 1):
+                line = f"{index}: {lines[index - 1]}"
+                if size + len(line) > 4000:
+                    break
+                selected.append(line)
+                shown.add(index)
+                size += len(line)
+            if selected:
+                excerpts.append({"start": start, "end": start + len(selected) - 1,
+                                 "lines": "\n".join(selected)})
+        return {"source": source.id, "url": source.url, "property_id": source.property_id,
+                "observed_at": source.observed_at, "total_lines": len(lines), "excerpts": excerpts,
+                "omitted_lines": len(lines) - len(shown),
+                "guidance": "Full source saved. Preview shows header and trailing details, not all conditions. "
+                            "Use read with source/start/limit or find with an observed phrase for omitted lines."}
+
     def _quote(self, span: Span) -> str:
         if span.source not in self.sources:
             raise ValueError("Source was not captured by this run")
@@ -263,15 +290,16 @@ class StayEvidence(BaseModel):
         return [key for key in FIELDS if key not in candidate.fields
                 or not self.sources[candidate.fields[key].source].fresh(now)]
 
-    def status(self) -> dict[str, Any]:
+    def status(self, *, compact: bool = False) -> dict[str, Any]:
         selected: dict[str, Candidate] = {}
         for candidate in self.candidates.values():
             if not self.missing(candidate):
                 selected.setdefault(candidate.property_id, candidate)
         return {"complete": len(selected) >= self.query.count, "required": self.query.count,
-                "complete_properties": len(selected), "query": self.query.model_dump(mode="json"),
-                "sources": [{"id": item.id, "url": item.url, "property_id": item.property_id,
-                             "lines": len(item.text.splitlines())} for item in self.sources.values()],
+                "complete_properties": len(selected),
+                **({} if compact else {"query": self.query.model_dump(mode="json"),
+                    "sources": [{"id": item.id, "url": item.url, "property_id": item.property_id,
+                                 "lines": len(item.text.splitlines())} for item in self.sources.values()]}),
                 "candidates": [{"id": item.id, "property_id": item.property_id,
                                 "name": self._quote(item.fields["name"]), "room": self._quote(item.fields["room"]),
                                 "total_krw": item.total_krw, "missing": self.missing(item)}

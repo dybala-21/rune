@@ -118,6 +118,102 @@ def test_literal_find_recovers_only_the_requested_source_region(ledger):
     assert len(ledger.sources) == 1
 
 
+def test_preview_keeps_exact_line_numbers_and_omitted_policy_is_recoverable(ledger):
+    text = "Header\n" + "Filler\n" * 249 + "Mandatory policy\n" + "Other rooms\n" * 249 + TEXT
+    source = ledger.capture(url(), text, "doc")
+    preview = ledger.preview(source.id)
+    assert preview["omitted_lines"] > 0
+    assert sum(len(item["lines"]) for item in preview["excerpts"]) <= 8000
+    for item in preview["excerpts"]:
+        for line in item["lines"].splitlines():
+            number, value = line.split(": ", 1)
+            assert text.splitlines()[int(number) - 1] == value
+    assert "Mandatory policy" not in json.dumps(preview)
+    assert "251: Mandatory policy" in ledger.read(source.id, 251, 1)["lines"]
+    assert source.text == text and not ledger.status()["complete"]
+
+
+def test_compact_progress_preserves_candidate_identity_and_missing_conditions(ledger):
+    source = ledger.capture(url(), TEXT, "doc")
+    spans = fields(source)
+    spans.pop("taxes_quote")
+    candidate = ledger.record(spans, 90000)
+    progress = ledger.status(compact=True)
+    assert "sources" not in progress and "query" not in progress
+    assert progress["candidates"][0]["id"] == candidate.id
+    assert progress["candidates"][0]["missing"] == ["taxes_quote"]
+    assert not progress["complete"]
+    assert ledger.status()["sources"][0]["id"] == source.id
+
+
+def test_entrypoint_encodes_fixed_request_without_inventing_property_ids(ledger):
+    from urllib.parse import parse_qs, urlsplit
+
+    from rune.lodging.nol import entrypoints, source_guidance
+
+    ledger.query.city = "Sapporo & 函館?x=1"
+    entry = urlsplit(entrypoints(ledger.query)["overseas_search"])
+    assert entry.hostname == "nol.yanolja.com"
+    params = parse_qs(entry.query)
+    assert params["q"] == [ledger.query.city]
+    assert params["checkInDate"] == ["2026-11-15"] and params["checkOutDate"] == ["2026-11-16"]
+    assert params["adultCount"] == ["2"] and params["roomCount"] == ["1"]
+    assert "TDP-" not in entry.geturl()
+    assert not source_guidance(url().replace("/list?", "?"))["rate_source"]
+    assert source_guidance(url())["rate_source"]
+
+
+def test_room_list_entry_preserves_observed_property_and_stay_scope():
+    from rune.lodging.nol import source_guidance
+
+    overview = url("TDP-2").replace("/list?", "?")
+    assert source_guidance(overview + "#property-modal")["room_list_url"] == url("TDP-2")
+    assert "room_list_url" not in source_guidance(url())
+    assert "room_list_url" not in source_guidance(overview.replace("nol.yanolja.com", "example.com"))
+
+
+def test_capture_replaces_current_page_body_but_preserves_every_control():
+    controls = '--- Interactive Elements (2/2) ---\n[e0] button "Details"\n[e1] link "Policy" href="https://example.com/policy"'
+    view = {"role": "tool", "name": "browser_observe", "content": f"URL: {url()}\n" + "Body " * 1000 + "\n" + controls}
+    capture = {"role": "tool", "name": "browser_stay_evidence", "content": json.dumps({
+        "source": "original", "captured": True, "url": url(), "excerpts": [{"lines": "1: Body"}]})}
+    compacted = compact_browser_history([view, capture])
+    assert compacted[0]["content"].endswith(controls)
+    assert len(compacted[0]["content"]) < 700 and "source original" in compacted[0]["content"]
+    assert compacted[1] == capture and "Body Body" in view["content"]
+    assert compact_browser_history(compacted) == compacted
+
+
+def test_superseded_progress_clears_without_losing_unrecorded_lines_or_errors():
+    payload = {"source": "one", "lines": "1: Unrecorded cancellation policy", "progress": {"sources": ["a"]}}
+    messages = [{"role": "tool", "name": "browser_stay_evidence", "content": json.dumps(payload)},
+                {"role": "tool", "name": "browser_stay_evidence", "content": '{"progress":{"sources":["a","b"]}}'}]
+    compacted = compact_browser_history(messages)
+    assert "progress" not in json.loads(compacted[0]["content"])
+    assert json.loads(compacted[0]["content"])["lines"] == payload["lines"]
+    assert compacted[-1] == messages[-1]
+    assert compact_browser_history(compacted) == compacted
+    failed = {"role": "tool", "name": "browser_act", "content": "[ERROR] Denied " + "details " * 200}
+    assert compact_browser_history([failed, *messages, {"role": "tool", "name": "browser_stay_evidence",
+        "content": '{"recorded":"rate"}'}, {"role": "tool", "name": "browser_observe", "content": "Current"}])[0] == failed
+
+
+def test_captured_ui_is_retired_only_after_new_controls_and_same_url():
+    old = {"role": "tool", "name": "browser_observe", "content": f"URL: {url()}\n" + "Body " * 500}
+    captured = {"role": "tool", "name": "browser_stay_evidence", "content": json.dumps({
+        "source": "exact-source", "captured": True, "url": url(), "excerpts": [{"lines": "1: Saved body"}]})}
+    assert compact_browser_history([old, captured]) == [old, captured]
+    extracted = {"role": "tool", "name": "browser_extract", "content": "Some new facts without a new view"}
+    assert compact_browser_history([old, captured, extracted])[0] == old
+    latest = {"role": "tool", "name": "browser_observe", "content": "URL: https://example.com/\nCurrent controls"}
+    compacted = compact_browser_history([old, captured, latest])
+    assert "Source: exact-source" in compacted[0]["content"]
+    assert len(compacted[0]["content"]) < 700
+    assert compacted[-1] == latest and compacted[1] == captured
+    other = {**captured, "content": captured["content"].replace("TDP-1", "TDP-2")}
+    assert "Body Body" in compact_browser_history([old, other, latest])[0]["content"]
+
+
 def test_record_boundary_retires_old_ui_bodies_but_keeps_current_controls():
     messages = [{"role": "tool", "name": "browser_extract", "content": "Old body " * 1000},
                 {"role": "tool", "name": "browser_observe", "content": "Current control"},

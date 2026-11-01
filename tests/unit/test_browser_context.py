@@ -159,3 +159,12 @@ def test_duplicate_snapshots_do_not_displace_distinct_views():
         messages += observation(str(index), FORM + REFS)
         messages = compact_browser_history(messages)
     assert 'Cedar 8 Yes 10:00' in messages[1]["content"]
+
+
+@pytest.mark.parametrize("prefix", ["[ERROR]", "[BLOCKED]", "[DENIED]", "ERROR:"])
+def test_failed_browser_observations_are_not_masked(prefix):
+    failure = prefix + " Permission required\n" + FORM + "Failure detail\n" * 500 + REFS
+    messages = observation("failed", failure, "browser_act")
+    messages += observation("saved", '{"recorded":"one"}', "browser_stay_evidence")
+    messages += observation("current", FORM + REFS)
+    assert compact_browser_history(messages)[1]["content"] == failure

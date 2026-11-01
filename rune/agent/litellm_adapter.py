@@ -1746,7 +1746,9 @@ class StreamResult:
 
             from rune.agent.browser_context import compact_browser_history
 
-            self._messages = compact_browser_history(self._messages)
+            retrieval = self._retrieval_state() if self._retrieval_state else None
+            progress = (getattr(retrieval, "retrieval_acceptance", None) or {}).get("progress")
+            self._messages = compact_browser_history(self._messages, retrieval_progress=progress)
 
             if _is_last_round:
                 break

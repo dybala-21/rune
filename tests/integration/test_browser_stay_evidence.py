@@ -4,6 +4,8 @@ import html
 import json
 from pathlib import Path
 
+import pytest
+
 from rune.capabilities.browser.session import current_session
 from rune.capabilities.browser.stay_evidence import BrowserStayEvidenceParams, browser_stay_evidence
 from rune.lodging.evidence import StayQuery
@@ -42,3 +44,42 @@ async def test_capture_persist_recover_and_fill_only_missing_field(screen):
     assert finished.success and finished.metadata["retrieval_acceptance"]["status"] == "pass"
     assert json.loads(finished.output)["offers"][0]["taxes_quote"] == TEXT.splitlines()[8]
     assert finished.metadata["source_count"] == 1
+
+
+async def test_capture_waits_for_room_data_after_dom_quiet(screen):
+    await screen.route("https://nol.yanolja.com/**", lambda route: route.fulfill(
+        body='<div class="animate-pulse" style="height:20px">Placeholder</div>', content_type="text/html"))
+    await screen.goto(url())
+    await browser_stay_evidence(BrowserStayEvidenceParams(action="begin", query=StayQuery(
+        city="Sapporo", check_in="2026-11-15", check_out="2026-11-16", adults=2, count=1, max_total_krw=200000)))
+    await screen.evaluate("text => setTimeout(() => {document.body.innerText = text}, 800)", TEXT)
+    captured = await browser_stay_evidence(BrowserStayEvidenceParams(action="capture"))
+    assert captured.success, captured.error
+    assert next(iter(current_session().stay_evidence.sources.values())).text == TEXT
+
+
+async def test_loading_timeout_does_not_store_placeholder_as_evidence(screen, monkeypatch):
+    from rune.capabilities.browser.stay_readiness import wait_for_stay_content
+
+    await screen.route("https://nol.yanolja.com/**", lambda route: route.fulfill(
+        body='<div class="animate-pulse" style="height:20px">Placeholder</div>', content_type="text/html"))
+    await screen.goto(url())
+    await browser_stay_evidence(BrowserStayEvidenceParams(action="begin", query=StayQuery(
+        city="Sapporo", check_in="2026-11-15", check_out="2026-11-16", adults=2, count=1, max_total_krw=200000)))
+
+    async def bounded(page):
+        await wait_for_stay_content(page, timeout_ms=100)
+
+    monkeypatch.setattr("rune.capabilities.browser.stay_evidence.wait_for_stay_content", bounded)
+    captured = await browser_stay_evidence(BrowserStayEvidenceParams(action="capture"))
+    assert not captured.success and "loading" in captured.error
+    assert not current_session().stay_evidence.sources
+
+
+@pytest.mark.parametrize("body", ['<p>No available rooms</p>', '<div hidden class="animate-pulse">Hidden</div>'])
+async def test_no_rates_or_hidden_placeholder_does_not_wait_forever(screen, body):
+    from rune.capabilities.browser.stay_readiness import wait_for_stay_content
+
+    await screen.route("https://nol.yanolja.com/**", lambda route: route.fulfill(body=body, content_type="text/html"))
+    await screen.goto(url())
+    await wait_for_stay_content(screen, timeout_ms=100)

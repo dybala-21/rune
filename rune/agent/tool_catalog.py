@@ -18,6 +18,8 @@ def deferred_for_task(names: list[str], classification) -> set[str]:
         return set(names) - {"web_search", "web_fetch", "ask_user", "task_blocked"}
     if classification.goal_type == "browser":
         immediate = {*_BROWSER, "ask_user", "task_blocked"}
+        if classification.browser_effect == "view":
+            immediate.discard("browser_batch")
         if classification.needs_web_evidence:
             immediate.update(("web_search", "web_fetch"))
         return set(names) - immediate
