@@ -66,6 +66,8 @@ def traits(model: str, *, cache_key: Hashable | None = None) -> ModelTraits:
         if all(n in m for n in needles):
             found = entry
             break
+    if m == "openai/kimi-k2.7-code":
+        found = replace(found, vision=True)
     from rune.llm.xai import REASONING
     from rune.llm.xai import model_name as xai_model_name
     if xai_model_name(model) is not None:

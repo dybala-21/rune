@@ -167,6 +167,68 @@ async def test_azure_response_text_and_usage_survive_sdk_conversion(azure, monke
     assert estimate_request_cost("azure/daily", counts, params) is None
 
 
+@pytest.mark.parametrize("model_id", ["Kimi-K2.7-Code", "DeepSeek-V4-Pro"])
+async def test_foundry_chat_stream_and_tool_continuation_use_the_azure_deployment(azure, monkeypatch, model_id):
+    from rune.agent.litellm_adapter import StreamResult, _litellm
+    from rune.llm.client import LLMClient
+    from rune.types import ModelTier, Provider
+
+    azure.active_model = "my-kimi"
+    azure.azure_deployments = {"my-kimi": model_id}
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://fixture.services.ai.azure.com/openai/v1")
+    monkeypatch.setenv("RUNE_ARTIFACT_PROVENANCE", "0")
+    if model_id == "Kimi-K2.7-Code":
+        assert supports_vision("azure/my-kimi")
+    assert not traits("azure/my-kimi").responses_api
+    assert not reasoning_efforts("azure/my-kimi")
+    assert LLMClient().resolve_model(ModelTier.FAST, Provider.AZURE) == "my-kimi"
+    calls = []
+    executed = []
+
+    async def send(self, request, **kwargs):
+        assert request.url.path == "/openai/v1/chat/completions"
+        assert request.url.host == "fixture.services.ai.azure.com"
+        assert request.headers["authorization"] == "Bearer azure-test-key"
+        body = json.loads(request.content)
+        calls.append(body)
+        assert body["model"] == "my-kimi" and body["stream"]
+        assert "reasoning_effort" not in body and "max_output_tokens" not in body
+        deltas = [
+            {"reasoning_content": "Use "}, {"reasoning_content": "the tool."},
+            {"tool_calls": [{"index": 0, "id": "call_1", "type": "function",
+                             "function": {"name": "lookup", "arguments": '{"key":'}}]},
+            {"tool_calls": [{"index": 0, "function": {"arguments": '"fixture"}'}}]},
+        ] if len(calls) == 1 else [{"content": "Done."}]
+        finish = "tool_calls" if len(calls) == 1 else "stop"
+        events = [{"id": "chat_fixture", "object": "chat.completion.chunk", "created": 1,
+                   "model": model_id, "choices": [{"index": 0, "delta": delta,
+                   "finish_reason": None}]} for delta in deltas]
+        events.append({**events[-1], "choices": [{"index": 0, "delta": {}, "finish_reason": finish}]})
+        return httpx.Response(200, request=request, headers={"content-type": "text/event-stream"},
+                              content="".join(f"data: {json.dumps(event)}\n\n" for event in events) + "data: [DONE]\n\n")
+
+    async def lookup(key):
+        executed.append(key)
+        return "fixture value"
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    _litellm()
+    target = resolve_target("azure/my-kimi")
+    stream = StreamResult(model=target.wire_model, provider_extra=dict(target.options),
+        messages=[{"role": "user", "content": "Look up fixture."}],
+        tool_schemas=[{"type": "function", "function": {"name": "lookup", "parameters": {
+            "type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}}}],
+        tool_lookup={"lookup": lookup}, max_tokens=256, temperature=1,
+        request_tokens_limit=100_000, response_tokens_limit=1024)
+    assert "".join([part async for part in stream.stream_text()]) == "Done."
+    assert len(calls) == 2 and executed == ["fixture"]
+    history = calls[1]["messages"]
+    assistant = next(m for m in history if m["role"] == "assistant")
+    assert assistant["reasoning_content"] == "Use the tool."
+    assert assistant["tool_calls"][0]["id"] == "call_1"
+    assert any(m.get("tool_call_id") == "call_1" and "fixture value" in m["content"] for m in history)
+
+
 async def test_deployment_settings_persist_without_touching_credentials(azure, monkeypatch, tmp_path):
     from rune.api.handlers.config import ConfigPatchRequest, get_config_endpoint, patch_config
     from rune.config import loader
@@ -183,6 +245,8 @@ async def test_deployment_settings_persist_without_touching_credentials(azure, m
     assert loader.load_config(force=True).llm.azure_deployments == {"daily": "gpt-6-sol"}
     state = await get_config_endpoint()
     assert state.azure["hasKey"]
+    assert "Kimi-K2.7-Code" in state.azure["suggestedModels"]
+    assert "DeepSeek-V4-Pro" in state.azure["suggestedModels"]
     assert "azure-test-key" not in state.model_dump_json()
     monkeypatch.setattr("rune.config.save_config_values", lambda _: None)
     from fastapi import HTTPException
