@@ -377,8 +377,8 @@ class ProactiveConfig(BaseModel):
 # Browser Configuration
 
 class BrowserConfig(BaseModel):
-    default_profile: str = "managed"  # managed | relay
-    headless: bool = True  # managed mode is always headless; use relay for headed
+    default_profile: str = "managed"  # managed (headless) | visible (headed)
+    headless: bool = True  # Compatibility field; the profile determines headless mode.
     timeout_ms: int = 30_000
     viewport_width: int = 1280
     viewport_height: int = 720

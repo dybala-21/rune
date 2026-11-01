@@ -99,6 +99,8 @@ class ElementMeta:
     #              "value": str, "confidence": float}]
     breadcrumb: str = ""  # ancestor context path (e.g. "main > list > listitem")
     href: str = ""
+    match_count: int = 1
+    context: str = ""
 
 
 class ElementStore:
@@ -190,8 +192,8 @@ async def extract_interactive_elements(page: Any, root_selector: str = "") -> li
     accessibility tree.  Interactive roles are parsed from the YAML lines.
     """
     store = get_element_store()
-    previous = {(meta.role, meta.name): (meta, store.handles[meta.ref])
-                for meta in store.all.values() if meta.ref in store.handles}
+    previous = [(meta, store.handles[meta.ref])
+                for meta in store.all.values() if meta.ref in store.handles]
     previous_handles = [*store.handles.values(), store.document]
     previous_document = store.document
     same_page = store.page is page and store.last_url == page.url
@@ -221,31 +223,12 @@ async def extract_interactive_elements(page: Any, root_selector: str = "") -> li
         snapshot_text = await root.aria_snapshot()
         elements: list[ElementMeta] = []
         _parse_aria_snapshot(snapshot_text or "", elements, store)
-        for meta in elements:
-            locator = page.get_by_role(meta.role, name=meta.name, exact=True)
-            try:
-                if await locator.count() != 1:
-                    continue
-                handle = await locator.element_handle(timeout=1000)
-                if handle is None:
-                    continue
-                store.handles[meta.ref] = handle
-                if meta.role == "link":
-                    meta.href = await handle.evaluate("el => el.href || ''")
-                observed = previous.get((meta.role, meta.name)) if same_document else None
-                if observed and await handle.evaluate("(node, old) => node === old", observed[1]):
-                    # A fresh observation does not invalidate an unchanged node.
-                    # Replacements with the same label still receive a new ref.
-                    store.handles.pop(meta.ref)
-                    store.all.pop(meta.ref)
-                    meta.ref = observed[0].ref
-                    store.handles[meta.ref] = handle
-                    store.put(meta)
-            except Exception as exc:
-                log.debug("browser_reference_unavailable", ref=meta.ref, error=str(exc))
+        from rune.capabilities.browser.node_binding import bind_nodes
+
+        elements = await bind_nodes(page, root, elements, store, previous if same_document else [])
         store.last_url = page.url
         store.last_observe_time = time.monotonic()
-        return [meta for meta in elements if meta.role not in READBACK_ROLES or meta.ref in store.handles]
+        return elements
     except Exception as exc:
         log.warning("ax_snapshot_failed", error=str(exc))
         await store.release()
@@ -388,6 +371,8 @@ def format_interactive_elements(
             parts.append(f'"{meta.name}"')
         if meta.breadcrumb:
             parts.append(f"in({meta.breadcrumb})")
+        if meta.context:
+            parts.append(f"context={json.dumps(meta.context, ensure_ascii=False)}")
         if meta.href:
             parts.append(f"href={json.dumps(meta.href[:2000])}")
         lines.append(" ".join(parts))
@@ -422,9 +407,9 @@ async def find_element_locator(page: Any, ref: str) -> Any | None:
         if not await handle.evaluate("el => el.isConnected && el.ownerDocument === document"):
             return None
         locator = page.get_by_role(meta.role, name=meta.name, exact=True)
-        if await locator.count() != 1:
+        if await locator.count() != meta.match_count:
             return None
-        if await locator.evaluate("(el, observed) => el === observed", handle, timeout=1000):
+        if await locator.evaluate_all("(nodes, observed) => nodes.includes(observed)", handle):
             return handle
     except Exception as exc:
         log.debug("browser_reference_stale", ref=ref, error=str(exc))

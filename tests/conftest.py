@@ -17,6 +17,12 @@ def pytest_addoption(parser):
     group.addoption("--decision-backend", choices=("connected", "jev", "microsoft", "paired"),
                     help="Override task routing; paired compares connected and Jev in alternating order")
     group.addoption("--live-repeat", type=int, default=1, help="Independent trials per live scenario (1-10)")
+    group.addoption("--nol-budget", choices=("standard", "extended"), default="standard",
+                    help="NOL comparison budget: standard ($5/1.5M tokens) or extended ($8/2.5M); reported separately")
+    group.addoption("--nol-browser", choices=("managed", "visible"), default="managed",
+                    help="NOL live trial: a managed headless or a new visible browser (no personal profile)")
+    group.addoption("--nol-destination", choices=("seoul", "sapporo"), default="seoul",
+                    help="Separate domestic Seoul and overseas Sapporo comparison scenarios")
 
 
 @pytest.fixture

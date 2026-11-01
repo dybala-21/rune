@@ -193,6 +193,12 @@ def _resolve_intent_contract(
         )
 
     if category == "browser":
+        if getattr(classification, "browser_effect", "change") == "view":
+            return IntentContract(
+                kind="browser_read", tool_requirement="read",
+                grounding_requirement="required", output_expectation=output_expectation,
+                requires_code_verification=False,
+            )
         return IntentContract(
             kind="browser_write", tool_requirement="write",
             grounding_requirement="none", output_expectation=output_expectation,

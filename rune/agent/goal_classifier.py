@@ -191,9 +191,12 @@ Use web for an explicit lookup or URL reading. Other outcomes can also need sour
 Set source_output=verbatim only when the user requests original source fields or exact text, including follow-ups.
 Use derived for calculations, unit/time conversions, or renamed/computed fields; summary for revisiting source facts.
 Use none otherwise, including acknowledgements.
-browser_effect: view only for scrolling or navigating without changing app data;
-edit for local control or draft changes without saving/submitting;
-change for saved settings, submissions, bookings or uncertain browser outcomes.
+browser_effect describes the requested business outcome, not whether a UI control moves.
+view for information retrieval, including search submissions, filters, dates, occupancy,
+opening details and comparing offers, when no record, draft or transaction is requested.
+edit for a requested unsaved draft or local control configuration as the deliverable;
+change for saved settings, sent messages, bookings, payments or uncertain external effects.
+For comparisons, verify the retrieved information; do not invent a saved-result requirement.
 calculation_operation: sum, count, mean, min, max for a single requested aggregate;
 other for no calculation, multiple operations, or a more complex calculation.
 Set needs_current_source when the answer depends on current or recent observations:

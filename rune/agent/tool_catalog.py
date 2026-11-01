@@ -7,7 +7,7 @@ from collections.abc import Collection
 from rune.agent.tool_output import RejectedToolResult
 
 _CORE = {"think", "ask_user", "task_blocked", "bash_execute", "project_map", "table_requirements", "table_verify"}
-_BROWSER = ("browser_observe", "browser_act", "browser_navigate", "browser_extract", "browser_batch")
+_BROWSER = ("browser_observe", "browser_act", "browser_navigate", "browser_extract", "browser_batch", "browser_stay_evidence")
 
 
 def deferred_for_task(names: list[str], classification) -> set[str]:

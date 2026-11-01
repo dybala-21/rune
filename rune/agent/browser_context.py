@@ -1,5 +1,6 @@
 """Keep earlier page content without keeping actionable element references."""
 
+import json
 import re
 from typing import Any
 from uuid import uuid4
@@ -60,6 +61,39 @@ def _historical(text: str) -> str:
 def compact_browser_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     calls = {call.get("id"): (call.get("function") or {}).get("name", "")
              for message in messages for call in message.get("tool_calls") or []}
+    # Keep excerpts until a successful record makes them recoverable from the ledger.
+    messages = list(messages)
+    evidence_indexes = [i for i, m in enumerate(messages) if m.get("role") == "tool"
+                        and (m.get("name") or calls.get(m.get("tool_call_id"))) == "browser_stay_evidence"]
+    parsed = {}
+    for index in evidence_indexes:
+        content = messages[index].get("content")
+        if not isinstance(content, str):
+            continue
+        try:
+            saved = json.loads(content)
+        except ValueError:
+            continue
+        if not isinstance(saved, dict):
+            continue
+        parsed[index] = saved
+    boundary = max((index for index, saved in parsed.items() if saved.get("recorded")), default=-1)
+    for index, saved in parsed.items():
+        if index >= boundary:
+            continue
+        summary = {key: saved[key] for key in ("source", "url", "recorded", "missing") if key in saved}
+        summary["stored"] = "Use browser_stay_evidence status/read; original evidence remains in the ledger."
+        messages[index] = {**messages[index], "content": json.dumps(summary, ensure_ascii=False)}
+    # After recording, retain the latest controls and retire older UI bodies,
+    # including extract/open outputs without snapshot markers.
+    browser_indexes = [i for i, m in enumerate(messages) if i < boundary and m.get("role") == "tool"
+                       and (m.get("name") or calls.get(m.get("tool_call_id"), "")).startswith("browser_")
+                       and i not in parsed]
+    for index in browser_indexes[:-1]:
+        content = messages[index].get("content")
+        if isinstance(content, str) and len(content) > 700:
+            messages[index] = {**messages[index], "content": _HISTORY + content.splitlines()[0][:500]
+                               + "\n[Earlier UI body retired after evidence was recorded; use the saved ledger.]"}
     snapshots = []
     for index, message in enumerate(messages):
         name = message.get("name") or calls.get(message.get("tool_call_id"), "")

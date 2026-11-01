@@ -40,6 +40,9 @@ class _FakeStream:
         if self._text:
             yield self._text
 
+    async def get_output(self) -> str:
+        return self._text
+
     def get_failure_state(self) -> tuple[dict, set]:
         return {}, set()
 

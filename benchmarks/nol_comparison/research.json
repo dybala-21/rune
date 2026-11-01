@@ -1,0 +1,120 @@
+{
+  "reviewed_at": "2026-11-01 Asia/Seoul",
+  "scope": "Research first; no production code changes in this research turn",
+  "local_run": "output/nol-e2e-overseas/64734c5635da43c3a03f4255bb87707c/f70993c8c4494c1f8a88033928d4212f.json",
+  "sources": [
+    {
+      "id": "openai-computer",
+      "url": "https://developers.openai.com/api/docs/guides/tools-computer-use",
+      "kind": "current official guidance",
+      "finding": "Programmatic execution and structured computer actions are both supported; preserve execution state and return fresh observations. This is not disclosure of all production internals."
+    },
+    {
+      "id": "openai-drivers",
+      "url": "https://developers.openai.com/api/docs/guides/tools-computer-use-sdk-drivers",
+      "kind": "current official guidance",
+      "finding": "Bind permitted actions to the original target at execution; prior observation does not freeze page state."
+    },
+    {
+      "id": "openai-context",
+      "url": "https://developers.openai.com/cookbook/examples/agents_sdk/building_reliable_agents_memory_compaction",
+      "date": "2026-05-01",
+      "kind": "official cookbook example, not comparative experiment",
+      "finding": "Separate working context, reusable memory, and reviewable factual artifacts; compact at meaningful boundaries."
+    },
+    {
+      "id": "browsergym",
+      "url": "https://arxiv.org/html/2412.05467v4",
+      "first_submitted": "2024-12-06",
+      "revised": "2025-02-28",
+      "kind": "research paper",
+      "finding": "DOM and AXTree share unique element identifiers (bid), with screenshot/geometry metadata and ID-based actions. Exact stability across all DOM mutations is not established by this review."
+    },
+    {
+      "id": "odysseys",
+      "url": "https://arxiv.org/html/2604.24964v1",
+      "date": "2026-04-27",
+      "kind": "preprint",
+      "finding": "200 live-web tasks; evaluate requirement coverage and efficiency. Appendix A.9 reports benefits from 100 to 200 steps for Opus 4.6, but not comparable gains for Qwen 3.5-9B. Does not establish the effect of raising Rune budgets.",
+      "caution": "Appendix states 44.5% and 86/200 for the same baseline; these are arithmetically inconsistent. Do not treat the exact effect size as independently replicated."
+    },
+    {
+      "id": "awm",
+      "url": "https://arxiv.org/html/2409.07429v1",
+      "date": "2024-09-11",
+      "kind": "research preprint version inspected",
+      "finding": "Reuse abstract workflows induced from evaluated past trajectories. Evidence from Mind2Web/WebArena and older models is not a guarantee for current NOL pages."
+    },
+    {
+      "id": "webarena-verified",
+      "url": "https://github.com/ServiceNow/webarena-verified",
+      "kind": "authors repository; 2025 workshop paper linked",
+      "finding": "Deterministic evaluation of typed response data and captured network traces. Paper landing page required browser verification, so this review relies on the authors repository for implementation details."
+    },
+    {
+      "id": "osworld2",
+      "url": "https://arxiv.org/abs/2606.29537",
+      "first_submitted": "2026-06-28",
+      "revised": "2026-07-13",
+      "kind": "preprint abstract inspected",
+      "finding": "108 long-horizon workflows expose constraint tracking and verification failures; benchmark task complexity differs from NOL comparison."
+    }
+  ],
+  "confirmed_local_findings": [
+    {
+      "finding": "Duplicate role/name elements receive listed refs but no bound handle; action then rejects them. Re-observation does not remove ambiguity.",
+      "code": [
+        "rune/capabilities/browser/helpers.py:225",
+        "rune/capabilities/browser/helpers.py:248",
+        "rune/capabilities/browser/helpers.py:412"
+      ]
+    },
+    {
+      "finding": "Classification says browser/edit; incomplete browser result formatter replaces partial answer with generic saved-result failure. A comparison should verify retrieved offers, not imply a requested save.",
+      "code": [
+        "rune/agent/goal_classifier.py:194",
+        "rune/agent/task_evidence.py:107",
+        "rune/agent/browser_result.py:209"
+      ]
+    },
+    {
+      "finding": "Cumulative usage across 35 calls was 1442725 tokens, including 1012027 cache-read, 1426232 input and 16493 output. Not one 1.44M-token context. 57275 tokens remained in final accounting; runtime entered budget answer-reserve/incomplete state."
+    },
+    {
+      "finding": "Rune already has session, journal recovery and browser history compaction. Additional state/compaction proposal must improve these rather than assume they are absent.",
+      "code": [
+        "rune/agent/browser_context.py:61",
+        "rune/agent/recovery_context.py:65"
+      ]
+    },
+    {
+      "finding": "DOM findings and partial quotes exist; distinct exact fee/coupon/cancellation completeness was not established. Snapshot quotation checks alone cannot prove semantic association or final payable total."
+    }
+  ],
+  "hypotheses_requiring_measurement": [
+    "How much token use comes from schemas/prompts, ordinary extraction outputs, repeated snapshots and retries separately.",
+    "Whether fresh targeted vision or node identity fixes improve NOL task completion under equal budgets.",
+    "How much increasing budget helps after deterministic reference and completion-contract defects are fixed."
+  ],
+  "recommended_experiments": [
+    "Reproduce duplicate buttons and DOM replacement locally; newly observed duplicates must resolve to specific nodes, retired refs must never click replacements.",
+    "Separate information retrieval, reversible UI state and external business effects; verify comparison and booking with different outcome contracts.",
+    "Persist per-property/date/occupancy/room/rate evidence with timestamps and missing fields; preserve verified partial results through interruption.",
+    "Compare baseline, node binding, targeted screenshot fallback, persisted evidence and short programmatic batches under the same model/request/budget. Run repeated trials, then held-out domestic/overseas sites.",
+    "Record full completion, per-field verified coverage, false success, wrong target actions, latency, cached/uncached tokens, cost and resume duplication separately."
+  ],
+  "research_harness": {
+    "report": "output/nol-research-audit/ad837f4e7d0640389169a43fe5f81e17/7e3c6d2790444294a18d3544a6c87f0a.json",
+    "seconds": 49.297,
+    "model_calls": 5,
+    "web_reads": 7,
+    "estimated_usd": 0.62709475,
+    "role": "corroboration only; root manually checked citations and did not adopt unverified date or cross-mutation stability claims"
+  },
+  "non_claims": [
+    "No evidence OpenAI solves NOL perfectly.",
+    "No OpenAI-vs-Rune NOL A/B experiment.",
+    "No measured effect size for proposed Rune changes.",
+    "Domestic HTTP 403 cause remains unknown."
+  ]
+}

@@ -1924,7 +1924,7 @@ class NativeAgentLoop(EventEmitter):
                     evidence.web_fetches += int(web_grounding.observe(cap_name, _last_tool_params, result))
                 else:
                     evidence.executions += int(result.success)
-            elif cap_name == "browser_extract":
+            elif cap_name in {"browser_extract", "browser_stay_evidence"}:
                 evidence.reads += int(result.success)
                 evidence.browser_reads += int(result.success)
                 web_grounding.observe(cap_name, _last_tool_params, result)
@@ -2146,7 +2146,8 @@ class NativeAgentLoop(EventEmitter):
         )
         _explore_budget = _compute_explore_budget(classification, _repo_fix)
         simple_lookup = is_simple_lookup(classification)
-        reserve_answer = simple_lookup or is_web_research(classification) or classification.goal_type == "chat" and set(tools) <= {
+        browser_read = classification.goal_type == "browser" and classification.browser_effect == "view"
+        reserve_answer = browser_read or simple_lookup or is_web_research(classification) or classification.goal_type == "chat" and set(tools) <= {
             "think", "ask_user", "task_blocked", "memory_search", "memory_save", "web_search", "web_fetch",
         }
         from rune.agent.goal_classifier import task_reasoning_effort
@@ -2155,10 +2156,13 @@ class NativeAgentLoop(EventEmitter):
         deferred_tools = deferred_for_task(tools, classification)
         if _desktop_mode:
             deferred_tools.difference_update(DESKTOP_TOOLS)
-        task_agent_options = {
+        task_agent_options: dict[str, Any] = {
             "deferred_tools": deferred_tools,
             "compact_tools": simple_lookup or is_web_research(classification) or classification.goal_type == "browser",
             "reserve_answer": reserve_answer,
+            "reserve_answer_at_round_limit": not browser_read,
+            "retrieval_state": (lambda: None if self._cancel_event.is_set() else task_evidence)
+                               if browser_read and not classification.is_multi_task else None,
             "default_reasoning_effort": task_reasoning_effort(classification),
         }
         agent = LiteLLMAgent(
@@ -2842,6 +2846,14 @@ class NativeAgentLoop(EventEmitter):
                 with contextlib.suppress(Exception):
                     messages = result.all_messages()
 
+                from rune.agent.retrieval_result import accepted_answer, progress_hint
+                if browser_read and not classification.is_multi_task and (answer := accepted_answer(task_evidence)):
+                    self._last_answer_text = answer
+                    trace.reason = "completed"
+                    trace.tool_budget_exhausted = False
+                    trace.final_step = self._step
+                    break
+
                 # Retry once at full rigor with seed history and facts, not the failed trajectory.
                 if (
                     _fast_lane_active
@@ -2865,19 +2877,41 @@ class NativeAgentLoop(EventEmitter):
                     log.info("cap_upshift_scheduled", step=self._step)
                     continue
 
+                if getattr(result, "tool_round_limit_reached", False):
+                    # Resume tool history under the enclosing run's limits.
+                    self._last_answer_text = ""
+                    if self._step < max_iterations:
+                        trace.tool_budget_exhausted = False
+                    log.info("tool_round_continuation", step=self._step)
+                    if hint := progress_hint(task_evidence):
+                        messages = self._inject_system_message(messages, hint)
+                    continue
+
                 # stall tracking
                 output_text = ""
                 try:
                     out = await result.get_output()
-                    output_text = str(out) if out else collected_text
-                except Exception:
-                    output_text = collected_text
+                    output_text = str(out) if out else ""
+                except Exception as exc:
+                    log.warning("final_output_unavailable", error=str(exc)[:200])
 
                 if output_text:
                     self._last_answer_text = output_text
                     self._stall.mark_activity("agent_step")
                 else:
                     self._stall.mark_no_progress()
+
+                if browser_read and trace.answer_reserve_reason:
+                    # Without an accepted collector result, forced synthesis is partial.
+                    self._record_completion_block(
+                        "Browser retrieval coverage",
+                        f"Retrieval stopped for {trace.answer_reserve_reason}; the returned information "
+                        "is preserved, but full request coverage has not been independently verified.",
+                    )
+                    trace.reason = "task_incomplete"
+                    trace.tool_budget_exhausted = True
+                    trace.final_step = self._step
+                    break
 
                 # Rehydration trigger (per-step, fail-safe)
                 if self._rehydration_trigger is not None:
@@ -3611,10 +3645,17 @@ class NativeAgentLoop(EventEmitter):
 
         if trace.reason == "request_budget_exhausted" and not trace.tool_budget_exhausted and not self._cancel_event.is_set():
             from rune.agent.browser_result import budget_answer, can_finish_from_readback
+            from rune.agent.retrieval_result import accepted_answer
             from rune.agent.task_context import context_blocker
             from rune.config import get_config
 
-            if (can_finish_from_readback(task_evidence, classification)
+            if (browser_read and not classification.is_multi_task and (answer := accepted_answer(task_evidence))
+                    and not context_blocker(previous_task, classification, original_history)):
+                # Budget exhaustion cannot discard a result the collector already verified.
+                trace.reason = "completed"
+                self._completion_check = None
+                self._last_answer_text = answer
+            elif (can_finish_from_readback(task_evidence, classification)
                     and not context_blocker(previous_task, classification, original_history)):
                 # A final prose call adds no evidence to already checked stored values.
                 trace.reason = "completed"
@@ -3653,6 +3694,11 @@ class NativeAgentLoop(EventEmitter):
         trace.total_tokens_used = self._token_budget.used
         trace.source_review = web_grounding.snapshot(self._last_answer_text, goal)
         trace.requirement_acceptance = task_evidence.acceptance()
+        if (browser_read and not classification.is_multi_task
+                and trace.reason in {"task_incomplete", "request_budget_exhausted", "max_iterations"}):
+            from rune.agent.retrieval_result import partial_answer
+            if answer := partial_answer(task_evidence):
+                self._last_answer_text = answer
         self._finalize_browser_answer(trace)
         if trace.reason in {"completed", "verified"}:
             from rune.config import get_config

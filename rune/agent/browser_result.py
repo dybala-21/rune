@@ -8,6 +8,8 @@ log = get_logger(__name__)
 
 
 def saved_outcomes(evidence):
+    if evidence.browser_effect != "change":
+        return []
     plan = evidence.requirements
     return [item for item in plan.outcomes if item.kind == "result"] if isinstance(plan, BrowserRequirements) else []
 

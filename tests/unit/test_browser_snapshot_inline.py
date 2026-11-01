@@ -19,6 +19,23 @@ def test_empty_list_renders_nothing():
     assert format_interactive_elements([]) == ""
 
 
+@pytest.mark.parametrize("value", ["1500", "-500", "left"])
+def test_scroll_rejects_invalid_direction_before_browser_input(value):
+    from pydantic import ValidationError
+
+    from rune.capabilities.browser.capabilities import BrowserActParams
+
+    with pytest.raises(ValidationError, match="Scroll value must be up or down"):
+        BrowserActParams(action="scroll", selector="body", value=value)
+
+
+@pytest.mark.parametrize("value", ["", "up", "down"])
+def test_scroll_accepts_documented_directions(value):
+    from rune.capabilities.browser.capabilities import BrowserActParams
+
+    assert BrowserActParams(action="scroll", selector="body", value=value).value == value
+
+
 def test_renders_ref_role_name_and_breadcrumb():
     out = format_interactive_elements([
         _el("e1", "button", "코엑스", "main > list"),

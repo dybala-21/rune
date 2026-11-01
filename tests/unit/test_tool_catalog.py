@@ -112,7 +112,7 @@ async def test_browser_catalog_starts_with_working_tools_and_preserves_discovery
     deferred = deferred_for_task(list(names), classification)
     agent = LiteLLMAgent("openai/gpt-5.4", tools=wrappers, deferred_tools=deferred, compact_tools=True)
     full = LiteLLMAgent("openai/gpt-5.4", tools=wrappers)
-    expected = {"browser_navigate", "browser_observe", "browser_act", "browser_extract", "browser_batch",
+    expected = {"browser_navigate", "browser_observe", "browser_act", "browser_extract", "browser_batch", "browser_stay_evidence",
                 "ask_user", "task_blocked", "tool_search"}
     if needs_sources:
         expected.update(("web_search", "web_fetch"))

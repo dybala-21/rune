@@ -3,6 +3,7 @@
 import json
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 from rune.agent.browser_requirements import BrowserRequirements, refers_to
 from rune.agent.intent_engine import IntentContract
@@ -87,6 +88,7 @@ class TaskEvidence:
     last_write_status: str | None = None
     readback_offered: bool = False
     multiple_saves_confirmed: bool = False
+    retrieval_acceptance: dict[str, Any] | None = None
 
     @property
     def requirements_unavailable(self) -> bool:
@@ -364,6 +366,8 @@ class TaskEvidence:
                                          and (read_results or key[3] in {"value", "checked"}))]
 
     def observe(self, name: str, result: CapabilityResult, params: dict | None = None) -> None:
+        if name == "browser_stay_evidence" and result.success:
+            self.retrieval_acceptance = (result.metadata or {}).get("retrieval_acceptance")
         meta = result.metadata or {}
         document = meta.get("document_id")
         if document and self.document_id and document != self.document_id:
@@ -643,6 +647,9 @@ class TaskEvidence:
                    for key, value in saved["values"].items())
 
     def acceptance(self) -> dict | None:
+        from rune.agent.retrieval_result import acceptance
+        if self.retrieval_acceptance is not None and self.browser_effect == "view":
+            return acceptance(self)
         from rune.agent.browser_result import pending_results, retrieved_coverage, saved_outcomes
         if not self.coverage_required:
             if self.independent_readback:
@@ -722,6 +729,9 @@ class TaskEvidence:
         return "verification_inconclusive"
 
     def blocker(self, contract: IntentContract, executions: int) -> str | None:
+        if contract.kind == "browser_read" and self.retrieval_acceptance is not None:
+            from rune.agent.retrieval_result import accepted_answer, progress_hint
+            return None if accepted_answer(self) else progress_hint(self)
         if contract.kind == "browser_write":
             from rune.agent.browser_result import (
                 READBACK_GUIDANCE,

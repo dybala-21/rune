@@ -1,0 +1,61 @@
+{
+  "reviewed_at": "2026-11-01 Asia/Seoul",
+  "question": "How should Rune combine API, DOM, vision and desktop control while preserving outcome evidence?",
+  "sources": [
+    {
+      "title": "OpenAI Computer use integration",
+      "url": "https://developers.openai.com/api/docs/guides/tools-computer-use-integration",
+      "type": "current official documentation",
+      "finding": "Custom function/MCP tools and programmatic runtimes can combine DOM locators, text and screenshots. Choose integrations using success, latency, recovery and permissions. This is not a universal API-first mandate or disclosure of all production internals."
+    },
+    {
+      "title": "OpenAI Computer use SDK drivers",
+      "url": "https://developers.openai.com/api/docs/guides/tools-computer-use-sdk-drivers",
+      "type": "current official documentation",
+      "finding": "Revalidate the original permitted target at execution. Observation does not freeze the UI. Screenshot coordinates and execution must share the same coordinate frame; unsupported operations must not silently succeed."
+    },
+    {
+      "title": "Beyond Browsing: API-Based Web Agents",
+      "url": "https://arxiv.org/html/2410.16464v2",
+      "type": "research paper version inspected; first submitted 2024-10-21",
+      "finding": "API and browsing can provide complementary coverage on WebArena with GPT-4o. API quality, coverage and manual integration matter. This does not establish that APIs always outperform DOM or that private NOL endpoints are authorized."
+    },
+    {
+      "title": "MCPWorld",
+      "url": "https://arxiv.org/html/2506.07672v1",
+      "type": "preprint; first submitted 2025-06-09",
+      "finding": "201 tasks in instrumented applications compare GUI, MCP and hybrid execution with application-side outcome checks. Missing API coverage motivates hybrid access; additional prompts and switching can also hurt. White-box customized apps differ materially from closed NOL pages."
+    },
+    {
+      "title": "WebChallenger",
+      "url": "https://arxiv.org/html/2606.10423v1",
+      "type": "preprint; first submitted 2026-06-09",
+      "finding": "Section 2.4 reuses PageMem and updates changed sections while retaining unchanged extractions. Appendix D notes hand-designed DOM/workflow heuristics can fail on unusual websites. Supports measuring selective rereads, not assuming a guaranteed speedup."
+    },
+    {
+      "title": "Enhancing Web Agents with a Hierarchical Memory Tree",
+      "url": "https://arxiv.org/html/2603.07024v1",
+      "type": "preprint; first submitted 2026-03-07",
+      "finding": "Separate task/stage/action memory and ground reusable workflows in current UI state. A reported failure from requiring a URL change illustrates why modal progress needs outcome-specific checks. Do not reuse stale selectors as evidence."
+    }
+  ],
+  "decisions": [
+    "Use a documented authorized API/connector when it covers the requested operation, required fields and the same user/account context. No applicable NOL consumer reservation API was established in this investigation; do not infer that none exists.",
+    "Use DOM for NOL's current text/control surface. On missing or stale targets first refresh scoped observations. Consider vision only for genuine visual gaps, with an actual image-capable model and shared page/coordinate state.",
+    "Use desktop control for native apps or OS dialogs; prefer accessible element identities where available. Switching drivers does not automatically preserve login, target or transaction identity.",
+    "HTTP 403, authentication and access challenges require explicit access handling, not a visual bypass. Unknown write outcomes require independent readback before retrying any mutation.",
+    "Persist exact source lines outside model context by run, property, dates, occupancy and room/rate. Keep completed fields; reread stored text first, then obtain only missing evidence.",
+    "Gate comparison completion on a fixed structured contract and exact rendered result. Booking requires separate confirmed reservation evidence; comparison success never means booking success.",
+    "The new implementation collects DOM evidence only. A universal adaptive API/vision/desktop router is a researched follow-up, not claimed implemented here."
+  ],
+  "research_harness": {
+    "report": "output/nol-hybrid-research/feaa8ebb2f6a4fbfbe7edfa9a14e2440/276028511ad04f05b84b44d92b3deefb.json",
+    "seconds": 72.777,
+    "estimated_usd": 0.6845965,
+    "tokens": 110186,
+    "model_calls": 6,
+    "tool_calls": 11,
+    "limitations": "Independent research-agent audit read portions of long papers, not every ablation. Root reviewed primary passages and rejected suggestions to treat access-denial as a visual-fallback trigger. No NOL success claim follows from this research."
+  },
+  "evaluation": "Track verified required-field coverage, false completion, wrong-target actions, fresh captures versus saved reads, interface-switch reasons, latency and cost. Single live trials cannot establish reliability or causal performance gains."
+}

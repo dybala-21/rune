@@ -245,6 +245,7 @@ PROMPT_BROWSER = """
   Example: browser_observe({ taskHint: "hotel list" }) - returns only task-relevant elements
 
 ## Data Collection (browser)
+- For NOL accommodation comparisons, use browser_stay_evidence: begin with the requested city/dates/adults/count/budget, capture each relevant page, then record its numbered source lines. Start each candidate with name, room, price_quote and total_krw; add missing fields to its candidate ID. Capture/read returns exact lines, so never reconstruct or shorten quotes yourself. Record taxes separately from discounts. Reuse saved lines and request only missing conditions; do not revisit completed candidates. Call finish after the required distinct properties are complete. Its validated JSON is the final answer; additional charges are separate from the displayed room charge, not a guaranteed checkout total.
 - browser_extract for structured data (cards, tables, lists)
 - Paginated? Check for next-page links, page numbers, or any-language pagination indicators
 - Verify all items have ALL requested fields before finishing"""
