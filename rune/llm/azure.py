@@ -18,16 +18,20 @@ def endpoint() -> str:
     return model_environment(environment_name(ENDPOINT_NAMES)).strip()
 
 
-def connection_options(options: dict) -> dict:
+def resource_endpoint(value: str) -> str:
     from rune.llm.target import ModelCompatibilityError
 
-    result = dict(options)
-    base = str(result.get("api_base") or endpoint()).strip().rstrip("/")
+    base = value.strip().rstrip("/")
     parsed = urlsplit(base)
     if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
             or parsed.query or parsed.fragment or parsed.path not in {"", "/openai/v1"}):
         raise ModelCompatibilityError("Set a valid HTTPS Azure endpoint in Settings before selecting an Azure model.")
-    result["api_base"] = base.removesuffix("/openai/v1")
+    return base.removesuffix("/openai/v1")
+
+
+def connection_options(options: dict) -> dict:
+    result = dict(options)
+    result["api_base"] = resource_endpoint(str(result.get("api_base") or endpoint()))
     result.setdefault("api_version", model_environment("AZURE_API_VERSION") or "v1")
     key = model_environment(environment_name(KEY_NAMES)).strip()
     if key:

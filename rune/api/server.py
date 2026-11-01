@@ -342,6 +342,8 @@ def create_app() -> Any:
 
     # Auth dependency
     auth = TokenAuthDependency()
+    from rune.api.azure import azure_router
+    app.include_router(azure_router(auth))
     app.include_router(computer_router(_computers, auth))
     from rune.api.desktop import desktop_router
     app.include_router(desktop_router(_computers, auth, stop_run=lambda rid: _stop_run(rid)))
