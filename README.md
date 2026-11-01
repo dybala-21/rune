@@ -151,12 +151,17 @@ rune --provider ollama --model MODEL_NAME
 
 Local-first describes where RUNE runs and stores its state. Requests sent to a cloud model, search service, or connector still leave your machine.
 
-### Azure Foundry: Kimi K2.7 Code
+### Azure Foundry: Kimi and DeepSeek
 
-In **Settings → Azure Foundry**, save your resource endpoint (for example,
+In **Settings → Advanced settings → Azure Foundry**, save your resource endpoint (for example,
 `https://YOUR-RESOURCE.services.ai.azure.com/openai/v1`) and API key. Add a row
 with the exact deployment name from Foundry and model ID `Kimi-K2.7-Code`,
 then select that Azure deployment in the model picker.
+
+For `DeepSeek-V4-Pro`, add another row with its deployment name and model ID
+`DeepSeek-V4-Pro`. Deployments in the same resource share one endpoint and API key.
+The list is registered manually, not discovered from Azure. Saving settings does
+not test the connection or send a model request.
 
 For project-scoped configuration, put credentials in the ignored `.rune/.env`:
 

@@ -167,16 +167,18 @@ async def test_azure_response_text_and_usage_survive_sdk_conversion(azure, monke
     assert estimate_request_cost("azure/daily", counts, params) is None
 
 
-async def test_kimi_chat_stream_and_tool_continuation_use_the_azure_deployment(azure, monkeypatch):
+@pytest.mark.parametrize("model_id", ["Kimi-K2.7-Code", "DeepSeek-V4-Pro"])
+async def test_foundry_chat_stream_and_tool_continuation_use_the_azure_deployment(azure, monkeypatch, model_id):
     from rune.agent.litellm_adapter import StreamResult, _litellm
     from rune.llm.client import LLMClient
     from rune.types import ModelTier, Provider
 
     azure.active_model = "my-kimi"
-    azure.azure_deployments = {"my-kimi": "Kimi-K2.7-Code"}
+    azure.azure_deployments = {"my-kimi": model_id}
     monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://fixture.services.ai.azure.com/openai/v1")
     monkeypatch.setenv("RUNE_ARTIFACT_PROVENANCE", "0")
-    assert supports_vision("azure/my-kimi")
+    if model_id == "Kimi-K2.7-Code":
+        assert supports_vision("azure/my-kimi")
     assert not traits("azure/my-kimi").responses_api
     assert not reasoning_efforts("azure/my-kimi")
     assert LLMClient().resolve_model(ModelTier.FAST, Provider.AZURE) == "my-kimi"
@@ -199,7 +201,7 @@ async def test_kimi_chat_stream_and_tool_continuation_use_the_azure_deployment(a
         ] if len(calls) == 1 else [{"content": "Done."}]
         finish = "tool_calls" if len(calls) == 1 else "stop"
         events = [{"id": "chat_fixture", "object": "chat.completion.chunk", "created": 1,
-                   "model": "Kimi-K2.7-Code", "choices": [{"index": 0, "delta": delta,
+                   "model": model_id, "choices": [{"index": 0, "delta": delta,
                    "finish_reason": None}]} for delta in deltas]
         events.append({**events[-1], "choices": [{"index": 0, "delta": {}, "finish_reason": finish}]})
         return httpx.Response(200, request=request, headers={"content-type": "text/event-stream"},
@@ -244,6 +246,7 @@ async def test_deployment_settings_persist_without_touching_credentials(azure, m
     state = await get_config_endpoint()
     assert state.azure["hasKey"]
     assert "Kimi-K2.7-Code" in state.azure["suggestedModels"]
+    assert "DeepSeek-V4-Pro" in state.azure["suggestedModels"]
     assert "azure-test-key" not in state.model_dump_json()
     monkeypatch.setattr("rune.config.save_config_values", lambda _: None)
     from fastapi import HTTPException

@@ -198,7 +198,7 @@ _PROVIDER_LABELS: dict[str, str] = {
     "anthropic": "Anthropic",
     "gemini":    "Google Gemini",
     "xai":       "xAI Grok",
-    "azure":     "Azure OpenAI",
+    "azure":     "Azure Foundry",
     "mistral":   "Mistral AI",
     "deepseek":  "DeepSeek",
     "cohere":    "Cohere",

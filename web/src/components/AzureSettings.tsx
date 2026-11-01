@@ -70,7 +70,8 @@ export function AzureSettings({ connection, onSaved }: {
   return <details style={{ padding: '12px 14px', borderBottom: '1px solid var(--border-subtle)', fontSize: 12 }}>
     <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Azure Foundry</summary>
     <p style={{ color: 'var(--text-muted)', lineHeight: 1.5 }}>
-      Register OpenAI or Kimi deployments from your Azure resource. Saving settings does not create a deployment or call a model.
+      Connect one Azure resource, then register its OpenAI, Kimi, or DeepSeek deployments.
+      Deployments are added manually; model suggestions do not indicate availability in your resource.
     </p>
     <p style={{ color: 'var(--text-muted)', lineHeight: 1.5 }}>
       For cost estimates, select the deployment type shown in Foundry. Rates cover GPT-6 Astra, Sol and Luna.
@@ -83,9 +84,13 @@ export function AzureSettings({ connection, onSaved }: {
         onChange={event => { change(); setEndpoint(event.target.value); setPricing({}); }} />
       <label htmlFor="azure-key">{connection.hasKey ? 'Replace API key (optional)' : 'API key'}</label>
       <input id="azure-key" type="password" autoComplete="off" spellCheck={false} value={key}
+        aria-describedby="azure-key-help"
         placeholder={connection.hasKey ? 'Key saved' : 'Paste your Azure key'}
         disabled={connection.keyScope === 'process'} style={{ ...inputStyle, margin: '5px 0 10px' }}
         onChange={event => { change(); setKey(event.target.value); }} />
+      <p id="azure-key-help" style={{ color: 'var(--text-muted)', lineHeight: 1.5 }}>
+        All deployments below share this endpoint and API key. Save the key once; leave this field blank to keep it.
+      </p>
       {(connection.keyScope === 'process' || connection.endpointScope === 'process') &&
         <p style={{ color: 'var(--text-muted)' }}>Launch environment values must be changed there, then Rune restarted.</p>}
       {rows.map(([name, model], index) => <div key={index} style={{ marginBottom: 12 }}>
@@ -118,7 +123,8 @@ export function AzureSettings({ connection, onSaved }: {
       </datalist>
       <button type="button" onClick={() => { change(); setRows([...rows, ['', '']]); }}>Add deployment</button>
       <p style={{ color: 'var(--text-muted)', lineHeight: 1.5 }}>
-        Use the deployment name shown in Foundry. Model ID controls reasoning options. Changes apply to new runs.
+        Deployment name must match Foundry exactly. Model ID identifies the underlying model and its capabilities.
+        After saving, choose the Azure deployment in the model picker. Changes apply to new runs.
       </p>
       <button type="button" onClick={save} disabled={!dirty.current || (!connection.hasKey && !key.trim())}>
         {saving ? 'Saving…' : 'Save'}
