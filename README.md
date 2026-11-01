@@ -160,8 +160,21 @@ then select that Azure deployment in the model picker.
 
 For `DeepSeek-V4-Pro`, add another row with its deployment name and model ID
 `DeepSeek-V4-Pro`. Deployments in the same resource share one endpoint and API key.
-The list is registered manually, not discovered from Azure. Saving settings does
-not test the connection or send a model request.
+Use **Fetch models** to load Azure's model catalog and **Add selected model** to
+start a deployment row. Enter the exact deployment name from Foundry before saving.
+The [models API](https://learn.microsoft.com/en-us/rest/api/microsoft-foundry/azureopenai/models)
+returns model offerings, not the names of deployments in your resource; it does
+not prove that a listed model is deployed. Actual [deployment enumeration](https://learn.microsoft.com/en-us/azure/foundry/reference/rest/deployments-list)
+uses a separate project API and authentication flow, which this API-key form does not configure.
+
+**Test connection** checks the endpoint and API key without generating tokens.
+Each row's **Test deployment** sends one short text request, capped at 256 output
+tokens, with no automatic retries; Azure usage charges may apply. It checks text
+generation, not streaming or tools. Request limit zero or a configured cost limit
+disables deployment tests; the credential check remains available.
+Checks use the current form values without saving them. A changed resource
+requires its key to be entered again. Saving settings itself does not test the
+connection or send a model request.
 
 For project-scoped configuration, put credentials in the ignored `.rune/.env`:
 

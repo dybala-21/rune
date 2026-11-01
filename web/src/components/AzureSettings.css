@@ -1,0 +1,34 @@
+.azure-settings p {
+  margin: 8px 0;
+}
+
+.azure-settings button {
+  min-height: 32px;
+  padding: 5px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.azure-settings button:hover:not(:disabled) {
+  border-color: var(--text-muted);
+}
+
+.azure-settings button:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+
+.azure-settings button:focus-visible {
+  outline: 2px solid var(--text-primary);
+  outline-offset: 2px;
+}
+
+.azure-settings .azure-deployment {
+  margin: 14px 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+}
