@@ -175,4 +175,27 @@ def test_running_app_registers_both_azure_routes(connection):
     from rune.api.server import create_app
 
     paths = {route.path for route in create_app().routes}
-    assert {"/api/v1/azure/models", "/api/v1/azure/test"} <= paths
+    assert {"/api/v1/azure/models", "/api/v1/azure/test", "/api/v1/azure/settings"} <= paths
+
+
+async def test_client_disconnect_cancels_the_outbound_check(connection, monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    from rune.api import azure as handler
+
+    cancelled = asyncio.Event()
+
+    async def delayed(*args, **kwargs):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    async def disconnected():
+        return True
+
+    monkeypatch.setattr(handler, "_request", delayed)
+    with pytest.raises(HTTPException) as error:
+        await handler._checked(AzureConnection(endpoint=BASE), SimpleNamespace(is_disconnected=disconnected))
+    assert error.value.status_code == 499 and cancelled.is_set()

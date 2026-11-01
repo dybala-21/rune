@@ -6,7 +6,7 @@ from time import monotonic
 from urllib.parse import urlsplit
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from rune.llm import azure
@@ -25,6 +25,7 @@ class AzureConnection(BaseModel):
     model_config = ConfigDict(extra="forbid")
     endpoint: str = Field(min_length=1, max_length=2048)
     apiKey: SecretStr | None = Field(None, exclude=True, repr=False)
+    expectedRevision: str | None = Field(None, max_length=64)
 
 
 class AzureTest(AzureConnection):
@@ -37,6 +38,10 @@ def _credentials(req: AzureConnection) -> tuple[str, str]:
 
     if hosted():
         raise HTTPException(403, "Azure settings are only available in local Rune.")
+    if req.expectedRevision:
+        from rune.api.azure_settings import revision
+        if req.expectedRevision != revision():
+            raise HTTPException(409, "Azure settings changed elsewhere. Reload the saved settings before trying again.")
     try:
         base = azure.resource_endpoint(req.endpoint)
         parsed = urlsplit(base)
@@ -134,7 +139,7 @@ async def _request(req: AzureConnection, *, deployment: str | None = None, model
             finished = choice.get("finish_reason") == "stop"
             content = choice["message"].get("content")
         if not finished or not isinstance(content, str) or not content.strip():
-            return {**result, "ok": False, "detail": "Azure accepted the request but did not return a complete text answer "
+            return {**result, "ok": False, "state": "incomplete", "detail": "Azure accepted the request but did not return a complete text answer "
                     "within the short test. The deployment may need a larger reasoning budget or a different API."}
         return {**result, "ok": True, "detail": "Deployment connected: Azure returned a complete text response. "
                 "Streaming and tool use were not tested."}
@@ -143,16 +148,36 @@ async def _request(req: AzureConnection, *, deployment: str | None = None, model
         return {**result, "ok": False, "detail": "Azure returned an unexpected response. Check the resource endpoint and model API."}
 
 
+async def _checked(req: AzureConnection, request: Request, **kwargs) -> dict:
+    task = asyncio.create_task(_request(req, **kwargs))
+    try:
+        while not task.done():
+            await asyncio.wait({task}, timeout=0.1)
+            if await request.is_disconnected():
+                raise HTTPException(499, "The connection check was cancelled.")
+        return await task
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
 def azure_router(auth) -> APIRouter:
+    from rune.api.azure_settings import AzureSave, save_settings
+
     router = APIRouter(prefix="/api/v1/azure", dependencies=[Depends(auth)])
 
+    @router.post("/settings")
+    async def save(req: AzureSave) -> dict:
+        return save_settings(req)
+
     @router.post("/models")
-    async def models(req: AzureConnection) -> dict:
-        return await _request(req)
+    async def models(req: AzureConnection, request: Request) -> dict:
+        return await _checked(req, request)
 
     @router.post("/test")
-    async def test(req: AzureTest) -> dict:
-        result = await _request(req, deployment=req.deployment, model=req.model)
+    async def test(req: AzureTest, request: Request) -> dict:
+        result = await _checked(req, request, deployment=req.deployment, model=req.model)
         result.pop("models", None)
         return result
 

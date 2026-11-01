@@ -549,6 +549,9 @@ export interface ConfigInfo {
     }>;
   };
   azure?: {
+    revision: string;
+    credentialRevision: string;
+    deploymentTestBlocked?: string | null;
     endpoint: string;
     endpointKey: string;
     endpointScope: 'user' | 'project' | 'process' | null;

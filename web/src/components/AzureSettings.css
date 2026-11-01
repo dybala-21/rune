@@ -1,34 +1,36 @@
-.azure-settings p {
-  margin: 8px 0;
+.azure-settings { padding: 12px 14px; border-bottom: 1px solid var(--border-subtle); font-size: 13px; }
+.azure-settings summary { cursor: pointer; font-weight: 600; }
+.azure-settings p { margin: 8px 0; line-height: 1.5; overflow-wrap: anywhere; }
+.azure-settings h3 { font-size: 13px; margin: 20px 0 10px; }
+.azure-settings h4 { font-size: 13px; margin: 0; }
+.azure-settings label { display: block; margin: 12px 0 5px; }
+.azure-settings input, .azure-settings select {
+  width: 100%; min-width: 0; box-sizing: border-box; padding: 8px 9px; border-radius: 6px;
+  border: 1px solid var(--border-subtle); background: var(--bg-secondary); color: var(--text-primary); font: inherit;
 }
-
+.azure-settings [aria-invalid="true"] { border-color: var(--danger); }
 .azure-settings button {
-  min-height: 32px;
-  padding: 5px 10px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 6px;
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-  font: inherit;
-  cursor: pointer;
+  min-height: 36px; padding: 7px 10px; border: 1px solid var(--border-subtle); border-radius: 6px;
+  background: var(--bg-secondary); color: var(--text-primary); font: inherit; cursor: pointer;
 }
-
-.azure-settings button:hover:not(:disabled) {
-  border-color: var(--text-muted);
+.azure-settings button:hover:not(:disabled) { border-color: var(--text-muted); }
+.azure-settings button:disabled, .azure-settings input:disabled, .azure-settings select:disabled { opacity: .5; cursor: not-allowed; }
+.azure-settings button:focus-visible, .azure-settings input:focus-visible, .azure-settings select:focus-visible {
+  outline: 2px solid var(--text-primary); outline-offset: 2px;
 }
-
-.azure-settings button:disabled {
-  opacity: .5;
-  cursor: not-allowed;
-}
-
-.azure-settings button:focus-visible {
-  outline: 2px solid var(--text-primary);
-  outline-offset: 2px;
-}
-
-.azure-settings .azure-deployment {
-  margin: 14px 0;
-  padding-top: 12px;
-  border-top: 1px solid var(--border-subtle);
-}
+.azure-settings .azure-primary { border-color: var(--text-muted); font-weight: 600; }
+.azure-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.azure-help, .azure-summary-state, .azure-timing { color: var(--text-muted); font-size: 12px; }
+.azure-summary-state { display: block; margin-top: 4px; font-weight: 400; }
+.azure-deployment { margin: 16px 0; padding: 14px 0; border-top: 1px solid var(--border-subtle); }
+.azure-row-heading { display: flex; align-items: center; gap: 10px; }
+.azure-badge { border: 1px solid var(--border-subtle); border-radius: 4px; padding: 2px 6px; font-size: 11px; }
+.azure-pricing { margin: 14px 0; }
+.azure-pricing summary { color: var(--text-muted); font-weight: 400; }
+.azure-settings .azure-remove { margin-left: auto; background: transparent; color: var(--text-muted); }
+.azure-check { padding: 8px; border-left: 2px solid var(--border-subtle); background: var(--bg-secondary); }
+.azure-check.is-success { border-left-color: var(--text-primary); }
+.azure-field-error, .azure-check.is-error { color: var(--danger); }
+.azure-save-bar { position: sticky; bottom: 0; padding: 10px 0; border-top: 1px solid var(--border-subtle); background: var(--bg-primary, var(--bg-secondary)); z-index: 1; }
+.azure-catalog { margin: 14px 0; }
+.azure-conflict { padding: 8px; border: 1px solid var(--border-subtle); }

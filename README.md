@@ -153,28 +153,38 @@ Local-first describes where RUNE runs and stores its state. Requests sent to a c
 
 ### Azure Foundry: Kimi and DeepSeek
 
-In **Settings → Advanced settings → Azure Foundry**, save your resource endpoint (for example,
+In **Settings → Azure Foundry**, enter your resource endpoint (for example,
 `https://YOUR-RESOURCE.services.ai.azure.com/openai/v1`) and API key. Add a row
 with the exact deployment name from Foundry and model ID `Kimi-K2.7-Code`,
-then select that Azure deployment in the model picker.
+then choose **Save and use** on that deployment.
 
 For `DeepSeek-V4-Pro`, add another row with its deployment name and model ID
 `DeepSeek-V4-Pro`. Deployments in the same resource share one endpoint and API key.
-Use **Fetch models** to load Azure's model catalog and **Add selected model** to
+Use **Connect and fetch models** to check the key and load Azure's model catalog.
+Search by model name or version, then use **Add selected model** to
 start a deployment row. Enter the exact deployment name from Foundry before saving.
 The [models API](https://learn.microsoft.com/en-us/rest/api/microsoft-foundry/azureopenai/models)
 returns model offerings, not the names of deployments in your resource; it does
 not prove that a listed model is deployed. Actual [deployment enumeration](https://learn.microsoft.com/en-us/azure/foundry/reference/rest/deployments-list)
 uses a separate project API and authentication flow, which this API-key form does not configure.
 
-**Test connection** checks the endpoint and API key without generating tokens.
+The connection check does not generate tokens.
 Each row's **Test deployment** sends one short text request, capped at 256 output
 tokens, with no automatic retries; Azure usage charges may apply. It checks text
 generation, not streaming or tools. Request limit zero or a configured cost limit
-disables deployment tests; the credential check remains available.
+disables deployment tests with an explanation beside the controls; the connection check remains available.
 Checks use the current form values without saving them. A changed resource
-requires its key to be entered again. Saving settings itself does not test the
-connection or send a model request.
+requires its key to be entered again, for both checking and saving.
+**Stop waiting** cancels the local check; Azure may still charge for a submitted request.
+You can edit other deployments while a test runs, and unrelated edits retain completed checks.
+
+Use **Save settings** to keep the current model, or a deployment's **Save and use**
+to select it for new runs. Pricing is under **Cost estimates (optional)**.
+Saving does not call a model. Credentials, deployment mappings and selection are
+saved in one server request. Files are staged first and restored on write errors;
+runtime settings change only after all files are written. Changes from another tab
+are rejected until the saved settings are reloaded. This is not a crash-atomic
+transaction across files or a lock shared by separate Rune processes.
 
 For project-scoped configuration, put credentials in the ignored `.rune/.env`:
 
