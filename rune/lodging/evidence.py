@@ -1,7 +1,7 @@
 """Keep exact observations outside model context and join only compatible stay scopes.
 
 Design references: benchmarks/nol_comparison/hybrid-research.json. This checks
-provenance and requested stay scope, not checkout availability or policy semantics.
+rate-card boundaries and complete policy regions, not checkout availability.
 """
 
 import hashlib
@@ -13,6 +13,8 @@ from typing import Any, Literal, Self
 from urllib.parse import parse_qs, urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from rune.lodging.rates import RateCard, RateRegion, fingerprint
 
 QUOTE_FIELDS = ("price_quote", "stay_quote", "occupancy_quote", "location_quote",
                 "cancellation_quote", "price_conditions_quote", "taxes_quote")
@@ -82,6 +84,8 @@ class Source(BaseModel):
     text: str
     document_id: str
     interface: Literal["dom"] = "dom"
+    rates: list[RateCard] = Field(default_factory=list)
+    regions: list[RateRegion] = Field(default_factory=list)
 
     def quote(self, span: Span) -> str:
         lines = self.text.splitlines()
@@ -102,11 +106,12 @@ class Candidate(BaseModel):
     property_id: str
     total_krw: int = Field(gt=0)
     fields: dict[str, Span] = Field(default_factory=dict)
+    rate_id: str = ""
 
 
 class StayEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    version: Literal[1] = 1
+    version: Literal[2] = 2
     owner: str
     run_id: str
     query: StayQuery
@@ -128,19 +133,21 @@ class StayEvidence(BaseModel):
             raise ValueError("Evidence belongs to a different owner or run")
         return ledger
 
-    def capture(self, url: str, text: str, document_id: str, now: datetime | None = None) -> Source:
+    def capture(self, url: str, text: str, document_id: str, now: datetime | None = None, *,
+                rates: list[RateCard] | None = None, regions: list[RateRegion] | None = None) -> Source:
         property_id = nol_scope(url, self.query)
         if len(text) > 80000 or not text.strip():
             raise ValueError("Page text is empty or too large; no truncated source is accepted")
         now = now or datetime.now(UTC)
-        key = digest(url + "\n" + text)
+        rates, regions = rates or [], regions or []
+        key = fingerprint(url, text, rates, regions)
         previous = self.sources.get(key)
         if previous and previous.fresh(now):
             return previous
         if len(self.sources) >= 60 and key not in self.sources:
             raise ValueError("Evidence source limit reached; finish with the missing fields reported")
         source = Source(id=key, url=url, text=text, property_id=property_id,
-                        observed_at=now.isoformat(), document_id=document_id)
+                        observed_at=now.isoformat(), document_id=document_id, rates=rates, regions=regions)
         self.sources[key] = source
         self.finished = False
         return source
@@ -250,23 +257,10 @@ class StayEvidence(BaseModel):
         if properties != {candidate.property_id}:
             raise ValueError("These fields do not belong to the selected property")
         candidate.fields.update(fields)
-        name, room, price = (normalize(self._quote(candidate.fields[key])) for key in ("name", "room", "price_quote"))
-        if room not in price or candidate.total_krw not in numbers(price):
-            raise ValueError("The continuous price quote must contain the selected room and its price")
-        for key, span in fields.items():
-            source = self.sources[span.source]
-            if not source.fresh(datetime.now(UTC)):
+        self._validate_rate(candidate)
+        for span in candidate.fields.values():
+            if not self.sources[span.source].fresh(datetime.now(UTC)):
                 raise ValueError("Source expired; recapture the current page")
-            if (candidate.property_id.startswith("/stay/overseas/")
-                    and key in {"price_quote", "cancellation_quote", "price_conditions_quote"}
-                    and not urlsplit(source.url).path.rstrip("/").endswith("/list")):
-                raise ValueError(f"{key} needs the selected overseas room's /list or room-detail view. "
-                                 "The property teaser/coupon banner cannot establish its rate conditions. "
-                                 "Reuse a saved room-list source if available; otherwise open the room details.")
-            # Shared tax policies may omit the rate; rate-specific sources must show it.
-            if key in {"price_quote", "cancellation_quote", "price_conditions_quote"}:
-                if room not in normalize(source.text) or candidate.total_krw not in numbers(source.text):
-                    raise ValueError("The rate-condition source does not show this room and price")
         if "location_quote" in candidate.fields and not any(
             label.casefold() in self._quote(candidate.fields["location_quote"]).casefold()
             for label in [self.query.city, *self.query.city_labels]
@@ -285,8 +279,54 @@ class StayEvidence(BaseModel):
         self.finished = False
         return candidate
 
+    def _validate_rate(self, candidate: Candidate) -> None:
+        price = candidate.fields["price_quote"]
+        source = self.sources[price.source]
+        if (candidate.property_id.startswith("/stay/overseas/")
+                and not urlsplit(source.url).path.rstrip("/").endswith("/list")):
+            raise ValueError("The property teaser/coupon banner cannot establish its rate conditions")
+        room = normalize(self._quote(candidate.fields["room"]))
+        matches = [r for r in source.rates if normalize(r.room) == room
+                   and r.lines.start == price.start and r.lines.end == price.end
+                   and r.current_price == candidate.total_krw]
+        if len(matches) != 1:
+            raise ValueError("price quote must be the complete issued DOM rate card with its current price; "
+                             "struck-through prices and page-wide room/price matches are not accepted")
+        rate = matches[0]
+        if candidate.rate_id and candidate.rate_id != rate.id:
+            raise ValueError("The candidate's selected DOM rate cannot change")
+        candidate.rate_id = rate.id
+        for key in ("cancellation_quote", "price_conditions_quote", "taxes_quote"):
+            if key not in candidate.fields:
+                continue
+            span = candidate.fields[key]
+            regions = self.sources[span.source].regions
+            if not any(r.rate_id == rate.id and r.kind == key and r.lines.start == span.start
+                       and r.lines.end == span.end for r in regions):
+                raise ValueError(f"{key} must quote the entire DOM region opened from this exact rate; "
+                                 "use inspect_rate with the issued source/rate, then copy suggested_fields")
+
+    def rate_fields(self, source_id: str, rate_id: str) -> tuple[dict[str, Span], int]:
+        source = self.sources[source_id]
+        rate = next((r for r in source.rates if r.id == rate_id), None)
+        if rate is None:
+            raise ValueError("Unknown DOM rate ID; copy one from capture")
+        fields = {"room": Span(source=source.id, **rate.room_lines.model_dump()),
+                  "price_quote": Span(source=source.id, **rate.lines.model_dump())}
+        for observed in self.sources.values():
+            if observed.property_id != source.property_id or not observed.fresh(datetime.now(UTC)):
+                continue
+            for region in observed.regions:
+                if region.rate_id == rate_id:
+                    fields[region.kind] = Span(source=observed.id, **region.lines.model_dump())
+        return fields, rate.current_price
+
     def missing(self, candidate: Candidate) -> list[str]:
         now = datetime.now(UTC)
+        try:
+            self._validate_rate(candidate)
+        except (KeyError, ValueError):
+            return list(FIELDS)
         return [key for key in FIELDS if key not in candidate.fields
                 or not self.sources[candidate.fields[key].source].fresh(now)]
 
@@ -312,12 +352,17 @@ class StayEvidence(BaseModel):
                 continue
             used.add(item.property_id)
             values = {key: self._quote(span) for key, span in item.fields.items()}
+            rate = next(r for r in self.sources[item.fields["price_quote"].source].rates if r.id == item.rate_id)
             refs = {key: {**span.model_dump(), "url": self.sources[span.source].url,
                           "observed_at": self.sources[span.source].observed_at,
-                          "property_id": item.property_id, "room": values["room"], "rate_id": item.id}
+                          "property_id": item.property_id, "room": values["room"], "rate_id": item.rate_id,
+                          "text_sha256": digest(self.sources[span.source].text)}
                     for key, span in item.fields.items()}
             offers.append({**values, "url": self.sources[item.fields["price_quote"].source].url,
-                           "total_krw": item.total_krw, "evidence_refs": refs})
+                           "total_krw": item.total_krw, "evidence_refs": refs,
+                           "price_basis": "displayed_rate_subject_to_quoted_conditions",
+                           "eligibility": "not_verified", "purchase_verified": False,
+                           "dom_rate": {"room_id": rate.room_id, "index": rate.index}})
             if len(offers) == self.query.count:
                 break
         missing = self.query.count - len(offers)
@@ -331,7 +376,7 @@ class StayEvidence(BaseModel):
             partial["limitations"] = ["Evidence collected, but comparison has not been finalized"]
         return {"status": "pass" if ready else "incomplete", "required": True,
                 "expires_at": (min(times) + timedelta(seconds=900)).isoformat() if times else "",
-                "scope": "property/room/rate quote provenance and fixed stay scope; displayed charge, not final checkout total",
+                "scope": "DOM rate/card and complete cancellation/price/tax region linkage; displayed conditional charge, not personal eligibility or checkout total",
                 "contract": digest(self.query.model_dump_json()), "progress": self.status(),
                 "answer": json.dumps(self.result(), ensure_ascii=False) if self.finished else "",
                 "partial_answer": json.dumps(partial, ensure_ascii=False)}

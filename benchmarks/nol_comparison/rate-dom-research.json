@@ -1,0 +1,508 @@
+{
+  "as_of": "2026-11-01",
+  "decision": "Keep DOM rate/card boundaries; bind full policy regions to the specific revalidated read-only control that opened them. Conditional displayed prices must not be represented as verified checkout prices.",
+  "sources": [
+    {
+      "url": "https://arxiv.org/html/2508.13024v3",
+      "title": "WebMall v3",
+      "date": "2026-04-30",
+      "finding": "Accessibility-tree observations support multi-store comparison; benchmark evidence does not establish NOL production reliability."
+    },
+    {
+      "url": "https://github.com/ServiceNow/webarena-verified/blob/main/docs/evaluation/index.md",
+      "finding": "Evaluate structured results and observable state separately from the agent completion statement."
+    },
+    {
+      "url": "https://introducing.muse.ai/",
+      "date": "2026-09",
+      "finding": "Official examples include school emails and district website dates into a family calendar, supplies in a cart, a sweatshirt on sale, dinner booking, and creating artifacts. Product description, not independent benchmark results."
+    },
+    {
+      "url": "https://about.fb.com/news/2026/09/introducing-muse-personal-ai-agent/",
+      "date": "2026-09-08",
+      "finding": "Dedicated VM and browser; explicit controls for sensitive actions. US rollout. No public comparative reliability result supplied."
+    },
+    {
+      "url": "https://muse.ai/",
+      "finding": "Login required for execution; connected apps include email, calendar and Instagram. We do not have an authenticated Muse execution in this experiment."
+    }
+  ],
+  "observed_nol_dom": {
+    "date": "2026-11-01",
+    "property": "TDP-114841",
+    "room_id": "TDP-1695171",
+    "reference_struck_price": 108371,
+    "current_conditional_price": 106204,
+    "price_panel": "coupon 2167 KRW, not owned; taxes/service fees included",
+    "detail_regions": [
+      "cancelPolicy",
+      "importantInfo"
+    ],
+    "artifacts": [
+      "output/nol-dom-readiness-probe.html",
+      "output/nol-rate-detail-probe.html",
+      "output/nol-price-detail-probe.html",
+      "output/nol-rate-adapter-probe.json"
+    ]
+  },
+  "tests": {
+    "nol": "Unchanged short request, standard $5 / 1.5M tokens / 600 seconds. Independent before-click/after-dialog DOM witnesses verify price and rate-policy lineage.",
+    "muse_cases": "Rune reproductions: Apple KR three-product price comparison and SNU official three calendar events to local CSV. No Muse engine comparison, purchase, reservation, message sending, login or external calendar writes."
+  },
+  "limitations": [
+    "No personal discount eligibility or final checkout verification.",
+    "Full displayed policy regions are preserved; tax arithmetic/applicability interpretation is not guaranteed.",
+    "NOL adapter is site-specific; cross-site cases do not inherit its rate verifier.",
+    "Small live sample does not estimate general reliability."
+  ],
+  "live_trials": [
+    {
+      "report": "output/nol-dom-rates-live/74d5eb529c6a4ecf9b70dc336e5e5613/bc7f29f3fdf54f81975a596669b0bef3.json",
+      "scenario": "tests/e2e/test_live_nol.py::test_nol_comparison_from_one_request",
+      "stage": "nol-dom-rates-live",
+      "outcome": "passed",
+      "metrics": {
+        "seconds": 117.443,
+        "tokens": 585789,
+        "known_tokens": 585789,
+        "usd": 2.0146450000000002,
+        "known_usd": 2.0146450000000002,
+        "model_calls": 26,
+        "failed_model_calls": 0,
+        "tool_calls": 25,
+        "failed_tool_calls": 2,
+        "gui_calls": 25,
+        "cache_read_tokens": 306715,
+        "cache_write_tokens": 272606,
+        "model_seconds_by_phase": {
+          "classification": 4.0118,
+          "execution": 86.30169999999998
+        },
+        "median_first_text_seconds": 6.240259042009711
+      },
+      "reason": "",
+      "source": {
+        "commit": "143ef914ffb82145196af96d7821eff1809c6dce",
+        "content_hash": "bae595ea46da09bf63e94647db9f256d67e1456a9e1c697f6bdbe43d074882b9"
+      },
+      "source_unchanged": true,
+      "one_request": true,
+      "no_user_intervention": true,
+      "failures": []
+    },
+    {
+      "report": "output/nol-dom-rates-final/82066ec54aea41699797ca477d870d98/a59dd421eea4438e8bf44a91c35e04a5.json",
+      "scenario": "tests/e2e/test_live_nol.py::test_nol_comparison_from_one_request",
+      "stage": "nol-dom-rates-final",
+      "outcome": "interrupted_incomplete",
+      "metrics": null,
+      "reason": "Interrupted after identifying missing browser_stay_evidence in TOOLS_WEB. No structured evidence contract could start. Harness metrics are empty because submit was interrupted; actual usage is unknown, not zero.",
+      "source": {
+        "commit": "143ef914ffb82145196af96d7821eff1809c6dce",
+        "content_hash": "eafd28e31c7beb8ded30545baf15c287b44901ac480ef583f16da16620009f47"
+      },
+      "source_unchanged": true,
+      "one_request": null,
+      "no_user_intervention": null,
+      "failures": []
+    },
+    {
+      "report": "output/nol-dom-rates-complete/5e7df4fe7d7048b8a3c026c1f4d81bfa/441098a6f5cc4d4b8af6e1b930b21f43.json",
+      "scenario": "tests/e2e/test_live_nol.py::test_nol_comparison_from_one_request",
+      "stage": "nol-dom-rates-complete",
+      "outcome": "passed",
+      "metrics": {
+        "seconds": 170.074,
+        "tokens": 738106,
+        "known_tokens": 738106,
+        "usd": 2.7378,
+        "known_usd": 2.7378,
+        "model_calls": 30,
+        "failed_model_calls": 0,
+        "tool_calls": 29,
+        "failed_tool_calls": 2,
+        "gui_calls": 29,
+        "cache_read_tokens": 349995,
+        "cache_write_tokens": 380566,
+        "model_seconds_by_phase": {
+          "classification": 4.5802,
+          "execution": 130.14049999999997
+        },
+        "median_first_text_seconds": 7.669297083004494
+      },
+      "reason": "",
+      "source": {
+        "commit": "143ef914ffb82145196af96d7821eff1809c6dce",
+        "content_hash": "e649c719da75b5b35b5b5c71ca4a319b95bd42e97cd35cdda29a8bf787bc9dda"
+      },
+      "source_unchanged": true,
+      "one_request": true,
+      "no_user_intervention": true,
+      "failures": []
+    },
+    {
+      "report": "output/muse-source-audit/3a5d7f23eca0498e9eb3ce587c838397/0dc1af4cf1d940fb9d5ea9ad3ea4eb75.json",
+      "scenario": "tests/e2e/test_live_muse_cases.py::test_muse_primary_source_audit",
+      "stage": "muse-source-audit",
+      "outcome": "passed",
+      "metrics": {
+        "seconds": 18.988,
+        "tokens": 21579,
+        "known_tokens": 21579,
+        "usd": 0.12479225000000001,
+        "known_usd": 0.12479225000000001,
+        "model_calls": 3,
+        "failed_model_calls": 0,
+        "tool_calls": 2,
+        "failed_tool_calls": 0,
+        "gui_calls": 0,
+        "cache_read_tokens": 5442,
+        "cache_write_tokens": 14789,
+        "model_seconds_by_phase": {
+          "classification": 3.9455,
+          "execution": 13.1366
+        },
+        "median_first_text_seconds": 5.857256375005818
+      },
+      "reason": "",
+      "source": {
+        "commit": "143ef914ffb82145196af96d7821eff1809c6dce",
+        "content_hash": "bae595ea46da09bf63e94647db9f256d67e1456a9e1c697f6bdbe43d074882b9"
+      },
+      "source_unchanged": true,
+      "one_request": null,
+      "no_user_intervention": null,
+      "failures": []
+    },
+    {
+      "report": "output/muse-public-cases-live/09f9f7769cd64581ae45393698d537e8/45a73822676a4a06bcaa34a6808eb8d3.json",
+      "scenario": "calendar",
+      "stage": "muse-public-cases-live",
+      "outcome": "failed",
+      "metrics": {
+        "seconds": 13.351,
+        "tokens": 15949,
+        "known_tokens": 15949,
+        "usd": 0.0834675,
+        "known_usd": 0.0834675,
+        "model_calls": 0,
+        "failed_model_calls": 0,
+        "tool_calls": 2,
+        "failed_tool_calls": 0,
+        "gui_calls": 0,
+        "cache_read_tokens": 4850,
+        "cache_write_tokens": 10294,
+        "model_seconds_by_phase": {},
+        "median_first_text_seconds": null
+      },
+      "reason": "Table aggregation gate incorrectly blocked browsing for new CSV rows.",
+      "source": {
+        "commit": "143ef914ffb82145196af96d7821eff1809c6dce",
+        "content_hash": "bae595ea46da09bf63e94647db9f256d67e1456a9e1c697f6bdbe43d074882b9"
+      },
+      "source_unchanged": true,
+      "one_request": true,
+      "no_user_intervention": null,
+      "failures": [
+        "Expected header and 3 rows, got 0"
+      ]
+    },
+    {
+      "report": "output/muse-public-cases-live/09f9f7769cd64581ae45393698d537e8/f3973bf36eb3486abf860cec5642654f.json",
+      "scenario": "shopping",
+      "stage": "muse-public-cases-live",
+      "outcome": "failed",
+      "metrics": {
+        "seconds": 15.343,
+        "tokens": 19248,
+        "known_tokens": 19248,
+        "usd": 0.0975955,
+        "known_usd": 0.0975955,
+        "model_calls": 0,
+        "failed_model_calls": 0,
+        "tool_calls": 2,
+        "failed_tool_calls": 0,
+        "gui_calls": 0,
+        "cache_read_tokens": 6386,
+        "cache_write_tokens": 11930,
+        "model_seconds_by_phase": {},
+        "median_first_text_seconds": null
+      },
+      "reason": "Table aggregation gate incorrectly blocked browsing for new CSV rows.",
+      "source": {
+        "commit": "143ef914ffb82145196af96d7821eff1809c6dce",
+        "content_hash": "bae595ea46da09bf63e94647db9f256d67e1456a9e1c697f6bdbe43d074882b9"
+      },
+      "source_unchanged": true,
+      "one_request": true,
+      "no_user_intervention": null,
+      "failures": [
+        "Expected header and 3 rows, got 0"
+      ]
+    },
+    {
+      "report": "output/muse-public-cases-routed/4488704e24dc434ea50b391f843fed54/49f63c9090a544e391fbcc6cd9b356ba.json",
+      "scenario": "shopping",
+      "stage": "muse-public-cases-routed",
+      "outcome": "failed",
+      "metrics": {
+        "seconds": 33.609,
+        "tokens": 75560,
+        "known_tokens": 75560,
+        "usd": 0.2375255,
+        "known_usd": 0.2375255,
+        "model_calls": 6,
+        "failed_model_calls": 0,
+        "tool_calls": 9,
+        "failed_tool_calls": 4,
+        "gui_calls": 0,
+        "cache_read_tokens": 47211,
+        "cache_write_tokens": 26220,
+        "model_seconds_by_phase": {
+          "classification": 5.307300000000001,
+          "execution": 24.883200000000002
+        },
+        "median_first_text_seconds": 8.679157000005944
+      },
+      "reason": "CSV created from official web_fetch sources, but requested browser execution and independent DOM checks failed.",
+      "source": {
+        "commit": "143ef914ffb82145196af96d7821eff1809c6dce",
+        "content_hash": "ba324f7aa70cd7a10b7ce443fa8276e2f9afa2a6510e1ec14bebcb8872685d78"
+      },
+      "source_unchanged": true,
+      "one_request": true,
+      "no_user_intervention": true,
+      "failures": [
+        "Row has no independently visited official source: ['AirPods 5']",
+        "Exact source quotation missing: ['AirPods 5']",
+        "Row has no independently visited official source: ['AirPods Pro 3']",
+        "Exact source quotation missing: ['AirPods Pro 3']",
+        "Row has no independently visited official source: ['AirPods Max 2']",
+        "Exact source quotation missing: ['AirPods Max 2']"
+      ]
+    },
+    {
+      "report": "output/muse-public-cases-routed/4488704e24dc434ea50b391f843fed54/c54575b06ee645c7b6969b05fd2204e6.json",
+      "scenario": "calendar",
+      "stage": "muse-public-cases-routed",
+      "outcome": "failed",
+      "metrics": {
+        "seconds": 40.303,
+        "tokens": 78418,
+        "known_tokens": 78418,
+        "usd": 0.20920724999999998,
+        "known_usd": 0.20920724999999998,
+        "model_calls": 8,
+        "failed_model_calls": 0,
+        "tool_calls": 6,
+        "failed_tool_calls": 1,
+        "gui_calls": 0,
+        "cache_read_tokens": 56667,
+        "cache_write_tokens": 19183,
+        "model_seconds_by_phase": {
+          "classification": 4.359100000000001,
+          "execution": 34.2701
+        },
+        "median_first_text_seconds": 20.73709116700047
+      },
+      "reason": "CSV created from official web_fetch sources, but requested browser execution and independent DOM checks failed.",
+      "source": {
+        "commit": "143ef914ffb82145196af96d7821eff1809c6dce",
+        "content_hash": "ba324f7aa70cd7a10b7ce443fa8276e2f9afa2a6510e1ec14bebcb8872685d78"
+      },
+      "source_unchanged": true,
+      "one_request": true,
+      "no_user_intervention": true,
+      "failures": [
+        "Row has no independently visited official source: ['제1학기 시작']",
+        "Exact source quotation missing: ['제1학기 시작']",
+        "Row has no independently visited official source: ['제1학기 개강']",
+        "Exact source quotation missing: ['제1학기 개강']",
+        "Row has no independently visited official source: ['제1학기 수강신청 변경']",
+        "Exact source quotation missing: ['제1학기 수강신청 변경']"
+      ]
+    },
+    {
+      "report": "output/muse-public-cases-browser/c1b0572a39fe4fc499ab0d2085e01bac/2747319a076645079542996e33ed67ce.json",
+      "scenario": "shopping",
+      "stage": "muse-public-cases-browser",
+      "outcome": "failed",
+      "metrics": {
+        "seconds": 36.827,
+        "tokens": 97335,
+        "known_tokens": 97335,
+        "usd": 0.24098375,
+        "known_usd": 0.24098375,
+        "model_calls": 7,
+        "failed_model_calls": 0,
+        "tool_calls": 10,
+        "failed_tool_calls": 4,
+        "gui_calls": 0,
+        "cache_read_tokens": 71595,
+        "cache_write_tokens": 23205,
+        "model_seconds_by_phase": {
+          "classification": 3.7659000000000002,
+          "execution": 28.9059
+        },
+        "median_first_text_seconds": 6.750029832997825
+      },
+      "reason": "CSV created from official web_fetch sources, but requested browser execution and independent DOM checks failed.",
+      "source": {
+        "commit": "143ef914ffb82145196af96d7821eff1809c6dce",
+        "content_hash": "eafd28e31c7beb8ded30545baf15c287b44901ac480ef583f16da16620009f47"
+      },
+      "source_unchanged": true,
+      "one_request": true,
+      "no_user_intervention": true,
+      "failures": [
+        "Row has no independently visited official source: ['AirPods 5']",
+        "Exact source quotation missing: ['AirPods 5']",
+        "Row has no independently visited official source: ['AirPods Pro 3']",
+        "Exact source quotation missing: ['AirPods Pro 3']",
+        "Row has no independently visited official source: ['AirPods Max 2']",
+        "Exact source quotation missing: ['AirPods Max 2']"
+      ]
+    },
+    {
+      "report": "output/muse-public-cases-browser/c1b0572a39fe4fc499ab0d2085e01bac/0a2773c67ef54d2f9ee56db5e7e81482.json",
+      "scenario": "calendar",
+      "stage": "muse-public-cases-browser",
+      "outcome": "failed",
+      "metrics": {
+        "seconds": 41.381,
+        "tokens": 80838,
+        "known_tokens": 80838,
+        "usd": 0.22184575,
+        "known_usd": 0.22184575,
+        "model_calls": 8,
+        "failed_model_calls": 0,
+        "tool_calls": 6,
+        "failed_tool_calls": 1,
+        "gui_calls": 0,
+        "cache_read_tokens": 58019,
+        "cache_write_tokens": 19969,
+        "model_seconds_by_phase": {
+          "classification": 3.8534,
+          "execution": 36.283500000000004
+        },
+        "median_first_text_seconds": 6.540832708997186
+      },
+      "reason": "CSV created from official web_fetch sources, but requested browser execution and independent DOM checks failed.",
+      "source": {
+        "commit": "143ef914ffb82145196af96d7821eff1809c6dce",
+        "content_hash": "eafd28e31c7beb8ded30545baf15c287b44901ac480ef583f16da16620009f47"
+      },
+      "source_unchanged": true,
+      "one_request": true,
+      "no_user_intervention": true,
+      "failures": [
+        "Row has no independently visited official source: ['제1학기 시작']",
+        "Exact source quotation missing: ['제1학기 시작']",
+        "Row has no independently visited official source: ['제1학기 개강']",
+        "Exact source quotation missing: ['제1학기 개강']",
+        "Row has no independently visited official source: ['제1학기 수강신청 변경']",
+        "Exact source quotation missing: ['제1학기 수강신청 변경']"
+      ]
+    },
+    {
+      "report": "output/muse-public-cases-complete/ba226ec55eab44cb8744ddba851053c6/93720b84c14e4f85b5356f4a01861b22.json",
+      "scenario": "calendar",
+      "stage": "muse-public-cases-complete",
+      "outcome": "passed",
+      "metrics": {
+        "seconds": 50.355,
+        "tokens": 156257,
+        "known_tokens": 156257,
+        "usd": 0.32186325,
+        "known_usd": 0.32186325,
+        "model_calls": 11,
+        "failed_model_calls": 0,
+        "tool_calls": 8,
+        "failed_tool_calls": 1,
+        "gui_calls": 2,
+        "cache_read_tokens": 123194,
+        "cache_write_tokens": 30025,
+        "model_seconds_by_phase": {
+          "classification": 6.0241999999999996,
+          "execution": 38.068
+        },
+        "median_first_text_seconds": 29.252255250001326
+      },
+      "reason": "",
+      "source": {
+        "commit": "143ef914ffb82145196af96d7821eff1809c6dce",
+        "content_hash": "e649c719da75b5b35b5b5c71ca4a319b95bd42e97cd35cdda29a8bf787bc9dda"
+      },
+      "source_unchanged": true,
+      "one_request": true,
+      "no_user_intervention": true,
+      "failures": []
+    },
+    {
+      "report": "output/muse-public-cases-complete/ba226ec55eab44cb8744ddba851053c6/341de35996c9499aa355c08f4a8286f0.json",
+      "scenario": "shopping",
+      "stage": "muse-public-cases-complete",
+      "outcome": "passed",
+      "metrics": {
+        "seconds": 72.462,
+        "tokens": 194780,
+        "known_tokens": 194780,
+        "usd": 0.5796435,
+        "known_usd": 0.5796435,
+        "model_calls": 11,
+        "failed_model_calls": 0,
+        "tool_calls": 10,
+        "failed_tool_calls": 2,
+        "gui_calls": 6,
+        "cache_read_tokens": 119847,
+        "cache_write_tokens": 72012,
+        "model_seconds_by_phase": {
+          "classification": 5.982399999999999,
+          "execution": 38.283
+        },
+        "median_first_text_seconds": 65.43795854201016
+      },
+      "reason": "",
+      "source": {
+        "commit": "143ef914ffb82145196af96d7821eff1809c6dce",
+        "content_hash": "e649c719da75b5b35b5b5c71ca4a319b95bd42e97cd35cdda29a8bf787bc9dda"
+      },
+      "source_unchanged": true,
+      "one_request": true,
+      "no_user_intervention": true,
+      "failures": []
+    }
+  ],
+  "runtime_findings": [
+    "Plain body text accepted crossed-out reference amounts in earlier benchmarks; v2 binds the visible current-price DOM node and exact card.",
+    "The same room can have multiple refund/meal plans. Full cancelPolicy, importantInfo and price-panel regions are tied to the revalidated originating card.",
+    "The web goal route omitted browser_stay_evidence entirely; exact tool search could not load it. Add the collector to TOOLS_WEB and retain schema deferral.",
+    "New CSV rows were incorrectly routed to the existing-table aggregate verifier. Clarify the existing semantic classifier contract; no keyword intent matching and no aggregate gate bypass.",
+    "A large artifact tool catalog hid the browser entry point. Keep browser_navigate initially callable while deferring large browser_batch; honor explicit browser requests in tool guidance."
+  ],
+  "final_validation": {
+    "source_hash": "e649c719da75b5b35b5b5c71ca4a319b95bd42e97cd35cdda29a8bf787bc9dda",
+    "trials": [
+      "output/nol-dom-rates-complete/5e7df4fe7d7048b8a3c026c1f4d81bfa/441098a6f5cc4d4b8af6e1b930b21f43.json",
+      "output/muse-public-cases-complete/ba226ec55eab44cb8744ddba851053c6/93720b84c14e4f85b5356f4a01861b22.json",
+      "output/muse-public-cases-complete/ba226ec55eab44cb8744ddba851053c6/341de35996c9499aa355c08f4a8286f0.json"
+    ],
+    "tests": {
+      "non_perf_passed": 7307,
+      "skipped": 71,
+      "perf_passed": 3,
+      "mypy_existing": 1423,
+      "mypy_new": 0
+    },
+    "manual_reviews": [
+      "output/nol-dom-rates-complete/5e7df4fe7d7048b8a3c026c1f4d81bfa/441098a6f5cc4d4b8af6e1b930b21f43-manual-review.json",
+      "output/muse-public-cases-complete/shopping-review.json",
+      "output/muse-public-cases-complete/calendar-review.json"
+    ],
+    "artifacts": [
+      "output/muse-public-cases-complete/airpods.csv",
+      "output/muse-public-cases-complete/calendar.csv"
+    ],
+    "interpretation": "One final-source trial per scenario, all passed. Earlier exploratory failures and interruption are retained; this is not a reliability estimate or a comparison against the Muse engine."
+  }
+}

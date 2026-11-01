@@ -39,6 +39,10 @@ class Offer(BaseModel):
     cancellation_quote: str = Field(min_length=1)
     price_conditions_quote: str = Field(min_length=1)
     taxes_quote: str = Field(min_length=1)
+    price_basis: Literal["displayed_rate_subject_to_quoted_conditions"]
+    eligibility: Literal["not_verified"]
+    purchase_verified: Literal[False]
+    dom_rate: dict
     evidence_refs: dict[str, dict] = Field(default_factory=dict)
 
 
@@ -71,7 +75,7 @@ def has_date(value: str, expected: date) -> bool:
     return any(expected.strftime(fmt) in value for fmt in ("%Y-%m-%d", "%Y.%m.%d", "%Y/%m/%d"))
 
 
-def verify_comparison(answer: str, request: StayRequest, snapshots: list[dict]) -> dict:
+def verify_comparison(answer: str, request: StayRequest, snapshots: list[dict], *, check_dom: bool = True) -> dict:
     failures = []
     try:
         comparison = Comparison.model_validate(json.loads(answer.strip()))
@@ -131,12 +135,11 @@ def verify_comparison(answer: str, request: StayRequest, snapshots: list[dict]) 
                     if type(start) is not int or type(end) is not int or not 1 <= start <= end <= len(lines):
                         continue
                     quoted = "\n".join(lines[start - 1:end]).strip()
-                    fingerprint = hashlib.sha256((page["url"] + "\n" + page["text"]).encode()).hexdigest()
                     path = urlsplit(page["url"]).path.rstrip("/").removesuffix("/list")
                     params = parse_qs(urlsplit(page["url"]).query)
                     scope = {"checkInDate": [str(request.check_in)], "checkOutDate": [str(request.check_out)],
                              "rooms[0][adult]": [str(request.adults)]}
-                    valid |= (quoted == value and fingerprint == ref.get("source")
+                    valid |= (quoted == value and hashlib.sha256(page["text"].encode()).hexdigest() == ref.get("text_sha256")
                               and path == identity == ref.get("property_id") and ref.get("room") == offer.room
                               and nol_url(page["url"]) and all(params.get(key) == value for key, value in scope.items())
                               and not any(key.startswith("rooms[") and key not in scope for key in params))
@@ -147,7 +150,10 @@ def verify_comparison(answer: str, request: StayRequest, snapshots: list[dict]) 
                                                      for quote in [offer.name, *quotes])]
             if not matching:
                 failures.append(prefix + "quotes do not coexist in one observed page state")
-        if normalized(offer.room) not in normalized(offer.price_quote):
+        if check_dom:
+            from tests.e2e.lodging_dom_checks import verify_dom_rate
+            failures.extend(prefix + f for f in verify_dom_rate(offer, snapshots))
+        if not check_dom and not offer.evidence_refs and normalized(offer.room) not in normalized(offer.price_quote):
             failures.append(prefix + "price quote does not identify the selected room")
         if offer.total_krw not in numbers(offer.price_quote):
             failures.append(prefix + "price is absent from the room quote")
@@ -159,5 +165,5 @@ def verify_comparison(answer: str, request: StayRequest, snapshots: list[dict]) 
         if not all(has_date(date_evidence, day) for day in (request.check_in, request.check_out)):
             failures.append(prefix + "requested dates are absent from evidence")
     return {"passed": not failures, "failures": failures, "offers_checked": len(comparison.offers),
-            "scope": "Observed quote provenance, distinct properties, dates, numeric occupancy and quoted price; "
-                     "cancellation/fee semantics require review; no booking or checkout verification."}
+            "scope": "Exact quotes, DOM current price and selected-card-to-policy action linkage, complete policy regions; "
+                     "no personal coupon eligibility, tax calculation or checkout verification."}

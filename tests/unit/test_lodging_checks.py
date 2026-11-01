@@ -23,14 +23,15 @@ def comparison_case():
              "location_quote": "Seoul, Example street",
              "cancellation_quote": "Non-refundable",
              "price_conditions_quote": "Taxes included. No coupon required.",
-             "taxes_quote": "Taxes included."}
+             "taxes_quote": "Taxes included.", "price_basis": "displayed_rate_subject_to_quoted_conditions",
+             "eligibility": "not_verified", "purchase_verified": False, "dom_rate": {"room_id": "room-a", "index": 0}}
     text = "\n".join([offer["name"], *[v for k, v in offer.items() if k.endswith("_quote")]])
     return stay, {"offers": [offer], "limitations": []}, [{"url": offer["url"], "text": text}]
 
 
 def check(case):
     stay, result, pages = case
-    return verify_comparison(json.dumps(result), stay, pages)
+    return verify_comparison(json.dumps(result), stay, pages, check_dom=False)
 
 
 def test_all_quotes_must_be_observed_on_the_actual_detail_page(comparison_case):

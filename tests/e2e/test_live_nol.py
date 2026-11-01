@@ -58,6 +58,10 @@ def nol_observations(monkeypatch, request):
     captures = []
     ledger_paths = set()
     original = CapabilityRegistry.execute
+    from playwright.async_api import Locator
+
+    from tests.e2e.lodging_dom_checks import TRIGGER, WITNESS
+    original_click = Locator.click
     directory = request.config.getoption("--live-report-dir")
     evidence = Path(directory).resolve() / ("nol-evidence-" + uuid4().hex) if directory else None
     if evidence:
@@ -81,6 +85,7 @@ def nol_observations(monkeypatch, request):
                 try:
                     async with asyncio.timeout(5):
                         capture["text"] = (await page.locator("body").inner_text())[:80_000]
+                        capture["dom"] = await page.evaluate(WITNESS)
                         if evidence:
                             shot = evidence / f"{len(captures):03d}.png"
                             await page.screenshot(path=str(shot))
@@ -90,6 +95,28 @@ def nol_observations(monkeypatch, request):
                 captures.append(capture)
         return result
 
+    async def click(locator, *args, **kwargs):
+        page = locator.page
+        trigger = await locator.evaluate(TRIGGER) if nol_url(page.url) else None
+        result = await original_click(locator, *args, **kwargs)
+        if trigger and trigger["kind"] in {"price", "detail"}:
+            panel = page.locator('[mode="overflow"]:visible')
+            await panel.wait_for(timeout=5000)
+            if trigger["kind"] == "price":
+                await panel.locator('[data-simulator-state="success"]').wait_for(timeout=12000)
+            else:
+                await panel.locator('#cancelPolicy').wait_for(timeout=5000)
+            capture = {"tool": "independent_click_observer", "url": page.url, "trigger": trigger,
+                       "text": await page.locator('body').inner_text(), "dom": await page.evaluate(WITNESS),
+                       "observed_at": datetime.now(ZoneInfo("Asia/Seoul")).isoformat()}
+            if evidence:
+                shot = evidence / f"{len(captures):03d}.png"
+                await page.screenshot(path=str(shot))
+                capture["screenshot"] = str(shot)
+            captures.append(capture)
+        return result
+
+    monkeypatch.setattr(Locator, "click", click)
     monkeypatch.setattr(CapabilityRegistry, "execute", execute)
     yield captures
     if evidence:

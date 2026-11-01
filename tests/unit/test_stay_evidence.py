@@ -8,7 +8,8 @@ from rune.agent.goal_classifier import ClassificationResult
 from rune.agent.intent_engine import resolve_intent_contract
 from rune.agent.retrieval_result import accepted_answer
 from rune.agent.task_evidence import TaskEvidence
-from rune.lodging.evidence import FIELDS, Span, StayEvidence, StayQuery
+from rune.lodging.evidence import FIELDS, Span, StayEvidence, StayQuery, digest
+from rune.lodging.rates import Lines, RateCard, RateRegion
 from rune.types import CapabilityResult
 from tests.e2e.lodging_checks import StayRequest, verify_comparison
 
@@ -33,15 +34,29 @@ def fields(source):
     return {key: Span(source=source.id, start=index + 1, end=index + 1) for index, key in enumerate(FIELDS)}
 
 
+def capture(ledger, observed_url, text, document_id):
+    """Synthetic DOM boundaries for ledger unit tests; browser tests use real nodes."""
+    if text.splitlines()[0] != TEXT.splitlines()[0]:
+        return ledger.capture(observed_url, text, document_id)
+    lines = text.splitlines()
+    rate_id = digest(observed_url.split("#")[0] + lines[1] + lines[2])
+    rate = RateCard(id=rate_id, room_id="room-a", index=0, room=lines[1],
+                    room_lines=Lines(start=2,end=2), lines=Lines(start=3,end=3), text=lines[2],
+                    current_price=90000, price_text="90,000", price_label="Standard", signature=rate_id)
+    regions = [RateRegion(rate_id=rate_id,kind=key,lines=Lines(start=n,end=n),selector="#"+key)
+               for key,n in (("cancellation_quote",7),("price_conditions_quote",8),("taxes_quote",9))]
+    return ledger.capture(observed_url,text,document_id,rates=[rate],regions=regions)
+
+
 def complete(ledger):
-    source = ledger.capture(url(), TEXT, "document-a")
+    source = capture(ledger, url(), TEXT, "document-a")
     ledger.record(fields(source), 90000)
     ledger.finished = True
     return source
 
 
 def test_missing_fields_are_preserved_and_filled_without_recapturing(ledger):
-    source = ledger.capture(url(), TEXT, "doc-a")
+    source = capture(ledger, url(), TEXT, "doc-a")
     spans = fields(source)
     taxes = spans.pop("taxes_quote")
     item = ledger.record(spans, 90000)
@@ -64,16 +79,16 @@ def test_missing_fields_are_preserved_and_filled_without_recapturing(ledger):
 ])
 def test_other_stay_conditions_cannot_enter_the_ledger(ledger, change):
     with pytest.raises(ValueError):
-        ledger.capture(url(**change), TEXT, "doc")
+        capture(ledger, url(**change), TEXT, "doc")
     assert not ledger.sources
 
 
 def test_another_property_cannot_supply_the_missing_tax_policy(ledger):
-    source = ledger.capture(url(), TEXT, "a")
+    source = capture(ledger, url(), TEXT, "a")
     spans = fields(source)
     spans.pop("taxes_quote")
     item = ledger.record(spans, 90000)
-    other = ledger.capture(url("TDP-2"), TEXT, "b")
+    other = capture(ledger, url("TDP-2"), TEXT, "b")
     with pytest.raises(ValueError, match="selected property"):
         ledger.record({"taxes_quote": fields(other)["taxes_quote"]}, candidate_id=item.id)
     assert ledger.missing(item) == ["taxes_quote"]
@@ -84,14 +99,14 @@ def test_room_price_changes_cannot_silently_overwrite_a_rate(ledger):
     item = next(iter(ledger.candidates.values()))
     with pytest.raises(ValueError, match="price change"):
         ledger.record({"taxes_quote": fields(source)["taxes_quote"]}, 100000, item.id)
-    new = ledger.capture(url(), TEXT.replace("Double room", "Twin room"), "a")
+    new = capture(ledger, url(), TEXT.replace("Double room", "Twin room"), "a")
     with pytest.raises(ValueError, match="silently replaced"):
         ledger.record({"room": fields(new)["room"]}, candidate_id=item.id)
     assert ledger.result()["offers"][0]["room"] == "Double room"
 
 
 def test_quotes_are_exact_ranges_and_cannot_be_fabricated(ledger):
-    source = ledger.capture(url(), TEXT, "doc")
+    source = capture(ledger, url(), TEXT, "doc")
     with pytest.raises(ValueError, match="outside"):
         ledger.record({"name": Span(source=source.id, start=999, end=1000)}, 90000)
     spans = fields(source)
@@ -102,14 +117,14 @@ def test_quotes_are_exact_ranges_and_cannot_be_fabricated(ledger):
 
 
 def test_property_teaser_cannot_establish_room_rate_conditions(ledger):
-    source = ledger.capture(url().replace("/list?", "?"), TEXT, "doc")
+    source = capture(ledger, url().replace("/list?", "?"), TEXT, "doc")
     with pytest.raises(ValueError, match="teaser/coupon banner"):
         ledger.record(fields(source), 90000)
     assert not ledger.candidates
 
 
 def test_literal_find_recovers_only_the_requested_source_region(ledger):
-    source = ledger.capture(url(), "Filler\n" * 200 + TEXT, "doc")
+    source = capture(ledger, url(), "Filler\n" * 200 + TEXT, "doc")
     found = ledger.find(source.id, "local accommodation tax")
     assert len(found["matches"]) == 1
     assert "209: Pay local accommodation tax" in found["matches"][0]["lines"]
@@ -120,7 +135,7 @@ def test_literal_find_recovers_only_the_requested_source_region(ledger):
 
 def test_preview_keeps_exact_line_numbers_and_omitted_policy_is_recoverable(ledger):
     text = "Header\n" + "Filler\n" * 249 + "Mandatory policy\n" + "Other rooms\n" * 249 + TEXT
-    source = ledger.capture(url(), text, "doc")
+    source = capture(ledger, url(), text, "doc")
     preview = ledger.preview(source.id)
     assert preview["omitted_lines"] > 0
     assert sum(len(item["lines"]) for item in preview["excerpts"]) <= 8000
@@ -134,7 +149,7 @@ def test_preview_keeps_exact_line_numbers_and_omitted_policy_is_recoverable(ledg
 
 
 def test_compact_progress_preserves_candidate_identity_and_missing_conditions(ledger):
-    source = ledger.capture(url(), TEXT, "doc")
+    source = capture(ledger, url(), TEXT, "doc")
     spans = fields(source)
     spans.pop("taxes_quote")
     candidate = ledger.record(spans, 90000)
@@ -258,7 +273,7 @@ async def test_stream_finishes_from_trusted_ledger_without_a_prose_call(monkeypa
 def test_repeated_rooms_at_one_property_cannot_satisfy_two_properties(ledger):
     ledger.query.count = 2
     complete(ledger)
-    other = ledger.capture(url(), TEXT.replace("Double room", "Twin room"), "doc")
+    other = capture(ledger, url(), TEXT.replace("Double room", "Twin room"), "doc")
     ledger.record(fields(other), 90000)
     assert len(ledger.candidates) == 2
     assert ledger.status()["complete_properties"] == 1
@@ -302,20 +317,20 @@ def test_unrecorded_excerpts_survive_reads_and_failed_records():
 
 
 def test_scoped_multi_page_quotes_pass_independent_capture_checks(ledger):
-    source = ledger.capture(url(), TEXT, "doc")
+    source = capture(ledger, url(), TEXT, "doc")
     spans = fields(source)
     spans.pop("taxes_quote")
     item = ledger.record(spans, 90000)
     popup_url = url() + "#policy"
-    popup = ledger.capture(popup_url, TEXT + "Modal content\n", "doc")
+    popup = capture(ledger, popup_url, TEXT + "Modal content\n", "doc")
     ledger.record({"taxes_quote": fields(popup)["taxes_quote"]}, candidate_id=item.id)
     ledger.finished = True
     stay = StayRequest(**ledger.query.model_dump(exclude={"rooms"}), market="overseas")
     pages = [{"url": source.url, "text": source.text}, {"url": popup.url, "text": popup.text}]
     result = ledger.result()
-    assert verify_comparison(json.dumps(result), stay, pages)["passed"]
+    assert verify_comparison(json.dumps(result), stay, pages, check_dom=False)["passed"]
     result["offers"][0]["evidence_refs"]["taxes_quote"]["rate_id"] = "wrong-rate"
-    assert not verify_comparison(json.dumps(result), stay, pages)["passed"]
+    assert not verify_comparison(json.dumps(result), stay, pages, check_dom=False)["passed"]
 
 
 def test_partial_collection_blocks_completion_and_final_answer_is_canonical(ledger):

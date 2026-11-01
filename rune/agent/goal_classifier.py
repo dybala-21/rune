@@ -222,8 +222,12 @@ Reading or copying a price, date, measurement or other observed value is not cal
 email: work on email itself (inbox, message, draft, reply).
 document: produce a standalone report, proposal or formal document, excluding code.
 table: save a CSV/XLSX aggregation of existing data, or revise that deliverable.
-Set table_output accordingly; otherwise none. Markdown tables, test summaries,
-blank templates and software that processes tables are not table deliverables.
+Set table_output accordingly; otherwise none. This field means a SOURCE-DERIVED AGGREGATE,
+not the filename extension. Collecting observed products, prices, dates or quotations into new
+CSV/XLSX rows is artifact with table_output=none and no table intent when no aggregation is requested.
+Those tasks must first access their public sources; they have no original input table for the aggregate checker.
+A request to sum/count/group an existing table still uses table_output=csv/xlsx and table intent.
+Markdown tables, test summaries, blank templates and software that processes tables are not table deliverables.
 desktop: use native app state or features, including open/unsaved documents,
 windows, menus and app settings. Honor an explicit request to use a native app.
 Webpage interaction, including localhost, uses browser tools without desktop.

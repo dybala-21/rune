@@ -20,7 +20,7 @@ async def test_source_research_defers_other_tools_but_keeps_them_discoverable(ki
     agent = LiteLLMAgent("openai/gpt-6-astra", tools=wrappers, compact_tools=True,
                         deferred_tools=deferred_for_task(names, classification))
     assert agent._tool_catalog.loaded == {"web_search", "web_fetch", "task_blocked", "tool_search"}
-    for name in ("browser_extract", "file_read", "table_verify"):
+    for name in ("browser_extract", "browser_stay_evidence", "file_read", "table_verify"):
         await agent._tool_catalog.search(name)
         assert name in agent._tool_catalog.loaded
         assert agent._tool_lookup[name] is next(w.function for w in wrappers if w.name == name)
@@ -667,3 +667,29 @@ def test_mixed_file_work_keeps_its_execution_fallback():
                         deferred_tools=deferred_for_task([tool.name for tool in tools], task))
     assert agent._tool_catalog is None
     assert {tool["function"]["name"] for tool in agent._tool_schemas} == {"file_write", "bash_execute"}
+
+
+async def test_web_route_can_discover_the_actual_stay_collector():
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.agent.litellm_adapter import LiteLLMAgent
+    from rune.agent.loop import NativeAgentLoop
+    from rune.agent.tool_adapter import ToolWrapper
+    from rune.agent.tool_catalog import deferred_for_task
+
+    classification = ClassificationResult("web", .9, 2, needs_web_evidence=True, browser_effect="view")
+    names = NativeAgentLoop()._select_tools(classification)
+    assert "browser_stay_evidence" in names
+    wrappers = [ToolWrapper(name=n,description=n,function=AsyncMock()) for n in names]
+    agent = LiteLLMAgent("anthropic/claude-opus-5",tools=wrappers,compact_tools=True,
+                        deferred_tools=deferred_for_task(names,classification))
+    result = json.loads(await agent._tool_catalog.search("browser_stay_evidence"))
+    assert [t["name"] for t in result["tools"]] == ["browser_stay_evidence"]
+    assert "browser_stay_evidence" in agent._tool_catalog.loaded
+
+
+def test_large_artifact_catalog_keeps_browser_entry_point_callable():
+    schemas = [{"type":"function","function":{"name":n,"description":n}} for n in
+               ["file_write","web_fetch","browser_navigate","browser_batch"]]
+    catalog = ToolCatalog(schemas)
+    assert {"file_write","web_fetch","browser_navigate"} <= catalog.loaded
+    assert "browser_batch" not in catalog.loaded

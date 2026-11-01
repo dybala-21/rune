@@ -37,7 +37,8 @@ _PROPERTIES = {
     "intent_categories": {"type": "array", "items": {"type": "string", "enum": ["coding", "email", "document", "table", "desktop", "calculation"]}},
     "requires_desktop_input": {"type": "boolean"},
     "is_related_to_previous": {"type": "boolean"},
-    "table_output": {"type": "string", "enum": ["none", "csv", "xlsx"]},
+    "table_output": {"type": "string", "enum": ["none", "csv", "xlsx"],
+                     "description": "Format of a source-derived aggregate table (sum/count/group/etc), not every CSV/XLSX file. New rows of observed products, prices, dates or quotations without aggregation use none."},
     "calculation_expression": {
         "type": "string",
         "description": "Copy the complete numeric arithmetic expression verbatim from the current request. Never solve, rewrite or invent it. Use an empty string for all other requests, including native app tasks, identifiers and code-writing requests.",

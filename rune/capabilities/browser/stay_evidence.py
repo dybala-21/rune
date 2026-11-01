@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from rune.capabilities.browser.core import _get_browser
 from rune.capabilities.browser.session import BrowserSession, browser_operation, current_session
+from rune.capabilities.browser.stay_dom import capture_rates, inspect_rate
 from rune.capabilities.browser.stay_readiness import wait_for_stay_content
 from rune.lodging.evidence import FIELDS, Span, StayEvidence, StayQuery, digest
 from rune.lodging.nol import entrypoints, source_guidance
@@ -24,9 +25,10 @@ log = get_logger(__name__)
 
 class BrowserStayEvidenceParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    action: Literal["begin", "capture", "read", "find", "record", "status", "finish"]
+    action: Literal["begin", "capture", "inspect_rate", "read", "find", "record", "status", "finish"]
     query: StayQuery | None = None
     source: str = Field(default="", description="Issued source ID for read/find; leave empty for capture (the tool issues it).")
+    rate: str = Field(default="", description="Issued DOM rate ID from capture. inspect_rate opens its read-only price and policy panels; record auto-fills these exact fields when source/rate are provided.")
     start: int = Field(default=1, ge=1, description="1-based saved line. Leave unset for capture's header/detail preview.")
     limit: int = Field(default=120, ge=1, le=300, description="Maximum lines for read, or capture with explicit start.")
     text: str = Field(default="", description="For find: a literal observed label/phrase to locate in saved source text; no network access.")
@@ -36,10 +38,10 @@ class BrowserStayEvidenceParams(BaseModel):
         "Exact captured line ranges for name, room, price_quote, stay_quote, occupancy_quote, "
         "location_quote, cancellation_quote, price_conditions_quote (discount/rate conditions), taxes_quote. "
         "The tool copies the original text; never synthesize or abbreviate quotes. "
-        "price_quote must span the selected room name through its price, not just the numeric price lines. "
+        "price_quote must cover exactly one issued DOM rate card. Copy suggested_fields from inspect_rate. "
         "For a conditional price, open the selected room/rate and price details: a generic get-coupon button is "
         "not the discount conditions. Include the displayed coupon/member eligibility and rate-specific fees. "
-        "Use a verifiable base price if eligibility cannot be established; do not log in or book."
+        "Use the current displayed price, never a struck-through amount. Eligibility remains unverified; do not log in or book."
     ))
 
 
@@ -86,20 +88,41 @@ async def browser_stay_evidence(params: BrowserStayEvidenceParams) -> Capability
                 raise ValueError(f"HTTP {response.status}: error pages cannot be evidence")
             url = page.url
             await wait_for_stay_content(page)
-            text = await page.locator("body").inner_text(timeout=5000)
+            text, rates = await capture_rates(page)
             if page.url != url:
                 raise ValueError("Page changed during capture; observe the new page before collecting")
-            source = ledger.capture(url, text, session.elements.document_id if session.elements else "")
+            source = ledger.capture(url, text, session.elements.document_id if session.elements else "", rates=rates)
             payload = (ledger.read(source.id, params.start, params.limit)
                        if "start" in params.model_fields_set else ledger.preview(source.id))
             payload["captured"] = True
             payload.update(source_guidance(source.url))
+            if rates:
+                payload["rates"] = [{"id": r.id, "room": r.room, "current_price": r.current_price,
+                                     "price_label": r.price_label, "struck_prices": r.struck_prices}
+                                    for r in rates[:6]]
+                payload["rate_count"] = len(rates)
+                payload["rate_guidance"] = "Choose an issued rate under budget, then inspect_rate(source, rate). It opens only price/policy details, saves complete regions and returns suggested_fields."
+        elif params.action == "inspect_rate":
+            _, page = await _get_browser()
+            await inspect_rate(page, ledger, params.source, params.rate,
+                               session.elements.document_id if session.elements else "")
+            session.needs_observation = True
+            suggested, total = ledger.rate_fields(params.source, params.rate)
+            payload = {"source": params.source, "rate": params.rate, "total_krw": total,
+                       "suggested_fields": {k: v.model_dump() for k, v in suggested.items()},
+                       "quotes": {k: ledger.sources[v.source].quote(v) for k, v in suggested.items()},
+                       "guidance": "record with source/rate auto-fills these exact fields. Supply only missing stay/occupancy/location quotes from saved sources. This is a displayed conditional rate; personal coupon eligibility and checkout are unverified."}
         elif params.action == "read":
             payload = ledger.read(params.source, params.start, params.limit)
         elif params.action == "find":
             payload = ledger.find(params.source, params.text, params.start)
         elif params.action == "record":
-            candidate = ledger.record(params.fields, params.total_krw, params.candidate)
+            fields, total = dict(params.fields), params.total_krw
+            if params.rate:
+                suggested, current_price = ledger.rate_fields(params.source, params.rate)
+                fields = {**suggested, **fields}
+                total = current_price if total is None else total
+            candidate = ledger.record(fields, total, params.candidate)
             payload = {"recorded": candidate.id, "missing": ledger.missing(candidate)}
         elif params.action == "finish":
             ledger.finished = True
@@ -139,7 +162,7 @@ def register_stay_evidence(registry: CapabilityRegistry) -> None:
         parameters_model=BrowserStayEvidenceParams, execute=browser_stay_evidence,
         description=("Collect accommodation comparison evidence without booking. NOL currently supported. "
                      "begin fixes the requested stay conditions and returns official search entry points; "
-                     "capture accepts property detail/room-list pages, "
+                     "capture preserves DOM room/rate boundaries and current versus struck-through prices on property detail/room-list pages. inspect_rate opens the selected rate's read-only price and policy dialogs, validates its identity and stores complete cancellation/tax/discount regions. "
                      "not search results, stores full page text and returns a bounded "
                      "header/trailing-detail preview with original line numbers (leave start unset); "
                      "record copies exact line ranges into a property/room/rate record; read/find retrieve saved lines without "
@@ -148,5 +171,5 @@ def register_stay_evidence(registry: CapabilityRegistry) -> None:
                      "For overseas rates, price/cancellation/discount evidence must come from the room list/detail view, "
                      "not the property's teaser or general coupon banner. "
                      "Use for multi-property comparisons to avoid losing evidence or retyping quotes. "
-                     "Does not navigate, click, log in or make reservations."),
+                     "Only inspect_rate clicks read-only details and closes them. Never logs in, claims coupons or makes reservations."),
     ))

@@ -560,7 +560,7 @@ def register_browser_capabilities(registry: CapabilityRegistry) -> None:
             "compact snapshot: page title, status, and the interactive elements "
             "with their ref IDs — there is no need to call browser_observe right "
             "after navigating. "
-            "Use when page state, dynamic rendering or interaction is needed. For "
+            "Use when page state, dynamic rendering, interaction, or explicit browser use is requested. Otherwise for "
             "plain retrieval prefer web_search or web_fetch, and for a documented "
             "API endpoint or a .json/.txt/.md URL call web_fetch directly — the "
             "browser is far slower for those. "
@@ -604,7 +604,7 @@ def register_browser_capabilities(registry: CapabilityRegistry) -> None:
     ))
     registry.register(CapabilityDefinition(
         name="browser_act",
-        description="Interact with required page controls (click/type/scroll/select). Use fresh refs from the current page. For information already available through search, fetch or an API, use those tools instead.",
+        description="Interact with required page controls (click/type/scroll/select). Use fresh refs from the current page. For plain retrieval use search, fetch or an API unless the user explicitly requests browser use.",
         domain=Domain.BROWSER,
         risk_level=RiskLevel.MEDIUM,
         group="browser",

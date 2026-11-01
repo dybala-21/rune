@@ -26,7 +26,7 @@ def source_guidance(url: str) -> dict[str, str | bool]:
             "record_guidance": (
                 "This view may supply room/rate quotes; it does not prove all conditions are present. "
                 "Record room as the room name alone; cite applied occupancy from the date/guest header, not maximum capacity. "
-                "Keep member/coupon conditions explicit; use a verifiable nonconditional price when eligibility is unknown."
+                "Choose a current DOM rate and use inspect_rate for its complete conditions. Struck-through amounts are not current prices. Member/coupon eligibility is unverified and must remain explicit."
                 if rate_source else
                 "Property overview: check the address is in the requested city before opening rooms; "
                 "search results may include nearby cities. Skip properties outside the requested city. "

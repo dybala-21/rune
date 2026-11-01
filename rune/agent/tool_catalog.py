@@ -6,7 +6,7 @@ from collections.abc import Collection
 
 from rune.agent.tool_output import RejectedToolResult
 
-_CORE = {"think", "ask_user", "task_blocked", "bash_execute", "project_map", "table_requirements", "table_verify"}
+_CORE = {"browser_navigate", "think", "ask_user", "task_blocked", "bash_execute", "project_map", "table_requirements", "table_verify"}
 _BROWSER = ("browser_observe", "browser_act", "browser_navigate", "browser_extract", "browser_batch", "browser_stay_evidence")
 
 
