@@ -292,7 +292,7 @@ When enabled, task context is sent to the selected decision service and billed s
 |---|---|
 | **Local — default** | Runs on your machine with workspace policies and approval checks. No Docker or VM required. |
 | **Container — optional** | Requires Docker. Runs supported commands in a configured container with controlled mounts and network policy. It does not move every tool into the container. |
-| **Hosted — experimental** | Linux/Incus tooling for one Rune instance per owner. Requires operator-provided compute, images, storage, and networking; RUNE does not supply cloud resources. |
+| **Remote access — experimental** | `rune cloud` routes each owner's login to their own isolated Rune worker (for example the iOS app). Hosted workers run with a locked-down boundary; RUNE does not supply cloud resources. |
 
 The connector broker can keep service credentials outside the command workspace and constrain requests by origin, path, and method. It is infrastructure for configured connectors, not a complete catalog of ready-to-use OAuth integrations.
 
