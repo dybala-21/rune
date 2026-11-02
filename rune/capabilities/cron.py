@@ -399,7 +399,8 @@ async def cron_delete(params: CronDeleteParams) -> CapabilityResult:
 # Cron execution engine - runs pending jobs via heartbeat
 
 async def execute_cron_job(job: CronJob, *, approval_from: str | None = None, refresh: bool = False,
-                           scheduled_minute: int | None = None) -> None:
+                           scheduled_minute: int | None = None) -> str | None:
+    """Run one occurrence. Returns why it did not start (e.g. ``"busy"``), or None once it ran."""
     from rune.daemon.cron_dispatcher import execution_slot
 
     async with execution_slot() as enabled:
@@ -411,15 +412,16 @@ async def execute_cron_job(job: CronJob, *, approval_from: str | None = None, re
 
                 from rune.config.loader import get_config
                 if int(time.time() // 60) - scheduled_minute > get_config().cron_execution.misfire_grace_seconds // 60:
-                    return
+                    return "expired"
             from rune.daemon.maintenance import check_storage
             check_storage()
-            await _execute_cron_job(job, approval_from=approval_from, refresh=refresh,
-                                    scheduled_minute=scheduled_minute)
+            return await _execute_cron_job(job, approval_from=approval_from, refresh=refresh,
+                                           scheduled_minute=scheduled_minute)
+        return "disabled"
 
 
 async def _execute_cron_job(job: CronJob, *, approval_from: str | None = None, refresh: bool = False,
-                            scheduled_minute: int | None = None) -> None:
+                            scheduled_minute: int | None = None) -> str | None:
     """Execute a single cron job (bash command or agent goal)."""
     import asyncio
 
@@ -434,18 +436,18 @@ async def _execute_cron_job(job: CronJob, *, approval_from: str | None = None, r
     store = _get_store()
     row = store.get_cron_job(job.id)
     if row is None:
-        return
+        return "deleted"
     if scheduled_minute is not None:
         from rune.proactive.routine import task_fingerprint
         if task_fingerprint(job) != task_fingerprint(_row_to_cronjob(row)):
-            return
+            return "changed"
     job = _row_to_cronjob(row)
     if job.status != "active" or job.policy.expired:
         if approval_from:
             raise ValueError("Enable the task and check its deadline before continuing")
-        return
+        return "inactive"
     if not approval_from and row.get("max_runs") is not None and row.get("run_count", 0) >= row["max_runs"]:
-        return
+        return "run_limit"
     prior, history = None, None
     if approval_from:
         from rune.proactive.execution_store import ExecutionStore
@@ -478,7 +480,7 @@ async def _execute_cron_job(job: CronJob, *, approval_from: str | None = None, r
     try:
         if decision != "claimed":
             log.info("cron_occurrence_skipped", job_id=job.id, reason=decision)
-            return
+            return decision
         previous = prior or claims.latest_result(f"cron:{job.id}:")
         progress = prior or claims.latest_result(f"cron:{job.id}:", executed_only=True)
         observed = None

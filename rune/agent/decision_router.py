@@ -53,7 +53,11 @@ def accelerator_status(selected: ActiveModelSelection | None = None, *,
 
     settings = settings or llm_settings().decision_routing
     backend = backend or settings.backend
-    if backend == "connected":
+    from rune.llm.gateway import gateway_active
+
+    # Decision backends call third parties with their own keys; under a gateway only the
+    # connected model (which the gateway fronts) may see request content.
+    if backend == "connected" or gateway_active():
         return "disabled"
     target = decision_target(settings, backend)
     if not model_environment(target.key_name).strip():

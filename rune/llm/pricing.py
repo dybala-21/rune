@@ -95,7 +95,11 @@ def _request_rates(model: str, request: dict) -> Rates | None:
         # https://commandline.microsoft.com/microsoft-decision-1-model-foundry/
         return Rates(.042, 0, 0) if target.model == MICROSOFT.model else None
     if not model.startswith("azure/"):
-        return None if request.get("api_base") or request.get("base_url") else rates_for(model)
+        from rune.llm.gateway import is_gateway_base
+
+        base = request.get("api_base") or request.get("base_url")
+        # A gateway forwards to the public API, so list prices still bound the spend.
+        return rates_for(model) if not base or is_gateway_base(base) else None
 
     from urllib.parse import urlsplit
 

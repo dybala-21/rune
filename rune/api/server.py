@@ -383,6 +383,9 @@ def create_app() -> Any:
         ready: bool
         checks: dict[str, bool] = Field(default_factory=dict)
         connections: dict[str, str] = Field(default_factory=dict)
+        # Operator-supplied image/build identifier (RUNE_BUILD_ID), so a rollout can confirm
+        # which build a machine is actually serving before widening a ring.
+        build: str = ""
 
     class MessageAttachment(BaseModel):
         ref: str = ""
@@ -1075,6 +1078,8 @@ def create_app() -> Any:
 
     # Health (no auth)
 
+    from rune import __version__ as _rune_version
+
     @app.get("/health", response_model=HealthResponse)
     @app.get("/api/v1/health", response_model=HealthResponse)
     async def health(response: Response) -> HealthResponse:
@@ -1083,7 +1088,8 @@ def create_app() -> Any:
         response.status_code = 200 if state["checks"].get("daemon", True) else 503
         return HealthResponse(
             **state,
-            version="0.1.0",
+            version=_rune_version,
+            build=os.environ.get("RUNE_BUILD_ID", "").strip()[:128],
             uptime_seconds=time.monotonic() - _start_time,
             pid=os.getpid(),
             ready=state["status"] == "ok",
@@ -2072,6 +2078,15 @@ def create_app() -> Any:
                 job_id = params.pop("jobId", "")
                 handler = inspect_routine_approval if method == "cron.approval.inspect" else refresh_routine_approval
                 return _ok(await handler(job_id, RoutineOperationRequest(**params)))
+
+            elif method in {"cron.fire", "cron.occurrence"}:
+                from rune.daemon.external_schedule import fire, occurrence
+                try:
+                    if method == "cron.fire":
+                        return _ok(await fire(params.get("jobId"), params.get("scheduledMinute")))
+                    return _ok(occurrence(params.get("jobId"), params.get("scheduledMinute")))
+                except ValueError as exc:
+                    return _err("invalid", str(exc))
 
             # health
             elif method == "health":

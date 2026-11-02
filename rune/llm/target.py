@@ -65,7 +65,12 @@ def resolve_target(model: str, provider: str | None = None, *, options: dict | N
     if (provider and declared in _PROVIDERS and declared != provider
             and {provider, declared} != {"gemini", "vertex_ai"}):
         raise ModelCompatibilityError(f"Model {model!r} belongs to {declared}, not {provider}.")
+    from rune.llm.gateway import gateway_options, gateway_url
+
+    gateway = gateway_url()
     if separator and prefix not in _PROVIDERS and provider is None:
+        if gateway:
+            gateway_options(prefix, extra)  # raises: unrouted providers must not bypass the gateway
         return ModelTarget(prefix, suffix, name, tuple(extra.items()))
     if separator and prefix in _PROVIDERS:
         provider, name = prefix, suffix
@@ -73,6 +78,8 @@ def resolve_target(model: str, provider: str | None = None, *, options: dict | N
         provider, name = name.split(":", 1)
     provider = provider or next((p for stem, p in (
         ("claude-", "anthropic"), ("grok-", "xai"), ("gemini-", "gemini")) if name.startswith(stem)), "openai")
+    if gateway:
+        gateway_options(provider, extra)  # refuse unrouted providers before building local options
     if provider == "ollama":
         from rune.llm.endpoints import ollama_v1
         extra.setdefault("api_base", ollama_v1())
@@ -83,7 +90,7 @@ def resolve_target(model: str, provider: str | None = None, *, options: dict | N
         endpoint, server_model = split_model(name)
         extra = connection_options(endpoint, extra)
         wire = f"openai/{server_model}"
-    elif provider == "vertex_ai" or provider == "gemini" and vertex_active():
+    elif provider == "vertex_ai" or provider == "gemini" and not gateway and vertex_active():
         extra = vertex_options(name, extra)
         wire = f"vertex_ai/{name}"
         provider = "gemini"
@@ -100,6 +107,8 @@ def resolve_target(model: str, provider: str | None = None, *, options: dict | N
         if not wire.startswith("vertex_ai/") and (key_name := key_names.get(provider)):
             if key := model_environment(key_name):
                 extra.setdefault("api_key", key)
+    if gateway:
+        extra = gateway_options(provider, extra)
     return ModelTarget(provider, name.removeprefix("responses/"), wire, tuple(extra.items()))
 
 

@@ -12,6 +12,7 @@ from pathlib import Path
 from weakref import WeakKeyDictionary
 
 from rune.config.loader import get_config
+from rune.daemon.external_schedule import external_scheduler
 from rune.daemon.heartbeat import HeartbeatScheduler
 from rune.proactive.routine import task_fingerprint
 from rune.utils.logger import get_logger
@@ -79,7 +80,8 @@ class CronDispatcher:
             saved, cursor, pending = rows.get(job.id, (fingerprint, now - 1, None))
             if saved != fingerprint:
                 cursor, pending = now - 1, None
-            if not config.enabled:
+            if not config.enabled or external_scheduler():
+                # An external scheduler owns the clock: never queue local occurrences.
                 cursor, pending = now, None
             elif now >= cursor:
                 first = max(cursor + 1, now - config.misfire_grace_seconds // 60)
@@ -97,7 +99,7 @@ class CronDispatcher:
 
     def _dispatch(self, jobs) -> None:
         config = get_config().cron_execution
-        if self._stopped or not config.enabled:
+        if self._stopped or not config.enabled or external_scheduler():
             return
         now = int(time.time() // 60)
         for job_id, minute, fingerprint in self._db.execute(

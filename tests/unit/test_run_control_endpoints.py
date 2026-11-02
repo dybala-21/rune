@@ -47,3 +47,20 @@ class TestActiveRuns:
 
         assert body["success"] is True
         assert body["data"]["runIds"] == []
+
+
+class TestHostedControlPlaneHooks:
+    def test_health_reports_the_build_identifier(self, client, monkeypatch):
+        monkeypatch.setenv("RUNE_BUILD_ID", "rune-vm-abc123")
+        body = client.get("/health").json()
+        assert body["build"] == "rune-vm-abc123" and body["version"]
+
+    def test_external_cron_rpc_validates_and_reports(self, client):
+        bad = client.post("/api/v1/rpc", json={"method": "cron.fire", "params": {"jobId": "", "scheduledMinute": 1}}).json()
+        assert bad["success"] is False and bad["error"]["code"] == "invalid"
+        unknown = client.post("/api/v1/rpc", json={"method": "cron.fire",
+                                                  "params": {"jobId": "missing", "scheduledMinute": 1}}).json()
+        assert unknown["success"] is False
+        state = client.post("/api/v1/rpc", json={"method": "cron.occurrence",
+                                                "params": {"jobId": "missing", "scheduledMinute": 1}}).json()
+        assert state["success"] is True and state["data"]["state"] == "unavailable"
