@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections import deque
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from rune.utils.logger import get_logger
 
@@ -95,12 +95,16 @@ class BrowserPagePool:
         except ImportError:
             pass
 
-        from playwright.async_api import async_playwright
+        from playwright.async_api import ProxySettings, async_playwright
+
+        from rune.cloud.boundary import browser_proxy
+
+        proxy = cast("ProxySettings | None", browser_proxy())
         pw = await async_playwright().start()
         try:
-            browser = await pw.chromium.launch(headless=True, channel="chrome")
+            browser = await pw.chromium.launch(headless=True, channel="chrome", proxy=proxy)
         except Exception:
-            browser = await pw.chromium.launch(headless=True)
+            browser = await pw.chromium.launch(headless=True, proxy=proxy)
         return browser
 
     # -- acquire / release --------------------------------------------------

@@ -431,6 +431,10 @@ class RuneDaemon:
         cleanup = Cleanup()
         if self._api_server is not None:
             self._api_server.should_exit = True
+        from rune.daemon.external_schedule import shutdown as stop_external_cron
+
+        # Stop externally fired runs before the browser, MCP and channels go away under them.
+        await cleanup.run("external_cron", stop_external_cron)
         await self._connections.stop(cleanup)
         if self._heartbeat_scheduler is not None:
             await cleanup.run("scheduler", self._heartbeat_scheduler.stop)

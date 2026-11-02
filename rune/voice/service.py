@@ -192,8 +192,13 @@ def _auto_detect_stt() -> STTProvider | None:
     """
     import os
 
+    from rune.llm.gateway import gateway_active
+
+    # Under an LLM gateway no local provider key may be used, so only local STT is offered.
+    cloud = not gateway_active()
+
     # 1. Deepgram (best quality, Korean, $0.004/min)
-    if os.environ.get("DEEPGRAM_API_KEY"):
+    if cloud and os.environ.get("DEEPGRAM_API_KEY"):
         try:
             from rune.voice.providers.deepgram import DeepgramProvider
             return DeepgramProvider(api_key=os.environ["DEEPGRAM_API_KEY"])
@@ -201,7 +206,7 @@ def _auto_detect_stt() -> STTProvider | None:
             log.debug("stt_detect_skip", provider="deepgram", error=str(exc)[:80])
 
     # 2. OpenAI Whisper (most users have this key, 99 languages, $0.006/min)
-    if os.environ.get("OPENAI_API_KEY"):
+    if cloud and os.environ.get("OPENAI_API_KEY"):
         try:
             from rune.voice.providers.openai_stt import OpenAISTTProvider
             return OpenAISTTProvider(api_key=os.environ["OPENAI_API_KEY"])
@@ -209,7 +214,7 @@ def _auto_detect_stt() -> STTProvider | None:
             log.debug("stt_detect_skip", provider="openai", error=str(exc)[:80])
 
     # 3. Groq Whisper (free tier, ultra-fast)
-    if os.environ.get("GROQ_API_KEY"):
+    if cloud and os.environ.get("GROQ_API_KEY"):
         try:
             from rune.voice.providers.groq_stt import GroqSTTProvider
             return GroqSTTProvider(api_key=os.environ["GROQ_API_KEY"])

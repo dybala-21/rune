@@ -1423,6 +1423,11 @@ def _ensure_llm_key() -> bool:
     provider = config.llm.active_provider or config.llm.default_provider
     if provider == "ollama" or (provider == "openai_compatible" and config.llm.endpoints):
         return True
+    from rune.llm.gateway import gateway_active
+
+    if gateway_active():
+        # A misconfigured gateway also counts: the first request then fails with its reason.
+        return True
     return bool(
         config.openai_api_key
         or config.anthropic_api_key

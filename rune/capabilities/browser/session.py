@@ -84,6 +84,14 @@ class BrowserSession:
     async def release_resources(self) -> None:
         if self.elements is not None:
             await self.elements.release()
+        if self.profile in {"managed", "visible"} and self.browser is not None:
+            from rune.capabilities.browser.persistence import save
+
+            try:
+                if self.browser.is_connected() and self.browser.contexts:
+                    await save(self.browser.contexts[0])
+            except Exception as exc:
+                log.debug("browser_state_save_skipped", error=str(exc))
         for resource, method in ((self.monitor, "detach"), (self.browser, "close"), (self.playwright, "stop")):
             if resource is not None:
                 try:

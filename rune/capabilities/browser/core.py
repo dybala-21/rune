@@ -84,11 +84,16 @@ async def _get_browser(profile: str | None = None) -> tuple[Any, Any]:
         session.profile = profile
         try:
             session.playwright = await async_playwright().start()
+            from rune.cloud.boundary import browser_proxy
+
+            proxy = browser_proxy()
             session.browser = await session.playwright.chromium.launch(
-                headless=profile == "managed", chromium_sandbox=True,
+                headless=profile == "managed", chromium_sandbox=True, **({"proxy": proxy} if proxy else {}),
             )
-            context = await session.browser.new_context(
-                viewport={"width": config.viewport_width, "height": config.viewport_height},
+            from rune.capabilities.browser.persistence import new_context
+
+            context = await new_context(
+                session.browser, viewport={"width": config.viewport_width, "height": config.viewport_height},
             )
             session.page = await context.new_page()
             return session.browser, session.page

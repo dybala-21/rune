@@ -48,3 +48,34 @@ def check_tool(name: str, params: dict) -> str | None:
         if params.get(field) and (reason := check_path(str(params[field]))):
             return reason
     return None
+
+
+def browser_proxy() -> dict[str, str] | None:
+    """Playwright proxy settings for a hosted worker whose egress is forced through a proxy.
+
+    Chromium does not read HTTP(S)_PROXY reliably, so a hosted browser would otherwise try
+    direct connections that the host firewall drops. Local runs are left untouched.
+    """
+    if not hosted():
+        return None
+    from urllib.parse import unquote, urlsplit
+
+    raw = next((os.environ[name] for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
+                if os.environ.get(name, "").strip()), "").strip()
+    if not raw:
+        return None
+    parsed = urlsplit(raw if "://" in raw else f"http://{raw}")
+    if parsed.scheme not in {"http", "https", "socks5"} or not parsed.hostname:
+        raise ValueError("The hosted egress proxy must be an http, https or socks5 URL")
+    host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+    proxy: dict[str, str] = {"server": f"{parsed.scheme}://{host}" + (f":{parsed.port}" if parsed.port else "")}
+    bypass = (os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or "").strip()
+    if bypass:
+        proxy["bypass"] = bypass
+    if parsed.username:
+        if parsed.scheme == "socks5":
+            # Chromium cannot authenticate to a SOCKS5 proxy; fail here with the reason.
+            raise ValueError("Chromium does not support SOCKS5 proxy credentials; use an http(s) proxy")
+        proxy["username"] = unquote(parsed.username)
+        proxy["password"] = unquote(parsed.password or "")
+    return proxy
