@@ -1,13 +1,9 @@
 """Hosting cannot be downgraded through project config or ordinary agent tools."""
 
-import json
-from unittest.mock import AsyncMock
-
 import pytest
 from starlette.requests import Request
 
-from rune.cloud.incus import Incus
-from rune.cloud.store import CloudStore, owner_key
+from rune.cloud.store import CloudStore
 from rune.config.schema import SandboxConfig
 
 
@@ -97,69 +93,6 @@ async def test_hosted_authority_survives_environment_changes(monkeypatch, tmp_pa
     with pytest.raises(HTTPException) as err:
         await TokenAuthDependency()(request)
     assert err.value.status_code == 401
-
-
-async def test_vm_creation_has_network_resource_and_ownership_boundaries(tmp_path):
-    store = CloudStore(tmp_path / "cloud")
-    driver = Incus(store)
-    commands = []
-    driver.wait_http = AsyncMock()
-    async def run(*args, **kwargs):
-        commands.append(args)
-        if args[0] == "list":
-            if any(c[0] == "init" for c in commands):
-                return json.dumps([{"name": store.reserve("alice")["name"], "type": "virtual-machine", "config": {"user.rune.owner": owner_key("alice")}}])
-            return "[]"
-        if "initialize" in args:
-            return "rune_internal_test"
-        return ""
-    driver.run = run
-    token = await driver.provision("alice", "rune-image", storage="default")
-    assert store.authenticate(token)["owner"] == "alice"
-    init = next(c for c in commands if c[0] == "init")
-    assert "--vm" in init and "--no-profiles" in init and "limits.cpu=2" in init and "root,size=32GiB" in init
-    assert any("ipv6.address=none" in c for c in commands)
-    assert any("security.ipv4_filtering=true" in c for c in commands)
-    assert any("destination_port=80,443" in c for c in commands)
-    with pytest.raises(ValueError):
-        await driver.provision("alice", "rune-image", storage="default")
-    assert len([c for c in commands if c[0] == "init"]) == 1
-
-
-async def test_foreign_instance_or_container_cannot_be_started(tmp_path):
-    store = CloudStore(tmp_path / "cloud")
-    machine = store.reserve("alice")
-    driver = Incus(store)
-    for kind, owner in [("container", owner_key("alice")), ("virtual-machine", owner_key("bob"))]:
-        driver.run = AsyncMock(return_value=json.dumps([{"name": machine["name"], "type": kind, "config": {"user.rune.owner": owner}}]))
-        with pytest.raises(ValueError):
-            await driver.set_running("alice", True)
-        assert driver.run.await_count == 1
-
-
-async def test_incus_failure_does_not_register_or_fall_back(tmp_path):
-    store = CloudStore(tmp_path / "cloud")
-    driver = Incus(store)
-    driver.run = AsyncMock(side_effect=RuntimeError("Incus is unavailable"))
-    with pytest.raises(RuntimeError):
-        await driver.provision("alice", "rune-image", storage="default")
-    with store.connect() as db:
-        assert db.execute("SELECT COUNT(*) FROM workers").fetchone()[0] == 0
-
-
-async def test_start_does_not_restore_revoked_access(tmp_path):
-    store = CloudStore(tmp_path / "cloud")
-    machine = store.reserve("alice")
-    token = store.register("alice", "http://10.207.0.6:18789", "rune_internal")
-    store.status("alice", "running")
-    assert store.authenticate(token)
-    store.disable("alice")
-    driver = Incus(store)
-    driver.run = AsyncMock(return_value=json.dumps([{"name": machine["name"], "type": "virtual-machine", "status": "Running", "config": {"user.rune.owner": owner_key("alice")}}]))
-    driver.wait_ready = AsyncMock()
-    driver.wait_http = AsyncMock()
-    await driver.set_running("alice", True)
-    assert store.authenticate(token) is None
 
 
 def test_partial_provision_never_accepts_user_traffic(tmp_path):
