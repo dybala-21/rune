@@ -370,13 +370,15 @@ class StayEvidence(BaseModel):
 
     def acceptance(self) -> dict[str, Any]:
         ready = self.finished and self.status()["complete"]
-        times = [datetime.fromisoformat(source.observed_at) for source in self.sources.values()]
-        partial = self.result()
+        result = self.result()
+        used = {ref["source"] for offer in result["offers"] for ref in offer["evidence_refs"].values()}
+        times = [datetime.fromisoformat(self.sources[key].observed_at) for key in used]
+        partial = dict(result)
         if not ready and not partial["limitations"]:
             partial["limitations"] = ["Evidence collected, but comparison has not been finalized"]
         return {"status": "pass" if ready else "incomplete", "required": True,
                 "expires_at": (min(times) + timedelta(seconds=900)).isoformat() if times else "",
                 "scope": "DOM rate/card and complete cancellation/price/tax region linkage; displayed conditional charge, not personal eligibility or checkout total",
                 "contract": digest(self.query.model_dump_json()), "progress": self.status(),
-                "answer": json.dumps(self.result(), ensure_ascii=False) if self.finished else "",
+                "answer": json.dumps(result, ensure_ascii=False) if self.finished else "",
                 "partial_answer": json.dumps(partial, ensure_ascii=False)}

@@ -14,12 +14,18 @@ def accepted_answer(evidence: TaskEvidence | None) -> str:
     report = getattr(evidence, "retrieval_acceptance", None) or {}
     if report.get("status") != "pass" or not report.get("contract") or not report.get("answer"):
         return ""
+    from rune.agent.stay_contract import bound_query
+    from rune.lodging.evidence import digest
+
+    query = bound_query(evidence)
+    if query is None or report["contract"] != digest(query.model_dump_json()):
+        return ""
     try:
         expiry = datetime.fromisoformat(report["expires_at"])
         result = json.loads(report["answer"])
         if expiry <= datetime.now(UTC) or result["limitations"]:
             return ""
-        if len(result["offers"]) != report["progress"]["required"]:
+        if len(result["offers"]) != query.count or report["progress"]["required"] != query.count:
             return ""
     except (ValueError, KeyError, TypeError):
         return ""

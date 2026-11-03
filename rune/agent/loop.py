@@ -1667,6 +1667,9 @@ class NativeAgentLoop(EventEmitter):
                 return CompletionTrace(reason="max_gate_blocked", completion_check=self._completion_check,
                                        requirement_acceptance={"required": True, "status": "unavailable",
                                                                "scope": "browser_request_requirements"})
+        from rune.agent.stay_contract import prompt as stay_contract_prompt
+        if stay_hint := stay_contract_prompt(task_evidence):
+            system_prompt += "\n" + stay_hint
         source_context = SourceContext()
         if previous_task is not None:
             if not classification.needs_current_source and classification.source_output != "none":

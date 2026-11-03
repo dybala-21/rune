@@ -100,6 +100,29 @@ async def test_browser_requirements_share_checks_and_bound_calls(setup, monkeypa
         ]})
 
 
+@pytest.mark.parametrize("route", ["browser", "web"])
+async def test_choice_router_defers_stay_conditions_to_connected_classifier(setup, monkeypatch, route):
+    from rune.agent.browser_requirements import request_key
+    from rune.agent.task_evidence import TaskEvidence
+    from tests.unit.test_goal_classifier import response, verdict
+
+    cfg, client = setup
+    cfg.llm.decision_routing.backend = "jev"
+    goal = "NOL에서 2026-11-15~16 삿포로 숙소 3곳, 성인 2명 객실 1개, 20만원 이하로 비교해줘."
+    query = {"city": "삿포로", "city_labels": ["Sapporo"], "check_in": "2026-11-15",
+             "check_out": "2026-11-16", "adults": 2, "rooms": 1, "count": 3, "max_total_krw": 200000}
+    client.completion.return_value = response(verdict(goal_type=route, browser_effect="view", stay_query=query))
+    external = AsyncMock(side_effect=lambda **kwargs: payload(
+        kwargs["questions"], goal_type=route, browser_effect="view", stay_comparison="yes"))
+    monkeypatch.setattr(system_one, "_request", external)
+    result = await classify_goal(goal)
+    assert result.available and result.decision_backend == "connected"
+    assert result.fallback_reason == "stay_conditions_needed"
+    assert result.stay_query == query and result.stay_query_key == request_key((goal,))
+    TaskEvidence.for_request(goal, result).prepare_tool("browser_stay_evidence", {"action": "begin", "query": query})
+    assert external.await_count == client.completion.await_count == 1
+
+
 @pytest.mark.parametrize("backend", ["connected", "jev"])
 async def test_resume_selection_and_operation_use_the_existing_routing_call(setup, monkeypatch, backend):
     from tests.unit.test_goal_classifier import response, verdict

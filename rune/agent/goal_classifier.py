@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from rune.agent.classification_response import COMPLEXITY_CRITERIA
 from rune.agent.provenance import ArtifactRoleHints
@@ -47,6 +47,8 @@ class ClassificationResult:
     browser_effect: str = "change"  # view / edit / change
     browser_requirements: dict | None = None
     browser_requirements_key: str = ""
+    stay_query: dict[str, Any] | None = None
+    stay_query_key: str = ""
     calculation_operation: str = "other"
     resume_task: str = ""
     task_scope: str = "step"  # task / step / inspect / amend
@@ -125,6 +127,7 @@ def to_wire(c: ClassificationResult) -> str:
         "browser_effect": c.browser_effect,
         "browser_requirements": c.browser_requirements,
         "browser_requirements_key": c.browser_requirements_key,
+        "stay_query": c.stay_query, "stay_query_key": c.stay_query_key,
         "calculation_operation": c.calculation_operation,
         "resume_task": c.resume_task,
         "task_scope": c.task_scope,
@@ -320,6 +323,8 @@ async def classify_tier2(
             browser_effect=data["browser_effect"],
             browser_requirements=data.get("browser_requirements"),
             browser_requirements_key=request_key((goal,)),
+            stay_query=data.get("stay_query"),
+            stay_query_key=request_key((goal,)) if data.get("stay_query") is not None else "",
             calculation_operation=data["calculation_operation"],
             resume_task=data.get("resume_task", ""),
             task_scope=data.get("task_scope", "step"),

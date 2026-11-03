@@ -55,6 +55,12 @@ def complete(ledger):
     return source
 
 
+def bound_evidence(ledger, request="Compare one Sapporo hotel"):
+    from rune.agent.browser_requirements import request_key
+    return TaskEvidence(browser_effect="view", request_texts=(request,),
+                        stay_query=ledger.query.model_dump(mode="json"), stay_query_key=request_key((request,)))
+
+
 def test_missing_fields_are_preserved_and_filled_without_recapturing(ledger):
     source = capture(ledger, url(), TEXT, "doc-a")
     spans = fields(source)
@@ -243,7 +249,7 @@ async def test_stream_finishes_from_trusted_ledger_without_a_prose_call(monkeypa
 
     complete(ledger)
     ledger.finished = False
-    evidence = TaskEvidence(browser_effect="view")
+    evidence = bound_evidence(ledger)
     stream = _make("anthropic/claude-opus-5")
     stream._reserve_answer = True
     stream._retrieval_state = lambda: evidence
@@ -334,7 +340,7 @@ def test_scoped_multi_page_quotes_pass_independent_capture_checks(ledger):
 
 
 def test_partial_collection_blocks_completion_and_final_answer_is_canonical(ledger):
-    evidence = TaskEvidence(browser_effect="view")
+    evidence = bound_evidence(ledger)
     target = resolve_intent_contract(ClassificationResult("browser", .99, 2, browser_effect="view"), .99)
     evidence.observe("browser_stay_evidence", CapabilityResult(success=True, metadata={"retrieval_acceptance": ledger.acceptance()}))
     assert evidence.blocker(target, 0) and not accepted_answer(evidence)
@@ -412,7 +418,9 @@ async def test_real_loop_uses_only_finished_evidence_and_exact_answer(monkeypatc
     monkeypatch.setattr("rune.agent.loop.LiteLLMAgent", Agent)
     loop = NativeAgentLoop()
     loop._workspace_root = str(tmp_path)
-    classification = ClassificationResult("browser", .99, 2, browser_effect="view")
+    from rune.agent.browser_requirements import request_key
+    classification = ClassificationResult("browser", .99, 2, browser_effect="view",
+        stay_query=ledger.query.model_dump(mode="json"), stay_query_key=request_key(("Compare one Sapporo hotel",)))
     trace = await loop._execute_loop("Compare one Sapporo hotel", "", [], 1, classification)
     assert run_outcome(trace).success is (stop in {"normal", "budget"})
     if stop in {"normal", "budget"}:

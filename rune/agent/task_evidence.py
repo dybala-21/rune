@@ -89,6 +89,8 @@ class TaskEvidence:
     readback_offered: bool = False
     multiple_saves_confirmed: bool = False
     retrieval_acceptance: dict[str, Any] | None = None
+    stay_query: dict[str, Any] | None = None
+    stay_query_key: str = ""
 
     @property
     def requirements_unavailable(self) -> bool:
@@ -101,6 +103,8 @@ class TaskEvidence:
 
     @classmethod
     def for_request(cls, goal: str, classification) -> "TaskEvidence":
+        from copy import deepcopy
+
         from rune.agent.calculation import calculation_context
 
         # The exact arithmetic supplied in the prompt is already computed evidence.
@@ -111,6 +115,8 @@ class TaskEvidence:
                    requirements=classification.browser_requirements,
                    requirements_key=classification.browser_requirements_key,
                    browser_effect=classification.browser_effect,
+                   stay_query=deepcopy(getattr(classification, "stay_query", None)),
+                   stay_query_key=getattr(classification, "stay_query_key", ""),
                    calculation_operation=classification.calculation_operation,
                    operations={classification.calculation_operation} if computed else set(),
                    request_texts=(goal,))
@@ -178,6 +184,9 @@ class TaskEvidence:
         return requirement or selector, expected, selector, prop
 
     def prepare_tool(self, name: str, params: dict) -> None:
+        if name == "browser_stay_evidence":
+            from rune.agent.stay_contract import prepare
+            prepare(self, params)
         from rune.agent.browser_plan import accept_plan
         accept_plan(self, name, params)
         def validate(tool, values):

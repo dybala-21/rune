@@ -59,6 +59,10 @@ def build_questions(state: dict) -> tuple[dict, dict[str, str]]:
         expression_candidates(state["request_to_classify"]))}
     questions = {
         "complexity": _choice("Classify the current work's difficulty, including constraints inherited from the referenced task.", COMPLEXITY_CRITERIA),
+        "stay_comparison": _choice("Does the current request require comparing accommodation offers on NOL?", {
+            "yes": "Compare NOL stays; the connected classifier must extract the requested conditions before collection.",
+            "no": "No NOL accommodation comparison is requested.",
+        }),
         "browser_effect": _choice("What result does the user require from browser interaction?", {
             "view": "Only scroll or navigate; no edits, submission or saved app state.",
             "edit": "Only change a local control value or draft, without submitting, saving, booking or another persistent effect.",
@@ -189,6 +193,8 @@ def _routing_values(picked: dict[str, str], confidences: dict[str, float], expre
 
     if picked["calculation"] == "unavailable":
         raise DecisionAbstained("extraction_needed")
+    if picked.get("stay_comparison") == "yes":
+        raise DecisionAbstained("stay_conditions_needed")
     if picked["desktop"] != "none" and picked["calculation"] != "none":
         raise DecisionAbstained("inconsistent_decision")
     aggregates = {"data", "sum", "count", "mean", "min", "max"}
