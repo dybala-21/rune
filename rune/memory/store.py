@@ -386,6 +386,18 @@ class MemoryStore:
         conn = self._conn
         assert conn is not None
         (current_version,) = conn.execute("PRAGMA user_version").fetchone()
+        if current_version == _CURRENT_SCHEMA_VERSION:
+            return
+        if current_version > _CURRENT_SCHEMA_VERSION:
+            # A newer build migrated this file; migrations are additive, so keep reading it,
+            # but never stamp the version back down (that would re-run steps on the next upgrade).
+            log.warning("memory_schema_newer_than_build", db_version=current_version,
+                        build_version=_CURRENT_SCHEMA_VERSION)
+            return
+        from rune.memory.migration_backup import backup_before_migration, has_tables
+
+        if current_version > 0 or has_tables(conn):
+            backup_before_migration(conn, self._db_path, current_version, _CURRENT_SCHEMA_VERSION)
 
         if current_version < 1:
             # Initial schema (tables created by _SCHEMA_SQL via CREATE TABLE IF NOT EXISTS)
@@ -596,7 +608,13 @@ class MemoryStore:
             self._conn.pragma("foreign_keys", True)
             self._conn.pragma("busy_timeout", 5000)
             # Run migrations first (may drop/recreate tables)
-            self._migrate()
+            try:
+                self._migrate()
+            except BaseException:
+                # Never hand out a half-opened, unmigrated connection on the next call.
+                self._conn.close()
+                self._conn = None
+                raise
             # Then ensure all tables/indexes exist
             self._conn.execute(_SCHEMA_SQL)
             log.info("memory_store_opened", path=self._db_path)

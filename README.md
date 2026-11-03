@@ -151,6 +151,70 @@ rune --provider ollama --model MODEL_NAME
 
 Local-first describes where RUNE runs and stores its state. Requests sent to a cloud model, search service, or connector still leave your machine.
 
+### Azure Foundry: Kimi and DeepSeek
+
+In **Settings → Azure Foundry**, enter your resource endpoint (for example,
+`https://YOUR-RESOURCE.services.ai.azure.com/openai/v1`) and API key. Add a row
+with the exact deployment name from Foundry and model ID `Kimi-K2.7-Code`,
+then choose **Save and use** on that deployment.
+
+For `DeepSeek-V4-Pro`, add another row with its deployment name and model ID
+`DeepSeek-V4-Pro`. Deployments in the same resource share one endpoint and API key.
+Use **Connect and fetch models** to check the key and load Azure's model catalog.
+Search by model name or version, then use **Add selected model** to
+start a deployment row. Enter the exact deployment name from Foundry before saving.
+The [models API](https://learn.microsoft.com/en-us/rest/api/microsoft-foundry/azureopenai/models)
+returns model offerings, not the names of deployments in your resource; it does
+not prove that a listed model is deployed. Actual [deployment enumeration](https://learn.microsoft.com/en-us/azure/foundry/reference/rest/deployments-list)
+uses a separate project API and authentication flow, which this API-key form does not configure.
+
+The connection check does not generate tokens.
+Each row's **Test deployment** sends one short text request, capped at 256 output
+tokens, with no automatic retries; Azure usage charges may apply. It checks text
+generation, not streaming or tools. Request limit zero or a configured cost limit
+disables deployment tests with an explanation beside the controls; the connection check remains available.
+Checks use the current form values without saving them. A changed resource
+requires its key to be entered again, for both checking and saving.
+**Stop waiting** cancels the local check; Azure may still charge for a submitted request.
+You can edit other deployments while a test runs, and unrelated edits retain completed checks.
+
+Use **Save settings** to keep the current model, or a deployment's **Save and use**
+to select it for new runs. Pricing is under **Cost estimates (optional)**.
+Saving does not call a model. Credentials, deployment mappings and selection are
+saved in one server request. Files are staged first and restored on write errors;
+runtime settings change only after all files are written. Changes from another tab
+are rejected until the saved settings are reloaded. This is not a crash-atomic
+transaction across files or a lock shared by separate Rune processes.
+
+For project-scoped configuration, put credentials in the ignored `.rune/.env`:
+
+```dotenv
+AZURE_API_BASE=https://YOUR-RESOURCE.services.ai.azure.com/openai/v1
+AZURE_API_KEY=YOUR_AZURE_KEY
+AZURE_API_VERSION=v1
+```
+
+Register the deployment in `.rune/config.yaml` (replace `my-kimi` with your deployment name):
+
+```yaml
+llm:
+  activeProvider: azure
+  activeModel: my-kimi
+  azureDeployments:
+    my-kimi: Kimi-K2.7-Code
+```
+
+```bash
+rune --provider azure --model my-kimi --message "Explain this project's auth flow."
+```
+
+Launch Rune from this directory to load the project settings. Existing launch
+environment variables take precedence over `.env` files. Keep API keys out of
+tracked files. Kimi uses the [Foundry v1 Chat Completions API](https://learn.microsoft.com/en-us/azure/ai-foundry/openai/api-version-lifecycle?tabs=key),
+including streamed responses and native tool calls. Its [Azure model card](https://ai.azure.com/catalog/models/Kimi-K2.7-Code)
+lists text and image input. Leave deployment pricing unknown for Kimi; the
+GPT-6 rates in Rune do not apply, and configured cost limits block unpriced calls.
+
 ## What RUNE can do
 
 | Work | Example request | What you can inspect |
@@ -228,7 +292,7 @@ When enabled, task context is sent to the selected decision service and billed s
 |---|---|
 | **Local — default** | Runs on your machine with workspace policies and approval checks. No Docker or VM required. |
 | **Container — optional** | Requires Docker. Runs supported commands in a configured container with controlled mounts and network policy. It does not move every tool into the container. |
-| **Hosted — experimental** | Linux/Incus tooling for one Rune instance per owner. Requires operator-provided compute, images, storage, and networking; RUNE does not supply cloud resources. |
+| **Remote access — experimental** | `rune cloud` routes each owner's login to their own isolated Rune worker (for example the iOS app). Hosted workers run with a locked-down boundary; RUNE does not supply cloud resources. |
 
 The connector broker can keep service credentials outside the command workspace and constrain requests by origin, path, and method. It is infrastructure for configured connectors, not a complete catalog of ready-to-use OAuth integrations.
 

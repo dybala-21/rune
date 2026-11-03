@@ -36,6 +36,7 @@ class CronJobInfo(BaseModel):
     last_run_at: str | None = Field(None, alias="lastRunAt")
     run_count: int = Field(0, alias="runCount")
     max_runs: int | None = Field(None, alias="maxRuns")
+    fingerprint: str = ""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -111,6 +112,7 @@ class RoutineApprovalRequest(RoutineOperationRequest):
 def _job_dict_to_info(j: dict[str, Any]) -> CronJobInfo:
     from rune.capabilities.cron import _row_to_cronjob
     from rune.proactive.execution_store import ExecutionStore
+    from rune.proactive.routine import task_fingerprint
     from rune.proactive.routine_budget import budget_state
     from rune.utils.paths import rune_data
 
@@ -136,6 +138,8 @@ def _job_dict_to_info(j: dict[str, Any]) -> CronJobInfo:
         lastRunAt=j.get("last_run_at"),
         runCount=j.get("run_count", 0),
         maxRuns=j.get("max_runs"),
+        # Lets an external scheduler detect a changed definition without diffing every field.
+        fingerprint=task_fingerprint(job),
     )
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
@@ -11,6 +12,10 @@ from typing import Any, Literal
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
+
+# Status codes inside provider error text (structured, not natural language).
+_GATEWAY_REFUSED = re.compile(r"\b403\b|\bforbidden\b")
+_GATEWAY_BUDGET = re.compile(r"\b402\b|quota|insufficient[_ ](?:funds|balance|credit)|billing|payment required")
 
 # Types
 
@@ -168,6 +173,17 @@ def classify_error(error: Exception | str) -> FailoverReason:
     if any(k in msg for k in ("401", "unauthorized", "invalid api key", "authentication")):
         return "auth"
 
+    from rune.llm.gateway import gateway_active
+
+    if gateway_active():
+        # Behind a gateway, 403 is a policy refusal (suspended tenant, blocked model) and
+        # 402/quota is an exhausted tenant budget. Neither is transient.
+        status = getattr(error, "status_code", None)
+        if status == 403 or _GATEWAY_REFUSED.search(msg):
+            return "auth"
+        if status == 402 or _GATEWAY_BUDGET.search(msg):
+            return "billing"
+
     if any(k in msg for k in ("429", "rate limit", "too many requests", "quota")):
         return "rate_limit"
 
@@ -215,6 +231,11 @@ def determine_strategy(
         case "invalid_request":
             return FailoverStrategy(action="abort")
         case "auth" | "billing":
+            from rune.llm.gateway import gateway_active
+
+            if gateway_active():
+                # Every profile shares the gateway, so switching models would only hide the refusal.
+                return FailoverStrategy(action="abort")
             # Non-recoverable with retry - switch profile immediately
             return _find_next_profile(current_profile, profiles)
 

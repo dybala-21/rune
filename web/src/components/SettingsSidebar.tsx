@@ -607,9 +607,9 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
           </SettingsSection>
         )}
 
+        {config?.azure && <AzureSettings connection={config.azure} activeModel={config.activeModel} onSaved={load} />}
         <details className="advanced-settings">
           <summary>Advanced settings</summary>
-        {config?.azure && <AzureSettings connection={config.azure} onSaved={load} />}
         {config?.localModels && <LocalModelSettings state={config.localModels} onSaved={load} />}
 
         {config && memoryDraft && (

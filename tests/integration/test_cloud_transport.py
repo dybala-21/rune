@@ -7,12 +7,13 @@ import socket
 import tempfile
 import time
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
 
 import httpx
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from websockets.asyncio.client import connect
 
 from rune.capabilities.connector import ConnectorListParams, connector_list, connector_request
@@ -128,3 +129,61 @@ async def test_real_gateway_streams_without_buffering_and_keeps_owners_separate(
                 denied = await client.get(gateway + "/events", headers={"authorization": f"Bearer {alice}"})
                 assert denied.status_code == 401
     assert requests == ["Bearer rune_alice"]
+
+
+async def test_tool_to_remote_broker_over_tcp(tmp_path, monkeypatch):
+    """A broker outside the VM: the URL wins over any local socket, and the secret never crosses back."""
+    root = tmp_path / "broker"
+    monkeypatch.setenv("RUNE_BROKER_HOME", str(root))
+    monkeypatch.setenv("RUNE_CONNECTOR_SOCKET", str(tmp_path / "absent.sock"))
+    monkeypatch.setenv("RUNE_CONNECTOR_KEY_ID", "tenant-7")
+    store = ConnectorStore(root)
+    store.put(ConnectorPolicy(name="mail", origin="https://api.example.com", methods=["POST"]), "remote-credential-only")
+    requests, key_ids = [], []
+
+    async def send(policy, secret, request):
+        requests.append(secret)
+        return CapabilityResult(success=True, output='{"id":"draft-2"}')
+
+    monkeypatch.setattr("rune.connectors.broker.send_request", send)
+    app = create_broker(store, authority_key(root, create=True))
+
+    @app.middleware("http")
+    async def record(request, call_next):
+        key_ids.append(request.headers.get("x-rune-key-id"))
+        return await call_next(request)
+
+    async with serving(app) as origin:
+        monkeypatch.setenv("RUNE_CONNECTOR_URL", origin)
+        listed = await connector_list(ConnectorListParams())
+        assert listed.success and "remote-credential-only" not in listed.output
+        revision = json.loads(listed.output)["connectors"][0]["revision"]
+        request = ConnectorRequest(connector="mail", origin="https://api.example.com", revision=revision,
+                                   path="/drafts", method="POST", body='{"text":"Hi"}')
+        with approval_granted():
+            result = await connector_request(request)
+        assert result.success and json.loads(result.output)["id"] == "draft-2"
+        assert "remote-credential-only" not in json.dumps(asdict(result))
+    assert requests == ["remote-credential-only"] and key_ids == ["tenant-7", "tenant-7"]
+
+
+async def test_remote_broker_redirect_is_uncertain_and_not_followed(tmp_path, monkeypatch):
+    root = tmp_path / "broker"
+    monkeypatch.setenv("RUNE_BROKER_HOME", str(root))
+    authority_key(root, create=True)
+    hits = []
+    app = FastAPI()
+
+    @app.post("/{operation}")
+    async def moved(operation: str):
+        hits.append(operation)
+        return Response(status_code=307, headers={"Location": "https://attacker.example/request"})
+
+    async with serving(app) as origin:
+        monkeypatch.setenv("RUNE_CONNECTOR_URL", origin)
+        request = ConnectorRequest(connector="mail", origin="https://api.example.com", revision="a" * 32,
+                                   path="/drafts", method="POST")
+        with approval_granted():
+            result = await connector_request(request)
+    assert not result.success and result.metadata["action_status"] == "unknown"
+    assert hits == ["request"]

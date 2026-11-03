@@ -47,7 +47,12 @@ PROVIDER_ENV_KEYS: dict[str, list[str]] = {
 
 
 def _has_provider_key(provider: str) -> bool:
-    """Check if any env var for the provider is set."""
+    """Check if any env var for the provider is set, or a gateway serves it without one."""
+    from rune.llm.gateway import ROUTED_PROVIDERS, gateway_active
+
+    if gateway_active():
+        # Gateway mode never uses local keys, and must not list models it cannot route.
+        return provider in ROUTED_PROVIDERS
     config = get_config()
     for env_key in PROVIDER_ENV_KEYS.get(provider, []):
         if os.environ.get(env_key) or getattr(config, env_key.lower(), None):
@@ -198,7 +203,7 @@ _PROVIDER_LABELS: dict[str, str] = {
     "anthropic": "Anthropic",
     "gemini":    "Google Gemini",
     "xai":       "xAI Grok",
-    "azure":     "Azure OpenAI",
+    "azure":     "Azure Foundry",
     "mistral":   "Mistral AI",
     "deepseek":  "DeepSeek",
     "cohere":    "Cohere",
@@ -297,6 +302,15 @@ async def get_available_models() -> list[ModelInfo]:
         return _cached_models
 
     models: list[ModelInfo] = []
+
+    from rune.llm.gateway import gateway_active
+
+    if gateway_active():
+        # Listing would call the providers directly with local keys; the gateway serves the
+        # routed providers, so offer their static catalogs and nothing it cannot route.
+        models = [*FALLBACK_OPENAI_MODELS, *(m for group in _STATIC_PROVIDER_MODELS.values() for m in group), *XAI_MODELS]
+        _cached_models, _cache_timestamp = models, now
+        return models
 
     # OpenAI (dynamic fetch with fallback)
     if _has_provider_key("openai"):
@@ -400,6 +414,10 @@ def known_models() -> list[tuple[str, str]]:
     ):
         for m in group:
             result.append((m.provider, m.id))
+    from rune.llm.gateway import gateway_active
+
+    if gateway_active():
+        return result
     # Delay imports so callers that only need metadata do not load the provider SDKs.
     from rune.llm.azure import deployment_names
     from rune.llm.client import installed_ollama_models

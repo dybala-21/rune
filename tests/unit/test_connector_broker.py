@@ -183,3 +183,26 @@ def test_empty_broker_does_not_add_model_tools(configured, monkeypatch):
     assert not broker_available()
     store.remove("mail")
     assert not (store.path.parent / "configured").exists()
+
+
+@pytest.mark.parametrize("url", ["http://broker.example.com", "http://8.8.8.8", "ftp://10.0.0.1",
+                                 "https://user:pw@broker.example.com", "https://broker.example.com/v1",
+                                 "https://broker.example.com?x=1", "https://"])
+def test_remote_broker_url_is_validated(url, monkeypatch):
+    from rune.connectors.client import BrokerUnavailable, broker_available, remote_broker
+    monkeypatch.setenv("RUNE_CONNECTOR_URL", url)
+    with pytest.raises(BrokerUnavailable):
+        remote_broker()
+    assert not broker_available()
+
+
+@pytest.mark.parametrize("url", ["https://broker.internal", "https://broker.internal/", "http://10.207.0.1:18790", "http://127.0.0.1:9"])
+def test_remote_broker_needs_only_the_signing_key(url, configured, monkeypatch):
+    from rune.connectors.client import broker_available, remote_broker
+    store, _, _ = configured
+    monkeypatch.setenv("RUNE_BROKER_HOME", str(store.path.parent))
+    monkeypatch.setenv("RUNE_CONNECTOR_URL", url)
+    assert remote_broker() == url.rstrip("/")
+    assert broker_available()
+    (store.path.parent / "controller.key").unlink()
+    assert not broker_available()

@@ -6,6 +6,7 @@ import asyncio
 import socket
 import time
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -186,7 +187,23 @@ class LLMClient:
         healthy: bool
         reason: str
 
-        if provider == Provider.OPENAI:
+        from rune.llm.gateway import ROUTED_PROVIDERS, GatewayConfigError, gateway_url
+
+        try:
+            gateway, gateway_error = gateway_url(), ""
+        except GatewayConfigError as exc:
+            gateway, gateway_error = None, str(exc)
+
+        if gateway_error:
+            healthy, reason = False, gateway_error
+        elif gateway:
+            host = urlsplit(gateway).hostname or ""
+            if str(provider) in ROUTED_PROVIDERS:
+                healthy = await _check_dns(host)
+                reason = "OK (LLM gateway)" if healthy else f"DNS lookup failed for LLM gateway {host}"
+            else:
+                healthy, reason = False, f"{provider} is not routed through the LLM gateway"
+        elif provider == Provider.OPENAI:
             healthy = await _check_dns("api.openai.com")
             reason = "OK" if healthy else "DNS lookup failed for api.openai.com"
         elif provider == Provider.ANTHROPIC:

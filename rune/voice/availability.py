@@ -37,17 +37,21 @@ def _check() -> None:
         else:
             _mic_state = "unavailable"
 
+    from rune.llm.gateway import gateway_active
+
+    cloud = not gateway_active()  # matches _auto_detect_stt: no local keys under a gateway
+
     # Deepgram: needs API key
     if _deepgram_state == "unknown":
         _deepgram_state = (
-            "available" if os.environ.get("DEEPGRAM_API_KEY") else "unavailable"
+            "available" if cloud and os.environ.get("DEEPGRAM_API_KEY") else "unavailable"
         )
 
     # OpenAI Whisper / Groq: key-only, same as _auto_detect_stt's tiers 2-3
     if _cloud_state == "unknown":
         _cloud_state = (
             "available"
-            if os.environ.get("OPENAI_API_KEY") or os.environ.get("GROQ_API_KEY")
+            if cloud and (os.environ.get("OPENAI_API_KEY") or os.environ.get("GROQ_API_KEY"))
             else "unavailable"
         )
 

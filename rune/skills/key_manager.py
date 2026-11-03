@@ -42,6 +42,14 @@ def _resolve_key_file_path() -> str:
     override = os.environ.get(SKILL_SIGNING_KEY_FILE_ENV, "").strip()
     if override:
         return override
+    from rune.cloud.boundary import hosted
+
+    if hosted():
+        # A hosted worker persists only RUNE_HOME; a key under ~/.config would be
+        # regenerated on every VM rebuild and silently invalidate signed skills.
+        from rune.utils.paths import rune_home
+
+        return os.path.join(rune_home(), "keys", _DEFAULT_KEY_FILENAME)
     return os.path.join(_default_config_dir(), "keys", _DEFAULT_KEY_FILENAME)
 
 

@@ -111,6 +111,7 @@ def _seed_v2(mem_dir: Path) -> None:
         )
 
 
+@pytest.mark.perf
 class TestWriteSpeed:
     """Measure markdown write latency."""
 
@@ -146,6 +147,7 @@ class TestWriteSpeed:
         assert avg < 50
 
 
+@pytest.mark.perf
 class TestReadSpeed:
     """Measure markdown read/parse latency."""
 
@@ -241,6 +243,7 @@ class TestSearchQuality:
         # v2 should be at least as good as v1
         assert v2_hits >= v1_hits, f"v2 ({v2_hits}) should not be worse than v1 ({v1_hits})"
 
+    @pytest.mark.perf
     def test_search_latency(self) -> None:
         kw = self._build_keyword_index(GOLDEN_FACTS)
 

@@ -215,11 +215,13 @@ async def get_config_endpoint() -> ConfigGetResponse:
     cfg = _get_rune_config()
     effective = get_effective_model_selection()
     from rune.agent.decision_router import accelerator_status
+    from rune.api.azure_settings import credential_revision
+    from rune.api.azure_settings import revision as azure_revision
     from rune.cloud.boundary import hosted
     from rune.llm.azure import (
         ENDPOINT_NAMES,
-        GPT6_MODELS,
         KEY_NAMES,
+        SUGGESTED_MODELS,
         endpoint,
         environment_name,
     )
@@ -245,12 +247,17 @@ async def get_config_endpoint() -> ConfigGetResponse:
     effort = cfg.llm.reasoning_efforts.get(reasoning_model_key(model))
     return ConfigGetResponse(
         azure={
+            "revision": azure_revision(),
+            "credentialRevision": credential_revision(),
+            "deploymentTestBlocked": ("Deployment tests are disabled by the configured request or cost limit. "
+                                      "Connection checks remain available.")
+            if cfg.llm.model_request_limit == 0 or cfg.llm.cost_budget_usd is not None else None,
             "endpoint": endpoint(), "endpointKey": environment_name(ENDPOINT_NAMES),
             "endpointScope": effective_env_scope(environment_name(ENDPOINT_NAMES)),
             "hasKey": bool(model_environment(environment_name(KEY_NAMES)).strip()),
             "keyName": environment_name(KEY_NAMES),
             "keyScope": effective_env_scope(environment_name(KEY_NAMES)),
-            "deployments": cfg.llm.azure_deployments, "suggestedModels": GPT6_MODELS,
+            "deployments": cfg.llm.azure_deployments, "suggestedModels": SUGGESTED_MODELS,
             "pricing": cfg.llm.azure_pricing.model_dump() if cfg.llm.azure_pricing else None,
         },
         localModels=_local_models_state(cfg),

@@ -76,7 +76,7 @@ export function uncertainDelivery(error: unknown): boolean {
   return error instanceof TypeError || error instanceof ApiError && error.status >= 500;
 }
 
-async function post<T>(path: string, body?: unknown, retried = false, signal?: AbortSignal): Promise<T> {
+export async function post<T>(path: string, body?: unknown, retried = false, signal?: AbortSignal): Promise<T> {
   await ensureWebAuth();
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -549,6 +549,9 @@ export interface ConfigInfo {
     }>;
   };
   azure?: {
+    revision: string;
+    credentialRevision: string;
+    deploymentTestBlocked?: string | null;
     endpoint: string;
     endpointKey: string;
     endpointScope: 'user' | 'project' | 'process' | null;
