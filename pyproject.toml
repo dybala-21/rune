@@ -23,7 +23,8 @@ classifiers = [
 dependencies = [
     # Core Agent
     "pydantic>=2.12.5",
-    "litellm>=1.82.1",
+    # 1.82.7, 1.82.8 (2026-03-24) and 1.107.0 (2026-10-21) were malicious uploads that stole credentials.
+    "litellm>=1.82.1,!=1.82.7,!=1.82.8,!=1.107.0",
     "tiktoken>=0.12.0",
     # TUI
     "rich>=14.3.3",
@@ -157,3 +158,8 @@ markers = [
 ]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.uv]
+# Resolve only releases that have been public for a week. The 2026 LiteLLM compromises were live
+# for hours before removal; a cooldown would have skipped them.
+exclude-newer = "7 days"
