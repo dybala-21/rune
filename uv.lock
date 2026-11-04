@@ -6,6 +6,10 @@ resolution-markers = [
     "python_full_version < '3.14'",
 ]
 
+[options]
+exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
+exclude-newer-span = "P7D"
+
 [[package]]
 name = "aiofiles"
 version = "25.1.0"
@@ -2863,7 +2867,7 @@ requires-dist = [
     { name = "google-cloud-aiplatform", marker = "extra == 'vertex'", specifier = ">=1.70.0" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "kokoro-onnx", marker = "extra == 'voice'", specifier = ">=0.5.0" },
-    { name = "litellm", specifier = ">=1.82.1" },
+    { name = "litellm", specifier = ">=1.82.1,!=1.82.7,!=1.82.8,!=1.107.0" },
     { name = "llama-cpp-python", marker = "extra == 'embedding'", specifier = ">=0.3.0" },
     { name = "lxml", extras = ["cssselect"], specifier = ">=6.1.1" },
     { name = "markdown-it-py", specifier = ">=2.2.0" },
