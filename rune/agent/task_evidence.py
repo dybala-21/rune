@@ -3,6 +3,7 @@
 import json
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 from rune.agent.browser_requirements import BrowserRequirements, refers_to
 from rune.agent.intent_engine import IntentContract
@@ -87,6 +88,9 @@ class TaskEvidence:
     last_write_status: str | None = None
     readback_offered: bool = False
     multiple_saves_confirmed: bool = False
+    retrieval_acceptance: dict[str, Any] | None = None
+    stay_query: dict[str, Any] | None = None
+    stay_query_key: str = ""
 
     @property
     def requirements_unavailable(self) -> bool:
@@ -99,6 +103,8 @@ class TaskEvidence:
 
     @classmethod
     def for_request(cls, goal: str, classification) -> "TaskEvidence":
+        from copy import deepcopy
+
         from rune.agent.calculation import calculation_context
 
         # The exact arithmetic supplied in the prompt is already computed evidence.
@@ -109,6 +115,8 @@ class TaskEvidence:
                    requirements=classification.browser_requirements,
                    requirements_key=classification.browser_requirements_key,
                    browser_effect=classification.browser_effect,
+                   stay_query=deepcopy(getattr(classification, "stay_query", None)),
+                   stay_query_key=getattr(classification, "stay_query_key", ""),
                    calculation_operation=classification.calculation_operation,
                    operations={classification.calculation_operation} if computed else set(),
                    request_texts=(goal,))
@@ -176,6 +184,9 @@ class TaskEvidence:
         return requirement or selector, expected, selector, prop
 
     def prepare_tool(self, name: str, params: dict) -> None:
+        if name == "browser_stay_evidence":
+            from rune.agent.stay_contract import prepare
+            prepare(self, params)
         from rune.agent.browser_plan import accept_plan
         accept_plan(self, name, params)
         def validate(tool, values):
@@ -364,6 +375,8 @@ class TaskEvidence:
                                          and (read_results or key[3] in {"value", "checked"}))]
 
     def observe(self, name: str, result: CapabilityResult, params: dict | None = None) -> None:
+        if name == "browser_stay_evidence" and result.success:
+            self.retrieval_acceptance = (result.metadata or {}).get("retrieval_acceptance")
         meta = result.metadata or {}
         document = meta.get("document_id")
         if document and self.document_id and document != self.document_id:
@@ -643,6 +656,9 @@ class TaskEvidence:
                    for key, value in saved["values"].items())
 
     def acceptance(self) -> dict | None:
+        from rune.agent.retrieval_result import acceptance
+        if self.retrieval_acceptance is not None and self.browser_effect == "view":
+            return acceptance(self)
         from rune.agent.browser_result import pending_results, retrieved_coverage, saved_outcomes
         if not self.coverage_required:
             if self.independent_readback:
@@ -722,6 +738,9 @@ class TaskEvidence:
         return "verification_inconclusive"
 
     def blocker(self, contract: IntentContract, executions: int) -> str | None:
+        if contract.kind == "browser_read" and self.retrieval_acceptance is not None:
+            from rune.agent.retrieval_result import accepted_answer, progress_hint
+            return None if accepted_answer(self) else progress_hint(self)
         if contract.kind == "browser_write":
             from rune.agent.browser_result import (
                 READBACK_GUIDANCE,

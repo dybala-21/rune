@@ -6,8 +6,8 @@ from collections.abc import Collection
 
 from rune.agent.tool_output import RejectedToolResult
 
-_CORE = {"think", "ask_user", "task_blocked", "bash_execute", "project_map", "table_requirements", "table_verify"}
-_BROWSER = ("browser_observe", "browser_act", "browser_navigate", "browser_extract", "browser_batch")
+_CORE = {"browser_navigate", "think", "ask_user", "task_blocked", "bash_execute", "project_map", "table_requirements", "table_verify"}
+_BROWSER = ("browser_observe", "browser_act", "browser_navigate", "browser_extract", "browser_batch", "browser_stay_evidence")
 
 
 def deferred_for_task(names: list[str], classification) -> set[str]:
@@ -18,6 +18,8 @@ def deferred_for_task(names: list[str], classification) -> set[str]:
         return set(names) - {"web_search", "web_fetch", "ask_user", "task_blocked"}
     if classification.goal_type == "browser":
         immediate = {*_BROWSER, "ask_user", "task_blocked"}
+        if classification.browser_effect == "view":
+            immediate.discard("browser_batch")
         if classification.needs_web_evidence:
             immediate.update(("web_search", "web_fetch"))
         return set(names) - immediate

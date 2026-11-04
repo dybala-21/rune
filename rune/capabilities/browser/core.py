@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
@@ -185,6 +185,33 @@ class BrowserOpenParams(BrowserNavigateParams):
 
 
 # Capability implementations
+def _track_navigation_status(page: Any) -> None:
+    session = current_session()
+    if session.navigation_page is page:
+        return
+    session.navigation_page, session.navigation_response = page, None
+
+    def received(response: Any) -> None:
+        if (session.navigation_page is page and response.request.is_navigation_request()
+                and response.frame == page.main_frame):
+            session.navigation_response = response
+
+    page.on("response", received)
+
+
+def _navigation_status(page: Any) -> int:
+    response = current_session().navigation_response
+    return cast(int, response.status) if response is not None and response.url == page.url else 0
+
+
+def _navigation_error(status: int) -> str | None:
+    if status < 400:
+        return None
+    return (f"The requested page returned HTTP {status}; its requested content is unavailable. "
+            "The browser remains on the response page for inspection. Do not treat it as retrieved data. "
+            "For access restrictions, stop and report the blocker; do not guess alternate URLs or repeatedly retry.")
+
+
 @browser_operation
 async def browser_navigate(params: BrowserNavigateParams) -> CapabilityResult:
     """Navigate in the conversation's browser, preserving an already open URL."""
@@ -201,7 +228,11 @@ async def browser_navigate(params: BrowserNavigateParams) -> CapabilityResult:
         return CapabilityResult(success=False, error=url_err)
 
     try:
-        _, page = await _get_browser("managed")
+        from rune.config import get_config
+
+        profile = "visible" if get_config().browser.default_profile == "visible" else "managed"
+        _, page = await _get_browser(profile)
+        _track_navigation_status(page)
 
         # Attach CDP network monitor to capture XHR/fetch API calls
         from rune.capabilities.browser.network import get_network_monitor
@@ -217,7 +248,7 @@ async def browser_navigate(params: BrowserNavigateParams) -> CapabilityResult:
         elements = await extract_interactive_elements(page)
         current_session().needs_observation = False
 
-        status = response.status if response else 0
+        status = response.status if response else _navigation_status(page)
         title = await page.title()
         url = page.url
 
@@ -240,9 +271,10 @@ async def browser_navigate(params: BrowserNavigateParams) -> CapabilityResult:
         element_section = format_interactive_elements(elements)
 
         location = f"Already open: {url}" if skipped else f"Navigated to: {url}"
-        status_line = f"\nStatus: {status}" if response else ""
+        status_line = f"\nStatus: {status}" if status else ""
         return CapabilityResult(
-            success=True,
+            success=status < 400,
+            error=_navigation_error(status),
             output=(
                 f"{location}\nTitle: {title}{status_line}"
                 f"{api_section}{element_section}"
@@ -251,6 +283,7 @@ async def browser_navigate(params: BrowserNavigateParams) -> CapabilityResult:
                 "url": url,
                 "title": title,
                 "status": status,
+                **({"failure_kind": "http_error"} if status >= 400 else {}),
                 "skipped_navigation": skipped,
                 "interactive_count": len(elements),
                 "observed_controls": await read_controls(page),
@@ -284,6 +317,7 @@ async def browser_open(params: BrowserOpenParams) -> CapabilityResult:
 
     try:
         _, page = await _get_browser("visible")
+        _track_navigation_status(page)
 
         skipped = page.url == params.url and not params.reload
         response = None
@@ -294,14 +328,15 @@ async def browser_open(params: BrowserOpenParams) -> CapabilityResult:
         elements = await extract_interactive_elements(page)
         current_session().needs_observation = False
 
-        status = response.status if response else 0
+        status = response.status if response else _navigation_status(page)
         title = await page.title()
         url = page.url
 
         location = f"Already open: {url}" if skipped else f"Opened in Rune browser: {url}"
-        status_line = f"\nStatus: {status}" if response else ""
+        status_line = f"\nStatus: {status}" if status else ""
         return CapabilityResult(
-            success=True,
+            success=status < 400,
+            error=_navigation_error(status),
             output=(
                 f"{location}\nTitle: {title}{status_line}"
                 f"{format_interactive_elements(elements)}"
@@ -310,6 +345,7 @@ async def browser_open(params: BrowserOpenParams) -> CapabilityResult:
                 "url": url,
                 "title": title,
                 "status": status,
+                **({"failure_kind": "http_error"} if status >= 400 else {}),
                 "profile": current_session().profile,
                 "skipped_navigation": skipped,
                 "interactive_count": len(elements),

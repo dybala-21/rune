@@ -10,6 +10,7 @@ from copy import deepcopy
 from typing import Any
 
 from rune.agent.browser_requirements import response_schema
+from rune.agent.stay_contract import response_schema as stay_response_schema
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -33,11 +34,13 @@ _PROPERTIES = {
     "source_output": {"type": "string", "enum": ["none", "verbatim", "derived", "summary"]},
     "browser_effect": {"type": "string", "enum": ["view", "edit", "change"]},
     "browser_requirements": response_schema(),
+    "stay_query": stay_response_schema(),
     "calculation_operation": {"type": "string", "enum": ["sum", "count", "mean", "min", "max", "other"]},
     "intent_categories": {"type": "array", "items": {"type": "string", "enum": ["coding", "email", "document", "table", "desktop", "calculation"]}},
     "requires_desktop_input": {"type": "boolean"},
     "is_related_to_previous": {"type": "boolean"},
-    "table_output": {"type": "string", "enum": ["none", "csv", "xlsx"]},
+    "table_output": {"type": "string", "enum": ["none", "csv", "xlsx"],
+                     "description": "Format of a source-derived aggregate table (sum/count/group/etc), not every CSV/XLSX file. New rows of observed products, prices, dates or quotations without aggregation use none."},
     "calculation_expression": {
         "type": "string",
         "description": "Copy the complete numeric arithmetic expression verbatim from the current request. Never solve, rewrite or invent it. Use an empty string for all other requests, including native app tasks, identifiers and code-writing requests.",
@@ -103,7 +106,7 @@ def decode_response(response: Any) -> dict[str, Any]:
 
 
 def validate_decision(data: dict[str, Any]) -> dict[str, Any]:
-    if set(data) - {"resume_task", "task_scope", "browser_requirements", "complexity"} != set(_PROPERTIES) - {"browser_requirements", "complexity"}:
+    if set(data) - {"resume_task", "task_scope", "browser_requirements", "stay_query", "complexity"} != set(_PROPERTIES) - {"browser_requirements", "stay_query", "complexity"}:
         raise InvalidClassification("invalid_fields")
     if "complexity" in data and (not isinstance(data["complexity"], str) or data["complexity"] not in COMPLEXITY_CRITERIA):
         raise InvalidClassification("invalid_complexity")
@@ -143,6 +146,15 @@ def validate_decision(data: dict[str, Any]) -> dict[str, Any]:
             from rune.agent.tool_errors import validation_details
             detail = validation_details(exc) if isinstance(exc, ValidationError) else "Invalid requirement structure"
             raise InvalidClassification("invalid_browser_requirements: " + detail) from exc
+    if data.get("stay_query") is not None:
+        from rune.agent.stay_contract import validated_query
+        try:
+            query = validated_query(data["stay_query"])
+        except ValueError as exc:
+            raise InvalidClassification("invalid_stay_query") from exc
+        if data["goal_type"] not in {"browser", "web"} or data["browser_effect"] != "view":
+            raise InvalidClassification("inconsistent_stay_query")
+        data = {**data, "stay_query": query.model_dump(mode="json")}
     desktop = "desktop" in data["intent_categories"]
     if data["needs_current_source"] and not data["needs_web_evidence"]:
         data = {**data, "needs_web_evidence": True}
@@ -177,8 +189,9 @@ async def request_classification(
 
     selected = selected or get_effective_model_selection()
     from rune.agent.browser_requirements import INSTRUCTION, validated
+    from rune.agent.stay_contract import INSTRUCTION as STAY_INSTRUCTION
 
-    system += "\n" + INSTRUCTION
+    system += "\n" + INSTRUCTION + "\n" + STAY_INSTRUCTION
     response_format = RESPONSE_FORMAT
     try:
         state = json.loads(content)

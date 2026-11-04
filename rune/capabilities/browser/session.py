@@ -52,6 +52,9 @@ class BrowserSession:
     check_targets: dict[str, dict] = field(default_factory=dict)
     result_document: Any = None
     readback_document: Any = None
+    navigation_page: Any = None
+    navigation_response: Any = None
+    stay_evidence: Any = None
 
     def __post_init__(self) -> None:
         _sessions.add(self)
@@ -99,6 +102,7 @@ class BrowserSession:
                 except Exception as exc:
                     log.debug("browser_resource_close_failed", resource=method, error=str(exc))
         self.browser = self.page = self.playwright = self.monitor = None
+        self.navigation_page = self.navigation_response = None
         if self.profile == "native" and self.native_host:
             try:
                 await self.native_host.request(self.owner_id, "close")

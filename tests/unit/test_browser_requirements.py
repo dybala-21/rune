@@ -699,6 +699,52 @@ def test_final_answer_preserves_unrelated_and_verified_work():
         assert final_answer(TaskEvidence(), trace, 'Document attached.') == 'Document attached.'
 
 
+@pytest.mark.parametrize("effect", ["view", "edit"])
+def test_information_and_unsaved_drafts_do_not_claim_missing_storage(effect):
+    from types import SimpleNamespace
+
+    from rune.agent.browser_result import final_answer, saved_outcomes
+    from rune.agent.run_outcome import run_outcome
+
+    # Even if the executor incorrectly includes a result item, the business
+    # effect determines whether a stored-record contract is applicable.
+    goal = "Compare three hotels"
+    plan = validated({"complete": True, "items": [{"requirement": goal, "kind": "result"}]}, (goal,))
+    evidence = TaskEvidence(browser_effect=effect, browser_actions=3, requirements=plan)
+    trace = SimpleNamespace(reason="request_budget_exhausted",
+                            requirement_acceptance={"required": True, "status": "inconclusive"})
+    partial = '{"offers": ["observed hotel"], "limitations": ["two hotels remain"]}'
+    assert not saved_outcomes(evidence)
+    assert final_answer(evidence, trace, partial) == partial
+    assert not run_outcome(trace).success
+
+
+async def test_readonly_comparison_does_not_require_a_saved_browser_result():
+    classification = ClassificationResult("browser", .99, 2, browser_effect="view", needs_web_evidence=True)
+    evidence = TaskEvidence.for_request("Compare available rooms for two adults", classification)
+    await evidence.prepare_requirements()
+    assert not evidence.browser_task and evidence.acceptance() is None
+    contract = resolve_intent_contract(classification, .99)
+    assert contract.kind == "browser_read" and contract.tool_requirement == "read"
+    assert contract.grounding_requirement == "required"
+
+
+def test_booking_keeps_write_contract_and_independent_readback_requirement():
+    from rune.agent.browser_result import saved_outcomes
+
+    goal = "Book this room"
+    plan = {"complete": True, "items": [{"requirement": goal, "kind": "result"}]}
+    classification = ClassificationResult("browser", .99, 2, browser_effect="change")
+    contract = resolve_intent_contract(classification, .99)
+    evidence = TaskEvidence.for_request(goal, classification)
+    evidence.requirements = validated(plan, (goal,))
+    evidence.coverage_required = True
+    assert contract.kind == "browser_write" and contract.tool_requirement == "write"
+    assert saved_outcomes(evidence)
+    assert evidence.acceptance()["status"] != "pass"
+    assert evidence.blocker(contract, 0)
+
+
 def test_new_document_retires_targets_but_keeps_fixed_outcomes_and_baselines():
     from rune.agent.browser_requirements import validated
 

@@ -35,6 +35,7 @@ _READS = frozenset({
     "think", "memory_search", "task_list", "cron_list", "service_status", "service_list", "connector_list",
     "table_requirements", "table_verify", "skill_load", "skill_search", "document_preview",
     "browser_observe", "browser_find", "browser_extract", "browser_discover_apis",
+    "browser_stay_evidence",
     "desktop_apps", "desktop_observe", "desktop_wait",
 })
 _MAX_FILE = 16 * 1024 * 1024

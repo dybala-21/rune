@@ -142,7 +142,7 @@ TOOLS_WEB = [
     "web_search", "web_fetch",
     "browser_navigate", "browser_observe", "browser_act",
     "browser_batch", "browser_extract", "browser_find",
-    "browser_screenshot", "file_read",
+    "browser_screenshot", "browser_stay_evidence", "file_read",
     "document_read", "document_bundle_inspect",
 ]
 

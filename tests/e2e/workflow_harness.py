@@ -14,6 +14,7 @@ class Workflow:
         self.provider, self.model = provider, model
         self.runs = []
         self.decisions = []
+        self.checks = {}
         self.session = uuid4().hex
 
     def submit(self, goal, attachments=None, *, editable_files=(), allow_new_tests=False, deny_approvals=False,
@@ -108,9 +109,9 @@ class Workflow:
                      if p.is_file() and p.suffix in {".py", ".csv", ".txt"} and p.stat().st_size < 100_000}
         report = {"provider": self.provider, "model": self.model, "outcome": outcome,
                   "decision_backend": getattr(self, "decision_backend", None),
-                  "scope": "Web API, real model, managed browser. Background learning disabled; no cross-model fallback.",
+                  "scope": "Web API, real model, run-owned browser. Background learning disabled; no cross-model fallback.",
                   "runs": self.runs, "decisions": self.decisions, "artifacts": artifacts,
-                  "metrics": metrics(self.runs), "checks": checks or {}}
+                  "metrics": metrics(self.runs), "checks": self.checks if checks is None else checks}
         path = self.reporter(report, settings={"max_iterations": 16, "timeout_seconds": 180,
                                              "cross_provider_failover": False, "browser_profile": "managed",
                                              **getattr(self, "settings", {})})

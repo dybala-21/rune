@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from rune.agent.classification_response import COMPLEXITY_CRITERIA
 from rune.agent.provenance import ArtifactRoleHints
@@ -47,6 +47,8 @@ class ClassificationResult:
     browser_effect: str = "change"  # view / edit / change
     browser_requirements: dict | None = None
     browser_requirements_key: str = ""
+    stay_query: dict[str, Any] | None = None
+    stay_query_key: str = ""
     calculation_operation: str = "other"
     resume_task: str = ""
     task_scope: str = "step"  # task / step / inspect / amend
@@ -125,6 +127,7 @@ def to_wire(c: ClassificationResult) -> str:
         "browser_effect": c.browser_effect,
         "browser_requirements": c.browser_requirements,
         "browser_requirements_key": c.browser_requirements_key,
+        "stay_query": c.stay_query, "stay_query_key": c.stay_query_key,
         "calculation_operation": c.calculation_operation,
         "resume_task": c.resume_task,
         "task_scope": c.task_scope,
@@ -191,9 +194,12 @@ Use web for an explicit lookup or URL reading. Other outcomes can also need sour
 Set source_output=verbatim only when the user requests original source fields or exact text, including follow-ups.
 Use derived for calculations, unit/time conversions, or renamed/computed fields; summary for revisiting source facts.
 Use none otherwise, including acknowledgements.
-browser_effect: view only for scrolling or navigating without changing app data;
-edit for local control or draft changes without saving/submitting;
-change for saved settings, submissions, bookings or uncertain browser outcomes.
+browser_effect describes the requested business outcome, not whether a UI control moves.
+view for information retrieval, including search submissions, filters, dates, occupancy,
+opening details and comparing offers, when no record, draft or transaction is requested.
+edit for a requested unsaved draft or local control configuration as the deliverable;
+change for saved settings, sent messages, bookings, payments or uncertain external effects.
+For comparisons, verify the retrieved information; do not invent a saved-result requirement.
 calculation_operation: sum, count, mean, min, max for a single requested aggregate;
 other for no calculation, multiple operations, or a more complex calculation.
 Set needs_current_source when the answer depends on current or recent observations:
@@ -219,8 +225,12 @@ Reading or copying a price, date, measurement or other observed value is not cal
 email: work on email itself (inbox, message, draft, reply).
 document: produce a standalone report, proposal or formal document, excluding code.
 table: save a CSV/XLSX aggregation of existing data, or revise that deliverable.
-Set table_output accordingly; otherwise none. Markdown tables, test summaries,
-blank templates and software that processes tables are not table deliverables.
+Set table_output accordingly; otherwise none. This field means a SOURCE-DERIVED AGGREGATE,
+not the filename extension. Collecting observed products, prices, dates or quotations into new
+CSV/XLSX rows is artifact with table_output=none and no table intent when no aggregation is requested.
+Those tasks must first access their public sources; they have no original input table for the aggregate checker.
+A request to sum/count/group an existing table still uses table_output=csv/xlsx and table intent.
+Markdown tables, test summaries, blank templates and software that processes tables are not table deliverables.
 desktop: use native app state or features, including open/unsaved documents,
 windows, menus and app settings. Honor an explicit request to use a native app.
 Webpage interaction, including localhost, uses browser tools without desktop.
@@ -313,6 +323,8 @@ async def classify_tier2(
             browser_effect=data["browser_effect"],
             browser_requirements=data.get("browser_requirements"),
             browser_requirements_key=request_key((goal,)),
+            stay_query=data.get("stay_query"),
+            stay_query_key=request_key((goal,)) if data.get("stay_query") is not None else "",
             calculation_operation=data["calculation_operation"],
             resume_task=data.get("resume_task", ""),
             task_scope=data.get("task_scope", "step"),

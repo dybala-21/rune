@@ -1,0 +1,166 @@
+{
+  "reviewed_at": "2026-11-01 Asia/Seoul",
+  "question": "Can Rune reach trustworthy hotel-comparison quality using browser DOM/accessibility control rather than screenshot-coordinate desktop control?",
+  "conclusion_ko": "NOL의 텍스트·가격·조건 비교는 DOM 중심 브라우저 조작으로 개선할 근거가 있다. 현재 한계는 평탄화된 관측과 객실/요금제/조건의 의미 연결 및 완료 검증에 있다. 이미지 의미가 필요한 과제에는 같은 브라우저의 시각 관측을 추가하고, OS/네이티브 화면에만 데스크톱 제어를 적용한다. 어느 방식도 임의 사이트에서 한 번에 완벽한 수행을 보장한다는 연구 근거는 없다.",
+  "interface_dimensions": {
+    "environment": [
+      "browser",
+      "desktop/native OS"
+    ],
+    "observation": [
+      "DOM/accessibility tree and attributes",
+      "screenshot/image",
+      "combined"
+    ],
+    "action": [
+      "element-identity/locator",
+      "coordinates/keyboard"
+    ],
+    "warning": "A browser can use visual observations without OS-wide control. A screenshot-only observation experiment using DOM-generated element IDs is not a pure coordinate-only desktop agent comparison."
+  },
+  "sources": [
+    {
+      "title": "WebMall — A Multi-Shop Benchmark for Evaluating Web Agents",
+      "url": "https://arxiv.org/html/2508.13024v3",
+      "first_submitted": "2025-08-18",
+      "version_date": "2026-04-30",
+      "evidence_type": "author benchmark/preprint; primary comparative experiment",
+      "scope": "91 tasks, four simulated English electronics shops, two backend models in v3, 50 steps per task. The end-to-end subgroup has eight tasks.",
+      "table3_gpt54_completion_percent": {
+        "specific_search": {
+          "AX": 69.32,
+          "AX_memory": 65.15,
+          "AX_vision": 52.27,
+          "vision": 64.39
+        },
+        "cheapest_search": {
+          "AX": 54.44,
+          "AX_memory": 63.33,
+          "AX_vision": 43.33,
+          "vision": 36.67
+        },
+        "end_to_end": {
+          "AX": 62.5,
+          "AX_memory": 75.0,
+          "AX_vision": 75.0,
+          "vision": 25.0
+        }
+      },
+      "inference": "Structured browser observations can be competitive or superior on comparison shopping. Adding images is task/model dependent, not a universal quality upgrade.",
+      "counterevidence": "Images improved GPT-5.4 end-to-end relative to AX alone. Screenshot-only GPT-5.4 used fewer average input tokens than AX alone (119,866 vs 148,250), despite weaker completion. Do not assert DOM always costs less.",
+      "limits": "Model-specific observation ablation, not NOL, hotel policy semantics, live login or proof of commercial reliability. v2 and v3 results must not be mixed."
+    },
+    {
+      "title": "WebMall project setup",
+      "url": "https://wbsg-uni-mannheim.github.io/WebMall/",
+      "accessed": "2026-11-01",
+      "finding": "The authors describe screenshot annotations with numbers corresponding to AX-tree element IDs. Screenshot-based rows therefore should not be labelled as raw-pixel OS computer-use agents."
+    },
+    {
+      "title": "VisualWebArena: Evaluating Multimodal Agents on Realistic Visually Grounded Web Tasks",
+      "url": "https://arxiv.org/html/2401.13649v2",
+      "version_date": "2024-06-06",
+      "evidence_type": "older foundational counterexample; not current-model ceiling",
+      "finding": "910 deliberately visually grounded tasks. Strong visual models outperform text-only baselines for image/OCR/spatial cases.",
+      "inference": "Room-photo similarity, image-only promotions and map appearance may require visual input. This does not require moving all web interaction to desktop coordinates.",
+      "limits": "Older GPT-4/GPT-4V-class models, different capabilities, visual task selection; not a controlled estimate of NOL performance."
+    },
+    {
+      "title": "The BrowserGym Ecosystem for Web Agent Research",
+      "url": "https://arxiv.org/html/2412.05467v2",
+      "publication": "TMLR February 2025",
+      "finding": "DOM/AXTree, stable element IDs, visibility, bounding boxes and screenshots are separate configurable observations/actions; reproducibility and live-web variability matter.",
+      "limits": "Do not use its headline model scores as a clean DOM-versus-vision ablation: experimental prose and appendix settings differ about screenshot availability."
+    },
+    {
+      "title": "OpenAI Computer use integration recipes",
+      "url": "https://developers.openai.com/api/docs/guides/tools-computer-use-integration",
+      "accessed": "2026-11-01",
+      "evidence_type": "official integration guidance, not performance evidence or disclosure of all production internals",
+      "finding": "Existing function/MCP tools can operate a browser without the built-in computer tool. Locator actions, page text, DOM inspection and screenshots can be combined. Compare success, latency, turns and recovery."
+    },
+    {
+      "title": "WebArena-Verified evaluation documentation",
+      "url": "https://github.com/ServiceNow/webarena-verified/blob/main/docs/evaluation/index.md",
+      "accessed": "2026-11-01",
+      "finding": "Structured agent response checks and network-event checks are separate from the action driver; exact typed comparison replaces permissive matching.",
+      "inference": "Rune should validate a rate-specific business result rather than only the presence of source quotes.",
+      "limits": "Reference answers/backends are available in the benchmark; closed NOL does not expose equivalent ground truth. A separate LLM judge is not a proof of correctness."
+    },
+    {
+      "title": "BrowserArena: Evaluating LLM Agents on Real-World Web Navigation Tasks",
+      "url": "https://arxiv.org/html/2510.02418v2",
+      "version_date": "2025-10-07",
+      "finding": "109 user-submitted live tasks; recurring popup, URL-navigation and access-challenge failures, with human/automated-judge disagreement.",
+      "limits": "BrowserUse-specific observational failure analysis, not a DOM/vision causal comparison. Access restrictions are blockers, not signals to bypass them."
+    }
+  ],
+  "local_evidence": [
+    {
+      "observed_html": "output/nol-dom-readiness-probe.html",
+      "sha256": "519cd5e84645826c9676f25816487ebe6f1c7593e301300099659917138ccfa9",
+      "exact_markup": "<s class=\"text-text-neutral-medium typography-body-13-regular pc:typography-body-14-regular\">108,371원</s>",
+      "current_capture": "rune/capabilities/browser/stay_evidence.py:89",
+      "interpretation": "The higher displayed amount is explicitly struck through in HTML. Flattening body.inner_text loses this distinction. It is not proof of an available unconditional rate. DOM-based capture could preserve this information without screenshot coordinates.",
+      "scope": "Offline inspection of a prior real NOL room-list capture, not a new live quote or purchase check."
+    },
+    {
+      "report": "benchmarks/nol_comparison/token-research.json",
+      "finding": "Final two NOL trials passed exact-quote provenance for 27 fields per trial within standard budget. No modality A/B trial has been run, and full fee/cancellation semantics or member-price eligibility were not proven."
+    },
+    {
+      "code": "rune/lodging/evidence.py",
+      "finding": "record enforces property ownership, freshness, room/price presence and /list source, but page-wide co-occurrence does not establish that a cancellation/discount span belongs to the selected rate card."
+    }
+  ],
+  "decisions": [
+    "Keep DOM/AXTree as the primary NOL interface; preserve element hierarchy, room/rate-card identity, visible labels and price styling instead of only body text.",
+    "Bind each quote to property, room, rate plan, dates, guests and the actually opened policy details. Preserve old price, member/coupon price, current payable price and unknown eligibility as distinct values.",
+    "Treat missing or ambiguous policy applicability as incomplete; source-hash/quote identity is necessary but does not prove policy meaning or full coverage.",
+    "Add visual observation within the same browser only when there is a demonstrated visual evidence gap; keep locator actions where the target can be grounded. Desktop control is for native apps or OS dialogs.",
+    "Evaluate enriched DOM, enriched DOM plus on-demand vision, and optionally a screenshot-coordinate browser arm with the same model, budgets and task set. Do not conflate model/tool changes with modality effects."
+  ],
+  "proposed_evaluation": {
+    "status": "proposal only; not executed in this research turn",
+    "tasks": [
+      "multiple dates, lengths of stay, guest counts and rooms",
+      "conditional member/coupon rates and undiscounted rates",
+      "free/nonrefundable/partially refundable policies and regional taxes",
+      "sold-out rooms, delayed rendering, popup and access-blocked cases",
+      "visual-only room-photo or map requests"
+    ],
+    "metrics": [
+      "correct completed comparisons over all requests",
+      "false-completion rate",
+      "per-field correctness AND requested-condition coverage",
+      "room/rate-policy linkage correctness",
+      "appropriate incomplete/blocker reporting",
+      "latency, token cost, rerenders/revisits and visual fallback frequency"
+    ],
+    "method": "First regression-test saved adversarial DOM cases, then repeat held-out live cases across cities/date ranges. Review against actual selected rate/policy pages with a human-checked rubric, not a single same-model self-grade. Report all failures and uncertainty; 2/2 is not a reliability estimate."
+  },
+  "research_harness": {
+    "report": "output/nol-browser-quality-research/9127daedb7a649f6ac751cccdb10971f/05488582d07b4c78887db20298a4e585.json",
+    "outcome": "failed",
+    "seconds": 46.86,
+    "tokens": 140706,
+    "known_tokens": 140706,
+    "usd": 0.660291,
+    "known_usd": 0.660291,
+    "model_calls": 6,
+    "failed_model_calls": 0,
+    "tool_calls": 15,
+    "failed_tool_calls": 2,
+    "gui_calls": 0,
+    "cache_read_tokens": 48032,
+    "cache_write_tokens": 89092,
+    "model_seconds_by_phase": {
+      "classification": 3.8343000000000003,
+      "execution": 39.3747
+    },
+    "median_first_text_seconds": 6.8791530419985065,
+    "source_unchanged": true,
+    "limitation": "The bounded research-agent run hit its token admission limit after repeatedly fetching truncated long sources and did not produce a completed audit. It is not counted as corroborating successful analysis. Root separately read the primary WebMall table/setup, VisualWebArena results, official OpenAI guidance and evaluation docs via web browsing; final conclusions are grounded in those checked passages."
+  },
+  "scope": "Research only. No new NOL live comparison, no browser/desktop A/B experiment, no runtime behavior changes."
+}

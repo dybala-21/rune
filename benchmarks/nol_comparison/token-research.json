@@ -1,0 +1,207 @@
+{
+  "date": "2026-11-01",
+  "question": "Reduce cumulative NOL comparison tokens without dropping exact room/rate evidence or weakening the completion contract.",
+  "sources": [
+    {
+      "url": "https://platform.claude.com/cookbook/tool-use-context-engineering-context-engineering-tools",
+      "published": "2026-03-20",
+      "finding": "Clear retrievable tool results while retaining persistent notes. Aggressive clearing can cause rereads and invalidates cached prefixes; measure cache creation, turns, and verified completion as well as tokens."
+    },
+    {
+      "url": "https://arxiv.org/abs/2508.21433v3",
+      "published": "2025-08-29",
+      "revised": "2025-10-27",
+      "finding": "Observation masking was competitive with LLM summarization in SWE-agent/SWE-bench Verified. Window tuning did not transfer automatically to OpenHands. Workshop research; no measured NOL/browser transfer or promised reduction percentage."
+    },
+    {
+      "url": "https://www.anthropic.com/research/writing-tools-for-agents",
+      "published": "2025-09-11",
+      "finding": "Use bounded ranges, filtering and pagination with explicit recovery instructions. Preserve identifiers needed for subsequent calls and inspect redundant calls and errors."
+    },
+    {
+      "url": "https://playwright.dev/python/docs/api/class-page#page-wait-for-load-state",
+      "accessed": "2026-11-01",
+      "finding": "Playwright discourages using networkidle to assert readiness; use observable page conditions. wait_for_function can await a DOM predicate."
+    }
+  ],
+  "measured_baseline": {
+    "report": "output/nol-e2e-structured-strict/1108dbb00b544b95bbdac9c3d2034ad9/da6baaccba6647cfa9ab7b5a4de6636a.json",
+    "tokens": 1421134,
+    "model_calls": 35,
+    "usd_estimated": 4.054573,
+    "completed_properties": 2,
+    "stop": "The next prompt exceeds the estimated remaining token budget.",
+    "observations": "Repeated 300-line captures and subsequent range reads occurred before recording, including late-page room modals. Each evidence response carried the full source inventory and guidance. Execution prompt inputs grew from 16855 to a peak of 57923 tokens."
+  },
+  "decision_memory": [
+    "Keep full source text, hashes, timestamps, ownership, fixed query and exact numbered citations unchanged.",
+    "Default capture previews the header and trailing detail regions, with explicit omitted-line count and saved-source read/find recovery. Preview is not a semantic policy extractor or proof of completeness.",
+    "Return compact candidate progress during collection; full query/source inventory remains available through status and in trusted runtime metadata.",
+    "Remove superseded inventories from model history while retaining all unrecorded source excerpts. Retire earlier UI after recording or corresponding capture only when a newer UI observation preserves current controls. Keep failed actions visible.",
+    "Validate a short user request without fixture URLs, hotel IDs, tool names, JSON schema or procedural instructions. Keep the existing independent exact-citation and completion checks and standard $5/1.5M-token cap.",
+    "After a successful capture, remove the current read-only observation body from model history while preserving every control ref and link verbatim. Stored exact text remains available via read/find.",
+    "A second short trial exhausted the $5 cost budget after six tool errors. Supply canonical public NOL home/overseas-search entrypoints at begin, using the fixed query and no property IDs. This is a site adapter, not fixture selection.",
+    "Return capture-specific structural guidance: an overseas property overview cannot supply room-rate evidence; the room-list view can be cited if it actually contains the requested conditions. Preserve the existing rejection rules.",
+    "Entry route provenance: real browser navigate tool call 3 and screenshots in the first short trial confirmed the public discovery/list/search route with q, verticalCategory, checkInDate/checkOutDate, adultCount and roomCount. A web-fetch verification attempt could not access this dynamic page; do not mistake that for browser failure or infer route support for every locale.",
+    "Two trials with entrypoint/source guidance produced one pass and one cost-budget stop. Successful property work still accumulated assistant/tool exchanges after its facts were recorded. A completed-property checkpoint now replaces whole successful exchange pairs with trusted ledger progress.",
+    "Checkpointing is enabled only by the single browser-read runtime state. Preserve all user/system messages, the current run begin boundary, discovery links, incomplete-property sources, nonbrowser/mixed batches, failures and current controls. Keep source IDs/full query and missing fields for recovery. A checkpoint does not finalize the task; finish and exact-citation checks remain required.",
+    "Defer the 9,463-character browser_batch schema on initially read-only browser tasks; it remains discoverable/callable. Write tasks retain their original catalog.",
+    "Pass-through telemetry confirms the property checkpoint runs: context dropped from 83,071 to 55,441 chars (6 messages) and 99,630 to 65,828 chars (20 messages) at completed-property boundaries. It does not modify the returned runtime context.",
+    "A saved 217-character Grand Hotel room-list source was still a loading placeholder. Fresh visible Chromium probe returned HTTP 200, 217 body chars at 2.29/4.30 seconds, then 13,162 chars at 6.30 seconds. Observed animate-pulse skeleton elements numbered 68 before data and zero after. Before capture, wait at most 12 seconds for visible placeholders to disappear; timeout stores no source. A hidden placeholder or sold-out text is not itself blocked. No networkidle, fixed sleep or language-specific loading detection in production.",
+    "Offer a room_list_url derived from the captured NOL property URL, preserving its property/date/guest query and dropping modal fragments. The public sibling /list route was exercised in real runs. This avoids confusing property-information modals with room selection. No fixed hotel IDs or rate data are injected."
+  ],
+  "research_harness": {
+    "report": "output/nol-context-research/aff4d3570c1f46d8bf9ba8be68b21b33/fabadc5d2dd746dd8621ea7ca5282b28.json",
+    "seconds": 57.267,
+    "tokens": 127381,
+    "usd_estimated": 0.76247125,
+    "model_calls": 6,
+    "tool_calls": 7,
+    "source_unchanged": true,
+    "limitations": "The audit read the paper's main results/discussion/limitations and tools article; its cookbook fetch elided middle sections. Root separately read the tool-clearing cache-invalidation and reread warnings. No external source demonstrates NOL success."
+  },
+  "intermediate_trials": [
+    {
+      "stage": "preview/compact progress",
+      "report": "output/nol-e2e-short-standard/f60e18ea35e44f15a2cc487816a58bff/5bc77a25461f4dccbd278dfac44c5fdb.json",
+      "tokens": 878304,
+      "usd_estimated": 3.34917225,
+      "outcome": "passed",
+      "source_unchanged": true
+    },
+    {
+      "stage": "failure/control preservation and description refinement",
+      "report": "output/nol-e2e-short-standard-final/e25e2f4b52cf4434a4502b227350b0e5/92fbb12293534ddd8d3ecd4fe508be29.json",
+      "tokens": 1264633,
+      "usd_estimated": 4.6161895,
+      "outcome": "incomplete: 2 properties; next request exceeded remaining cost budget",
+      "source_unchanged": true
+    },
+    {
+      "stage": "entrypoint/source guidance and captured-body compaction",
+      "report": "output/nol-e2e-short-entrypoints/a2240f96c18949858bf6d53136fd5a2c/e7de6be866074d4792c1a86436525126.json",
+      "tokens": 1186011,
+      "usd_estimated": 4.5527815,
+      "outcome": "failed",
+      "source_unchanged": true
+    },
+    {
+      "stage": "entrypoint/source guidance and captured-body compaction",
+      "report": "output/nol-e2e-short-entrypoints/a2240f96c18949858bf6d53136fd5a2c/83a1106cd4904203a2a48177cf726d6f.json",
+      "tokens": 1098744,
+      "usd_estimated": 4.294595,
+      "outcome": "passed",
+      "source_unchanged": true
+    },
+    {
+      "stage": "completed-property checkpoint",
+      "report": "output/nol-e2e-short-checkpoint/bdef61cf379d4f66bb5def3009607c46/40c319adccc8426e8210d0f13149e96a.json",
+      "tokens": 995244,
+      "usd_estimated": 3.6100127499999988,
+      "seconds": 177.574,
+      "model_calls": 31,
+      "tool_calls": 30,
+      "outcome": "passed",
+      "source_unchanged": true
+    },
+    {
+      "stage": "completed-property checkpoint",
+      "report": "output/nol-e2e-short-checkpoint/bdef61cf379d4f66bb5def3009607c46/2169d6d901a348378cb169f334147954.json",
+      "tokens": 1239430,
+      "usd_estimated": 4.722447249999999,
+      "seconds": 237.598,
+      "model_calls": 36,
+      "tool_calls": 35,
+      "outcome": "failed",
+      "source_unchanged": true
+    },
+    {
+      "stage": "deferred batch schema/address guidance/context instrumentation",
+      "report": "output/nol-e2e-short-context-audit/42c9b670a5b64882bdf1a60e0cfed5ac/d580f0ce003f4488a9bd600765f7ea7b.json",
+      "tokens": 1156531,
+      "usd_estimated": 4.676089500000001,
+      "seconds": 238.869,
+      "model_calls": 41,
+      "tool_calls": 40,
+      "outcome": "failed",
+      "source_unchanged": true
+    },
+    {
+      "stage": "room-list link and observed DOM readiness",
+      "report": "output/nol-e2e-short-ready/2d1eb4bff3034b41b225a0c702cb6b1c/93273de8662c4c79bcf95440eebefc1a.json",
+      "tokens": 523648,
+      "usd_estimated": 1.8733192500000002,
+      "seconds": 146.071,
+      "model_calls": 24,
+      "tool_calls": 23,
+      "outcome": "passed",
+      "source_unchanged": true,
+      "manual_review": "output/nol-e2e-short-ready/manual-review.json"
+    }
+  ],
+  "dom_probe": {
+    "snapshots": "output/nol-dom-readiness-probe.json",
+    "loading_html": "output/nol-dom-loading.html",
+    "loaded_html": "output/nol-dom-readiness-probe.html",
+    "scope": "Read-only public-page diagnostics using fresh visible Chromium; no model calls. One property, one date range; readiness selector may change with the site."
+  },
+  "final_trials": [
+    {
+      "report": "output/nol-e2e-short-final/f5c3c4e38e1a4ddcba3adea8df1ec42d/9cf9e491968f449a844301b8ad2ba1c7.json",
+      "outcome": "passed",
+      "seconds": 161.355,
+      "tokens": 669195,
+      "model_calls": 29,
+      "tool_calls": 28,
+      "failed_tool_calls": 1,
+      "cache_read_tokens": 317318,
+      "cache_write_tokens": 341908,
+      "usd_estimated": 2.540489,
+      "source_hash": "3b0f987b67bbe5c3943a9a52357e3321ffd160cdb6cbcc946a0664710d400958",
+      "source_unchanged": true,
+      "one_request": true,
+      "no_user_intervention": true,
+      "offers_checked": 3,
+      "comparison": "output/nol-e2e-short-final/f5c3c4e38e1a4ddcba3adea8df1ec42d/9cf9e491968f449a844301b8ad2ba1c7-comparison.json",
+      "manual_review": "output/nol-e2e-short-final/f5c3c4e38e1a4ddcba3adea8df1ec42d/9cf9e491968f449a844301b8ad2ba1c7-manual-review.json"
+    },
+    {
+      "report": "output/nol-e2e-short-final/f5c3c4e38e1a4ddcba3adea8df1ec42d/b09ed07391524d739c2140a531027bc7.json",
+      "outcome": "passed",
+      "seconds": 156.657,
+      "tokens": 580982,
+      "model_calls": 27,
+      "tool_calls": 26,
+      "failed_tool_calls": 1,
+      "cache_read_tokens": 308397,
+      "cache_write_tokens": 263850,
+      "usd_estimated": 2.0173959999999997,
+      "source_hash": "3b0f987b67bbe5c3943a9a52357e3321ffd160cdb6cbcc946a0664710d400958",
+      "source_unchanged": true,
+      "one_request": true,
+      "no_user_intervention": true,
+      "offers_checked": 3,
+      "comparison": "output/nol-e2e-short-final/f5c3c4e38e1a4ddcba3adea8df1ec42d/b09ed07391524d739c2140a531027bc7-comparison.json",
+      "manual_review": "output/nol-e2e-short-final/f5c3c4e38e1a4ddcba3adea8df1ec42d/b09ed07391524d739c2140a531027bc7-manual-review.json"
+    }
+  ],
+  "evaluation_limits": "Two consecutive final-code trials, same provider/model, city/dates/occupancy, fresh browser sessions. Not a reliability estimate for other dates/cities/providers or a controlled causal ablation. Intermediate failures are retained. Exact evidence completion is not complete semantic validation or booking.",
+  "verification": {
+    "non_performance": {
+      "passed": 7288,
+      "skipped": 68,
+      "seconds": 248.79
+    },
+    "performance": {
+      "passed": 3
+    },
+    "ruff": "passed",
+    "mypy": {
+      "existing_diagnostics": 1423,
+      "new_diagnostics": 0,
+      "result": "baseline errors remain; not a clean typecheck"
+    }
+  },
+  "estimated_experiment_cost_usd": 36.252492,
+  "estimated_cost_including_research_usd": 37.01496325
+}

@@ -658,6 +658,59 @@ async def test_entry_points_preserve_drafts_until_an_explicit_reload(screen, ent
     assert next(cookie for cookie in await screen.context.cookies() if cookie["name"] == "session")["value"] == "retained"
 
 
+@pytest.mark.parametrize("entry_point", ["open", "navigate"])
+@pytest.mark.parametrize("status", [403, 429, 503])
+async def test_http_errors_remain_failures_until_the_document_changes(screen, entry_point, status):
+    from rune.capabilities.browser.core import (
+        BrowserNavigateParams,
+        BrowserOpenParams,
+        browser_navigate,
+        browser_open,
+    )
+
+    url = "http://rune.test/unavailable"
+    state = {"status": status, "requests": 0}
+
+    async def serve(route):
+        state["requests"] += 1
+        await route.fulfill(status=state["status"], content_type="text/html",
+                            body="<title>Response</title><p>Inspect this response.</p>")
+
+    await screen.route("http://rune.test/**", serve)
+    operation, params = ((browser_open, BrowserOpenParams) if entry_point == "open"
+                         else (browser_navigate, BrowserNavigateParams))
+    for _ in range(2):
+        result = await operation(params(url=url))
+        assert not result.success
+        assert result.metadata["status"] == status
+        assert result.metadata["failure_kind"] == "http_error"
+        assert f"HTTP {status}" in result.error
+    assert state["requests"] == 1, "Reading an already open error must not send another request"
+    state["status"] = 200
+    # A real reload from manual control must invalidate the retained error too.
+    await screen.reload()
+    recovered = await operation(params(url=url))
+    assert recovered.success and recovered.metadata["status"] == 200
+    assert state["requests"] == 2
+
+
+@pytest.mark.parametrize("attribute,value", [("class", "!whitespace-normal"),
+                                             ("class", "md:text-sm"), ("id", "123:price")])
+async def test_find_returns_extractable_selectors_for_css_special_characters(screen, attribute, value):
+    from rune.capabilities.browser.page_queries import (
+        BrowserExtractParams,
+        BrowserFindParams,
+        browser_extract,
+        browser_find,
+    )
+
+    await screen.set_content(f'<div {attribute}="{value}">Refund conditions</div>')
+    found = await browser_find(BrowserFindParams(text="Refund conditions"))
+    assert found.success and found.metadata["count"] == 1
+    extracted = await browser_extract(BrowserExtractParams(selector=found.metadata["elements"][0]["selector"]))
+    assert extracted.success and extracted.output == "Refund conditions"
+
+
 async def test_cancellation_closes_owned_browser_and_operations_serialize(screen):
     order = []
     entered, release = asyncio.Event(), asyncio.Event()

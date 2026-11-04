@@ -34,7 +34,7 @@ TOOL_GROUPS: dict[str, list[str]] = {
     "runtime": ["bash_execute"],
     "browser": ["browser_navigate", "browser_observe", "browser_act",
                  "browser_batch", "browser_extract", "browser_find",
-                 "browser_workflow", "browser_screenshot", "browser_profile"],
+                 "browser_workflow", "browser_screenshot", "browser_profile", "browser_stay_evidence"],
     "web": ["web_search", "web_fetch", "connector_list", "connector_request", "service_connect", "service_status",
             "service_list", "service_disconnect", "service_reconnect"],
     "schedule": ["cron_create", "cron_list", "cron_delete", "cron_update"],

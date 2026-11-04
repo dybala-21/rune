@@ -85,7 +85,7 @@ def live_report(request, live_model):
     params = {key: value for key, value in request.node.callspec.params.items() if key != "live_trial"}
     scenario = request.node.nodeid.split("[", 1)[0]
     signature = digest({"scenario": scenario, "parameters": params})
-    writer = ReportWriter(Path(directory), source=source, batch_id=batch, scenario=scenario,
+    writer = ReportWriter(Path(directory).resolve(), source=source, batch_id=batch, scenario=scenario,
                           scenario_hash=signature, environment=env) if directory else None
 
     def write(report, *, settings=None):

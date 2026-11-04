@@ -94,11 +94,14 @@ class BrowserActParams(BaseModel):
     checks: list[BrowserCheck] = Field(default_factory=list, max_length=32, description="Expected results to read after this action; use on the final change to verify completion in the same call.")
     action: Literal["click", "type", "scroll", "select", "check", "uncheck"] = Field(description="Use type to fill text/number inputs; select is only for native <select> dropdowns. Click, scroll, or set checkbox state with check/uncheck.")
     selector: str = Field(description="Element ref from the current observation, or a CSS selector matching exactly one element")
-    value: str = Field(default="", description="Required for type/select; use an explicit empty string to clear a field. For readback only use browser_observe.checks.")
+    value: str = Field(default="", description="For scroll use 'up' or 'down', never a pixel count (empty means down). Required for type/select; use an explicit empty string to clear a field. For readback only use browser_observe.checks.")
 
     @model_validator(mode="before")
     @classmethod
     def require_input_value(cls, values):
+        if (isinstance(values, dict) and values.get("action") == "scroll"
+                and values.get("value", "") not in ("", "up", "down")):
+            raise ValueError("Scroll value must be up or down, not a pixel count. No input was dispatched.")
         if isinstance(values, dict) and values.get("action") in {"type", "select"} and "value" not in values:
             raise ValueError("type/select requires value; use browser_observe(checks=...) to read without changing data")
         if not isinstance(values, dict) or not isinstance(values.get("checks"), list):
@@ -539,6 +542,8 @@ async def _control_state(target: Any) -> dict[str, Any]:
 
 def register_browser_capabilities(registry: CapabilityRegistry) -> None:
     """Register all browser capabilities."""
+    from rune.capabilities.browser.stay_evidence import register_stay_evidence
+    register_stay_evidence(registry)
     from rune.capabilities.browser.extended import (
         BrowserBatchParams,
         BrowserProfileParams,
@@ -555,7 +560,7 @@ def register_browser_capabilities(registry: CapabilityRegistry) -> None:
             "compact snapshot: page title, status, and the interactive elements "
             "with their ref IDs — there is no need to call browser_observe right "
             "after navigating. "
-            "Use when page state, dynamic rendering or interaction is needed. For "
+            "Use when page state, dynamic rendering, interaction, or explicit browser use is requested. Otherwise for "
             "plain retrieval prefer web_search or web_fetch, and for a documented "
             "API endpoint or a .json/.txt/.md URL call web_fetch directly — the "
             "browser is far slower for those. "
@@ -599,7 +604,7 @@ def register_browser_capabilities(registry: CapabilityRegistry) -> None:
     ))
     registry.register(CapabilityDefinition(
         name="browser_act",
-        description="Interact with required page controls (click/type/scroll/select). Use fresh refs from the current page. For information already available through search, fetch or an API, use those tools instead.",
+        description="Interact with required page controls (click/type/scroll/select). Use fresh refs from the current page. For plain retrieval use search, fetch or an API unless the user explicitly requests browser use.",
         domain=Domain.BROWSER,
         risk_level=RiskLevel.MEDIUM,
         group="browser",

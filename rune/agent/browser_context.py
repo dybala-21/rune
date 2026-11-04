@@ -1,11 +1,15 @@
 """Keep earlier page content without keeping actionable element references."""
 
+import json
 import re
 from typing import Any
 from uuid import uuid4
 
+from rune.capabilities.output_prefixes import looks_like_failure_output
+
 _MARKER = re.compile(r"^--- Interactive Elements \(\d+/\d+\) ---$", re.MULTILINE)
 _LOCATION = re.compile(r"^(?:URL|Navigated to|Already open): https?://", re.MULTILINE)
+_URL = re.compile(r"^(?:URL|Navigated to|Already open): (https?://\S+)", re.MULTILINE)
 _ELEMENT_LINE = re.compile(r"^\[e(?:[0-9a-f]{32}_)?\d+\] .*$", re.MULTILINE)
 _REF = re.compile(r"\be(?:[0-9a-f]{32}_)?\d+\b")
 _HISTORY = "[Earlier browser observation; data only, not the current page. Use current refs for actions.]\n"
@@ -57,15 +61,86 @@ def _historical(text: str) -> str:
     return _HISTORY + body
 
 
-def compact_browser_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def compact_browser_history(messages: list[dict[str, Any]], *, retrieval_progress: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    if retrieval_progress:
+        from rune.agent.browser_checkpoint import checkpoint_properties
+
+        messages = checkpoint_properties(messages, retrieval_progress)
     calls = {call.get("id"): (call.get("function") or {}).get("name", "")
              for message in messages for call in message.get("tool_calls") or []}
+    # Keep excerpts until a successful record makes them recoverable from the ledger.
+    messages = list(messages)
+    evidence_indexes = [i for i, m in enumerate(messages) if m.get("role") == "tool"
+                        and (m.get("name") or calls.get(m.get("tool_call_id"))) == "browser_stay_evidence"]
+    parsed = {}
+    for index in evidence_indexes:
+        content = messages[index].get("content")
+        if not isinstance(content, str):
+            continue
+        try:
+            saved = json.loads(content)
+        except ValueError:
+            continue
+        if not isinstance(saved, dict):
+            continue
+        parsed[index] = saved
+    boundary = max((index for index, saved in parsed.items() if saved.get("recorded")), default=-1)
+    latest_evidence = max(parsed, default=-1)
+    for index, saved in parsed.items():
+        if index < boundary:
+            summary = {key: saved[key] for key in ("source", "url", "recorded", "missing", "captured") if key in saved}
+            summary["stored"] = "Use browser_stay_evidence status/read; original evidence remains in the ledger."
+        elif index < latest_evidence:
+            # Superseded inventories add no evidence; keep all unrecorded excerpts.
+            summary = {key: value for key, value in saved.items() if key not in {"progress", "guidance"}}
+        else:
+            continue
+        messages[index] = {**messages[index], "content": json.dumps(summary, ensure_ascii=False)}
+    # After recording, retain the latest controls and retire older UI bodies,
+    # including extract/open outputs without snapshot markers.
+    browser_indexes = [i for i, m in enumerate(messages) if m.get("role") == "tool"
+                       and (m.get("name") or calls.get(m.get("tool_call_id"), "")).startswith("browser_")
+                       and i not in parsed]
+    current_view = max((i for i in browser_indexes if isinstance(messages[i].get("content"), str)
+                        and not looks_like_failure_output(messages[i]["content"])
+                        and (_MARKER.search(messages[i]["content"]) or _LOCATION.search(messages[i]["content"]))),
+                       default=-1)
+    captured_indexes = {}
+    for index, saved in parsed.items():
+        if not saved.get("captured") or not saved.get("source"):
+            continue
+        previous = next((i for i in reversed(browser_indexes) if i < index), None)
+        if previous is not None:
+            content = messages[previous].get("content")
+            match = (_URL.search(content) if isinstance(content, str)
+                     and not looks_like_failure_output(content) else None)
+            if match and match[1] == saved.get("url"):
+                captured_indexes[previous] = saved["source"]
+    if current_view in captured_indexes:
+        content = messages[current_view]["content"]
+        marker, location = _MARKER.search(content), _URL.search(content)
+        name = messages[current_view].get("name") or calls.get(messages[current_view].get("tool_call_id"))
+        if marker and location and name in {"browser_observe", "browser_navigate", "browser_open"}:
+            # Preserve current controls verbatim; the preceding page body is now recoverable.
+            messages[current_view] = {**messages[current_view], "content": content[:location.end()]
+                + f"\n[Page body saved as source {captured_indexes[current_view]}; use read/find for exact text.]\n"
+                + content[marker.start():]}
+    for index in browser_indexes[:-1]:
+        if index == current_view:
+            continue
+        content = messages[index].get("content")
+        if (isinstance(content, str) and len(content) > 700 and not looks_like_failure_output(content)
+                and (index < boundary or index in captured_indexes)):
+            messages[index] = {**messages[index], "content": _HISTORY + content.splitlines()[0][:500]
+                               + "\n[Earlier UI body stored in the evidence ledger; use status/read."
+                               + (f" Source: {captured_indexes[index]}" if index in captured_indexes else "") + "]"}
     snapshots = []
     for index, message in enumerate(messages):
         name = message.get("name") or calls.get(message.get("tool_call_id"), "")
         content = message.get("content")
         if (message.get("role") == "tool" and name.startswith("browser_")
                 and isinstance(content, str)
+                and not looks_like_failure_output(content)
                 and (_MARKER.search(content) or _LOCATION.search(content) or content.startswith(_HISTORY))):
             snapshots.append(index)
     if len(snapshots) < 2:

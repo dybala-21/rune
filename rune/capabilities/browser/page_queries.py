@@ -174,9 +174,9 @@ async def browser_find(params: BrowserFindParams) -> CapabilityResult:
 
             selector = tag
             if el_id:
-                selector = f"#{el_id}"
+                selector = "#" + await el.evaluate("el => CSS.escape(el.id)")
             elif el_class:
-                first_class = el_class.strip().split()[0]
+                first_class = await el.evaluate("el => CSS.escape(el.classList[0])")
                 selector = f"{tag}.{first_class}"
 
             results.append({

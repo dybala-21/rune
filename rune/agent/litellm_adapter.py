@@ -866,6 +866,8 @@ class StreamResult:
         request_deadline: float | None = None,
         tool_catalog: Any = None,
         reserve_answer: bool = False,
+        reserve_answer_at_round_limit: bool = True,
+        retrieval_state: Callable[[], Any] | None = None,
         default_reasoning_effort: str | None = None,
     ) -> None:
         self._model = model
@@ -876,6 +878,8 @@ class StreamResult:
         if tool_catalog is not None:
             tool_catalog.reset_recovery()
         self._reserve_answer = reserve_answer
+        self._reserve_answer_at_round_limit = reserve_answer_at_round_limit
+        self._retrieval_state = retrieval_state
         from rune.llm.reasoning import configured_reasoning_effort, supported_reasoning_default
         self._reasoning_effort = configured_reasoning_effort(model)
         if self._reasoning_effort is None:
@@ -994,6 +998,8 @@ class StreamResult:
         _oversized_batches = 0
         # The loop reports this limit because no final model response follows.
         self.tool_budget_exhausted = False
+        # Stream limits permit continuation; run-level budgets still apply.
+        self.tool_round_limit_reached = False
         self.answer_reserve_reason = ""
         _force_tool = False
         _output_recovery_count = 0
@@ -1200,16 +1206,19 @@ class StreamResult:
                     "json_schema": {"name": "rune_action", "schema": _gschema},
                 }
 
+            from rune.agent.retrieval_result import accepted_answer, partial_answer
+            saved_retrieval = bool(partial_answer(self._retrieval_state())) if self._retrieval_state else False
             if _continuing_text:
                 _answer_only = True
                 _acompletion_kwargs = _answer_request(_acompletion_kwargs, _tools, "output", continuation=True)
-            elif self._reserve_answer and _tool_round and not verification_pending and not recovery_tools:
+            elif self._reserve_answer and not saved_retrieval and _tool_round and not verification_pending and not recovery_tools:
                 from rune.agent.timing import needs_answer_reserve
 
                 time_to_answer = _answer_deadline is not None and time.monotonic() >= _answer_deadline
-                limit = "time" if time_to_answer else "tool rounds" if _tool_round >= _max_tool_rounds else "budget"
+                rounds_to_answer = self._reserve_answer_at_round_limit and _tool_round >= _max_tool_rounds
+                limit = "time" if time_to_answer else "tool rounds" if rounds_to_answer else "budget"
                 answer_request = _answer_request(_acompletion_kwargs, _tools, limit, guided=self._guided)
-                if time_to_answer or _tool_round >= _max_tool_rounds or needs_answer_reserve(
+                if time_to_answer or rounds_to_answer or needs_answer_reserve(
                     _acompletion_kwargs, remaining_tokens, answer_params=answer_request,
                 ):
                     _answer_only = True
@@ -1221,7 +1230,8 @@ class StreamResult:
 
             budget_reply = False
 
-            def prepare_request(params, tools=_tools, allow_reply=bool(_tool_round and not verification_pending and not recovery_tools)):
+            def prepare_request(params, tools=_tools, allow_reply=bool(_tool_round and not verification_pending and not recovery_tools),
+                                saved_retrieval=saved_retrieval):
                 nonlocal _answer_only, budget_reply
                 from rune.agent.reobservation import repeated_mutation_dirs
                 from rune.agent.timing import request_fits
@@ -1229,7 +1239,7 @@ class StreamResult:
                 tools = tools if self._guided else params.get("tools")
                 if budget_reply:
                     return _answer_request(params, tools, "budget", guided=self._guided, task=True)
-                if _answer_only or not allow_reply:
+                if _answer_only or not allow_reply or saved_retrieval:
                     return params
                 if request_fits(params):
                     return params
@@ -1658,6 +1668,7 @@ class StreamResult:
             )
             if _tool_round > _max_tool_rounds:
                 self.tool_budget_exhausted = True
+                self.tool_round_limit_reached = True
                 log.warning("stream_text_max_tool_rounds", rounds=_tool_round)
 
             # Keep each assistant tool call adjacent to its results.
@@ -1675,6 +1686,12 @@ class StreamResult:
             if getattr(self, "_task_blocked", ""):
                 self._collected_text = self._task_blocked
                 log.info("abstain_stop", round=_tool_round)
+                break
+
+            if self._retrieval_state and (answer := accepted_answer(self._retrieval_state())):
+                # Return the collector's checked result without another model call.
+                self._collected_text = answer
+                yield answer
                 break
 
             # Exploration-round budget: steer a wandering model toward the
@@ -1729,7 +1746,9 @@ class StreamResult:
 
             from rune.agent.browser_context import compact_browser_history
 
-            self._messages = compact_browser_history(self._messages)
+            retrieval = self._retrieval_state() if self._retrieval_state else None
+            progress = (getattr(retrieval, "retrieval_acceptance", None) or {}).get("progress")
+            self._messages = compact_browser_history(self._messages, retrieval_progress=progress)
 
             if _is_last_round:
                 break
@@ -2477,6 +2496,8 @@ class LiteLLMAgent:
         deferred_tools: set[str] | None = None,
         compact_tools: bool = False,
         reserve_answer: bool = False,
+        reserve_answer_at_round_limit: bool = True,
+        retrieval_state: Callable[[], Any] | None = None,
         default_reasoning_effort: str | None = None,
     ) -> None:
         self._model, self._provider_extra = _resolve_litellm_model(model)
@@ -2497,6 +2518,8 @@ class LiteLLMAgent:
         self._max_tool_rounds = max_tool_rounds
         self._explore_budget = explore_budget
         self._reserve_answer = reserve_answer
+        self._reserve_answer_at_round_limit = reserve_answer_at_round_limit
+        self._retrieval_state = retrieval_state
         self._default_reasoning_effort = default_reasoning_effort
         self._extra_headers: dict[str, str] = dict(extra_headers or {})
         self._last_stream_result: StreamResult | None = None
@@ -2593,6 +2616,8 @@ class LiteLLMAgent:
             request_deadline=request_deadline,
             tool_catalog=self._tool_catalog,
             reserve_answer=self._reserve_answer,
+            reserve_answer_at_round_limit=self._reserve_answer_at_round_limit,
+            retrieval_state=self._retrieval_state,
             default_reasoning_effort=self._default_reasoning_effort,
         )
         self._last_stream_result = stream_result
