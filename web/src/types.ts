@@ -195,7 +195,7 @@ export interface TextDeltaData {
   text?: string;
   reset?: boolean;
 }
-export interface ApprovalRequestData { id: string; command: string; riskLevel: string; reason?: string; timeoutMs: number }
+export interface ApprovalRequestData { id: string; command: string; riskLevel: string; reason?: string; timeoutMs: number; external?: { url: string } }
 export interface QuestionData {
   id: string;
   question: string;
@@ -402,6 +402,8 @@ export interface PendingApproval {
   suggestions?: string[];
   timeoutMs: number;
   receivedAt: number;
+  /** Decided on a separate approval page (hosted connectors); this card can only decline. */
+  externalUrl?: string;
 }
 
 /** 활동 요약 (완료 후 표시) */

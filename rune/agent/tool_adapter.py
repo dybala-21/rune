@@ -684,8 +684,9 @@ def _build_typed_tool(
         start_time = time.monotonic()
         try:
             from rune.agent.table_acceptance import acceptance_scope
+            from rune.safety.approval_context import approval_channel_scope
 
-            with acceptance_scope(opts.table_acceptance):
+            with acceptance_scope(opts.table_acceptance), approval_channel_scope(opts.approval_callback):
                 if approval_cleared:
                     with approval_granted(cap_name, normalized_params, revisions=approved_revisions):
                         result = await reg.execute(cap_name, effective_params)

@@ -13,6 +13,9 @@ export const APPROVAL_COPY = {
   denialPlaceholder: 'Add denial instructions...',
   denialHintEmpty: 'Please type denial instructions first.',
   denialHintPrompt: 'Type denial instructions and press Enter.',
+  externalHint: 'Approve this on your approval page. It opens separately so this app cannot approve on your behalf.',
+  externalOpenLabel: 'Open approval page',
+  externalDeclineLabel: 'Decline',
 } as const;
 
 export const QUESTION_COPY = {

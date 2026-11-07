@@ -762,6 +762,7 @@ export function useAgent() {
         reason: data.reason,
         timeoutMs: data.timeoutMs,
         receivedAt: Date.now(),
+        externalUrl: data.external?.url,
       });
     }));
 

@@ -40,6 +40,18 @@ def remote_broker() -> str | None:
         raise BrokerUnavailable(f"RUNE_CONNECTOR_URL is not usable: {exc}") from exc
 
 
+def hosted_approval() -> bool:
+    """Whether a remote broker decides connector approvals, outside this machine.
+
+    A local install approves each call here. A hosted worker can't be trusted to: the broker
+    keeps the request until the owner approves it on a page this worker can't reach.
+    """
+    try:
+        return remote_broker() is not None
+    except BrokerUnavailable:
+        return False
+
+
 def _socket(root: Path) -> Path:
     return Path(os.environ.get("RUNE_CONNECTOR_SOCKET", str(root / "broker.sock")))
 

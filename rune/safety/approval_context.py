@@ -21,6 +21,22 @@ class _Grant:
 
 
 _GRANT: ContextVar[_Grant | None] = ContextVar("rune_action_grant", default=None)
+# The run's approval channel, for capabilities whose approval is decided outside this process.
+_CHANNEL: ContextVar[Any] = ContextVar("rune_approval_channel", default=None)
+
+
+@contextlib.contextmanager
+def approval_channel_scope(channel: Any) -> Iterator[None]:
+    token = _CHANNEL.set(channel)
+    try:
+        yield
+    finally:
+        _CHANNEL.reset(token)
+
+
+def approval_channel() -> Any:
+    """The current run's approval callback, or None outside a run with one."""
+    return _CHANNEL.get()
 
 
 def _fingerprint(capability: str, params: dict[str, Any]) -> str:

@@ -52,6 +52,12 @@ class CapabilityRegistry:
     def requires_approval(self, name: str) -> bool:
         """Check if a capability requires approval."""
         cap = self._capabilities.get(name)
+        if name == "connector_request":
+            from rune.connectors.client import hosted_approval
+
+            if hosted_approval():
+                # The broker enforces the owner's approval, which a compromised worker could skip here.
+                return False
         if cap and cap.risk_level in (RiskLevel.HIGH, RiskLevel.CRITICAL):
             return True
         return any(fnmatch(name, pattern) for pattern in self._require_approval_patterns)

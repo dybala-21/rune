@@ -150,6 +150,12 @@ def _network_approval_request(
         return None
 
     if cap_name == "connector_request":
+        from rune.connectors.client import hosted_approval
+
+        if hosted_approval():
+            # The broker holds the request until the owner approves it on its own page; a prompt
+            # here would be a second, weaker approval of the same call.
+            return None
         method = str(params.get("method") or "GET")
         target = str(params.get("origin", "")) + str(params.get("path", ""))
         return _NetworkApproval(f"{method} {target[:160]}",
