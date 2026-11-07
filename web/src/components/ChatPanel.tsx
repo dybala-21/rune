@@ -992,7 +992,50 @@ function InlineApprovalCard({
           {APPROVAL_COPY.actionsLabel}
         </div>
 
-        {showDenyInput ? (
+        {approval.externalUrl ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{APPROVAL_COPY.externalHint}</div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              {approval.externalUrl.startsWith('https://') && (
+                <a
+                  href={approval.externalUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    flex: 1,
+                    padding: '9px 16px',
+                    background: 'var(--success)',
+                    color: 'var(--bg-primary)',
+                    borderRadius: 'var(--radius-md)',
+                    fontWeight: 600,
+                    fontSize: 13,
+                    textAlign: 'center',
+                    textDecoration: 'none',
+                  }}
+                >
+                  {APPROVAL_COPY.externalOpenLabel}
+                </a>
+              )}
+              <button
+                onClick={() => respond('deny')}
+                disabled={locked}
+                style={{
+                  padding: '9px 16px',
+                  background: 'transparent',
+                  color: 'var(--danger)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-md)',
+                  fontWeight: 600,
+                  fontSize: 13,
+                  opacity: locked ? 0.5 : 1,
+                  cursor: locked ? 'default' : 'pointer',
+                }}
+              >
+                {APPROVAL_COPY.externalDeclineLabel}
+              </button>
+            </div>
+          </div>
+        ) : showDenyInput ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             <input
               value={guidance}
