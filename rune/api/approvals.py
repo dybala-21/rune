@@ -54,13 +54,14 @@ def approval_callback(
                 await emit("approval_closed", {"id": approval_id, "runId": run_id,
                                                **({"suspended": True} if suspended else {})})
 
-    async def external(command: str, reason: str, url: str,
-                       done: Callable[[], Awaitable[Any]]) -> tuple[str, Any]:
+    async def external(command: str, reason: str, url: str, done: Callable[[], Awaitable[Any]],
+                       stop: Callable[[], None]) -> tuple[str, Any]:
         """Show an approval that is decided somewhere else, at `url`, while `done` waits for it.
 
         Returns ("done", result) when `done` finishes, ("declined", None) when the user declines
         here, or ("timeout", None). Approving here does nothing: that is the point of an approval
-        page this process can't reach.
+        page this process can't reach. On a decline or timeout `stop` asks `done` to finish, and
+        `done` returns None unless something it had already sent ran anyway.
         """
         async with lock:
             approval_id = f"approval:{run_id}:{uuid4().hex}"
@@ -80,10 +81,14 @@ def approval_callback(
                                                      return_when=asyncio.FIRST_COMPLETED)
                     if work in finished:
                         return "done", work.result()
-                    if future not in finished:
-                        return "timeout", None
-                    if not approval_granted(future.result()):
-                        return "declined", None
+                    if future in finished and approval_granted(future.result()):
+                        continue
+                    outcome = "declined" if future in finished else "timeout"
+                    stop()
+                    # A copy already sent may have run after the owner approved; its answer, not the
+                    # decline, says what happened.
+                    result = await work
+                    return ("done", result) if result is not None else (outcome, None)
             finally:
                 pending.pop(approval_id, None)
                 if not work.done():
@@ -92,5 +97,5 @@ def approval_callback(
                         await work
                 await emit("approval_closed", {"id": approval_id, "runId": run_id})
 
-    request.external = external  # type: ignore[attr-defined]
+    request.external = external
     return request

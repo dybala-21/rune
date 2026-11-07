@@ -90,6 +90,36 @@ async def test_declining_in_the_app_stops_waiting_and_nothing_runs(hosted, monke
     assert broker.await_count == calls, "no request is sent after the user declined"
 
 
+async def test_a_decline_that_crosses_a_copy_already_run_by_the_broker_reports_that_it_ran(hosted, monkeypatch):
+    in_flight, release = asyncio.Event(), asyncio.Event()
+
+    async def broker(op, payload):
+        if broker.calls == 0:
+            broker.calls += 1
+            return PENDING
+        # The owner approved on the page; this copy runs upstream while the user declines in the app.
+        in_flight.set()
+        await release.wait()
+        return RAN
+
+    broker.calls = 0
+    monkeypatch.setattr("rune.capabilities.connector.call_broker", broker)
+    approve, _, pending = channel()
+
+    async def decline_mid_call():
+        await opened(pending)
+        async with asyncio.timeout(5):
+            await in_flight.wait()
+        next(iter(pending.values())).set_result({"decision": "deny"})
+        await asyncio.sleep(0.02)
+        release.set()
+
+    decliner = asyncio.create_task(decline_mid_call())
+    answer = await tool(approve)(**PARAMS)
+    await decliner
+    assert "sent" in answer and "declined" not in answer.lower(), "the call ran, so it must not be reported as not run"
+
+
 async def test_an_unanswered_approval_times_out_without_running(hosted, monkeypatch):
     monkeypatch.setattr("rune.capabilities.connector.call_broker", AsyncMock(return_value=PENDING))
     approve, _, _ = channel(timeout_ms=50)

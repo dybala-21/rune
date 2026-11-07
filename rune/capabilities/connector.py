@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from typing import Any
 
 from pydantic import BaseModel, TypeAdapter
 
@@ -46,7 +47,7 @@ async def connector_request(params: ConnectorRequest) -> CapabilityResult:
                                 metadata={"action_status": "unknown"})
 
 
-async def _wait_for_owner(params: ConnectorRequest, payload: dict, pending: dict) -> CapabilityResult:
+async def _wait_for_owner(params: ConnectorRequest, payload: dict[str, Any], pending: dict[str, Any]) -> CapabilityResult:
     """Hold a hosted call while the owner decides on the broker's approval page.
 
     The broker runs the request the first time it is sent after approval, so waiting is sending
@@ -59,15 +60,24 @@ async def _wait_for_owner(params: ConnectorRequest, payload: dict, pending: dict
         # names the page, and an identical call after approval runs.
         return TypeAdapter(CapabilityResult).validate_python(pending)
 
-    async def decided() -> dict:
+    stopped = asyncio.Event()
+
+    async def decided() -> dict[str, Any] | None:
         while True:
-            await asyncio.sleep(APPROVAL_POLL_SECONDS)
+            try:
+                await asyncio.wait_for(stopped.wait(), APPROVAL_POLL_SECONDS)
+                return None
+            except TimeoutError:
+                pass
             result = await call_broker("request", payload)
             if (result.get("metadata") or {}).get("approval_status") != "pending":
                 return result
+            if stopped.is_set():
+                return None
 
     display = f"{params.method} {params.origin}{params.path}"[:200]
-    outcome, result = await external(display, f"Connected API: {display}. Approve it on the approval page.", url, decided)
+    outcome, result = await external(display, f"Connected API: {display}. Approve it on the approval page.", url,
+                                     decided, stopped.set)
     if outcome == "done":
         return TypeAdapter(CapabilityResult).validate_python(result)
     error = ("The user declined this request." if outcome == "declined"
