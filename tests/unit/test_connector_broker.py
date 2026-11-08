@@ -52,6 +52,21 @@ def test_ambiguous_paths_are_rejected(path):
         ConnectorRequest(connector="test", origin="https://api.example.com", revision="a" * 32, path=path)
 
 
+# Tomcat, Spring and Jetty strip `;params` from each segment before resolving dot segments, so
+# `/v1/..;/admin` reaches `/admin` while it still starts with the `/v1` prefix.
+@pytest.mark.parametrize("path", ["/v1/..;/admin", "/v1/.;/admin", "/v1/..;x=1/admin", "/v1/...", "/v1/..;"])
+def test_dot_segments_with_matrix_parameters_are_rejected(path):
+    with pytest.raises(ValidationError):
+        ConnectorRequest(connector="test", origin="https://api.example.com", revision="a" * 32, path=path)
+    with pytest.raises(ValidationError):
+        ConnectorPolicy(name="test", origin="https://api.example.com", methods=["GET"], path_prefix=path)
+
+
+@pytest.mark.parametrize("path", ["/v1/files;version=2", "/v1/a.b", "/v1/.well-known/x", "/v1/x..y", "/v1/a;b/c"])
+def test_ordinary_paths_with_dots_and_semicolons_still_pass(path):
+    ConnectorRequest(connector="test", origin="https://api.example.com", revision="a" * 32, path=path)
+
+
 async def test_signature_replay_and_policy_change(configured, monkeypatch):
     store, policy, key = configured
     send = AsyncMock(return_value=CapabilityResult(success=True, output="sent"))

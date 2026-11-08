@@ -9,10 +9,17 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+def _dot_segment(part: str) -> bool:
+    # Tomcat, Spring and Jetty drop `;params` from a segment before resolving dot segments, so
+    # `..;x` is `..` to them. Any segment that is only dots, with or without params, is refused.
+    name = part.split(";", 1)[0]
+    return bool(name) and set(name) == {"."}
+
+
 def checked_path(value: str) -> str:
     # Reject ambiguous paths before a proxy or server can normalize them differently.
     if (not re.fullmatch(r"/[A-Za-z0-9_./~:@!$&'()*+,;=-]*", value)
-            or "//" in value or any(part in {".", ".."} for part in value.split("/"))):
+            or "//" in value or any(_dot_segment(part) for part in value.split("/"))):
         raise ValueError("Use an absolute, unescaped API path without dot segments")
     return value
 
