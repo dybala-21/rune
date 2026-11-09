@@ -3,6 +3,7 @@ import { SSE_EVENT_TYPES, type SseEventType } from '../types';
 import { ensureWebAuth, resetWebAuth, setClientId as setApiClientId } from '../api';
 import { fetchRunSnapshot, getLiveSessionId } from '../api';
 import { RunRecovery } from '../utils/runRecovery';
+import { MACHINE_EVENT } from '../utils/presence';
 
 export interface SseConnection {
   connected: boolean;
@@ -127,6 +128,11 @@ export function useSSE(): SseConnection {
     };
     const unsubscribeResume = window.rune?.onResume?.(resume);
     window.addEventListener('online', resume);
+    // the hosted machine just woke up: reconnect now rather than at the next retry
+    const onMachine = (event: Event) => {
+      if ((event as CustomEvent<string>).detail === 'running' && !sourceRef.current) resume();
+    };
+    window.addEventListener(MACHINE_EVENT, onMachine);
 
     void connect();
 
@@ -135,6 +141,7 @@ export function useSSE(): SseConnection {
       connectionVersion++;
       unsubscribeResume?.();
       window.removeEventListener('online', resume);
+      window.removeEventListener(MACHINE_EVENT, onMachine);
       restoreRef.current = () => {};
       recoveryVersion += 1;
       if (retryTimer) clearTimeout(retryTimer);

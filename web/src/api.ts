@@ -1,8 +1,19 @@
 /** REST API 호출 (Client → Server) */
 
 import type { ProactiveFeedItem } from './types';
+import { noteResponse, presenceHeaders } from './utils/presence';
 
 const BASE = '';
+
+/** Every request to the engine goes through here, so the hosted gateway can tell a person's
+ * requests from the page's own (see utils/presence). */
+export async function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  for (const [name, value] of Object.entries(presenceHeaders())) headers.set(name, value);
+  const response = await fetch(input, { ...init, headers });
+  noteResponse(response);
+  return response;
+}
 
 export async function respondToSuggestion(suggestionId: string, response: 'accept' | 'dismiss') {
   const result = await post<{ acknowledged: boolean; executionStatus: string }>('/api/v1/proactive/feedback', {
@@ -14,7 +25,7 @@ export async function respondToSuggestion(suggestionId: string, response: 'accep
 
 export async function fetchProactiveSuggestions(signal?: AbortSignal): Promise<ProactiveFeedItem[]> {
   await ensureWebAuth();
-  const response = await fetch('/api/v1/proactive/feed', { credentials: 'include', cache: 'no-store', signal });
+  const response = await apiFetch('/api/v1/proactive/feed', { credentials: 'include', cache: 'no-store', signal });
   if (!response.ok) throw new ApiError('Could not refresh suggestions', response.status);
   const data = await response.json() as { suggestions: ProactiveFeedItem[] };
   return data.suggestions;
@@ -25,7 +36,7 @@ let _webAuthReady = false;
 let _webAuthPromise: Promise<void> | null = null;
 
 async function bootstrapWebAuth(): Promise<void> {
-  const res = await fetch(`${BASE}/api/v1/auth/bootstrap`, {
+  const res = await apiFetch(`${BASE}/api/v1/auth/bootstrap`, {
     method: 'POST',
     credentials: 'include',
   });
@@ -84,7 +95,7 @@ export async function post<T>(path: string, body?: unknown, retried = false, sig
     headers['X-Client-Id'] = _clientId;
   }
 
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await apiFetch(`${BASE}${path}`, {
     method: 'POST',
     headers,
     credentials: 'include',
@@ -176,7 +187,7 @@ declare global {
 
 export async function fetchComputer(sessionId: string): Promise<ComputerState> {
   await ensureWebAuth();
-  const response = await fetch(`/api/computer/state?sessionId=${encodeURIComponent(sessionId)}&preview=${!window.rune?.browserLayout}`, {
+  const response = await apiFetch(`/api/computer/state?sessionId=${encodeURIComponent(sessionId)}&preview=${!window.rune?.browserLayout}`, {
     credentials: 'include', cache: 'no-store', signal: AbortSignal.timeout(8000),
   });
   if (!response.ok) throw new Error(`Could not read the browser (${response.status}).`);
@@ -210,7 +221,7 @@ export function stopComputer(runId: string): Promise<{ ok: boolean }> {
 
 export async function fetchRunSnapshot(sessionId: string): Promise<{ run: import('./utils/runSnapshot').RunSnapshot | null; available?: boolean }> {
   await ensureWebAuth();
-  const response = await fetch(`/api/runs/snapshot?sessionId=${encodeURIComponent(sessionId)}`, {
+  const response = await apiFetch(`/api/runs/snapshot?sessionId=${encodeURIComponent(sessionId)}`, {
     credentials: 'include', signal: AbortSignal.timeout(5000),
   });
   if (response.status === 404 || (response.ok && response.headers.get('content-type')?.includes('text/html'))) {
@@ -373,7 +384,7 @@ export async function fetchSavedTasks(sessionId: string, query: string, offset: 
 }> {
   await ensureWebAuth();
   const params = new URLSearchParams({ sessionId, query, offset: String(offset) });
-  const response = await fetch(`/api/tasks?${params}`, { credentials: 'include', cache: 'no-store', signal });
+  const response = await apiFetch(`/api/tasks?${params}`, { credentials: 'include', cache: 'no-store', signal });
   if (!response.ok) throw new Error('Couldn’t load saved work. Try again.');
   return response.json();
 }

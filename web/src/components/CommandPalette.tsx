@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { apiFetch } from '../api';
 
 interface Command {
   name: string;
@@ -23,7 +24,7 @@ const ITEM_STYLE: React.CSSProperties = {
 };
 
 async function rpc(method: string, params: Record<string, unknown> = {}) {
-  const res = await fetch('/api/v1/rpc', {
+  const res = await apiFetch('/api/v1/rpc', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
