@@ -25,6 +25,8 @@ import { Toaster } from './components/Toaster';
 import { normalizeToolName, isCodingToolName, computeRunVerdict } from './utils/tooling';
 import { desktopAttention, shouldOpenWorkbench } from './utils/workbench';
 import { fetchConfig, fetchSessions, getLiveSessionId, type ConfigInfo, type SessionInfo } from './api';
+import { watchPresence } from './utils/presence';
+import { ConnectionBanner } from './components/ConnectionBanner';
 
 type SidebarTab = 'chats' | 'settings';
 
@@ -36,6 +38,7 @@ function isWorkspaceTool(name: string): boolean {
 
 export function App() {
   const agent = useAgent();
+  useEffect(() => watchPresence(), []);
   const history = useSessionHistory();
   const [compact, setCompact] = useState(() => window.matchMedia('(max-width: 820px)').matches);
   const [sidebarOpen, setSidebarOpen] = useState(() => !window.matchMedia('(max-width: 820px)').matches);
@@ -299,25 +302,7 @@ export function App() {
         }}
       />
 
-      {!agent.connected && (
-        <div className="fade-in" style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: 10,
-          padding: '7px 16px',
-          background: 'var(--danger-subtle)',
-          borderBottom: '1px solid var(--border)',
-          fontFamily: 'var(--font-mono)',
-          fontSize: 12,
-          color: 'var(--danger)',
-        }}>
-          <span className="spinner" style={{ width: 11, height: 11, borderTopColor: 'var(--danger)' }} />
-          <span>Engine unreachable — reconnecting…</span>
-          <span style={{ color: 'var(--text-muted)', marginLeft: 'auto' }}>
-            start it with: rune daemon start
-          </span>
-        </div>
-      )}
+      {!agent.connected && <ConnectionBanner />}
 
       <div className="app-body" data-sidebar={sidebarOpen} style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
         {sidebarOpen && <button type="button" className="sidebar-backdrop" aria-label="Hide tasks" tabIndex={-1}

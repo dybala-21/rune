@@ -30,6 +30,7 @@ function mount() {
     react: { useState: () => [null, () => {}], useRef: value => ({ current: value }),
       useEffect: effect => { cleanup = effect(); }, useCallback: fn => fn, useMemo: fn => fn() },
     '../api': api, '../types': { SSE_EVENT_TYPES: ['connected', 'text_delta'] },
+    '../utils/presence': { MACHINE_EVENT: 'rune:machine' },
     '../utils/runRecovery': { RunRecovery: class {
       constructor(emit) { this.emit = emit; }
       begin() {} finish() { return true; }
@@ -81,4 +82,22 @@ test('overlapping wake and network events create one stream and detach on unmoun
   await flush();
   assert.equal(app.streams.length, 2);
   assert.equal(app.streams[1].closed, true);
+});
+
+test('a hosted machine waking up reconnects at once, and only a dropped stream', async () => {
+  const app = mount();
+  try {
+    await flush();
+    app.window.dispatchEvent(new CustomEvent('rune:machine', { detail: 'running' }));
+    await flush();
+    assert.equal(app.streams.length, 1, 'an open stream is left alone');
+    app.streams[0].readyState = 2;
+    app.streams[0].onerror();
+    app.window.dispatchEvent(new CustomEvent('rune:machine', { detail: 'suspended' }));
+    await flush();
+    assert.equal(app.streams.length, 1, 'still asleep: wait for the retry');
+    app.window.dispatchEvent(new CustomEvent('rune:machine', { detail: 'running' }));
+    await flush();
+    assert.equal(app.streams.length, 2);
+  } finally { app.unmount(); }
 });

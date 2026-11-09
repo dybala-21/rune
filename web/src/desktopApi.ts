@@ -1,4 +1,4 @@
-import { ensureWebAuth, type ComputerState } from './api';
+import { apiFetch, ensureWebAuth, type ComputerState } from './api';
 
 export interface DesktopState {
   sessionId: string;
@@ -37,7 +37,7 @@ export interface DesktopSetup {
 
 export async function desktopRequest<T>(path: string, body?: unknown): Promise<T> {
   await ensureWebAuth();
-  const response = await fetch(`/api/desktop/${path}`, {
+  const response = await apiFetch(`/api/desktop/${path}`, {
     method: body === undefined ? 'GET' : 'POST', credentials: 'include', cache: 'no-store',
     headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(body === undefined ? 20000 : 190000),
