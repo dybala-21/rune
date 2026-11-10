@@ -1,12 +1,14 @@
-"""FAISS indexes partitioned by embedding model identity."""
+"""FAISS indexes partitioned by embedding model identity.
+
+numpy and faiss come with the `vector` extra and are imported where they are used, so the
+memory manager (and every memory tool) still works without them, on keyword search alone.
+"""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
 from typing import Any
-
-import numpy as np
 
 from rune.memory.types import SearchResult, VectorMetadata  # re-export for compat
 from rune.utils.fast_serde import json_decode, json_encode
@@ -84,6 +86,7 @@ class VectorStore:
 
         try:
             import faiss  # type: ignore[import-untyped]  # noqa: F811
+            import numpy  # noqa: F401  # same extra as faiss
         except (ImportError, ModuleNotFoundError):
             raise RuntimeError(
                 "faiss-cpu is not installed. Vector search requires it.\n"
@@ -125,6 +128,7 @@ class VectorStore:
         if self._deleted_count < 64 or self._deleted_count * 4 < len(self._metadata):
             return
         import faiss
+        import numpy as np
 
         live = [i for i, meta in enumerate(self._metadata) if meta.type != "_deleted"]
         replacement = faiss.IndexHNSWFlat(self._dim, 32)
@@ -158,6 +162,7 @@ class VectorStore:
         """Add a single vector with metadata."""
         self._bind_embedding(embedding)
         self._ensure_init()
+        import numpy as np
         if len(embedding) != self._dim:
             log.warning("embedding_dim_mismatch", got=len(embedding), expected=self._dim)
             return
@@ -172,6 +177,7 @@ class VectorStore:
     def upsert(self, embedding: list[float], metadata: VectorMetadata) -> None:
         self._bind_embedding(embedding)
         self._ensure_init()
+        import numpy as np
         if len(embedding) != self._dim or not np.isfinite(np.asarray(embedding, dtype=np.float32)).all():
             raise ValueError("Invalid replacement vector")
         self.delete_by_id(metadata.id)
@@ -190,6 +196,7 @@ class VectorStore:
             raise ValueError("Embedding batch mixes models")
         self._bind_embedding(embeddings[0])
         self._ensure_init()
+        import numpy as np
         valid_embeddings = []
         valid_metadata = []
         for emb, meta in zip(embeddings, metadata_list, strict=False):
@@ -235,6 +242,7 @@ class VectorStore:
         """
         self._bind_embedding(query_embedding)
         self._ensure_init()
+        import numpy as np
         if k <= 0 or self._index.ntotal == 0:
             return []
 

@@ -42,6 +42,11 @@ class SubsystemStatus(BaseModel):
     mcp: str = "disabled"
     scheduler: SchedulerStats = Field(default_factory=SchedulerStats)
     embedding: dict[str, Any] = Field(default_factory=lambda: {"state": "idle"})
+    # "semantic" once embeddings answer; "keyword" with the reason when memory search runs without them
+    memory_search: dict[str, str] = Field(default_factory=lambda: {"mode": "keyword", "reason": ""},
+                                          alias="memorySearch")
+
+    model_config = ConfigDict(populate_by_name=True)
 
 
 class MemoryInfo(BaseModel):
@@ -66,6 +71,23 @@ class HealthResponse(BaseModel):
 # Route
 
 
+def memory_search_mode() -> dict[str, str]:
+    """How memory search runs right now, so a degraded mode is visible instead of silent."""
+    import importlib.util
+
+    from rune.llm import local_embedding
+
+    if not all(importlib.util.find_spec(m) for m in ("numpy", "faiss")):
+        return {"mode": "keyword", "reason": "the vector extra (numpy, faiss) is not installed"}
+    if not local_embedding.embeddings_installed():
+        return {"mode": "keyword", "reason": "the embedding extra (llama-cpp-python) is not installed"}
+    engine = local_embedding._engine
+    if engine is None or not engine.is_ready():
+        error = engine.health.get("last_error") if engine is not None else None
+        return {"mode": "keyword", "reason": f"the embedding model is not ready ({error or 'not loaded yet'})"}
+    return {"mode": "semantic", "reason": ""}
+
+
 def _subsystem_status() -> SubsystemStatus:
     """Report what is actually running.
 
@@ -78,6 +100,7 @@ def _subsystem_status() -> SubsystemStatus:
 
     if local_embedding._engine is not None:
         status.embedding = local_embedding._engine.health
+    status.memory_search = memory_search_mode()
 
     try:
         from rune.memory import manager as memory_manager

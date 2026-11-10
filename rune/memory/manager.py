@@ -262,8 +262,8 @@ class MemoryManager:
                     }
                     for r in rules
                 ]
-            except Exception:
-                pass
+            except Exception as exc:
+                log.warning("global_rules_load_failed", error=str(exc)[:200])
 
         # Load recent commands from SQLite (operational data stays in DB)
         commands = await loop.run_in_executor(None, self._store.get_recent_commands, 20)
@@ -581,8 +581,8 @@ class MemoryManager:
             if rules:
                 rule_lines = [f"- {r['key']}: {r['value']}" for r in rules]
                 _add_section("## Learned Rules\n" + "\n".join(rule_lines[:10]) + "\n")
-        except Exception:
-            pass  # Rule injection is best-effort
+        except Exception as exc:  # rule injection is best-effort, but say so
+            log.warning("learned_rules_injection_failed", error=f"{type(exc).__name__}: {str(exc)[:200]}")
 
         # 1. Scored episodes (vector/keyword) + entity search fallback
         scored = await self.score_episodes(goal, limit=7)
@@ -609,8 +609,8 @@ class MemoryManager:
                                 },
                             }
                         )
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("entity_episode_search_failed", error=str(exc)[:200])
 
         if scored:
             # Failures are kept as ANTI-EXAMPLES, but guarded against the
@@ -770,15 +770,15 @@ class MemoryManager:
             # Keyword index (always available)
             self._keywords.add(episode.task_summary, meta)
 
-            # Vector index (may fail if embedding provider unavailable)
-            try:
-                from rune.llm.local_embedding import get_embedding_provider
+            # Vector index, only when embeddings can run; otherwise search stays on keywords
+            from rune.llm.local_embedding import embeddings_installed, get_embedding_provider
 
-                provider = get_embedding_provider()
-                embedding = await provider.embed_single(episode.task_summary)
-                self._vectors.add(embedding, meta)
-            except Exception as exc:
-                log.warning("episode_indexing_failed", error=str(exc))
+            if embeddings_installed():
+                try:
+                    embedding = await get_embedding_provider().embed_single(episode.task_summary)
+                    self._vectors.add(embedding, meta)
+                except Exception as exc:
+                    log.warning("episode_indexing_failed", error=str(exc))
 
     async def save_fact(self, fact: Fact) -> None:
         """Save a fact to learned.md and update working memory."""

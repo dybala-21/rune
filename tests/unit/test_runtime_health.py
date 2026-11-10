@@ -34,3 +34,10 @@ def test_optional_connection_failure_does_not_block_local_readiness(client):
     result = client.get("/ready")
     assert result.status_code == 200
     assert result.json()["connections"] == {"mcp": "failed", "channels": "connecting"}
+
+
+def test_health_says_how_memory_search_runs(client, monkeypatch):
+    monkeypatch.setattr("rune.llm.local_embedding.embeddings_installed", lambda: False)
+    body = client.get("/health").json()
+    assert body["memory_search"]["mode"] == "keyword"
+    assert "extra" in body["memory_search"]["reason"]
