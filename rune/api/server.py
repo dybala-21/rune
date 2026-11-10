@@ -15,7 +15,9 @@ from uuid import uuid4
 from rune.agent.run_outcome import run_outcome
 from rune.api.approvals import approval_callback
 from rune.api.approvals import approval_granted as approval_granted
+from rune.api.handlers.health import memory_search_mode
 from rune.api.questions import PendingQuestion
+from rune.api.run_memory import memory_context_for
 from rune.api.trust import build_cancelled_trust
 from rune.api.trust import build_trust_payload as build_trust_payload
 from rune.capabilities.ask_user import user_response
@@ -386,6 +388,8 @@ def create_app() -> Any:
         # Operator-supplied image/build identifier (RUNE_BUILD_ID), so a rollout can confirm
         # which build a machine is actually serving before widening a ring.
         build: str = ""
+        # how memory search runs here: "semantic", or "keyword" with the reason
+        memory_search: dict[str, str] = Field(default_factory=dict)
 
     class MessageAttachment(BaseModel):
         ref: str = ""
@@ -710,6 +714,9 @@ def create_app() -> Any:
             run_context = {"workspace_root": agent_ctx.workspace_root,
                            "original_goal": agent_ctx.original_goal or agent_ctx.goal,
                            "attachments": agent_ctx.metadata.get("attachments") or []}
+            # look memory up by what the user typed; the expanded goal can carry whole @referenced files
+            if memory_context := await memory_context_for(agent_ctx.original_goal or agent_ctx.goal):
+                run_context["memory_context"] = memory_context
             if resume_from is not None:
                 continuation["extra_system_context"] = recovery_context(resume_from, resume_records or [])
                 run_context["recovery_written_files"] = recovery_written_files(resume_records or [])
@@ -1093,6 +1100,7 @@ def create_app() -> Any:
             uptime_seconds=time.monotonic() - _start_time,
             pid=os.getpid(),
             ready=state["status"] == "ok",
+            memory_search=memory_search_mode(),
         )
 
     @app.get("/ready", response_model=HealthResponse)

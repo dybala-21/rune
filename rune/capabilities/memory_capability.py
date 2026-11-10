@@ -187,8 +187,8 @@ async def memory_search(params: MemorySearchParams) -> CapabilityResult:
                                 "score": 0.8,
                             }
                         )
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("project_memory_search_failed", error=str(exc)[:100])
 
         # Source 2: Episode memory (entity + keyword search)
         try:
@@ -253,8 +253,8 @@ async def memory_search(params: MemorySearchParams) -> CapabilityResult:
                             "score": r.score,
                         }
                     )
-        except Exception:
-            pass  # Vector search optional
+        except Exception as exc:  # vector search is optional; keyword sources above still answer
+            log.debug("memory_vector_search_skipped", error=str(exc)[:100])
 
         # Deduplicate and sort
         seen_summaries: set[str] = set()

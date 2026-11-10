@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import functools
+import importlib.util
 import math
 import os
 import tempfile
@@ -30,7 +32,13 @@ from rune.utils.process_worker import ProcessWorker, WorkerUnavailable
 log = get_logger(__name__)
 __all__ = ["DEFAULT_MODEL", "EMBEDDING_DIM", "EMBEDDING_MODELS", "EmbeddingModelConfig",
            "LocalEmbeddingEngine", "LocalEmbeddingProvider", "get_embedding_engine",
-           "get_embedding_provider", "dispose_embedding_engine", "warm_up_embedding"]
+           "get_embedding_provider", "dispose_embedding_engine", "embeddings_installed", "warm_up_embedding"]
+
+
+@functools.cache
+def embeddings_installed() -> bool:
+    """Whether the `embedding` extra is there; without it memory search runs on keywords."""
+    return importlib.util.find_spec("llama_cpp") is not None
 
 
 class LocalEmbeddingEngine:
@@ -147,6 +155,10 @@ class LocalEmbeddingEngine:
     def _call(self, texts: list[str], *, timeout: float, download: bool = False) -> list[list[float]]:
         if self._closed.is_set():
             raise WorkerUnavailable("Embedding engine is closed")
+        if not embeddings_installed():
+            # without llama.cpp the model could never load: don't fetch 140 MB of it
+            self._worker.last_error = "embedding_extra_missing"
+            raise WorkerUnavailable("Local embeddings need the `embedding` extra (llama-cpp-python)")
         path = _models_dir() / EMBEDDING_MODELS[self._model_id].file
         if not path.is_file() or path.stat().st_size == 0:
             if download:
@@ -272,7 +284,7 @@ def _is_model_cached() -> bool:
 
 
 async def warm_up_embedding() -> None:
-    if not _is_model_cached():
+    if not embeddings_installed() or not _is_model_cached():
         return
     try:
         await asyncio.to_thread(get_embedding_engine().initialize)
