@@ -4,8 +4,9 @@ MRR@10 for the keyword index memory search uses, and optionally for the embeddin
 
 The keyword side is what hosted machines answer with when no embeddings run, and what every
 machine falls back to. Measured 2026-11-10: whitespace word overlap 0.20, BM25 over character
-bigrams 0.70 (the KeywordIndex now). The dataset (Apache-2.0, ~14 MB) is downloaded once into
-the cache directory.
+bigrams 0.70 (the KeywordIndex now). With --embeddings, Qwen3-Embedding-0.6B through the provider
+(n_ctx 512, query instruction) gets 0.817, nomic as the core called it 0.05. The dataset
+(Apache-2.0, ~14 MB) is downloaded once into the cache directory.
 
 Usage:
     uv run python scripts/bench_memory_retrieval.py [--embeddings] [--cache DIR]
@@ -64,18 +65,19 @@ def keyword(queries: list[str], ids: list[str], docs: list[str]) -> tuple[list[l
 async def embedded(queries: list[str], ids: list[str], docs: list[str]) -> list[list[str]]:
     import numpy as np
 
+    from rune.llm.embedding_models import EmbeddingKind
     from rune.llm.local_embedding import get_embedding_provider
 
     provider = get_embedding_provider()
 
-    async def embed(texts: list[str]) -> np.ndarray:
+    async def embed(texts: list[str], kind: EmbeddingKind) -> np.ndarray:
         out = []
-        for start in range(0, len(texts), 64):
-            out += await provider.embed(texts[start:start + 64])
+        for start in range(0, len(texts), 32):
+            out += await provider.embed(texts[start:start + 32], kind=kind)
         a = np.asarray(out, dtype=np.float32)
         return a / np.linalg.norm(a, axis=1, keepdims=True)
 
-    q, d = await embed(queries), await embed(docs)
+    q, d = await embed(queries, "query"), await embed(docs, "document")
     return [[ids[j] for j in np.argsort(-row)[:10]] for row in q @ d.T]
 
 

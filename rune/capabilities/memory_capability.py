@@ -460,10 +460,12 @@ class ConversationSearchParams(BaseModel):
     )
 
 
-# Min cosine to count as a real recall. Calibrated to the local embedding model:
-# true topical matches score ~0.7+, unrelated turns ~0.3-0.4, so 0.5 cleanly
-# separates signal from noise. The keyword fallback (overlap fraction) reuses it.
+# Min cosine to count as a real recall. For Qwen3-Embedding on the 96-query memory
+# retrieval set, 0.5 keeps 89% of relevant pairs and passes 0.6% of unrelated ones.
+# The keyword fallback (overlap fraction) reuses it.
 _RELEVANCE_FLOOR = 0.5
+# Characters of uncached turns a search embeds itself: ~0.5 s on Apple GPUs, ~5 s on a CPU.
+_INLINE_TURN_CHARS = 6000
 
 
 def _cos(a: list[float], b: list[float]) -> float:
@@ -513,22 +515,28 @@ async def conversation_search(params: ConversationSearchParams) -> CapabilityRes
             import numpy as np
 
             manager = get_memory_manager()
-            query_vectors = await manager.embed_batch([params.query])
+            query_vectors = await manager.embed_batch([params.query], kind="query")
             if len(query_vectors) != 1:
                 raise ValueError("Embedding query count mismatch")
             identity = getattr(query_vectors[0], "fingerprint", None)
             if not identity:
                 raise ValueError("Embedding provenance is missing")
             cached = store.get_cached_embeddings([c["content_hash"] for c in cands], fingerprint=identity)
-            todo = {
-                c["content_hash"]: c["content"][:500]
-                for c in cands
-                if c["content_hash"] not in cached
-            }
+            # Turns are recent first. Embedding every uncached one here could take minutes after the
+            # model changes; the newest go now and the background reindex fills in the rest.
+            todo: dict[str, str] = {}
+            budget = _INLINE_TURN_CHARS
+            for c in cands:
+                if c["content_hash"] not in cached and c["content_hash"] not in todo:
+                    text = c["content"][:500]
+                    if len(text) > budget:
+                        break
+                    todo[c["content_hash"]] = text
+                    budget -= len(text)
             vecs = list(query_vectors)
             values = list(todo.values())
             for start in range(0, len(values), 64):
-                batch = await manager.embed_batch(values[start:start + 64])
+                batch = await manager.embed_batch(values[start:start + 64], kind="document")
                 if any(getattr(v, "fingerprint", None) != identity for v in batch):
                     raise ValueError("Embedding model changed during search")
                 vecs.extend(batch)

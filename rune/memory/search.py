@@ -112,7 +112,7 @@ async def _retrieve_vectors(
     try:
         from rune.llm.local_embedding import get_embedding_provider
         provider = get_embedding_provider()
-        embedding = await provider.embed_single(query)
+        embedding = await provider.embed_single(query, kind="query")
         return vectors.search(embedding, k=fetch_k, type_filter=type_filter)
     except Exception as exc:
         log.warning("vector_search_failed", error=str(exc))

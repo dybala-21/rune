@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from rune.llm.embedding_models import EMBEDDING_MODELS
+from rune.llm.embedding_models import DEFAULT_MODEL, EMBEDDING_MODELS
 from rune.llm.local_embedding import LocalEmbeddingEngine
 from rune.utils.process_worker import (
     ProcessWorker,
@@ -39,8 +39,9 @@ def fake_worker(sock: socket.socket) -> None:
                 time.sleep(30)
             time.sleep(params.get('delay', 0))
             count += 1
-            result = {'count': count, 'dimensions': 768, 'fingerprint': 'a' * 64,
-                      'vectors': [[float(count)] * 768 for _ in params.get('texts', [])]}
+            dimensions = EMBEDDING_MODELS[params.get('model_id', DEFAULT_MODEL)].dimensions
+            result = {'count': count, 'dimensions': dimensions, 'fingerprint': 'a' * 64,
+                      'vectors': [[float(count)] * dimensions for _ in params.get('texts', [])]}
             send_message(sock, {'id': 'bad' if action == 'wrong_id' else req['id'],
                                 'result': result}, None)
     except (EOFError, OSError):
@@ -58,7 +59,7 @@ def worker():
 
 @pytest.fixture
 def engine(tmp_path, monkeypatch, worker):
-    (tmp_path / EMBEDDING_MODELS['nomic-embed-text'].file).write_bytes(b'fixture')
+    (tmp_path / EMBEDDING_MODELS[DEFAULT_MODEL].file).write_bytes(b'fixture')
     monkeypatch.setattr('rune.llm.local_embedding._models_dir', lambda: tmp_path)
     eng = LocalEmbeddingEngine(worker=worker)
     yield eng
@@ -67,7 +68,8 @@ def engine(tmp_path, monkeypatch, worker):
 
 def test_sync_serialization(engine):
     with ThreadPoolExecutor(max_workers=8) as pool:
-        values = list(pool.map(engine.embed_sync, ['text'] * 16))
+        # Queries: the same document text would be answered from the document cache.
+        values = list(pool.map(lambda text: engine.embed_sync(text, kind='query'), ['text'] * 16))
     assert sorted(v[0] for v in values) == list(range(1, 17))
     assert engine.is_ready()
     assert engine.fingerprint == 'a' * 64

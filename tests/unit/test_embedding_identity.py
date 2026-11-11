@@ -60,7 +60,7 @@ async def test_indexer_rebuilds_missing_cache_and_deletes_after_reload(tmp_path,
     chunks = [{'id': key, 'text': key, 'hash': key, 'type': 'md_fact'} for key in ('one', 'two')]
     active = ['a' * 64]
 
-    async def embed(text):
+    async def embed(text, **_):
         return EmbeddingVector([1.0, 0.0], active[0])
 
     monkeypatch.setattr(indexer, 'collect_all_chunks', lambda: list(chunks))

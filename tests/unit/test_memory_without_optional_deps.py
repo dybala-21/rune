@@ -69,7 +69,7 @@ def test_no_model_download_without_llama_cpp(monkeypatch, tmp_path):
     try:
         for download in (False, True):
             with pytest.raises(WorkerUnavailable, match="embedding` extra"):
-                engine._call(["hello"], timeout=1, download=download)
+                engine._call(["hello"], kind="document", timeout=1, download=download)
         assert fetched == []
         assert engine._worker.last_error == "embedding_extra_missing"
     finally:

@@ -5,12 +5,15 @@ from __future__ import annotations
 import asyncio
 import atexit
 import functools
+import hashlib
 import importlib.util
 import math
 import os
 import tempfile
 import threading
 import time
+from array import array
+from collections import OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -21,18 +24,45 @@ from rune.llm.embedding_models import (
     DEFAULT_MODEL,
     EMBEDDING_DIM,
     EMBEDDING_MODELS,
+    EmbeddingKind,
     EmbeddingModelConfig,
     EmbeddingVector,
     _models_dir,
 )
 from rune.llm.embedding_worker import serve
+from rune.utils.env import env_flag
 from rune.utils.logger import get_logger
 from rune.utils.process_worker import ProcessWorker, WorkerUnavailable
 
 log = get_logger(__name__)
-__all__ = ["DEFAULT_MODEL", "EMBEDDING_DIM", "EMBEDDING_MODELS", "EmbeddingModelConfig",
+__all__ = ["DEFAULT_MODEL", "EMBEDDING_DIM", "EMBEDDING_MODELS", "EmbeddingKind", "EmbeddingModelConfig",
            "LocalEmbeddingEngine", "LocalEmbeddingProvider", "get_embedding_engine",
-           "get_embedding_provider", "dispose_embedding_engine", "embeddings_installed", "warm_up_embedding"]
+           "get_embedding_provider", "dispose_embedding_engine", "embeddings_installed", "model_cached",
+           "warm_up_embedding"]
+
+
+# Documents embedded again and again (every rule and skill on every lookup) are answered from
+# here. 4,096 vectors of 1,024 float32 are 16 MB.
+_DOCUMENT_CACHE_SIZE = 4096
+# A download that goes this long without finishing is abandoned and retried later.
+_DOWNLOAD_LIMIT_SECONDS = 1800
+# Documents go to the worker in pieces of at most this many characters (or items), each with its
+# own deadline. Qwen3 on a CPU embeds ~1,100 tokens/s, so 4,000 Korean characters take ~3 s; one
+# 64-turn batch took over 20 s and timed out. Queries get the worker between pieces.
+_DOCUMENT_PIECE_CHARS = 4000
+_DOCUMENT_PIECE_ITEMS = 32
+
+
+def _pieces(texts: list[str]) -> list[list[str]]:
+    out: list[list[str]] = [[]]
+    size = 0
+    for text in texts:
+        if out[-1] and (size + len(text) > _DOCUMENT_PIECE_CHARS or len(out[-1]) >= _DOCUMENT_PIECE_ITEMS):
+            out.append([])
+            size = 0
+        out[-1].append(text)
+        size += len(text)
+    return out
 
 
 @functools.cache
@@ -56,6 +86,8 @@ class LocalEmbeddingEngine:
         self._model_id = DEFAULT_MODEL
         self._fingerprint: str | None = None
         self._model_stamp: tuple[int, int, int] | None = None
+        # (fingerprint, text digest) -> vector; read and written under _sync_lock only.
+        self._documents: OrderedDict[tuple[str, bytes], array[float]] = OrderedDict()
 
     @property
     def dimensions(self) -> int:
@@ -87,19 +119,24 @@ class LocalEmbeddingEngine:
             temp: str | None = None
             try:
                 url = f"https://huggingface.co/{config.repo}/resolve/main/{config.file}"
+                # The socket timeout catches a stalled download; the overall limit a crawling one.
                 with urllib.request.urlopen(url, timeout=10) as response, tempfile.NamedTemporaryFile(
                     dir=root, prefix=".download-", delete=False,
                 ) as output:
                     temp = output.name
                     total = 0
-                    while chunk := response.read(65536):
-                        if self._closed.is_set() or time.monotonic() - started > 30:
+                    digest = hashlib.sha256()
+                    while chunk := response.read(1 << 20):
+                        if self._closed.is_set() or time.monotonic() - started > _DOWNLOAD_LIMIT_SECONDS:
                             raise WorkerUnavailable("Model download cancelled or timed out")
                         output.write(chunk)
+                        digest.update(chunk)
                         total += len(chunk)
                     if total == 0 or (response.headers.get("Content-Length") and
                                       total != int(response.headers["Content-Length"])):
                         raise ValueError("Incomplete model download")
+                    if config.sha256 and digest.hexdigest() != config.sha256:
+                        raise ValueError("Downloaded model does not match its pinned hash")
                 os.replace(temp, path)
                 log.info("embedding_model_downloaded", model=model_id, bytes=total)
             finally:
@@ -141,7 +178,7 @@ class LocalEmbeddingEngine:
 
     def _activate_model(self, model_id: str) -> None:
         self._model_id = model_id
-        self._call([], timeout=30, download=True)
+        self._call([], kind="document", timeout=30, download=True)
 
     def initialize(self, model_id: str = DEFAULT_MODEL) -> None:
         if model_id not in EMBEDDING_MODELS:
@@ -152,11 +189,12 @@ class LocalEmbeddingEngine:
                 raise WorkerUnavailable("Embedding engine is closed")
             self._activate_model(model_id)
 
-    def _call(self, texts: list[str], *, timeout: float, download: bool = False) -> list[list[float]]:
+    def _call(self, texts: list[str], *, kind: EmbeddingKind, timeout: float,
+              download: bool = False) -> list[EmbeddingVector]:
         if self._closed.is_set():
             raise WorkerUnavailable("Embedding engine is closed")
         if not embeddings_installed():
-            # without llama.cpp the model could never load: don't fetch 140 MB of it
+            # without llama.cpp the model could never load: don't fetch hundreds of MB of it
             self._worker.last_error = "embedding_extra_missing"
             raise WorkerUnavailable("Local embeddings need the `embedding` extra (llama-cpp-python)")
         path = _models_dir() / EMBEDDING_MODELS[self._model_id].file
@@ -173,7 +211,9 @@ class LocalEmbeddingEngine:
         if stamp != self._model_stamp:
             self._fingerprint = None
         result = self._worker.request({"model_id": self._model_id, "model_path": str(path),
-                                       "model_stamp": list(stamp), "texts": texts}, timeout=timeout)
+                                       "model_stamp": list(stamp), "texts": texts, "kind": kind,
+                                       "cpu_only": env_flag("RUNE_EMBEDDING_CPU_ONLY")},
+                                      timeout=timeout)
         vectors = result.get("vectors")
         fingerprint = result.get("fingerprint")
         if (result.get("dimensions") != self.dimensions or not isinstance(fingerprint, str)
@@ -190,10 +230,11 @@ class LocalEmbeddingEngine:
         self._model_stamp = stamp
         return [EmbeddingVector(v, fingerprint) for v in vectors]
 
-    def embed_sync(self, text: str) -> list[float]:
-        return self.embed_batch_sync([text])[0]
+    def embed_sync(self, text: str, *, kind: EmbeddingKind = "document") -> EmbeddingVector:
+        return self.embed_batch_sync([text], kind=kind)[0]
 
-    def embed_batch_sync(self, texts: list[str], *, deadline: float | None = None) -> list[list[float]]:
+    def embed_batch_sync(self, texts: list[str], *, kind: EmbeddingKind = "document",
+                         deadline: float | None = None) -> list[EmbeddingVector]:
         if not texts:
             return []
         if len(texts) > 256 or sum(len(t.encode()) for t in texts) > 1_000_000:
@@ -202,18 +243,60 @@ class LocalEmbeddingEngine:
         if not self._sync_lock.acquire(timeout=max(0, deadline - time.monotonic())):
             raise WorkerUnavailable("Embedding queue deadline exceeded")
         try:
-            return self._call(texts, timeout=max(0, deadline - time.monotonic()))
+            if kind == "query":
+                return self._call(texts, kind=kind, timeout=max(0, deadline - time.monotonic()))
+            return self._documents_sync(texts, deadline)
         finally:
             self._sync_lock.release()
 
-    async def embed_single(self, text: str) -> list[float]:
-        return (await self.embed([text]))[0]
+    def _documents_sync(self, texts: list[str], deadline: float) -> list[EmbeddingVector]:
+        """Documents, from the cache where the active model already embedded the same text."""
+        keys = [hashlib.blake2b(t.encode(), digest_size=16).digest() for t in texts]
+        known = self._fingerprint
+        found: dict[int, EmbeddingVector] = {}
+        if known is not None:
+            for i, key in enumerate(keys):
+                if (cached := self._documents.get((known, key))) is not None:
+                    self._documents.move_to_end((known, key))
+                    found[i] = EmbeddingVector(cached.tolist(), known)
+        missing = [i for i in range(len(texts)) if i not in found]
+        if missing:
+            fresh = self._call([texts[i] for i in missing], kind="document",
+                               timeout=max(0, deadline - time.monotonic()))
+            if fresh[0].fingerprint != known:
+                # Another model answers now: what was cached for the old one can't be mixed in.
+                self._documents.clear()
+                if found:
+                    found, missing = {}, list(range(len(texts)))
+                    fresh = self._call(texts, kind="document", timeout=max(0, deadline - time.monotonic()))
+            for i, vector in zip(missing, fresh, strict=True):
+                found[i] = vector
+                self._documents[(vector.fingerprint, keys[i])] = array("f", vector)
+                self._documents.move_to_end((vector.fingerprint, keys[i]))
+            while len(self._documents) > _DOCUMENT_CACHE_SIZE:
+                self._documents.popitem(last=False)
+        return [found[i] for i in range(len(texts))]
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
+    async def embed_single(self, text: str, *, kind: EmbeddingKind = "document") -> EmbeddingVector:
+        return (await self.embed([text], kind=kind))[0]
+
+    async def embed(self, texts: list[str], *, kind: EmbeddingKind = "document") -> list[EmbeddingVector]:
+        if kind == "query" or len(texts) <= 1:
+            return await self._embed_piece(texts, kind)
+        out: list[EmbeddingVector] = []
+        for piece in _pieces(texts):
+            vectors = await self._embed_piece(piece, kind)
+            if out and vectors and vectors[0].fingerprint != out[0].fingerprint:
+                raise WorkerUnavailable("Embedding model changed during a batch")
+            out += vectors
+        return out
+
+    async def _embed_piece(self, texts: list[str], kind: EmbeddingKind) -> list[EmbeddingVector]:
         if self._closed.is_set() or not self._slots.acquire(blocking=False):
             raise WorkerUnavailable("Embedding queue unavailable")
         try:
-            future = self._executor.submit(self.embed_batch_sync, texts, deadline=time.monotonic() + 10)
+            future = self._executor.submit(self.embed_batch_sync, texts, kind=kind,
+                                           deadline=time.monotonic() + 10)
         except BaseException:
             self._slots.release()
             raise
@@ -227,6 +310,7 @@ class LocalEmbeddingEngine:
         self._executor.shutdown(wait=True, cancel_futures=True)
         self._downloads.shutdown(wait=False, cancel_futures=True)
         self._fingerprint = None
+        self._documents.clear()
 
 
 _engine: LocalEmbeddingEngine | None = None
@@ -258,18 +342,25 @@ atexit.register(_shutdown)
 
 
 class LocalEmbeddingProvider:
+    """Every embedding caller goes through this contract.
+
+    `kind` is "query" for text searched with and "document" for text stored and searched for. It
+    defaults to "document"; a search that embeds its query as a document loses most of the recall
+    the instruction-trained default model was chosen for.
+    """
+
     @property
     def fingerprint(self) -> str | None:
         return get_embedding_engine().fingerprint
 
-    def embed_sync(self, texts: list[str]) -> list[list[float]]:
-        return get_embedding_engine().embed_batch_sync(texts)
+    def embed_sync(self, texts: list[str], *, kind: EmbeddingKind = "document") -> list[EmbeddingVector]:
+        return get_embedding_engine().embed_batch_sync(texts, kind=kind)
 
-    async def embed(self, texts: list[str]) -> list[list[float]]:
-        return await get_embedding_engine().embed(texts)
+    async def embed(self, texts: list[str], *, kind: EmbeddingKind = "document") -> list[EmbeddingVector]:
+        return await get_embedding_engine().embed(texts, kind=kind)
 
-    async def embed_single(self, text: str) -> list[float]:
-        return await get_embedding_engine().embed_single(text)
+    async def embed_single(self, text: str, *, kind: EmbeddingKind = "document") -> EmbeddingVector:
+        return await get_embedding_engine().embed_single(text, kind=kind)
 
 
 _provider = LocalEmbeddingProvider()
@@ -279,12 +370,13 @@ def get_embedding_provider() -> LocalEmbeddingProvider:
     return _provider
 
 
-def _is_model_cached() -> bool:
+def model_cached() -> bool:
+    """Whether the default model is on disk (a download only replaces it whole)."""
     return (_models_dir() / EMBEDDING_MODELS[DEFAULT_MODEL].file).is_file()
 
 
 async def warm_up_embedding() -> None:
-    if not embeddings_installed() or not _is_model_cached():
+    if not embeddings_installed() or not model_cached():
         return
     try:
         await asyncio.to_thread(get_embedding_engine().initialize)

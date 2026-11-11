@@ -10,7 +10,7 @@ import asyncio
 import math
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rune.memory import lexical
 from rune.memory.store import MemoryStore, get_memory_store
@@ -29,6 +29,9 @@ from rune.memory.vector import (
 )
 from rune.utils.logger import get_logger
 from rune.utils.paths import rune_home
+
+if TYPE_CHECKING:
+    from rune.llm.embedding_models import EmbeddingKind, EmbeddingVector
 
 log = get_logger(__name__)
 
@@ -300,12 +303,13 @@ class MemoryManager:
             source="markdown",
         )
 
-    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        """Embed a batch of texts using the configured embedding provider."""
+    async def embed_batch(self, texts: list[str], *, kind: EmbeddingKind = "document") -> list[EmbeddingVector]:
+        """Embed texts with the configured provider: `query` for what is searched with, `document`
+        for what is stored and searched for."""
         from rune.llm.local_embedding import get_embedding_provider
 
         provider = get_embedding_provider()
-        return await provider.embed(texts)
+        return await provider.embed(texts, kind=kind)
 
     async def search(
         self,
@@ -452,7 +456,7 @@ class MemoryManager:
             from rune.llm.local_embedding import get_embedding_provider
 
             provider = get_embedding_provider()
-            embedding = await provider.embed_single(query)
+            embedding = await provider.embed_single(query, kind="query")
             vec_results = self._vectors.search(embedding, k=len(episodes))
             for r in vec_results:
                 vector_scores[r.id] = max(0.0, min(1.0, r.score))
@@ -785,7 +789,7 @@ class MemoryManager:
 
             if embeddings_installed():
                 try:
-                    embedding = await get_embedding_provider().embed_single(episode.task_summary)
+                    embedding = await get_embedding_provider().embed_single(episode.task_summary, kind="document")
                     self._vectors.add(embedding, meta)
                 except Exception as exc:
                     log.warning("episode_indexing_failed", error=str(exc))

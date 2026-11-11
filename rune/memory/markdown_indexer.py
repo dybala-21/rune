@@ -197,7 +197,9 @@ async def incremental_reindex(
     state = load_index_state()
     chunks_state: dict[str, Any] = state.get("chunks", {})
 
-    current_chunks = collect_all_chunks()
+    # Chunks can share an id (the same fact key written more than once). The index keeps one vector
+    # per id, the last one written; embedding the earlier copies too re-embedded them on every run.
+    current_chunks = list({c["id"]: c for c in collect_all_chunks()}.values())
     probe = None
     identity = state.get("model_fingerprint")
     dimensions = state.get("embedding_dimensions")
@@ -207,7 +209,7 @@ async def incremental_reindex(
             from rune.llm.local_embedding import get_embedding_provider
 
             provider = get_embedding_provider()
-            probe = await provider.embed_single(current_chunks[0]["text"])
+            probe = await provider.embed_single(current_chunks[0]["text"], kind="document")
             identity = getattr(probe, "fingerprint", None)
             if not identity:
                 raise ValueError("Embedding provenance is missing")
@@ -246,7 +248,7 @@ async def incremental_reindex(
             provider = get_embedding_provider()
 
             for chunk in to_embed:
-                embedding = probe if probe is not None and chunk is current_chunks[0] else await provider.embed_single(chunk["text"])
+                embedding = probe if probe is not None and chunk is current_chunks[0] else await provider.embed_single(chunk["text"], kind="document")
                 if getattr(embedding, "fingerprint", None) != identity:
                     raise ValueError("Embedding model changed during indexing")
                 meta = VectorMetadata(

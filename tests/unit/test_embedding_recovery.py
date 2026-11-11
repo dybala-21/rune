@@ -19,7 +19,7 @@ async def test_many_updates_remain_searchable_after_reload(tmp_path, monkeypatch
     pytest.importorskip("faiss")
     query = EmbeddingVector([1.0, 0.0], "a" * 64)
 
-    async def embed(text):
+    async def embed(text, **_):
         return query
 
     monkeypatch.setattr("rune.llm.local_embedding.get_embedding_provider",
@@ -106,7 +106,7 @@ def test_transient_download_recovers_once_after_cooldown(recovery_engine, monkey
     with ThreadPoolExecutor(max_workers=8) as pool:
         list(pool.map(request, range(8)))
     engine._download.result(timeout=2)
-    assert len(engine.embed_sync("recovered")) == 768
+    assert len(engine.embed_sync("recovered")) == EMBEDDING_MODELS[DEFAULT_MODEL].dimensions
     assert attempts == [DEFAULT_MODEL, DEFAULT_MODEL] and calls
 
 

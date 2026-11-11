@@ -94,7 +94,7 @@ async def test_search_semantic_ranks_paraphrase_and_caches(monkeypatch, store):
     class _Mgr:
         calls = 0
 
-        async def embed_batch(self, texts):
+        async def embed_batch(self, texts, kind="document"):
             _Mgr.calls += 1
             out = []
             for t in texts:
@@ -133,7 +133,7 @@ def test_limit_and_window_bounds_rejected():
 @pytest.mark.asyncio
 async def test_embedding_count_mismatch_falls_back(monkeypatch, store):
     class _BadMgr:
-        async def embed_batch(self, texts):
+        async def embed_batch(self, texts, kind="document"):
             return [[1.0, 0.0]]  # wrong length → fall back, never drop/crash
 
     import rune.memory.manager as mgr_mod
@@ -151,7 +151,7 @@ async def test_embed_on_write_populates_cache(monkeypatch, tmp_dir):
     class _Prov:
         fingerprint = 'a' * 64
 
-        async def embed(self, texts):
+        async def embed(self, texts, kind="document"):
             return [EmbeddingVector([0.1, 0.2, 0.3, 0.4], self.fingerprint) for _ in texts]
 
     monkeypatch.setattr(le, "get_embedding_provider", lambda: _Prov())
