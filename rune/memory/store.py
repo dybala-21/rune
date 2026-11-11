@@ -682,6 +682,14 @@ class MemoryStore:
             ep.advisor_output_tokens = r[17] or 0
         return ep
 
+    def get_episodes_by_ids(self, ids: list[str]) -> list[Episode]:
+        """The episodes with these ids that still exist, in no particular order."""
+        if not ids:
+            return []
+        marks = ",".join("?" * len(ids))
+        rows = self.conn.execute(f"SELECT * FROM episodes WHERE id IN ({marks})", tuple(ids))  # only ? marks go into the SQL
+        return [self._row_to_episode(r) for r in rows]
+
     def get_recent_episodes(self, limit: int = 10) -> list[Episode]:
         rows = self.conn.execute(
             "SELECT * FROM episodes ORDER BY timestamp DESC LIMIT ?", (limit,)

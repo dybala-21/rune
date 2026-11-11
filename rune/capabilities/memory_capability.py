@@ -133,6 +133,24 @@ class MemoryTuneParams(BaseModel):
 # Implementations
 
 
+# Keyword matches scoring under this share of the best one are noise: with character bigrams
+# almost every text shares some term with the query.
+_KEYWORD_FLOOR = 0.25
+
+
+def _keyword_matches(query: str, texts: list[str], items: list[Any]) -> list[tuple[Any, float]]:
+    """Items whose text matches the query by keyword, best first, with relevance in (0, 1]."""
+    from rune.memory.lexical import rank
+
+    scores = rank(query, texts) if query.strip() else []
+    best = max(scores, default=0.0)
+    if best <= 0:
+        return []
+    found = [(item, score / best) for item, score in zip(items, scores, strict=True)
+             if score >= _KEYWORD_FLOOR * best]
+    return sorted(found, key=lambda pair: pair[1], reverse=True)
+
+
 async def memory_search(params: MemorySearchParams) -> CapabilityResult:
     """Multi-source memory search: facts + episodes + vector index.
 
@@ -155,18 +173,16 @@ async def memory_search(params: MemorySearchParams) -> CapabilityResult:
         query_words = [w for w in query_lower.split() if len(w) > 1]
 
         # Source 1: Working memory facts (keyword match)
-        working = manager.working
-        for key, value in working.facts.items():
-            text = f"{key} {value}".lower()
-            if query_words and any(w in text for w in query_words):
-                all_matches.append(
-                    {
-                        "type": "fact",
-                        "key": key,
-                        "summary": value,
-                        "score": 0.9,
-                    }
-                )
+        facts = list(manager.working.facts.items())
+        for (key, value), relevance in _keyword_matches(params.query, [f"{k} {v}" for k, v in facts], facts):
+            all_matches.append(
+                {
+                    "type": "fact",
+                    "key": key,
+                    "summary": value,
+                    "score": 0.9 * relevance,
+                }
+            )
 
         # Also search project MEMORY.md file
         try:
@@ -176,17 +192,16 @@ async def memory_search(params: MemorySearchParams) -> CapabilityResult:
 
             md_content = read_project_memory_head(os.getcwd())
             if md_content:
-                for line in md_content.splitlines():
-                    stripped = line.strip()
-                    if stripped and query_words and any(w in stripped.lower() for w in query_words):
-                        all_matches.append(
-                            {
-                                "type": "project_fact",
-                                "key": "project_memory",
-                                "summary": stripped,
-                                "score": 0.8,
-                            }
-                        )
+                md_lines = [line.strip() for line in md_content.splitlines() if line.strip()]
+                for stripped, relevance in _keyword_matches(params.query, md_lines, md_lines):
+                    all_matches.append(
+                        {
+                            "type": "project_fact",
+                            "key": "project_memory",
+                            "summary": stripped,
+                            "score": 0.8 * relevance,
+                        }
+                    )
         except Exception as exc:
             log.debug("project_memory_search_failed", error=str(exc)[:100])
 
@@ -213,30 +228,27 @@ async def memory_search(params: MemorySearchParams) -> CapabilityResult:
                         }
                     )
 
-            # Also keyword search in task_summary if few entity results
-            if len(seen_ep_ids) < 3 and query_words:
-                for word in query_words[:3]:
-                    rows = store.conn.execute(
-                        """SELECT * FROM episodes
-                           WHERE task_summary LIKE ? OR result LIKE ?
-                           ORDER BY timestamp DESC LIMIT 5""",
-                        (f"%{word}%", f"%{word}%"),
+            # Few entity matches: add episodes whose task summary matches by keyword
+            if len(seen_ep_ids) < 3 and params.query.strip():
+                hits = manager.keywords.search(params.query, k=10, type_filter="episode")
+                best = hits[0].score if hits else 0.0
+                by_id = {ep.id: ep for ep in store.get_episodes_by_ids(
+                    [h.id for h in hits if h.score >= _KEYWORD_FLOOR * best and h.id not in seen_ep_ids])}
+                for hit in hits:
+                    match = by_id.get(hit.id)
+                    if match is None or match.id in seen_ep_ids:
+                        continue
+                    seen_ep_ids.add(match.id)
+                    all_matches.append(
+                        {
+                            "type": "episode",
+                            "key": f"episode:{match.timestamp[:10]}",
+                            "summary": f"{match.task_summary} — {match.result[:200]}",
+                            "score": 0.75 * hit.score / best,
+                            "entities": match.entities,
+                            "lessons": match.lessons,
+                        }
                     )
-                    for r in rows:
-                        ep = store._row_to_episode(r)
-                        if ep.id in seen_ep_ids:
-                            continue
-                        seen_ep_ids.add(ep.id)
-                        all_matches.append(
-                            {
-                                "type": "episode",
-                                "key": f"episode:{ep.timestamp[:10]}",
-                                "summary": f"{ep.task_summary} — {ep.result[:200]}",
-                                "score": 0.75,
-                                "entities": ep.entities,
-                                "lessons": ep.lessons,
-                            }
-                        )
         except Exception as exc:
             log.debug("episode_search_fallback_error", error=str(exc)[:100])
 
