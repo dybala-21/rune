@@ -6,10 +6,12 @@ memory manager (and every memory tool) still works without them, on keyword sear
 
 from __future__ import annotations
 
+import heapq
 import os
 from pathlib import Path
 from typing import Any
 
+from rune.memory.lexical import LexicalIndex
 from rune.memory.types import SearchResult, VectorMetadata  # re-export for compat
 from rune.utils.fast_serde import json_decode, json_encode
 from rune.utils.logger import get_logger
@@ -295,35 +297,55 @@ class VectorStore:
 # Keyword fallback search (for when vector search is unavailable)
 
 class KeywordIndex:
-    """Simple in-memory keyword search as fallback."""
+    """Keyword search over memory summaries (BM25, rune.memory.lexical).
+
+    The keyword side of hybrid search, and all of it when embeddings can't answer. Items are keyed
+    by their metadata id: adding an id again replaces it. Past `max_items` the oldest goes.
+    """
 
     def __init__(self, max_items: int = 5000) -> None:
-        self._items: list[tuple[str, VectorMetadata]] = []
+        self._index: LexicalIndex[str] = LexicalIndex()
+        self._meta: dict[str, VectorMetadata] = {}
+        self._texts: dict[str, str] = {}
         self._max = max_items
+        self._unnamed = 0
+
+    def __len__(self) -> int:
+        return len(self._meta)
 
     def add(self, text: str, metadata: VectorMetadata) -> None:
-        if len(self._items) >= self._max:
-            self._items.pop(0)
-        self._items.append((text.lower(), metadata))
+        key = metadata.id
+        if not key:
+            self._unnamed += 1
+            key = f"_unnamed:{self._unnamed}"
+        self._meta.pop(key, None)
+        while len(self._meta) >= self._max:
+            oldest = next(iter(self._meta))
+            del self._meta[oldest]
+            del self._texts[oldest]
+            self._index.remove(oldest)
+        self._meta[key] = metadata
+        self._texts[key] = text
+        self._index.add(key, text)
+
+    def remove(self, item_id: str) -> None:
+        if self._meta.pop(item_id, None) is not None:
+            del self._texts[item_id]
+            self._index.remove(item_id)
+
+    def absorb(self, other: KeywordIndex) -> None:
+        """Add everything `other` holds, as newer than what is here."""
+        for key, meta in list(other._meta.items()):
+            self.add(other._texts[key], meta)
 
     def search(
         self, query: str, k: int = 5, type_filter: str | None = None,
     ) -> list[SearchResult]:
-        query_lower = query.lower()
-        query_terms = query_lower.split()
-
-        scored: list[tuple[float, VectorMetadata]] = []
-        for text, meta in self._items:
-            if type_filter is not None and meta.type != type_filter:
-                continue
-            score = sum(1.0 for term in query_terms if term in text) / max(len(query_terms), 1)
-            if score > 0:
-                scored.append((score, meta))
-
-        scored.sort(key=lambda x: x[0], reverse=True)
+        found = [(score, self._meta[key]) for key, score in self._index.scores(query).items()
+                 if type_filter is None or self._meta[key].type == type_filter]
         return [
-            SearchResult(id=meta.id, score=score, metadata=meta, text=meta.summary if meta else "")
-            for score, meta in scored[:k]
+            SearchResult(id=meta.id, score=score, metadata=meta, text=meta.summary)
+            for score, meta in heapq.nlargest(k, found, key=lambda x: x[0])
         ]
 
 

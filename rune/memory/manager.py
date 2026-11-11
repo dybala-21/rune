@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from rune.memory import lexical
 from rune.memory.store import MemoryStore, get_memory_store
 from rune.memory.tiered_memory import TieredMemoryManager
 from rune.memory.types import (
@@ -35,25 +36,8 @@ log = get_logger(__name__)
 # stable profile, bounded so it can't crowd out the rest of the context.
 _DURABLE_INJECT_CHAR_BUDGET = 1500
 _DURABLE_INJECT_MAX_FACTS = 30
-
-
-def _tokenize(text: str) -> set[str]:
-    """Lowercase alphanumeric tokens of length > 2 (cheap relevance signal)."""
-    out: set[str] = set()
-    word = []
-    for ch in text.lower():
-        if ch.isalnum():
-            word.append(ch)
-        elif word:
-            tok = "".join(word)
-            if len(tok) > 2:
-                out.add(tok)
-            word = []
-    if word:
-        tok = "".join(word)
-        if len(tok) > 2:
-            out.add(tok)
-    return out
+# Episodes the keyword index holds, refilled from SQLite on initialize
+_KEYWORD_EPISODES = 5000
 
 
 def _rank_durable_facts(
@@ -71,20 +55,20 @@ def _rank_durable_facts(
     """
     if not facts:
         return []
-    goal_words = _tokenize(goal) if goal else set()
+    texts = [f"{f.key} {f.value}" for f in facts]
+    relevances = lexical.rank(goal, texts) if goal and goal.strip() else [0.0] * len(facts)
 
     # Group preserving first-seen category order, then rank within each group.
     groups: dict[str, list[Any]] = {}
-    for f in facts:
-        groups.setdefault(f.category, []).append(f)
+    for f, relevance in zip(facts, relevances, strict=True):
+        groups.setdefault(f.category, []).append((f, relevance))
 
-    scored: list[tuple[int, int, float, Any]] = []
+    scored: list[tuple[int, float, float, Any]] = []
     for category, items in groups.items():
         # Personal profile (preference) outranks everything else.
         cat_weight = 1 if category == "preference" else 0
         m = len(items)
-        for j, f in enumerate(items):
-            relevance = len(goal_words & _tokenize(f"{f.key} {f.value}")) if goal_words else 0
+        for j, (f, relevance) in enumerate(items):
             recency = j / max(m - 1, 1)  # 0..1, newest highest within its category
             scored.append((cat_weight, relevance, recency, f))
     scored.sort(key=lambda t: (t[0], t[1], t[2]), reverse=True)
@@ -190,6 +174,11 @@ class MemoryManager:
         return self._store
 
     @property
+    def keywords(self) -> KeywordIndex:
+        """Keyword (BM25) index over episode summaries; filled from SQLite on initialize."""
+        return self._keywords
+
+    @property
     def working(self) -> WorkingMemory:
         return self._working
 
@@ -197,6 +186,14 @@ class MemoryManager:
     def tiered(self) -> TieredMemoryManager:
         """Direct access to the tiered memory subsystem."""
         return self._tiered
+
+    def _keyword_index_from_store(self) -> KeywordIndex:
+        index = KeywordIndex(max_items=_KEYWORD_EPISODES)
+        for ep in reversed(self._store.get_recent_episodes(_KEYWORD_EPISODES)):  # newest added last
+            if ep.task_summary:
+                index.add(ep.task_summary, VectorMetadata(
+                    type="episode", id=ep.id, timestamp=ep.timestamp, summary=ep.task_summary))
+        return index
 
     async def initialize(self) -> None:
         """Load working memory from markdown files and SQLite."""
@@ -268,6 +265,13 @@ class MemoryManager:
         # Load recent commands from SQLite (operational data stays in DB)
         commands = await loop.run_in_executor(None, self._store.get_recent_commands, 20)
         self._working.recent_commands = [c["command"] for c in commands]
+
+        # The keyword index lives in memory: refill it from the episodes SQLite keeps, so a
+        # restart doesn't leave keyword search knowing only what happened since. Built off the
+        # event loop (5,000 episodes take ~0.1 s), then swapped in with whatever was saved meanwhile.
+        refilled = await loop.run_in_executor(None, self._keyword_index_from_store)
+        refilled.absorb(self._keywords)
+        self._keywords = refilled
 
         # Reconcile: sync fact-meta.json with learned.md values.
         # If meta has eval data (eval_count > 0), meta wins — it has been
@@ -432,6 +436,13 @@ class MemoryManager:
             self._store.get_recent_episodes,
             max(limit * 5, 50),
         )
+        # Older episodes the query matches by keyword are candidates too, not only the latest few.
+        if query.strip():
+            have = {ep.id for ep in episodes}
+            older = [r.id for r in self._keywords.search(query, k=limit * 2, type_filter="episode")
+                     if r.id not in have]
+            if older:
+                episodes += await loop.run_in_executor(None, self._store.get_episodes_by_ids, older)
         if not episodes:
             return []
 
@@ -449,16 +460,15 @@ class MemoryManager:
             log.debug("episode_vector_scoring_failed", error=type(exc).__name__)
 
         if not vector_scores:
-            # Keyword overlap, whenever the vector side produced nothing —
-            # not only when it raised. An empty index returns [] cleanly, so
-            # gating this on the exception left episodes ranked by importance
-            # and recency alone the moment faiss was installed.
-            query_terms = set(query.lower().split()) if query.strip() else set()
-            if query_terms:
-                for ep in episodes:
-                    summary_terms = set((ep.task_summary or "").lower().split())
-                    overlap = len(query_terms & summary_terms)
-                    vector_scores[ep.id] = overlap / len(query_terms)
+            # Keyword relevance (BM25, scaled so the best match is 1), whenever the vector side
+            # produced nothing, not only when it raised. An empty index returns [] cleanly, so
+            # gating this on the exception left episodes ranked by importance and recency alone
+            # the moment faiss was installed.
+            if query.strip():
+                relevance = lexical.rank(query, [ep.task_summary or "" for ep in episodes])
+                best = max(relevance, default=0.0)
+                if best > 0:
+                    vector_scores = {ep.id: r / best for ep, r in zip(episodes, relevance, strict=True)}
 
         now = datetime.now(UTC)
 
