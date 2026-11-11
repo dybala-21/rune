@@ -213,7 +213,8 @@ class TestQARegressions:
         pathological = "<script " * 100_000
         t = time.perf_counter()
         relevant_windows(pathological, "server listens on port 6379", k=1, window=120)
-        assert time.perf_counter() - t < 0.5  # linear -> well under 0.5s
+        # Linear takes ~0.1 s, the quadratic version ~2.2 s. Shared CI runners have gone past 0.5 s.
+        assert time.perf_counter() - t < 1.5
 
     def test_evidence_at_page_end_is_windowed(self):
         # A supporting sentence in the final window-worth of text must be selectable.
