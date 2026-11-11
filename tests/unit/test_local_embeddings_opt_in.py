@@ -34,7 +34,7 @@ def test_off_by_default_downloads_and_starts_nothing(engine, monkeypatch, value)
         monkeypatch.setenv("RUNE_LOCAL_EMBEDDINGS", value)
     for download in (False, True):
         with pytest.raises(WorkerUnavailable, match="RUNE_LOCAL_EMBEDDINGS=1"):
-            engine._call(["hello"], timeout=1, download=download)
+            engine._call(["hello"], kind="document", timeout=1, download=download)
     assert engine.fetched == [] and engine.requests == []
     assert engine._worker.last_error == "local_embeddings_off"
     assert not local_embedding.embeddings_enabled()
@@ -44,7 +44,7 @@ def test_turned_on_it_fetches_the_model_as_before(engine, monkeypatch):
     monkeypatch.setenv("RUNE_LOCAL_EMBEDDINGS", "1")
     assert local_embedding.embeddings_enabled()
     with pytest.raises(WorkerUnavailable, match="not cached"):
-        engine._call(["hello"], timeout=1)
+        engine._call(["hello"], kind="document", timeout=1)
     assert engine.fetched == ["scheduled"]
 
 
@@ -60,7 +60,7 @@ def test_health_names_the_switch(monkeypatch):
 
 async def test_warm_up_starts_no_worker_while_off(monkeypatch):
     monkeypatch.setattr(local_embedding, "embeddings_installed", lambda: True)
-    monkeypatch.setattr(local_embedding, "_is_model_cached", lambda: True)
+    monkeypatch.setattr(local_embedding, "model_cached", lambda: True)
     monkeypatch.delenv("RUNE_LOCAL_EMBEDDINGS", raising=False)
     started = []
     monkeypatch.setattr(local_embedding, "get_embedding_engine", lambda: started.append(1))
@@ -76,7 +76,7 @@ async def test_saved_episode_is_not_embedded_while_off(monkeypatch):
     monkeypatch.delenv("RUNE_LOCAL_EMBEDDINGS", raising=False)
     embedded, vectors = [], []
 
-    async def embed_single(text):
+    async def embed_single(text, *, kind="document"):
         embedded.append(text)
         return [0.0]
 
@@ -102,7 +102,7 @@ async def test_search_asks_for_a_query_vector_only_when_on(monkeypatch, on):
         monkeypatch.delenv("RUNE_LOCAL_EMBEDDINGS", raising=False)
     asked = []
 
-    async def embed_single(text):
+    async def embed_single(text, *, kind="document"):
         asked.append(text)
         raise WorkerUnavailable("not loaded")
 

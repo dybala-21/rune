@@ -184,7 +184,7 @@ class ConversationStore:
             items = list(todo.items())
             for start in range(0, len(items), 64):
                 batch = items[start:start + 64]
-                vecs = await provider.embed([c[:500] for _, c in batch])
+                vecs = await provider.embed([c[:500] for _, c in batch], kind="document")
                 identity = getattr(vecs[0], "fingerprint", None)
                 if not identity or any(getattr(v, "fingerprint", None) != identity for v in vecs):
                     raise ValueError("Embedding provenance is missing or mixed")

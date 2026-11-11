@@ -460,10 +460,12 @@ class ConversationSearchParams(BaseModel):
     )
 
 
-# Min cosine to count as a real recall. Calibrated to the local embedding model:
-# true topical matches score ~0.7+, unrelated turns ~0.3-0.4, so 0.5 cleanly
-# separates signal from noise. The keyword fallback (overlap fraction) reuses it.
+# Min keyword overlap fraction to count as a real recall when there are no vectors.
+# With vectors the floor is the embedding model's measured match_threshold.
 _RELEVANCE_FLOOR = 0.5
+# Characters of uncached turns a search embeds itself, so a search after a model change stays
+# within a couple of seconds; the background reindex fills in the rest.
+_INLINE_TURN_CHARS = 6000
 
 
 def _cos(a: list[float], b: list[float]) -> float:
@@ -509,26 +511,35 @@ async def conversation_search(params: ConversationSearchParams) -> CapabilityRes
         # content hash (turn ids churn on re-save), so a search only embeds the
         # query plus turns never seen before — a warm store re-embeds nothing.
         ranked: list[tuple[float, dict]]
+        floor = _RELEVANCE_FLOOR
         try:
             import numpy as np
 
+            from rune.llm.local_embedding import match_threshold
+
             manager = get_memory_manager()
-            query_vectors = await manager.embed_batch([params.query])
+            query_vectors = await manager.embed_batch([params.query], kind="query")
             if len(query_vectors) != 1:
                 raise ValueError("Embedding query count mismatch")
             identity = getattr(query_vectors[0], "fingerprint", None)
             if not identity:
                 raise ValueError("Embedding provenance is missing")
             cached = store.get_cached_embeddings([c["content_hash"] for c in cands], fingerprint=identity)
-            todo = {
-                c["content_hash"]: c["content"][:500]
-                for c in cands
-                if c["content_hash"] not in cached
-            }
+            # Turns are recent first. Embedding every uncached one here could take minutes after the
+            # model changes; the newest go now and the background reindex fills in the rest.
+            todo: dict[str, str] = {}
+            budget = _INLINE_TURN_CHARS
+            for c in cands:
+                if c["content_hash"] not in cached and c["content_hash"] not in todo:
+                    text = c["content"][:500]
+                    if len(text) > budget:
+                        break
+                    todo[c["content_hash"]] = text
+                    budget -= len(text)
             vecs = list(query_vectors)
             values = list(todo.values())
             for start in range(0, len(values), 64):
-                batch = await manager.embed_batch(values[start:start + 64])
+                batch = await manager.embed_batch(values[start:start + 64], kind="document")
                 if any(getattr(v, "fingerprint", None) != identity for v in batch):
                     raise ValueError("Embedding model changed during search")
                 vecs.extend(batch)
@@ -549,6 +560,7 @@ async def conversation_search(params: ConversationSearchParams) -> CapabilityRes
                 np.linalg.norm(mat, axis=1) * (float(np.linalg.norm(qv)) + 1e-9) + 1e-9
             )
             ranked = list(zip(sims.tolist(), rows, strict=True))
+            floor = match_threshold()
         except Exception as exc:
             log.debug("conversation_vector_search_failed", error=type(exc).__name__)
             ranked = _keyword_rank()
@@ -560,7 +572,7 @@ async def conversation_search(params: ConversationSearchParams) -> CapabilityRes
         blocks: list[str] = []
         for score, turn in ranked:
             cid = turn["conversation_id"]
-            if cid in seen or score < _RELEVANCE_FLOOR:  # drop weak/unrelated matches
+            if cid in seen or score < floor:  # drop weak/unrelated matches
                 continue
             seen.add(cid)
             win = store.get_turn_window(cid, turn["created_order"], params.window)

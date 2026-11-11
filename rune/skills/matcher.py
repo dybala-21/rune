@@ -14,10 +14,9 @@ from difflib import SequenceMatcher
 
 from rune.skills.types import Skill, SkillMatch
 
-# Cosine at/above this counts as a semantic match; below it only lexical is used
-# (unrelated short texts still cosine ~0.3). Mirrors RUNE_RULE_SIM_THRESHOLD.
+# Cosine at/above this counts as a semantic match; below it only lexical is used.
+# Defaults to the embedding model's measured cut, like RUNE_RULE_SIM_THRESHOLD.
 _SKILL_SIM_THRESHOLD_ENV = "RUNE_SKILL_SIM_THRESHOLD"
-_DEFAULT_SKILL_SIM_THRESHOLD = 0.55
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -35,26 +34,31 @@ def _skill_embed_text(skill: Skill) -> str:
 
 def _semantic_scores(query: str, skills: list[Skill]) -> dict[str, float]:
     """Cosine(query, skill) keyed by skill name; {} on failure so the caller
-    falls back to lexical-only. One batched embed call."""
+    falls back to lexical-only. The query and the skills are embedded apart (query and document
+    kinds); skill vectors come from the provider's document cache after the first time."""
     if not skills:
         return {}
     try:
         from rune.llm.local_embedding import get_embedding_provider
 
         provider = get_embedding_provider()
-        texts = [query] + [_skill_embed_text(s) for s in skills]
-        vecs = provider.embed_sync(texts)
-        qv = vecs[0]
-        return {skills[i].name: _cosine(qv, vecs[i + 1]) for i in range(len(skills))}
+        qv = provider.embed_sync([query], kind="query")[0]
+        vecs = provider.embed_sync([_skill_embed_text(s) for s in skills], kind="document")
+        if any(getattr(v, "fingerprint", None) != getattr(qv, "fingerprint", None) for v in vecs):
+            return {}
+        return {skill.name: _cosine(qv, v) for skill, v in zip(skills, vecs, strict=True)}
     except Exception:
         return {}
 
 
 def _sim_threshold() -> float:
+    from rune.llm.local_embedding import match_threshold
+
+    default = match_threshold()
     try:
-        return float(os.environ.get(_SKILL_SIM_THRESHOLD_ENV, "") or _DEFAULT_SKILL_SIM_THRESHOLD)
+        return float(os.environ.get(_SKILL_SIM_THRESHOLD_ENV, "") or default)
     except ValueError:
-        return _DEFAULT_SKILL_SIM_THRESHOLD
+        return default
 
 
 def _tokenize(text: str) -> set[str]:

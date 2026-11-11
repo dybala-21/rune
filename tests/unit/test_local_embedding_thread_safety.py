@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from rune.llm.embedding_models import EMBEDDING_MODELS
+from rune.llm.embedding_models import DEFAULT_MODEL, EMBEDDING_MODELS
 from rune.llm.local_embedding import LocalEmbeddingEngine
 from rune.utils.process_worker import (
     ProcessWorker,
@@ -45,8 +45,9 @@ def fake_worker(sock: socket.socket) -> None:
                 time.sleep(30)
             time.sleep(params.get('delay', 0))
             count += 1
-            result = {'count': count, 'dimensions': 768, 'fingerprint': 'a' * 64,
-                      'vectors': [[float(count)] * 768 for _ in params.get('texts', [])]}
+            dimensions = EMBEDDING_MODELS[params.get('model_id', DEFAULT_MODEL)].dimensions
+            result = {'count': count, 'dimensions': dimensions, 'fingerprint': 'a' * 64,
+                      'vectors': [[float(count)] * dimensions for _ in params.get('texts', [])]}
             send_message(sock, {'id': 'bad' if action == 'wrong_id' else req['id'],
                                 'result': result}, None)
     except (EOFError, OSError):
@@ -64,7 +65,7 @@ def worker():
 
 @pytest.fixture
 def engine(tmp_path, monkeypatch, worker):
-    (tmp_path / EMBEDDING_MODELS['nomic-embed-text'].file).write_bytes(b'fixture')
+    (tmp_path / EMBEDDING_MODELS[DEFAULT_MODEL].file).write_bytes(b'fixture')
     monkeypatch.setattr('rune.llm.local_embedding._models_dir', lambda: tmp_path)
     eng = LocalEmbeddingEngine(worker=worker)
     yield eng
@@ -73,7 +74,8 @@ def engine(tmp_path, monkeypatch, worker):
 
 def test_sync_serialization(engine):
     with ThreadPoolExecutor(max_workers=8) as pool:
-        values = list(pool.map(engine.embed_sync, ['text'] * 16))
+        # Queries: the same document text would be answered from the document cache.
+        values = list(pool.map(lambda text: engine.embed_sync(text, kind='query'), ['text'] * 16))
     assert sorted(v[0] for v in values) == list(range(1, 17))
     assert engine.is_ready()
     assert engine.fingerprint == 'a' * 64
@@ -158,3 +160,39 @@ def test_missing_model_does_not_block_search(tmp_path, monkeypatch):
         assert engine.health['pid'] is None
     finally:
         engine.dispose()
+
+
+def _wait_for(predicate, seconds: float = 10.0) -> bool:
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_an_idle_worker_is_parked_and_starts_again_on_the_next_request():
+    w = ProcessWorker(fake_worker, cooldown=0, idle_timeout=0.5)
+    try:
+        assert w.request({"texts": ["a"]}, timeout=10)["count"] == 1
+        assert w.status["state"] == "ready"
+        assert _wait_for(lambda: w.status["state"] == "parked"), "stopped after half a second unused"
+        assert w.status["pid"] is None
+        again = w.request({"texts": ["b"]}, timeout=10)
+        assert again["count"] == 1, "a fresh child"
+        assert (w.status["state"], w.generation) == ("ready", 2)
+        assert _wait_for(lambda: w.status["state"] == "parked"), "and parked again after that"
+    finally:
+        w.close()
+
+
+def test_a_busy_worker_is_not_parked():
+    w = ProcessWorker(fake_worker, cooldown=0, idle_timeout=0.6)
+    try:
+        end = time.monotonic() + 1.5
+        while time.monotonic() < end:
+            w.request({"texts": ["a"]}, timeout=10)
+            time.sleep(0.1)
+        assert (w.status["state"], w.generation) == ("ready", 1)
+    finally:
+        w.close()

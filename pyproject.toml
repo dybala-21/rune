@@ -75,7 +75,11 @@ dependencies = [
 # Heavy optional features (lazy-imported, core works without them)
 vector = ["faiss-cpu>=1.13.2"]
 browser = ["playwright>=1.58.0"]
-embedding = ["llama-cpp-python>=0.3.0"]
+# Pinned to a commit until a release carries llama.cpp cb55ffe6 ("skip the LM head for pooled
+# embeddings"). 0.3.36 allocates a vocabulary-sized logits buffer even for embeddings: EmbeddingGemma
+# held 788-1,184 MB resident against 657 MB with the fix (CPU, 4 threads). Move back to a release
+# once one carries it.
+embedding = ["llama-cpp-python @ git+https://github.com/abetlen/llama-cpp-python@98f7a2de7eca445080d0b1f7b489b9e777fa5785"]
 codeintel = ["tree-sitter-language-pack>=0.13.0"]
 # Vertex AI (service-account auth for Gemini via LiteLLM vertex_ai/)
 vertex = ["google-cloud-aiplatform>=1.70.0"]
@@ -111,6 +115,10 @@ build-backend = "hatchling.build"
 Homepage = "https://github.com/dybala-21/rune"
 Repository = "https://github.com/dybala-21/rune"
 Issues = "https://github.com/dybala-21/rune/issues"
+
+[tool.hatch.metadata]
+# For the llama-cpp-python commit pin in the embedding extra.
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["rune"]

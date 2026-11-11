@@ -138,10 +138,12 @@ class TestGetRelevantRules:
         monkeypatch.setattr(rule_learner, "_resolved_rule_candidates", lambda: list(self._CANDS))
 
         class _FakeMgr:
-            async def embed_batch(self, texts):
+            async def embed_batch(self, texts, kind="document"):
                 if raise_embed:
                     raise RuntimeError("no embedding provider")
-                return vecs if vecs is not None else self_vecs
+                # The goal is embedded as a query, the rules as documents, in two calls.
+                out = vecs if vecs is not None else self_vecs
+                return out[:1] if kind == "query" else out[1:]
 
         self_vecs = self._VECS
         import rune.memory.manager as mgr_mod

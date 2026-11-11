@@ -19,7 +19,7 @@ from rune.utils.paths import rune_data
 
 log = get_logger(__name__)
 
-# Default embedding dimension (nomic-embed-text v1.5)
+# For a store used without a model identity; with one, select_model sets the dimension.
 DEFAULT_DIM = 768
 
 __all__ = ["VectorMetadata", "SearchResult", "VectorStore", "KeywordIndex", "get_vector_store"]
