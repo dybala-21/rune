@@ -109,8 +109,11 @@ async def _retrieve_vectors(
     fetch_k: int,
     type_filter: str | None,
 ) -> list[SearchResult]:
+    from rune.llm.local_embedding import embeddings_enabled, get_embedding_provider
+
+    if not embeddings_enabled():
+        return []  # keyword-only by choice, not a failure
     try:
-        from rune.llm.local_embedding import get_embedding_provider
         provider = get_embedding_provider()
         embedding = await provider.embed_single(query)
         return vectors.search(embedding, k=fetch_k, type_filter=type_filter)

@@ -51,6 +51,8 @@ def test_index_upsert_after_reload_replaces_old_entry(tmp_path):
 
 
 async def test_indexer_rebuilds_missing_cache_and_deletes_after_reload(tmp_path, monkeypatch):
+    monkeypatch.setenv("RUNE_LOCAL_EMBEDDINGS", "1")
+    monkeypatch.setattr("rune.llm.local_embedding.embeddings_installed", lambda: True)
     from types import SimpleNamespace
 
     import rune.memory.markdown_indexer as indexer

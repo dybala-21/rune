@@ -191,6 +191,10 @@ async def incremental_reindex(
     Compares SHA-256 hashes against index-state.json.
     Returns stats: {added, updated, removed, unchanged}.
     """
+    from rune.llm.local_embedding import embeddings_enabled
+
+    if not embeddings_enabled():
+        return {"added": 0, "updated": 0, "removed": 0, "unchanged": 0}  # keyword-only by choice
     if vectors is None:
         vectors = get_vector_store()
 

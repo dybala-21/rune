@@ -81,6 +81,9 @@ def memory_search_mode() -> dict[str, str]:
         return {"mode": "keyword", "reason": "the vector extra (numpy, faiss) is not installed"}
     if not local_embedding.embeddings_installed():
         return {"mode": "keyword", "reason": "the embedding extra (llama-cpp-python) is not installed"}
+    if not local_embedding.embeddings_enabled():
+        return {"mode": "keyword",
+                "reason": f"local embeddings are off (set {local_embedding.LOCAL_EMBEDDINGS_ENV}=1 to turn them on)"}
     engine = local_embedding._engine
     if engine is None or not engine.is_ready():
         error = engine.health.get("last_error") if engine is not None else None

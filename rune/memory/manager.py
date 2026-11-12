@@ -781,9 +781,9 @@ class MemoryManager:
             self._keywords.add(episode.task_summary, meta)
 
             # Vector index, only when embeddings can run; otherwise search stays on keywords
-            from rune.llm.local_embedding import embeddings_installed, get_embedding_provider
+            from rune.llm.local_embedding import embeddings_enabled, get_embedding_provider
 
-            if embeddings_installed():
+            if embeddings_enabled():
                 try:
                     embedding = await get_embedding_provider().embed_single(episode.task_summary)
                     self._vectors.add(embedding, meta)
