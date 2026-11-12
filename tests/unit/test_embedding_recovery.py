@@ -14,6 +14,13 @@ from rune.memory.vector import KeywordIndex, VectorStore
 from rune.utils.process_worker import WorkerUnavailable
 
 
+@pytest.fixture(autouse=True)
+def _local_embeddings_on(monkeypatch):
+    """These tests drive the engine itself, which runs only when local embeddings are turned on."""
+    monkeypatch.setenv("RUNE_LOCAL_EMBEDDINGS", "1")
+    monkeypatch.setattr("rune.llm.local_embedding.embeddings_installed", lambda: True)
+
+
 @pytest.mark.parametrize("type_filter", [None, "md_fact"])
 async def test_many_updates_remain_searchable_after_reload(tmp_path, monkeypatch, type_filter):
     pytest.importorskip("faiss")

@@ -23,6 +23,12 @@ from rune.utils.process_worker import (
 pytestmark = pytest.mark.embedding_engine
 
 
+@pytest.fixture(autouse=True)
+def _local_embeddings_on(monkeypatch):
+    """These tests drive the engine itself, which runs only when local embeddings are turned on."""
+    monkeypatch.setenv("RUNE_LOCAL_EMBEDDINGS", "1")
+
+
 def fake_worker(sock: socket.socket) -> None:
     count = 0
     try:

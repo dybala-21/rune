@@ -26,19 +26,31 @@ from rune.llm.embedding_models import (
     _models_dir,
 )
 from rune.llm.embedding_worker import serve
+from rune.utils.env import env_flag
 from rune.utils.logger import get_logger
 from rune.utils.process_worker import ProcessWorker, WorkerUnavailable
 
 log = get_logger(__name__)
 __all__ = ["DEFAULT_MODEL", "EMBEDDING_DIM", "EMBEDDING_MODELS", "EmbeddingModelConfig",
            "LocalEmbeddingEngine", "LocalEmbeddingProvider", "get_embedding_engine",
-           "get_embedding_provider", "dispose_embedding_engine", "embeddings_installed", "warm_up_embedding"]
+           "get_embedding_provider", "dispose_embedding_engine", "embeddings_enabled", "embeddings_installed",
+           "warm_up_embedding"]
+
+# Local embeddings run only when the user turns them on. The default model (nomic) costs a 140 MB
+# download and a resident worker, and on Korean it ranks worse than the keyword index alone:
+# Ko-StrategyQA recall@10 0.629 fused with BM25 against 0.703 for BM25 alone (2026-11-12).
+LOCAL_EMBEDDINGS_ENV = "RUNE_LOCAL_EMBEDDINGS"
 
 
 @functools.cache
 def embeddings_installed() -> bool:
     """Whether the `embedding` extra is there; without it memory search runs on keywords."""
     return importlib.util.find_spec("llama_cpp") is not None
+
+
+def embeddings_enabled() -> bool:
+    """Whether local embeddings may run: the extra is installed and the user turned them on."""
+    return env_flag(LOCAL_EMBEDDINGS_ENV) and embeddings_installed()
 
 
 class LocalEmbeddingEngine:
@@ -159,6 +171,10 @@ class LocalEmbeddingEngine:
             # without llama.cpp the model could never load: don't fetch 140 MB of it
             self._worker.last_error = "embedding_extra_missing"
             raise WorkerUnavailable("Local embeddings need the `embedding` extra (llama-cpp-python)")
+        if not env_flag(LOCAL_EMBEDDINGS_ENV):
+            # off unless asked for: no download, no worker, searches stay on keywords
+            self._worker.last_error = "local_embeddings_off"
+            raise WorkerUnavailable(f"Local embeddings are off; set {LOCAL_EMBEDDINGS_ENV}=1 to turn them on")
         path = _models_dir() / EMBEDDING_MODELS[self._model_id].file
         if not path.is_file() or path.stat().st_size == 0:
             if download:
@@ -284,7 +300,7 @@ def _is_model_cached() -> bool:
 
 
 async def warm_up_embedding() -> None:
-    if not embeddings_installed() or not _is_model_cached():
+    if not embeddings_enabled() or not _is_model_cached():
         return
     try:
         await asyncio.to_thread(get_embedding_engine().initialize)
