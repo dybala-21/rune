@@ -26,11 +26,15 @@ _RRF_K = 60
 # Rank assigned to documents missing from a result list
 _MISSING_RANK = 1000
 
-# How much the dense list counts against the keyword list in the fusion. With EmbeddingGemma-300M,
-# equal weights pull the dense ranking down; 3:1 keeps most of it while the keyword list still
-# lifts exact names and ids. Recall@10, dense alone / 1:1 / 3:1 (2026-11-12):
-#   Ko-StrategyQA 0.868 / 0.824 / 0.853,  SciFact 0.906 / 0.866 / 0.896;  BM25 alone 0.703 / 0.555.
-_DENSE_WEIGHT = 3.0
+# Dense-to-keyword weight in the fusion. Any keyword weight lowers EmbeddingGemma-300M's ranking;
+# at 10:1 the loss is within noise, and the keyword list still lifts exact names and ids.
+#
+# LongMemEval-S, all answer sessions in the top 5 (2026-11-13), dense / 1:1 / 3:1 / 10:1:
+#   English (470)                    0.964 / 0.896 / 0.938 / 0.957
+#   Korean (120)                     0.975 / 0.900 / 0.942 / 0.967
+#   Korean questions, English logs   0.958 / 0.942 / 0.958 / 0.958
+# 3:1 loses 0.026 (en) and 0.033 (ko), both significant; 10:1 vs dense is not.
+_DENSE_WEIGHT = 10.0
 _KEYWORD_WEIGHT = 1.0
 
 # Temporal decay: ln(2)/30 gives 30-day half-life

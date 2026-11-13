@@ -32,13 +32,13 @@ def _hit(doc_id: str) -> SearchResult:
                         text=doc_id)
 
 
-def test_the_dense_list_outweighs_the_keyword_list_three_to_one():
+def test_the_dense_list_outweighs_the_keyword_list_ten_to_one():
     from rune.memory.search import _rrf_fuse
 
     dense = [_hit("dense-1"), _hit("dense-2")]
     keyword = [_hit("keyword-1")]
     equal = [r.id for r in _rrf_fuse(dense, keyword)]
-    weighted = [r.id for r in _rrf_fuse(dense, keyword, weights=(3.0, 1.0))]
+    weighted = [r.id for r in _rrf_fuse(dense, keyword, weights=(10.0, 1.0))]
     assert equal.index("keyword-1") < equal.index("dense-2"), "1:1: a keyword-only top hit passes dense #2"
     assert weighted == ["dense-1", "dense-2", "keyword-1"]
     with pytest.raises(ValueError):
@@ -63,7 +63,7 @@ async def test_hybrid_search_fuses_with_the_dense_weight(monkeypatch):
     monkeypatch.setattr(search, "_retrieve_vectors", vectors)
     monkeypatch.setattr(search, "_retrieve_keywords", lambda *_: [_hit("b")])
     await search.hybrid_search("q", SimpleNamespace(), SimpleNamespace(), k=2)  # type: ignore[arg-type]
-    assert seen["weights"] == (3.0, 1.0)
+    assert seen["weights"] == (10.0, 1.0)
 
 
 # Match threshold
