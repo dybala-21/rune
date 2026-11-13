@@ -430,7 +430,7 @@ class TestSemanticMatching:
         import rune.skills.matcher as matcher
 
         class _Prov:
-            def embed_sync(self, texts):
+            def embed_sync(self, texts, kind="document"):
                 return [vec_map[t] for t in texts]
 
         monkeypatch.setattr(matcher, "get_embedding_provider", lambda: _Prov(), raising=False)

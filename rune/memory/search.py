@@ -26,6 +26,13 @@ _RRF_K = 60
 # Rank assigned to documents missing from a result list
 _MISSING_RANK = 1000
 
+# How much the dense list counts against the keyword list in the fusion. With EmbeddingGemma-300M,
+# equal weights pull the dense ranking down; 3:1 keeps most of it while the keyword list still
+# lifts exact names and ids. Recall@10, dense alone / 1:1 / 3:1 (2026-11-12):
+#   Ko-StrategyQA 0.868 / 0.824 / 0.853,  SciFact 0.906 / 0.866 / 0.896;  BM25 alone 0.703 / 0.555.
+_DENSE_WEIGHT = 3.0
+_KEYWORD_WEIGHT = 1.0
+
 # Temporal decay: ln(2)/30 gives 30-day half-life
 _DECAY_LAMBDA = math.log(2) / 30.0
 
@@ -83,7 +90,7 @@ async def hybrid_search(
         return [r for r in vector_results if r.score >= min_score][:k]
 
     # Stage 2: RRF fusion
-    fused = _rrf_fuse(vector_results, keyword_results)
+    fused = _rrf_fuse(vector_results, keyword_results, weights=(_DENSE_WEIGHT, _KEYWORD_WEIGHT))
 
     # Stage 3: Temporal decay
     _apply_temporal_decay(fused)
@@ -115,7 +122,7 @@ async def _retrieve_vectors(
         return []  # keyword-only by choice, not a failure
     try:
         provider = get_embedding_provider()
-        embedding = await provider.embed_single(query)
+        embedding = await provider.embed_single(query, kind="query")
         return vectors.search(embedding, k=fetch_k, type_filter=type_filter)
     except Exception as exc:
         log.warning("vector_search_failed", error=str(exc))
@@ -137,29 +144,33 @@ def _retrieve_keywords(
 
 # Stage 2: RRF Fusion
 
-def _rrf_fuse(*result_lists: list[SearchResult]) -> list[SearchResult]:
+def _rrf_fuse(*result_lists: list[SearchResult],
+              weights: tuple[float, ...] | None = None) -> list[SearchResult]:
     """Reciprocal Rank Fusion across multiple ranked lists.
 
-    score(d) = sum(1 / (k + rank_i(d))) for each list i.
+    score(d) = sum(w_i / (k + rank_i(d))) for each list i, w_i = 1 unless weights are given.
     Documents missing from a list get rank = _MISSING_RANK.
     """
+    weights = weights or (1.0,) * len(result_lists)
+    if len(weights) != len(result_lists):
+        raise ValueError("One weight per result list")
     scores: dict[str, float] = {}
     meta_lookup: dict[str, VectorMetadata] = {}
     text_lookup: dict[str, str] = {}
 
-    for results in result_lists:
+    for weight, results in zip(weights, result_lists, strict=True):
         for rank, r in enumerate(results):
-            scores[r.id] = scores.get(r.id, 0.0) + 1.0 / (_RRF_K + rank + 1)
+            scores[r.id] = scores.get(r.id, 0.0) + weight / (_RRF_K + rank + 1)
             meta_lookup.setdefault(r.id, r.metadata)
             if r.text and not text_lookup.get(r.id):
                 text_lookup[r.id] = r.text
 
     # Add penalty for documents missing from some lists
     all_ids = set(scores)
-    for results in result_lists:
+    for weight, results in zip(weights, result_lists, strict=True):
         present = {r.id for r in results}
         for rid in all_ids - present:
-            scores[rid] += 1.0 / (_RRF_K + _MISSING_RANK)
+            scores[rid] += weight / (_RRF_K + _MISSING_RANK)
 
     fused = [
         SearchResult(

@@ -1492,15 +1492,14 @@ wheels = [
 
 [[package]]
 name = "llama-cpp-python"
-version = "0.3.16"
-source = { registry = "https://pypi.org/simple" }
+version = "0.3.36"
+source = { git = "https://github.com/abetlen/llama-cpp-python?rev=98f7a2de7eca445080d0b1f7b489b9e777fa5785#98f7a2de7eca445080d0b1f7b489b9e777fa5785" }
 dependencies = [
     { name = "diskcache" },
     { name = "jinja2" },
     { name = "numpy" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e4/b4/c8cd17629ced0b9644a71d399a91145aedef109c0333443bef015e45b704/llama_cpp_python-0.3.16.tar.gz", hash = "sha256:34ed0f9bd9431af045bb63d9324ae620ad0536653740e9bb163a2e1fcb973be6", size = 50688636, upload-time = "2025-08-15T04:58:29.212Z" }
 
 [[package]]
 name = "lxml"
@@ -2868,7 +2867,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "kokoro-onnx", marker = "extra == 'voice'", specifier = ">=0.5.0" },
     { name = "litellm", specifier = ">=1.82.1,!=1.82.7,!=1.82.8,!=1.107.0" },
-    { name = "llama-cpp-python", marker = "extra == 'embedding'", specifier = ">=0.3.0" },
+    { name = "llama-cpp-python", marker = "extra == 'embedding'", git = "https://github.com/abetlen/llama-cpp-python?rev=98f7a2de7eca445080d0b1f7b489b9e777fa5785" },
     { name = "lxml", extras = ["cssselect"], specifier = ">=6.1.1" },
     { name = "markdown-it-py", specifier = ">=2.2.0" },
     { name = "mcp", specifier = ">=1.26.0" },

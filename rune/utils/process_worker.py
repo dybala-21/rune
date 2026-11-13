@@ -76,11 +76,17 @@ def watch_parent() -> None:
 class ProcessWorker:
     def __init__(
         self, target: Callable[..., None], *, args: tuple[Any, ...] = (),
-        cooldown: float = 60.0,
+        cooldown: float = 60.0, idle_timeout: float | None = None,
     ) -> None:
         self._target = target
         self._args = args
         self._cooldown = cooldown
+        # A child left unused this long is stopped ("parked") and started again on the next request,
+        # so a model it holds doesn't stay in memory all day for one search an hour.
+        self._idle_timeout = idle_timeout
+        self._last_used = 0.0
+        self._parked = False
+        self._reaper: threading.Thread | None = None
         self._lock = threading.Lock()
         self._closed = threading.Event()
         self._process: Any = None
@@ -101,7 +107,7 @@ class ProcessWorker:
         return {
             "state": "unavailable" if self._closed.is_set() else (
                 "degraded" if self.last_error else (
-                    "ready" if running else "idle"
+                    "ready" if running else ("parked" if self._parked else "idle")
                 )
             ),
             "generation": self.generation,
@@ -124,6 +130,38 @@ class ProcessWorker:
         self._socket = parent
         self._process = process
         self.generation += 1
+        self._parked = False
+        if self._idle_timeout is not None and self._reaper is None:
+            self._reaper = threading.Thread(target=self._park_when_idle, daemon=True, name="rune-worker-idle")
+            self._reaper.start()
+
+    def _park_when_idle(self) -> None:
+        """Stop the child once nothing has used it for idle_timeout seconds."""
+        assert self._idle_timeout is not None
+        while not self._closed.is_set():
+            wait = self._last_used + self._idle_timeout - time.monotonic()
+            if wait > 0:
+                self._closed.wait(wait)
+                continue
+            if not self._lock.acquire(blocking=False):
+                self._closed.wait(1.0)  # a request is running; it renews _last_used
+                continue
+            try:
+                if time.monotonic() - self._last_used < self._idle_timeout:
+                    continue
+                # Decided under the lock, so a request that starts the child again also starts a
+                # new reaper.
+                self._reaper = None
+                if self._process is not None:
+                    try:
+                        self._stop()
+                        self._parked = True
+                        log.info("worker_parked", idle_seconds=self._idle_timeout)
+                    except WorkerUnavailable as exc:
+                        log.warning("worker_park_failed", error=str(exc))
+                return
+            finally:
+                self._lock.release()
 
     def _stop(self) -> None:
         if self._socket is not None:
@@ -171,11 +209,13 @@ class ProcessWorker:
                 if not isinstance(result, dict):
                     raise ValueError("Worker result must be an object")
                 self.last_error = None
+                self._last_used = time.monotonic()
                 return result
             except Exception as exc:
                 # Keep input text out of supervisor errors and health responses.
                 self.last_error = type(exc).__name__
                 self._retry_at = time.monotonic() + self._cooldown
+                self._parked = False
                 self._stop()
                 raise WorkerUnavailable(f"Worker unavailable: {self.last_error}") from exc
         finally:
@@ -196,4 +236,5 @@ class ProcessWorker:
         with self._lock:
             self.last_error = reason
             self._retry_at = time.monotonic() + self._cooldown
+            self._parked = False
             self._stop()

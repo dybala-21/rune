@@ -272,6 +272,8 @@ def create_app() -> Any:
         _run_snapshots.open()
         _maintenance.start()
         computer_maintenance = asyncio.create_task(_computers.maintain())
+        from rune.memory.reindex import keep_vectors_filled
+        vector_fill = asyncio.create_task(keep_vectors_filled())
         log.info("api_server_started")
         _proactive_engine = None
         try:
@@ -295,7 +297,8 @@ def create_app() -> Any:
                 _run_snapshots.interrupt_active("server_shutdown")
             finally:
                 computer_maintenance.cancel()
-                await asyncio.gather(computer_maintenance, return_exceptions=True)
+                vector_fill.cancel()
+                await asyncio.gather(computer_maintenance, vector_fill, return_exceptions=True)
                 await _computers.close()
                 await _maintenance.close()
                 _run_snapshots.close()

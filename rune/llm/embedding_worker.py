@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.metadata
 import json
 import socket
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +21,31 @@ log = get_logger(__name__)
 def _stamp(path: str) -> tuple[int, int, int]:
     stat = Path(path).stat()
     return stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+
+@contextlib.contextmanager
+def _without_weight_repacking() -> Iterator[None]:
+    """Load the weights once, as mapped from the file.
+
+    On CPUs with a repacked layout (ARM, AVX) llama.cpp copies every weight into that layout on
+    load: EmbeddingGemma Q4_0 went from 427 MB to 657 MB resident, for 21 against 9 ms a query at
+    p95. Llama() takes no argument for it, so the model defaults are adjusted while it loads.
+    """
+    # Llama() reads the defaults from the ctypes module, not the package re-export.
+    from llama_cpp import llama_cpp as native
+
+    original = native.llama_model_default_params
+
+    def defaults() -> Any:
+        params = original()
+        params.use_extra_bufts = False
+        return params
+
+    native.llama_model_default_params = defaults
+    try:
+        yield
+    finally:
+        native.llama_model_default_params = original
 
 
 def serve(sock: socket.socket) -> None:
@@ -40,22 +67,30 @@ def serve(sock: socket.socket) -> None:
 
                     if model is not None:
                         model.close()
-                    model = Llama(
-                        model_path=key[1], embedding=True, n_ctx=0,
-                        n_batch=512, verbose=False,
-                    )
+                    model, model_key = None, None
                     with Path(key[1]).open("rb") as source:
                         digest = hashlib.file_digest(source, "sha256").hexdigest()
+                    if config.sha256 and digest != config.sha256:
+                        raise ValueError("Embedding model file does not match its pinned hash")
+                    # All layers go to the GPU when llama.cpp was built with one (Metal on Apple
+                    # Silicon: EmbeddingGemma 6 ms a query against 21 ms on the CPU); otherwise a no-op.
+                    with _without_weight_repacking():
+                        model = Llama(
+                            model_path=key[1], embedding=True, n_ctx=config.n_ctx,
+                            n_batch=512, n_gpu_layers=0 if params.get("cpu_only") else -1, verbose=False,
+                        )
                     if _stamp(key[1]) != key[2]:
                         raise ValueError("Embedding model changed while loading")
                     identity = hashlib.sha256(json.dumps([
-                        key[0], digest, config.dimensions, "raw-text-v1",
+                        key[0], digest, config.dimensions, config.prompt_version,
                         importlib.metadata.version("llama-cpp-python"),
                     ]).encode()).hexdigest()
                     model_key = key
+                prefix = config.query_prefix if params.get("kind") == "query" else config.document_prefix
                 vectors = []
                 for text in params.get("texts", []):
-                    vector = model.embed(text)
+                    # Truncated to n_ctx tokens; the prefix comes first, so it always survives.
+                    vector = model.embed(prefix + text, truncate=True)
                     vectors.append(vector[0] if vector and isinstance(vector[0], list) else vector)
                 result = {"vectors": vectors, "fingerprint": identity, "dimensions": config.dimensions}
                 send_message(sock, {"id": request["id"], "result": result}, None)

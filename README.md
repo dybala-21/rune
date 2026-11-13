@@ -286,6 +286,12 @@ In **Settings → Decision model**, choose **Off**, **Jev**, or **Microsoft**. O
 
 When enabled, task context is sent to the selected decision service and billed separately. Uncertain or unavailable decisions fall back to the current connection; local-model requests stay local. These services are optional. Speed and total cost depend on the workload.
 
+### Memory search by meaning (optional)
+
+Memory search uses a keyword index by default. With `RUNE_LOCAL_EMBEDDINGS=1` in `~/.rune/.env`, it also searches by meaning with a local model, [EmbeddingGemma-300M](https://huggingface.co/ggml-org/embeddinggemma-300M-qat-q4_0-GGUF) (Q4_0). The model is a one-time 265 MB download, checked against a pinned SHA-256. It runs in a worker process that takes about 480 MB while loaded and stops after 10 idle minutes.
+
+On Korean retrieval (Ko-StrategyQA), recall@10 rises from 0.70 with keywords to 0.85 with both. The model is under the [Gemma Terms of Use](https://ai.google.dev/gemma/terms). It needs the `embedding` extra, which `full` includes.
+
 ### Execution boundaries
 
 | Mode | Requirements and scope |

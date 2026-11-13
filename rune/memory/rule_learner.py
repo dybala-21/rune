@@ -11,6 +11,7 @@ task outcomes before being injected into prompts (trial-based validation).
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -664,10 +665,29 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb)
 
 
-# Semantic-similarity threshold for cross-domain rule retrieval. Tunable: too
-# low injects unrelated rules, too high misses relevant ones.
+# Semantic-similarity threshold for cross-domain rule retrieval: too low injects
+# unrelated rules, too high misses relevant ones. The default is measured per
+# embedding model (EmbeddingModelConfig.match_threshold); this env overrides it.
 _RULE_SIM_THRESHOLD_ENV = "RUNE_RULE_SIM_THRESHOLD"
-_DEFAULT_RULE_SIM_THRESHOLD = 0.55
+
+
+def _rule_sim_threshold() -> float:
+    from rune.llm.local_embedding import match_threshold
+    from rune.utils.env import env_float
+
+    return env_float(_RULE_SIM_THRESHOLD_ENV, match_threshold())
+
+
+async def _query_and_rules(query: str, rules: list[str]) -> tuple[list[float], Sequence[list[float]]]:
+    """The query embedded as a query and the rules as documents (cached by the provider)."""
+    from rune.memory.manager import get_memory_manager
+
+    manager = get_memory_manager()
+    qvec = (await manager.embed_batch([query], kind="query"))[0]
+    rvecs = await manager.embed_batch(rules, kind="document") if rules else []
+    if any(getattr(v, "fingerprint", None) != getattr(qvec, "fingerprint", None) for v in rvecs):
+        raise ValueError("Embedding model changed between the query and the rules")
+    return qvec, rvecs
 
 
 async def get_relevant_rules(
@@ -686,8 +706,6 @@ async def get_relevant_rules(
     the domain they were stored under. Falls back to exact-domain only when the
     embedding provider is unavailable.
     """
-    from rune.utils.env import env_float
-
     candidates = _resolved_rule_candidates()
     if not candidates:
         return []
@@ -703,12 +721,8 @@ async def get_relevant_rules(
     # 2. Semantic matches across ALL domains — robust to classifier drift.
     if goal:
         try:
-            from rune.memory.manager import get_memory_manager
-
-            threshold = env_float(_RULE_SIM_THRESHOLD_ENV, _DEFAULT_RULE_SIM_THRESHOLD)
-            texts = [goal] + [f"{r['key']}: {r['value']}" for r in candidates]
-            vecs = await get_memory_manager().embed_batch(texts)
-            gvec, rvecs = vecs[0], vecs[1:]
+            threshold = _rule_sim_threshold()
+            gvec, rvecs = await _query_and_rules(goal, [f"{r['key']}: {r['value']}" for r in candidates])
             for r, rv in zip(candidates, rvecs, strict=False):
                 if _cosine(gvec, rv) >= threshold:
                     chosen.setdefault(r["key"], r)
@@ -738,19 +752,14 @@ async def semantic_relevant_rule_keys(
         return None
     try:
         from rune.memory.markdown_store import parse_learned_md
-        from rune.utils.env import env_float
 
         rules = [f for f in parse_learned_md()
                  if f.get("category", "").startswith("rule:")]
         if not rules:
             return set()
-        from rune.memory.manager import get_memory_manager
-
-        threshold = env_float(_RULE_SIM_THRESHOLD_ENV, _DEFAULT_RULE_SIM_THRESHOLD)
+        threshold = _rule_sim_threshold()
         context = f"{goal} {error_message}".strip()
-        texts = [context] + [f"{r['key']}: {r['value']}" for r in rules]
-        vecs = await get_memory_manager().embed_batch(texts)
-        gvec, rvecs = vecs[0], vecs[1:]
+        gvec, rvecs = await _query_and_rules(context, [f"{r['key']}: {r['value']}" for r in rules])
         return {
             r["key"] for r, rv in zip(rules, rvecs, strict=False)
             if _cosine(gvec, rv) >= threshold

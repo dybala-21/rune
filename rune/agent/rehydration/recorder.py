@@ -126,7 +126,7 @@ class CompactionRecorder:
 
                 mgr = get_memory_manager()
                 texts = [r.original_content for r in batch]
-                embeddings = await mgr.embed_batch(texts)
+                embeddings = await mgr.embed_batch(texts, kind="document")
                 from rune.memory.types import VectorMetadata
 
                 for emb, record in zip(embeddings, batch, strict=False):
@@ -228,7 +228,7 @@ async def rebuild_compacted_index(session_id: str) -> int:
 
     mgr = get_memory_manager()
     texts = [r.original_content for r in all_records]
-    embeddings = await mgr.embed_batch(texts)
+    embeddings = await mgr.embed_batch(texts, kind="document")
 
     for emb, record in zip(embeddings, all_records, strict=False):
         meta_dict = record.to_vector_metadata(session_id)
