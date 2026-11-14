@@ -2,7 +2,7 @@ import { ConversationLoader } from '../utils/conversationLoader';
 import { latestTurn, retryAttachments } from '../utils/retry';
 import { retryRequestId, updateDelivery } from '../utils/messageDelivery';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { restoreRunMessages, type RunSnapshot } from '../utils/runSnapshot';
+import { restoreRunMessages, shouldPreserveLocalRequest, type RunSnapshot } from '../utils/runSnapshot';
 import { toast } from '../utils/toast';
 import { usageSummary } from '../utils/usageSummary';
 import { useSSE } from './useSSE';
@@ -184,7 +184,7 @@ function loadPersistedLiveState(): LoadedLiveDraft {
       };
     }
 
-    // legacy format support: state가 바로 루트에 저장되던 포맷
+    // Older drafts stored state directly at the root.
     const stateCandidate = (parsed.state && typeof parsed.state === 'object')
       ? parsed.state as Partial<PersistedLiveState>
       : parsed as Partial<PersistedLiveState>;
@@ -271,6 +271,7 @@ export function useAgent() {
   const acceptedRequest = useRef<string | undefined>(undefined);
   const latestRunStartedAt = useRef(0);
   const [messages, setMessages] = useState<ChatMessage[]>(initialLiveState.messages);
+  const messagesRef = useRef<ChatMessage[]>(initialLiveState.messages);
   const [toolCalls, setToolCalls] = useState<ToolCall[]>(initialLiveState.toolCalls);
   const [thinkingBlocks, setThinkingBlocks] = useState<ThinkingBlock[]>(initialLiveState.thinkingBlocks);
   const [tokenUsage, setTokenUsage] = useState<TokenUsage | null>(initialLiveState.tokenUsage);
@@ -291,7 +292,7 @@ export function useAgent() {
   const [compactionEvents, setCompactionEvents] = useState<CompactionItem[]>(initialLiveState.compactionEvents);
   const [currentStepInfo, setCurrentStepInfo] = useState<StepInfo | null>(null);
   const [orchestration, setOrchestration] = useState<OrchestrationState | null>(null);
-  // tool_call 핸들러가 스텝 번호를 동기적으로 읽어야 하므로 state와 별도로 ref 유지
+  // Tool events need the current step before React renders.
   const currentStepRef = useRef(0);
   // Continue the restored run counter so repeated step numbers stay separate across turns.
   const runSeqRef = useRef(
@@ -306,7 +307,7 @@ export function useAgent() {
   const pendingTextRef = useRef('');
   const pendingPersistRef = useRef<PersistedLiveState | null>(null);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // 현재 run의 assistant 메시지 ID (하나의 run에 하나의 assistant 메시지만 유지)
+  // All text deltas for a run share one assistant message.
   const assistantMsgIdRef = useRef<string | null>(null);
 
   // Read the message ID inside the updater so batched deltas share one message.
@@ -350,7 +351,8 @@ export function useAgent() {
     const restoredCalls = trimTail(draft.toolCalls, MAX_TOOL_CALLS);
     // Reserve the run numbers already used by restored calls.
     runSeqRef.current = restoredCalls.reduce((max, tc) => Math.max(max, tc.run ?? 0), 0);
-    setMessages(trimTail(draft.messages, MAX_MESSAGES));
+    messagesRef.current = trimTail(draft.messages, MAX_MESSAGES);
+    setMessages(messagesRef.current);
     setToolCalls(restoredCalls);
     setThinkingBlocks(trimTail(draft.thinkingBlocks, MAX_THINKING_BLOCKS));
     setTokenUsage(draft.tokenUsage ?? null);
@@ -383,6 +385,7 @@ export function useAgent() {
     currentStepRef.current = 0;
     runSeqRef.current = 0;
     setState('idle');
+    messagesRef.current = [];
     setMessages([]);
     setToolCalls([]);
     setThinkingBlocks([]);
@@ -410,9 +413,12 @@ export function useAgent() {
   }, []);
 
   const resetLiveConversation = useCallback(() => {
+    // Refs also catch submissions made before the next render.
+    if (submitting.current || stateRef.current !== 'idle') return false;
     cancelConversationLoad();
     api.rotateLiveSessionId();
     clearConversationState();
+    return true;
   }, [clearConversationState, cancelConversationLoad]);
 
   const followResumedRun = useCallback((sessionId: string) => {
@@ -453,8 +459,9 @@ export function useAgent() {
 
   const applyRunSnapshot = useCallback((run: RunSnapshot | null) => {
     if (pendingRequest.current && run?.requestId !== pendingRequest.current) return;
-    const unconfirmed = latestTurn(messagesRef.current).user;
-    if (unconfirmed?.delivery === 'unknown' && unconfirmed.requestId !== run?.requestId) return;
+    // Reloaded drafts may contain an unacknowledged request that is not visible yet.
+    if (shouldPreserveLocalRequest(messagesRef.current, run)
+      || shouldPreserveLocalRequest(savedDraftStateRef.current?.messages ?? [], run)) return;
     if (run && run.startedAt < latestRunStartedAt.current) return;
     if (!run) {
       setInterruptedRun(null);
@@ -506,10 +513,11 @@ export function useAgent() {
         activate: (id, contents) => {
           clearConversationState();
           api.setLiveSessionId(id);
-          setMessages(trimTail(contents.turns, MAX_MESSAGES).map(turn => ({
+          messagesRef.current = trimTail(contents.turns, MAX_MESSAGES).map(turn => ({
             id: nextId(), role: turn.role === 'assistant' ? 'assistant' : 'user',
             content: turn.content, attachments: turn.attachments, requestId: turn.requestId, delivery: 'accepted', timestamp: new Date(turn.timestamp).getTime() || Date.now(),
-          })));
+          }));
+          setMessages(messagesRef.current);
           applyRunSnapshot(contents.run ?? null);
           if (stateRef.current !== 'idle') refresh();
           window.dispatchEvent(new Event('rune:workspace-changed'));
@@ -894,7 +902,6 @@ export function useAgent() {
 
 
   // Snapshot for client-side slash commands (/retry, /copy, /export, /stats).
-  const messagesRef = useRef<ChatMessage[]>([]);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
   const tokenUsageRef = useRef<TokenUsage | null>(null);
   useEffect(() => { tokenUsageRef.current = tokenUsage; }, [tokenUsage]);

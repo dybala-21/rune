@@ -105,9 +105,28 @@ export function PickerPopover({ label, trigger, children, onOpen, openRequest, m
       event.stopPropagation();
       return;
     }
-    if (event.key === 'Escape' || event.key === 'Tab') {
-      if (event.key === 'Escape') event.preventDefault();
+    if (event.key === 'Escape') {
+      event.preventDefault();
       event.stopPropagation();
+      close();
+      return;
+    }
+    const panel = event.currentTarget;
+    const search = panel.querySelector<HTMLInputElement>('[data-picker-search]:not(:disabled)');
+    if (event.key === 'Tab') {
+      event.stopPropagation();
+      if (search) {
+        const controls = Array.from(panel.querySelectorAll<HTMLElement>(
+          '[data-picker-search]:not(:disabled), [data-picker-control]:not(:disabled), [role^="menuitem"]:not(:disabled)',
+        ));
+        const current = controls.indexOf(document.activeElement as HTMLElement);
+        const next = current + (event.shiftKey ? -1 : 1);
+        if (current >= 0 && next >= 0 && next < controls.length) {
+          event.preventDefault();
+          controls[next].focus();
+          return;
+        }
+      }
       close();
       return;
     }
@@ -116,18 +135,19 @@ export function PickerPopover({ label, trigger, children, onOpen, openRequest, m
       event.stopPropagation();
       return;
     }
-    const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role^="menuitem"]:not(:disabled)'));
+    const items = Array.from(panel.querySelectorAll<HTMLElement>('[role^="menuitem"]:not(:disabled)'));
     if (!items.length) return;
-    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    const arrows = search ? [search, ...items] : items;
+    const current = arrows.indexOf(document.activeElement as HTMLElement);
     let next: number;
-    if (event.key === 'ArrowDown') next = (current + 1) % items.length;
-    else if (event.key === 'ArrowUp') next = (current - 1 + items.length) % items.length;
-    else if (event.key === 'Home') next = 0;
-    else if (event.key === 'End') next = items.length - 1;
+    if (event.key === 'ArrowDown') next = (current + 1) % arrows.length;
+    else if (event.key === 'ArrowUp') next = current < 0 ? arrows.length - 1 : (current - 1 + arrows.length) % arrows.length;
+    else if (event.key === 'Home') next = search ? 1 : 0;
+    else if (event.key === 'End') next = arrows.length - 1;
     else return;
     event.preventDefault();
     event.stopPropagation();
-    items[next]?.focus();
+    arrows[next]?.focus();
   };
 
   return <>

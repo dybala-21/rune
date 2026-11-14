@@ -6,3 +6,9 @@
 .workbench-workspace-actions button { min-height: 30px; padding: 5px 8px; border-radius: 6px; background: transparent; color: var(--text-secondary); font-size: 12px; }
 .workbench-workspace-actions button:hover { background: var(--bg-hover); color: var(--text-primary); }
 .workbench-workspace-actions button:disabled { opacity: .6; }
+.workbench-run-details { flex-shrink: 0; max-height: 45%; overflow: auto; border-top: 1px solid var(--border); color: var(--text-secondary); font-size: 12px; }
+.workbench-run-details summary { padding: 12px 16px; cursor: pointer; }
+.workbench-run-details summary:hover { color: var(--text-primary); }
+.workbench-run-details dl { display: grid; gap: 6px; margin: 0; padding: 0 16px 14px; }
+.workbench-run-details dl > div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.workbench-run-details dd { margin: 0; color: var(--text-primary); font-family: var(--font-mono); font-variant-numeric: tabular-nums; }

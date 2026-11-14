@@ -18,7 +18,7 @@ interface EnvPanelProps {
 }
 
 type ScopeFilter = 'all' | 'user' | 'project' | 'process';
-type ViewMode = 'list' | 'view' | 'edit' | 'create';
+type ViewMode = 'list' | 'providers' | 'view' | 'edit' | 'create';
 type SaveStatus = { key: string; action: 'saved' | 'removed'; activation: EnvActivation; provider?: string };
 const UNKNOWN_ACTIVATION: EnvActivation = { state: 'unknown', reason: 'The engine did not report when this change takes effect.' };
 
@@ -112,7 +112,7 @@ export function EnvPanel({ onClose, initialMode = 'all', initialKey, onChooseMod
   }, [loadVars, initialKey]);
 
   useEffect(() => {
-    if (viewMode === 'view') detailRef.current?.querySelector<HTMLElement>('[data-env-title]')?.focus();
+    if (viewMode === 'view' || viewMode === 'providers') detailRef.current?.querySelector<HTMLElement>('[data-env-title]')?.focus();
   }, [viewMode, selected]);
 
   const cancelEditing = () => {
@@ -146,6 +146,26 @@ export function EnvPanel({ onClose, initialMode = 'all', initialKey, onChooseMod
     setFormScope('user');
     setSelected(null);
     setViewMode('create');
+  };
+
+  const handleStartAdd = () => {
+    if (loading || loadFailed || saving || editing) return;
+    if (mode === 'all') {
+      handleStartCreate();
+      return;
+    }
+    listTrigger.current = document.activeElement as HTMLElement | null;
+    setError(null);
+    setSelected(null);
+    setFormValue('');
+    setViewMode('providers');
+  };
+
+  const chooseProvider = (key: string) => {
+    const existing = variables.find(variable => variable.key === key
+      || (key === 'GEMINI_API_KEY' && variable.key === 'GOOGLE_API_KEY'));
+    if (existing) handleSelect(existing);
+    else handleStartCreate(key);
   };
 
   const handleStartEdit = () => {
@@ -207,7 +227,6 @@ export function EnvPanel({ onClose, initialMode = 'all', initialKey, onChooseMod
     }
   };
 
-  // Filter and group
   const filtered = variables.filter((v) => {
     if (mode === 'providers' && v.category !== 'llm') return false;
     if (scopeFilter !== 'all' && v.scope !== scopeFilter) return false;
@@ -247,6 +266,7 @@ export function EnvPanel({ onClose, initialMode = 'all', initialKey, onChooseMod
         if (saving) return;
         if (deleteConfirm) setDeleteConfirm(null);
         else if (editing) cancelEditing();
+        else if (viewMode === 'providers') showList();
         else onClose();
       }}
     >
@@ -295,7 +315,7 @@ export function EnvPanel({ onClose, initialMode = 'all', initialKey, onChooseMod
             setViewMode('list');
           }}>{mode === 'providers' ? 'All environment variables' : 'Provider keys'}</button>
           <button
-            onClick={() => handleStartCreate()}
+            onClick={handleStartAdd}
             disabled={loading || loadFailed || saving || editing}
             style={{
               padding: '6px 14px',
@@ -341,7 +361,6 @@ export function EnvPanel({ onClose, initialMode = 'all', initialKey, onChooseMod
             disabled={saving || editing} onClick={() => onChooseModel(saveStatus.provider!)}>Choose model</button>}
         </div>}
 
-        {/* Error banner */}
         {error && (
           <div role="alert" style={{
             padding: '8px 20px',
@@ -381,8 +400,7 @@ export function EnvPanel({ onClose, initialMode = 'all', initialKey, onChooseMod
                   || (provider.key === 'GEMINI_API_KEY' && variable.key === 'GOOGLE_API_KEY'));
                 return <button key={provider.key} disabled={loading || loadFailed || saving || editing} onClick={event => {
                   listTrigger.current = event.currentTarget;
-                  if (existing) handleSelect(existing);
-                  else handleStartCreate(provider.key);
+                  chooseProvider(provider.key);
                 }}><strong>{provider.name}</strong><span>{existing
                   ? existing.scope === 'process' ? 'Inherited key' : 'Saved key' : 'Add key'}</span></button>;
               })}
@@ -409,7 +427,6 @@ export function EnvPanel({ onClose, initialMode = 'all', initialKey, onChooseMod
               />
             </div>
 
-            {/* Scope filter */}
             <div style={{ display: 'flex', gap: 2, padding: '0 12px 8px' }}>
               {(['all', 'user', ...(managed ? [] : ['project']), ...(variables.some(variable => variable.scope === 'process') ? ['process'] : [])] as ScopeFilter[]).map((s) => (
                 <button
@@ -433,7 +450,6 @@ export function EnvPanel({ onClose, initialMode = 'all', initialKey, onChooseMod
               ))}
             </div>
 
-            {/* Variable list grouped by category */}
             <div style={{ flex: 1, overflowY: 'auto', padding: '0 8px 8px' }}>
               {loading ? (
                 <div style={{ padding: 20, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
@@ -532,8 +548,27 @@ export function EnvPanel({ onClose, initialMode = 'all', initialKey, onChooseMod
           <div ref={detailRef} className="env-detail">
             {viewMode !== 'list' && <button className="env-back" disabled={saving} onClick={showList}>← Back to {mode === 'providers' ? 'keys' : 'variables'}</button>}
             {viewMode === 'list' && !selected && (
-              <EnvEmptyState providers={mode === 'providers'} disabled={loading || loadFailed} onCreateNew={() => handleStartCreate()} />
+              <EnvEmptyState providers={mode === 'providers'} disabled={loading || loadFailed} onCreateNew={handleStartAdd} />
             )}
+
+            {viewMode === 'providers' && <div className="env-provider-chooser">
+              <h2 data-env-title tabIndex={-1}>Add an API key</h2>
+              <p>Choose the provider for your key.</p>
+              <div className="env-provider-options">
+                {PROVIDER_KEYS.map(provider => <button type="button" key={provider.key}
+                  disabled={loading || loadFailed || saving}
+                  onClick={() => chooseProvider(provider.key)}>
+                  <strong>{provider.name}</strong><span aria-hidden="true">→</span>
+                </button>)}
+              </div>
+              <button type="button" className="env-advanced-variable" onClick={() => {
+                setMode('all');
+                setScopeFilter('all');
+                setSearch('');
+                handleStartCreate();
+              }}>Add an advanced environment variable</button>
+              <p>For Azure, Vertex, custom providers, and other settings.</p>
+            </div>}
 
             {viewMode === 'view' && selected && (
               <EnvDetailView
@@ -557,6 +592,7 @@ export function EnvPanel({ onClose, initialMode = 'all', initialKey, onChooseMod
                 scope={formScope}
                 paths={paths}
                 managed={managed}
+                providerName={mode === 'providers' ? providerForKey(formKey)?.name : undefined}
                 saving={saving}
                 onKeyChange={setFormKey}
                 onValueChange={setFormValue}
@@ -589,7 +625,6 @@ export function EnvPanel({ onClose, initialMode = 'all', initialKey, onChooseMod
   );
 }
 
-// ── Sub-components ──
 
 function Badge({ label, color }: { label: string; color: string }) {
   return (
@@ -639,7 +674,7 @@ function EnvEmptyState({ onCreateNew, providers, disabled }: { onCreateNew: () =
           cursor: 'pointer',
         }}
       >
-        {providers ? 'Add another provider key' : 'Add a variable'}
+        {providers ? 'Choose a provider' : 'Add a variable'}
       </button>
     </div>
   );
@@ -663,8 +698,7 @@ function EnvDetailView({
 
   return (
     <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
-      {/* Toolbar */}
-      <div style={{
+      <div className="env-detail-toolbar" style={{
         display: 'flex',
         alignItems: 'center',
         gap: 8,
@@ -674,6 +708,7 @@ function EnvDetailView({
       }}>
         <span data-env-title tabIndex={-1} style={{
           overflowWrap: 'anywhere',
+          minWidth: 0,
           fontSize: 15,
           fontWeight: 600,
           color: 'var(--text-primary)',
@@ -712,7 +747,6 @@ function EnvDetailView({
         </button></>}
       </div>
 
-      {/* Detail */}
       <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: 16 }}>
         <DetailRow label="Value">
           <div style={{
@@ -803,6 +837,7 @@ function EnvEditor({
   scope,
   paths,
   managed,
+  providerName,
   saving,
   onKeyChange,
   onValueChange,
@@ -816,6 +851,7 @@ function EnvEditor({
   scope: 'user' | 'project';
   paths: { user: string; project: string };
   managed: boolean;
+  providerName?: string;
   saving: boolean;
   onKeyChange: (v: string) => void;
   onValueChange: (v: string) => void;
@@ -829,8 +865,7 @@ function EnvEditor({
 
   return (
     <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
-      {/* Toolbar */}
-      <div style={{
+      <div className="env-detail-toolbar" style={{
         display: 'flex',
         alignItems: 'center',
         gap: 8,
@@ -838,8 +873,9 @@ function EnvEditor({
         borderBottom: '1px solid var(--border)',
         flexShrink: 0,
       }}>
-        <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', flex: 1 }}>
-          {mode === 'create' ? 'Add Variable' : `Edit: ${envKey}`}
+        <span className="env-editor-title" style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', flex: 1 }}>
+          {providerName ? `${mode === 'create' ? 'Add' : 'Update'} ${providerName} key`
+            : mode === 'create' ? 'Add variable' : `Edit: ${envKey}`}
         </span>
         <button
           onClick={onCancel}
@@ -863,7 +899,7 @@ function EnvEditor({
             background: isValid && !saving ? 'var(--accent)' : 'var(--bg-tertiary)',
             border: 'none',
             borderRadius: 'var(--radius-md)',
-            color: isValid && !saving ? 'white' : 'var(--text-muted)',
+            color: isValid && !saving ? 'var(--text-on-accent)' : 'var(--text-muted)',
             fontSize: 11,
             fontWeight: 600,
             cursor: isValid && !saving ? 'pointer' : 'default',
@@ -873,11 +909,10 @@ function EnvEditor({
         </button>
       </div>
 
-      {/* Form */}
       <div style={{ flex: 1, overflow: 'auto', padding: '16px 20px' }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 520 }}>
-          {/* Key */}
-          {mode === 'create' && (
+          {providerName === 'Google Gemini' && <p className="env-provider-help">Use this key for the Gemini API. Vertex uses Google Cloud credentials instead.</p>}
+          {mode === 'create' && !providerName && (
             <FormField label="Key" hint="e.g. OPENAI_API_KEY">
               <input
                 type="text"
@@ -892,17 +927,16 @@ function EnvEditor({
             </FormField>
           )}
 
-          {/* Value */}
-          <FormField label="Value" hint={mode === 'edit' ? 'Enter the new value' : undefined}>
+          <FormField label={providerName ? 'API key' : 'Value'} hint={mode === 'edit' ? 'Enter the new value' : undefined}>
             <div style={{ position: 'relative' }}>
               <input
                 type={showValue ? 'text' : 'password'}
-                aria-label="Value"
+                aria-label={providerName ? `${providerName} API key` : 'Value'}
                 autoComplete="new-password"
                 disabled={saving}
                 value={value}
                 onChange={(e) => onValueChange(e.target.value)}
-                placeholder={mode === 'edit' ? 'Enter the replacement value' : 'Paste the value'}
+                placeholder={providerName ? 'Paste your API key' : mode === 'edit' ? 'Enter the replacement value' : 'Paste the value'}
                 style={{ ...inputStyle, paddingRight: 36 }}
                 autoFocus={mode === 'edit' || Boolean(envKey)}
               />
@@ -937,9 +971,8 @@ function EnvEditor({
             </div>
           </FormField>
 
-          {/* Scope */}
           <FormField label="Scope" hint={managed ? 'This workspace engine uses user settings.' : 'Where to save'}>
-            <div style={{ display: 'flex', gap: 8 }}>
+            <div className="env-scope-options" style={{ display: 'flex', gap: 8 }}>
               {scopes.map((s) => (
                 <button
                   key={s}

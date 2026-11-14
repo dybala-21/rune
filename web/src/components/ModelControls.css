@@ -21,5 +21,7 @@
 .model-connection strong { font-weight: 500; }
 .model-connection p { margin-top: 4px; line-height: 1.5; }
 .model-connection button, .model-setup-notice button { padding: 3px 0; background: transparent; color: var(--accent); font: inherit; text-align: left; }
+.model-connection .model-connection-summary { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0; color: var(--text-muted); cursor: pointer; }
+.model-connection-summary span:first-child { min-width: 0; }
 .model-setup-notice { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; font-size: 11px; color: var(--text-muted); }
 .model-setup-notice button { text-decoration: underline; text-underline-offset: 3px; }

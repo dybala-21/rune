@@ -26,7 +26,7 @@ const initial = {
 };
 
 function mount() {
-  const slots = [], dependencies = [], pendingEffects = [], calls = [], errors = [];
+  const slots = [], dependencies = [], pendingEffects = [], calls = [], errors = [], modelChanges = [];
   let cursor = 0, config = initial, rejectNext = false, catalogs = 0, fullTree;
   const useState = initial => {
     const index = cursor++;
@@ -60,7 +60,7 @@ function mount() {
   const { ModelPicker } = load(source, modules);
   const render = () => {
     cursor = 0;
-    const tree = ModelPicker({ config, onConfigure() {} });
+    const tree = ModelPicker({ config, onConfigure() {}, onModelChange: model => modelChanges.push(model) });
     fullTree = tree;
     pendingEffects.splice(0).forEach(effect => effect());
     return tree.props.children[0];
@@ -77,7 +77,8 @@ function mount() {
   };
   render();
   return {
-    calls, errors, render, find,
+    calls, errors, render, find, modelChanges,
+    menuText: () => text(render().props.children(() => {})),
     catalogs: () => catalogs,
     notice() { render(); return text(nodes(fullTree).find(node => node.props.className === 'model-setup-notice')); },
     search(value) { menu().find(node => node.type === 'input').props.onChange({ target: { value } }); },
@@ -159,9 +160,11 @@ test('selecting the current model does not save it again', async () => {
   app.find('shared').onClick();
   await flush();
   assert.equal(app.calls.length, 0);
+  assert.equal(app.modelChanges.length, 0);
   app.find('other').onClick();
   await flush();
   assert.deepEqual(app.calls, [{ kind: 'model', provider: 'first', model: 'other' }]);
+  assert.deepEqual(app.modelChanges, [{ provider: 'first', model: 'other' }]);
 });
 
 
@@ -193,4 +196,19 @@ test('setup notice follows the displayed model while a selection is awaiting con
   app.update({ ...initial, activeModel: { provider: 'first', model: 'other', source: 'active' },
     modelConnection: { ...connection, model: 'other', state: 'configured' } });
   assert.equal(app.notice(), '');
+});
+
+test('configured connection details expand locally without claiming verification or reloading models', async () => {
+  const app = mount();
+  app.update({ ...initial, modelConnection: { state: 'configured', provider: 'first', model: 'shared',
+    reason: 'Saved settings exist; model access has not been verified.', action: null } });
+  await app.open();
+  assert.match(app.menuText(), /Configured · access not checked/);
+  assert.doesNotMatch(app.menuText(), /Saved settings exist/);
+  assert.equal(app.find('Configured · access not checked')['aria-expanded'], false);
+  app.find('Configured · access not checked').onClick();
+  assert.equal(app.find('Configured · access not checked')['aria-expanded'], true);
+  assert.match(app.menuText(), /Saved settings exist; model access has not been verified/);
+  assert.equal(app.catalogs(), 1);
+  assert.deepEqual(app.calls, []);
 });

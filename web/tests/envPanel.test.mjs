@@ -114,6 +114,54 @@ test('provider shortcuts open blank values and save only through the existing en
   }
 });
 
+test('Add key chooses a named provider before presenting a key form', async () => {
+  const app = mount({ initialMode: 'providers' });
+  await flush();
+  app.click('Add key');
+  assert.match(app.html(), /Add an API key/);
+  assert.doesNotMatch(app.html(), /aria-label="Variable name"|aria-label="Value"/);
+  app.click('Anthropic→');
+  const editor = app.component('EnvEditor');
+  assert.equal(editor.envKey, 'ANTHROPIC_API_KEY');
+  assert.equal(editor.providerName, 'Anthropic');
+  assert.match(app.html(), /Add Anthropic key|aria-label="Anthropic API key"/);
+  assert.doesNotMatch(app.html(), /aria-label="Variable name"/);
+  assert.deepEqual(app.calls, [['list']]);
+});
+
+test('provider choice preserves the advanced variable editor and hosted user scope', async () => {
+  const app = mount({ initialMode: 'providers', managed: true });
+  await flush();
+  app.click('Add key');
+  app.click('Add an advanced environment variable');
+  assert.match(app.html(), /aria-label="Variable name"/);
+  assert.doesNotMatch(app.html(), /\/project\/\.env|>project</);
+  const editor = app.component('EnvEditor');
+  editor.onKeyChange('GOOGLE_CLOUD_PROJECT');
+  editor.onValueChange('test-project');
+  await app.component('EnvEditor').onSave();
+  assert.deepEqual(app.calls, [['list'], ['set', 'GOOGLE_CLOUD_PROJECT', 'test-project', 'user'], ['list']]);
+});
+
+test('provider chooser resolves an inherited Google alias without offering a replacement', async () => {
+  const app = mount({ initialMode: 'providers' }, [variable('GOOGLE_API_KEY', 'process')]);
+  await flush();
+  app.click('Add key');
+  app.click('Google Gemini→');
+  assert.equal(app.component('EnvDetailView').envVar.key, 'GOOGLE_API_KEY');
+  assert.match(app.html(), /read-only/);
+  assert.doesNotMatch(app.html(), /aria-label="Variable name"/);
+  assert.deepEqual(app.calls, [['list']]);
+});
+
+test('Gemini API key setup distinguishes the Vertex credentials path', async () => {
+  const app = mount({ initialMode: 'providers' });
+  await flush();
+  app.click('Google GeminiAdd key');
+  assert.match(app.html(), /Gemini API/);
+  assert.match(app.html(), /Vertex uses Google Cloud credentials instead/);
+});
+
 test('inherited provider keys are read-only and never point to the project file', async () => {
   for (const managed of [false, true]) {
     const app = mount({ initialMode: 'providers', managed }, [variable('OPENAI_API_KEY', 'process')]);

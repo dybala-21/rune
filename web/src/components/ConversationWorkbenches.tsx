@@ -50,6 +50,8 @@ export function ConversationWorkbenches({ agent, live, history, historyState, wo
             historical
             active={history.open}
             onTabChange={history.setTab}
+            expanded={history.expanded}
+            onToggleExpand={() => history.setExpanded(value => !value)}
             toolCalls={historyState?.toolCalls ?? []}
             fileChanges={historyState?.run?.fileChanges ?? []}
             isRunning={false}
