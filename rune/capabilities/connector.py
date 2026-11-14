@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from pydantic import BaseModel, TypeAdapter
@@ -10,7 +11,8 @@ from rune.capabilities.registry import CapabilityRegistry
 from rune.capabilities.types import CapabilityDefinition
 from rune.connectors.client import BrokerUnavailable, call_broker, hosted_approval
 from rune.connectors.models import ConnectorRequest
-from rune.safety.approval_context import approval_channel, was_approved
+from rune.safety.approval_context import approval_channel, parking, was_approved
+from rune.safety.approval_request import action_request, request_scope
 from rune.types import CapabilityResult, Domain, RiskLevel
 
 
@@ -35,9 +37,15 @@ async def connector_request(params: ConnectorRequest) -> CapabilityResult:
         return CapabilityResult(success=False, error="Connector request requires approval",
                                 metadata={"action_status": "not_executed", "requires_approval": True})
     payload = params.model_dump()
+    stop = parking() if hosted else None
+    if stop is not None:
+        # The owner may take hours; the broker keeps a background request waiting longer.
+        payload["wait"] = "background"
     try:
         result = await call_broker("request", payload)
         if hosted and (result.get("metadata") or {}).get("approval_status") == "pending":
+            if stop is not None:
+                return await _park(stop, params, result)
             return await _wait_for_owner(params, payload, result)
         return TypeAdapter(CapabilityResult).validate_python(result)
     except BrokerUnavailable as exc:
@@ -45,6 +53,30 @@ async def connector_request(params: ConnectorRequest) -> CapabilityResult:
     except Exception as exc:
         return CapabilityResult(success=False, error=f"Connector result unavailable ({type(exc).__name__}); do not repeat a write without checking its outcome",
                                 metadata={"action_status": "unknown"})
+
+
+async def _park(stop: Callable[[str, str], Awaitable[bool]], params: ConnectorRequest,
+                pending: dict[str, Any]) -> CapabilityResult:
+    """Stop a background run until the owner decides on the approval page.
+
+    The run ends as needing approval, with this request as its pending action and the broker's
+    approval id beside it. Once the owner decides, the host wakes this machine and continues the
+    run (`connector.decided`). The continuation sends the request again, and the broker runs it
+    or reports the decline.
+    """
+    metadata = pending.get("metadata") or {}
+    approval_id = str(metadata.get("approval_id") or "")
+    url = str(metadata.get("approval_url") or "")
+    display = f"{params.method} {params.origin}{params.path}"[:200]
+    where = f" at {url}" if url.startswith("https://") else ""
+    action = {**action_request("connector_request", params.model_dump()), "brokerApprovalId": approval_id}
+    with request_scope(action):
+        await stop("connector_request", f"Connected API: {display}. Approve it on the approval page{where}.")
+    return CapabilityResult(success=False,
+                            error="Waiting for the owner to decide on the approval page. "
+                                  "This task stops here and continues after the decision.",
+                            metadata={"action_status": "not_executed", "approval_status": "pending",
+                                      "approval_id": approval_id, "approval_url": url})
 
 
 async def _wait_for_owner(params: ConnectorRequest, payload: dict[str, Any], pending: dict[str, Any]) -> CapabilityResult:

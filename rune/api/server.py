@@ -2090,6 +2090,13 @@ def create_app() -> Any:
                 handler = inspect_routine_approval if method == "cron.approval.inspect" else refresh_routine_approval
                 return _ok(await handler(job_id, RoutineOperationRequest(**params)))
 
+            elif method == "connector.decided":
+                from rune.daemon.external_schedule import continue_decided
+                try:
+                    return _ok(await continue_decided(params.get("approvalId"), params.get("approved")))
+                except ValueError as exc:
+                    return _err("invalid", str(exc))
+
             elif method in {"cron.fire", "cron.occurrence"}:
                 from rune.daemon.external_schedule import fire, occurrence
                 try:
