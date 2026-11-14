@@ -71,6 +71,14 @@ class CapabilityRegistry:
     @timed("tool", name_arg=1)
     async def execute(self, name: str, params: dict[str, Any]) -> CapabilityResult:
         """Execute a capability by name."""
+        result = await self._execute(name, params)
+        if not result.success:
+            from rune.connectors.web_access import explain, touches_network
+            if touches_network(name):
+                result = await explain(result)
+        return result
+
+    async def _execute(self, name: str, params: dict[str, Any]) -> CapabilityResult:
         from rune.safety.task_inspection import inspection_blocker
 
         if blocker := inspection_blocker(name, params):
