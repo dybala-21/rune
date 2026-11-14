@@ -74,7 +74,7 @@ async def list_channels() -> ChannelListResponse:
             channels.append(
                 ChannelInfoResponse(
                     name=name,
-                    status="connected" if _is_running(adapter) else "disconnected",
+                    status=_status(adapter),
                     type=type(adapter).__name__,
                     sessionCount=0,
                 )
@@ -83,6 +83,13 @@ async def list_channels() -> ChannelListResponse:
         log.warning("channel_list_failed", error=str(exc))
 
     return ChannelListResponse(channels=channels)
+
+
+def _status(adapter: object) -> str:
+    # "relayed": the host holds the connection (rune-relay), so the machine may sleep meanwhile.
+    if getattr(adapter, "status", None) == "relayed":
+        return "relayed"
+    return "connected" if _is_running(adapter) else "disconnected"
 
 
 def _is_running(adapter: object) -> bool:
