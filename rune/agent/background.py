@@ -11,7 +11,7 @@ from uuid import uuid4
 
 from rune.agent.run_control import RunControl, control_scope
 from rune.agent.run_outcome import run_outcome
-from rune.safety.approval_context import approval_required
+from rune.safety.approval_context import approval_required, parking_scope
 from rune.safety.execution_environment import environment_scope
 
 
@@ -87,7 +87,7 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
     }
     scope = _current_task.set(task)
     try:
-        with control_scope(control), approval_required(), environment_scope(workspace):
+        with control_scope(control), approval_required(), parking_scope(needs_approval), environment_scope(workspace):
             async with asyncio.timeout(task.timeout_seconds):
                 from rune.proactive.routine_routing import restore, routing_key, snapshot
 

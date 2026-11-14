@@ -2,7 +2,9 @@
 
 Hosted VMs may be stopped between tasks, so their timers belong to a control plane that
 wakes the VM and fires each occurrence. Set ``RUNE_EXTERNAL_SCHEDULER=1`` to stop the
-local dispatcher from firing jobs; approval continuations still run locally.
+local dispatcher from firing jobs; approval continuations still run locally. A run that stops
+for a connector approval waits on the host's approval page, and the control plane continues it
+with ``connector.decided`` once the owner decides.
 
 Scheduled minutes are interpreted in this machine's local time zone, exactly like the
 local dispatcher; run hosted machines in UTC so the control plane computes the same minutes.
@@ -142,6 +144,87 @@ async def fire(job_id: object, minute: object) -> dict[str, Any]:
     if key not in _inflight:
         _inflight[key] = asyncio.create_task(run(), name=f"external-cron:{key}")
     return {"occurrenceId": key, "state": "accepted", "result": None, "replayed": False}
+
+
+def _parked(approval_id: str) -> tuple[Any, str, str, str | None, str | None] | None:
+    """The scheduled run stopped on this broker approval, as (job, operation id, its status, the
+    continuation's id and state), or None."""
+    from rune.capabilities.cron import _get_store, _row_to_cronjob
+    from rune.proactive.execution_store import ExecutionStore
+    from rune.utils.paths import rune_data
+
+    records = ExecutionStore(rune_data() / "routine-executions.db")
+    try:
+        for row in _get_store().list_cron_jobs():  # type: ignore[no-untyped-call]
+            for run in records.recent(f"cron:{row['id']}:"):
+                result = run["result"] or {}
+                action = (result.get("pending_approval") or {}).get("action") or {}
+                # A continued or dismissed run keeps its pending action, so it is still found here.
+                if (result.get("status") in {"needs_approval", "continued", "dismissed"}
+                        and action.get("brokerApprovalId") == approval_id):
+                    child = records.continued(run["id"])
+                    return (_row_to_cronjob(row), run["id"], result["status"], child,
+                            records.state(child) if child else None)
+        return None
+    finally:
+        records.close()
+
+
+async def continue_decided(approval_id: object, approved: object) -> dict[str, Any]:
+    """Act on the owner's decision on the approval page for the scheduled run that stopped on it.
+
+    Approved: the run continues and sends the request again, and the broker runs it. Declined:
+    the run is dismissed and its job paused, as when the owner declines in the app; nothing is
+    sent. Safe to call again: while a continuation runs it reports ``accepted``, and afterwards
+    the state it ended in. ``unknown`` means no run here is waiting on that approval.
+    """
+    if not isinstance(approval_id, str) or not approval_id.isalnum() or not 0 < len(approval_id) <= 64:
+        raise ValueError("approvalId must be the broker's approval id")
+    if not isinstance(approved, bool):
+        raise ValueError("approved must be true or false")
+    key = f"approval:{approval_id}"
+    if (task := _inflight.get(key)) is not None and not task.done():
+        return {"approvalId": approval_id, "state": "accepted"}
+    found = _parked(approval_id)
+    if found is None:
+        return {"approvalId": approval_id, "state": "unknown"}
+    job, operation_id, status, child, state = found
+    if child is not None:
+        return {"approvalId": approval_id, "operationId": child, "state": state}
+    if status == "dismissed":
+        return {"approvalId": approval_id, "operationId": operation_id, "state": "dismissed"}
+    if not approved:
+        _dismiss(job.id, operation_id)
+        return {"approvalId": approval_id, "operationId": operation_id, "state": "dismissed"}
+    if _stopping:
+        raise ValueError("The daemon is shutting down; nothing was started")
+    from rune.capabilities.cron import execute_cron_job
+
+    async def run() -> None:
+        try:
+            await execute_cron_job(job, approval_from=operation_id)
+        except Exception as exc:
+            # The run is still waiting on its approval, so the host's next call tries again.
+            log.warning("approval_continuation_failed", operation=operation_id, error=type(exc).__name__)
+        finally:
+            _inflight.pop(key, None)
+
+    _inflight[key] = asyncio.create_task(run(), name=f"approval-continuation:{operation_id}")
+    return {"approvalId": approval_id, "operationId": operation_id, "state": "accepted"}
+
+
+def _dismiss(job_id: str, operation_id: str) -> None:
+    """What declining in the app does: pause the job first, so nothing reclaims it, then close the run."""
+    from rune.capabilities.cron import _get_store
+    from rune.proactive.execution_store import ExecutionStore
+    from rune.utils.paths import rune_data
+
+    _get_store().update_cron_job(job_id, enabled=False)  # type: ignore[no-untyped-call]
+    records = ExecutionStore(rune_data() / "routine-executions.db")
+    try:
+        records.dismiss_approval(f"cron:{job_id}", operation_id)
+    finally:
+        records.close()
 
 
 async def shutdown() -> None:

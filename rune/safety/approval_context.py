@@ -39,6 +39,25 @@ def approval_channel() -> Any:
     return _CHANNEL.get()
 
 
+_PARKING: ContextVar[Any] = ContextVar("rune_approval_parking", default=None)
+
+
+@contextlib.contextmanager
+def parking_scope(stop: Any) -> Iterator[None]:
+    """A run nobody is watching. `stop(capability, reason)` ends it to wait for an approval decided
+    elsewhere, with the current approval request as the action to continue from."""
+    token = _PARKING.set(stop)
+    try:
+        yield
+    finally:
+        _PARKING.reset(token)
+
+
+def parking() -> Any:
+    """The current run's `stop` callback when it can wait for a later decision, else None."""
+    return _PARKING.get()
+
+
 def _fingerprint(capability: str, params: dict[str, Any]) -> str:
     payload = json.dumps([capability, params], sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(payload.encode()).hexdigest()
