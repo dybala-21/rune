@@ -131,6 +131,7 @@ class ChannelGateway:
         "_registry",
         "_scheduler",
         "_sender_queues",
+        "_working",
         "_running",
         "_routing",
         "_default_recipients",
@@ -153,6 +154,8 @@ class ChannelGateway:
         self._registry = channel_registry
         self._scheduler = agent_scheduler
         self._sender_queues: dict[str, _SenderQueue] = {}
+        # Senders whose message is running now (runs.active reports them, so a hosted machine stays up).
+        self._working: set[str] = set()
         self._running = False
         self._routing = routing or list(DEFAULT_ROUTING)
         self._default_recipients: dict[str, str] = dict(default_recipients or {})
@@ -715,6 +718,7 @@ class ChannelGateway:
                     break
 
                 channel_name = message.metadata.get("channel_name", "")
+                self._working.add(sender_key)
                 try:
                     response_text = await self._execute_for_message(message)
                     await self._send_response(
@@ -737,6 +741,8 @@ class ChannelGateway:
                         "An error occurred while processing your request. Please try again.",
                         channel_name=channel_name,
                     )
+                finally:
+                    self._working.discard(sender_key)
         except asyncio.CancelledError:
             pass
         finally:
@@ -1340,6 +1346,15 @@ def _truncate_for_channel(text: str, channel_name: str) -> str:
 # Module-level singleton for gateway access from other subsystems (e.g. cron)
 
 _gateway_instance: ChannelGateway | None = None
+
+
+def busy_channel_runs() -> list[str]:
+    """Ids for the channel messages running or waiting to run, as `runs.active` lists them."""
+    gw = _gateway_instance
+    if gw is None:
+        return []
+    waiting = {key for key, sq in gw._sender_queues.items() if not sq.queue.empty()}
+    return sorted(f"channel:{key}" for key in gw._working | waiting)
 
 
 def set_gateway(gw: ChannelGateway) -> None:

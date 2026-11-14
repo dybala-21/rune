@@ -2124,6 +2124,22 @@ def create_app() -> Any:
                 result = await list_channels()
                 return _ok(result)
 
+            elif method == "channel.deliver":
+                # Updates the host's rune-relay stored for this machine's channel (rune-bot control).
+                from rune.channels.registry import get_channel_registry
+                from rune.channels.telegram_relay import RelayTelegramAdapter
+
+                _adapter = get_channel_registry().get(str(params.get("channel", "")))
+                _updates = params.get("updates")
+                if not isinstance(_adapter, RelayTelegramAdapter):
+                    return _err("not_found", "This machine has no relayed channel by that name")
+                if not isinstance(_updates, list):
+                    return _err("invalid", "updates must be a list")
+                if _adapter.on_message is None:
+                    # Nothing would handle them yet; refused, they stay with the relay for later.
+                    return _err("unavailable", "The channel gateway isn't running yet")
+                return _ok({"accepted": await _adapter.deliver(_updates)})
+
             elif method == "channels.restart":
                 # Restart the adapter so Settings reports its actual state.
                 from rune.channels.registry import get_channel_registry
@@ -2185,8 +2201,11 @@ def create_app() -> Any:
 
             elif method == "runs.active":
                 # Expose active runs so clients can recover after losing their event stream.
+                from rune.daemon.gateway import busy_channel_runs
+
+                # Channel messages count too: rune-bot's control loop won't suspend a machine mid-run.
                 return _ok({
-                    "runIds": sorted(set(_active_loops) | set(_active_tasks)),
+                    "runIds": sorted(set(_active_loops) | set(_active_tasks) | set(busy_channel_runs())),
                 })
 
             elif method == "models.list":

@@ -114,8 +114,17 @@ def auto_discover_channels() -> list[str]:
     registry = get_channel_registry()
     discovered: list[str] = []
 
+    from rune.channels.telegram_relay import RelayTelegramAdapter, relay_url
+
     telegram_token = os.environ.get("RUNE_TELEGRAM_TOKEN")
-    if telegram_token:
+    if relay := relay_url():
+        # A hosted machine: the host holds the owner's bot. A token here would poll the same bot,
+        # which Telegram refuses while the host's webhook is set.
+        if telegram_token:
+            log.warning("telegram_token_ignored_with_relay")
+        registry.register(RelayTelegramAdapter(relay))
+        discovered.append("telegram")
+    elif telegram_token:
         try:
             from rune.channels.telegram import TelegramAdapter
 
