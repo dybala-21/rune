@@ -73,6 +73,8 @@ class PostProcessInput:
     # Match learned rules to the task domain.
     classification_hint: str | None = None
     wait_for_consolidation: bool = False
+    # Connectors the run called; what it remembers keeps them as its origin.
+    connectors: list[str] = field(default_factory=list)
 
 
 def _sanitize_goal_input(raw: str) -> str:
@@ -309,6 +311,7 @@ async def post_process_agent_result(inp: PostProcessInput) -> list[str]:
                     "tool_budget_exhausted": inp.tool_budget_exhausted,
                     "explanation_review": inp.explanation_review,
                     "changed_files": inp.changed_files,
+                    "connectors": inp.connectors,
                 },
                 memory_manager=manager,
                 conversation_id=inp.context.conversation_id,

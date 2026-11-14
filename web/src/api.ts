@@ -961,3 +961,74 @@ export async function readMarkdownFile(key: string): Promise<{ key: string; cont
 export async function writeMarkdownFile(key: string, content: string): Promise<{ key: string; saved: boolean }> {
   return rpc('markdown.write', { key, content });
 }
+
+// What RUNE remembers, fact by fact, with where each came from.
+export interface MemoryOrigin {
+  kind: string;
+  connectors: string[];
+  conversations: string[];
+}
+
+export interface LearnedFact {
+  key: string;
+  category: string;
+  value: string;
+  confidence: number;
+  hits: number;
+  origin: MemoryOrigin;
+}
+
+export interface MemoryLine {
+  section: string;
+  line: string;
+  key: string;
+  origin: MemoryOrigin | null;
+}
+
+export interface SuppressedFact {
+  key: string;
+  value: string;
+  reason: string;
+  at: string;
+}
+
+export interface RememberedConnector {
+  name: string;
+  facts: number;
+  episodes: number;
+}
+
+export interface MemorySnapshot {
+  learned: LearnedFact[];
+  memory: MemoryLine[];
+  profile: MemoryLine[];
+  suppressed: SuppressedFact[];
+  connectors: RememberedConnector[];
+  forgotten?: { facts: number; episodes: number; dailyEntries: number };
+}
+
+export type MemoryZone = 'learned' | 'memory' | 'profile';
+
+export async function fetchMemory(): Promise<MemorySnapshot> {
+  return rpc('memory.list', {});
+}
+
+export async function saveMemory(change: { zone: MemoryZone; value: string; key?: string; section?: string; old?: string | null }): Promise<MemorySnapshot> {
+  return rpc('memory.save', change);
+}
+
+export async function forgetMemory(item: { zone: MemoryZone; key?: string; section?: string; line?: string }): Promise<MemorySnapshot> {
+  return rpc('memory.forget', item);
+}
+
+export async function promoteMemory(key: string): Promise<MemorySnapshot> {
+  return rpc('memory.promote', { key });
+}
+
+export async function unsuppressMemory(key: string): Promise<MemorySnapshot> {
+  return rpc('memory.unsuppress', { key });
+}
+
+export async function forgetConnectorMemory(connector: string): Promise<MemorySnapshot> {
+  return rpc('memory.forget_connector', { connector });
+}

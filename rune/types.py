@@ -264,6 +264,8 @@ class CompletionTrace:
     # Figures absent from retrieved sources; derived or rounded values may still be valid.
     unsourced_numbers: list[str] = field(default_factory=list)
     timings: dict[str, Any] = field(default_factory=dict)
+    # Connectors this run called, so what it remembers keeps where it came from.
+    connectors: list[str] = field(default_factory=list)
 
 
 # LLM

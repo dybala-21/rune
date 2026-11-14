@@ -71,6 +71,7 @@ class RunMaintenance:
             evidence_gate=getattr(trace, "evidence_gate", None),
             classification_hint=classification_hint,
             wait_for_consolidation=True,
+            connectors=list(getattr(trace, "connectors", []) or []),
         )
         payload = {**asdict(inp), "remaining_budget": getattr(trace, "timings", {}).get("remainingBudget")}
         with self._store.db:

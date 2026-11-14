@@ -18,6 +18,7 @@ const EnvPanel = lazy(() => import('./components/EnvPanel').then(m => ({ default
 const CronPanel = lazy(() => import('./components/CronPanel').then(m => ({ default: m.CronPanel })));
 const MCPPanel = lazy(() => import('./components/MCPPanel').then(m => ({ default: m.MCPPanel })));
 const MarkdownPanel = lazy(() => import('./components/MarkdownPanel').then(m => ({ default: m.MarkdownPanel })));
+const MemoryPanel = lazy(() => import('./components/MemoryPanel').then(m => ({ default: m.MemoryPanel })));
 import { ResumeRunCard } from './components/ResumeRunCard';
 import { CommandK, type Command } from './components/CommandK';
 import { WorkspaceChip } from './components/WorkspaceChip';
@@ -54,6 +55,7 @@ export function App() {
   const [cronPanelOpen, setCronPanelOpen] = useState(false);
   const [mcpPanelOpen, setMcpPanelOpen] = useState(false);
   const [markdownPanelOpen, setMarkdownPanelOpen] = useState(false);
+  const [memoryPanelOpen, setMemoryPanelOpen] = useState(false);
   const [configInfo, setConfigInfo] = useState<ConfigInfo | null>(null);
   const liveWorkbench = useWorkbenchState(getLiveSessionId());
   const historyWorkbench = useWorkbenchState(history.viewingSessionId);
@@ -69,7 +71,7 @@ export function App() {
   const sidebarTriggerRef = useRef<HTMLButtonElement>(null);
   const settingsTriggerRef = useRef<HTMLButtonElement>(null);
   const settingsReturnFocus = useRef<HTMLElement | null>(null);
-  const panelOpen = skillsPanelOpen || envPanelOpen || cronPanelOpen || mcpPanelOpen || markdownPanelOpen;
+  const panelOpen = skillsPanelOpen || envPanelOpen || cronPanelOpen || mcpPanelOpen || markdownPanelOpen || memoryPanelOpen;
   const overlayOpen = settingsOpen || panelOpen || paletteOpen;
   const sidebarRef = useFocusTrap<HTMLDivElement>(compact && sidebarOpen && !overlayOpen, sidebarTriggerRef.current);
   const openSettings = () => {
@@ -297,7 +299,8 @@ export function App() {
     { id: 'env', label: 'Open Environment variables', run: () => openEnvironment('all') },
     { id: 'cron', label: 'Open Scheduled tasks', run: () => setCronPanelOpen(true) },
     { id: 'mcp', label: 'Open MCP servers', run: () => setMcpPanelOpen(true) },
-    { id: 'memory', label: 'Open Memory files', run: () => setMarkdownPanelOpen(true) },
+    { id: 'memory', label: 'Open Memory', run: () => setMemoryPanelOpen(true) },
+    { id: 'memory-files', label: 'Open Memory files', run: () => setMarkdownPanelOpen(true) },
   );
   for (const s of paletteSessions) {
     if (s.id === history.viewingSessionId) continue;
@@ -689,6 +692,7 @@ export function App() {
           onOpenCronPanel={() => setCronPanelOpen(true)}
           onOpenMcpPanel={() => setMcpPanelOpen(true)}
           onOpenMarkdownPanel={() => setMarkdownPanelOpen(true)}
+          onOpenMemoryPanel={() => setMemoryPanelOpen(true)}
         />
       </SettingsDialog>}
 
@@ -700,6 +704,7 @@ export function App() {
         setCronPanelOpen(false);
         setMcpPanelOpen(false);
         setMarkdownPanelOpen(false);
+        setMemoryPanelOpen(false);
       }} />}>
         {skillsPanelOpen && (
           <SkillsPanel
@@ -719,6 +724,10 @@ export function App() {
         )}
         {markdownPanelOpen && (
           <MarkdownPanel onClose={() => setMarkdownPanelOpen(false)} />
+        )}
+        {memoryPanelOpen && (
+          <MemoryPanel onClose={() => setMemoryPanelOpen(false)}
+            onOpenFiles={() => { setMemoryPanelOpen(false); setMarkdownPanelOpen(true); }} />
         )}
       </Suspense>
 

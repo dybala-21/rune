@@ -27,6 +27,12 @@ _CACHE_SECONDS = 5.0
 _cache: tuple[float, dict[str, Any] | None] = (0.0, None)
 
 
+def forget() -> None:
+    """Drop the cached answer, after something here closed the web."""
+    global _cache
+    _cache = (0.0, None)
+
+
 def touches_network(tool: str) -> bool:
     return tool.startswith(_NETWORK_PREFIXES) or tool in _NETWORK_TOOLS
 

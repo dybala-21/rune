@@ -2236,6 +2236,16 @@ def create_app() -> Any:
                 except OSError as exc:
                     return _err("storage", str(exc))
 
+            # Remembered facts with their origin, and forgetting by connector
+            elif method.startswith("memory."):
+                from rune.api.handlers.memory import handle as memory_rpc
+                try:
+                    return _ok(await memory_rpc(method, params))
+                except LookupError as exc:
+                    return _err("NOT_FOUND", str(exc))
+                except ValueError as exc:
+                    return _err("invalid", str(exc)[:300])
+
             # Markdown file editor (HEARTBEAT.md, MEMORY.md, learned.md, user-profile.md)
             elif method == "markdown.list":
                 from rune.utils.paths import rune_home
@@ -2271,6 +2281,9 @@ def create_app() -> Any:
                 _ok_write = _write_markdown_file(_key, _content)
                 if not _ok_write:
                     return _err("WRITE_FAILED", f"Cannot write: {_key}")
+                if _key in {"memory", "learned"}:
+                    from rune.memory.manager import get_memory_manager
+                    get_memory_manager().reload_facts()  # runs read the edited facts, not the old ones
                 return _ok({"key": _key, "saved": True})
 
             else:

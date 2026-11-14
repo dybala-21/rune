@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from rune.memory import lexical
+from rune.memory.provenance import PrivateFilter, allow_private
 from rune.memory.store import MemoryStore, get_memory_store
 from rune.memory.tiered_memory import TieredMemoryManager
 from rune.memory.types import (
@@ -119,6 +120,21 @@ def _actionable_lesson(ep: Any) -> str:
     return "" if _mechanical(raw) else raw[:200]
 
 
+def _markdown_facts() -> dict[str, str]:
+    """Facts from MEMORY.md (Zone 1), then learned.md (Zone 2); MEMORY.md wins on conflict."""
+    from rune.memory.markdown_store import parse_learned_md, parse_memory_md
+
+    facts: dict[str, str] = {}
+    for lines in parse_memory_md().values():
+        for line in lines:
+            if ":" in line:
+                key, _, value = line.partition(":")
+                facts[key.strip()] = value.strip()
+    for fact in parse_learned_md():
+        facts.setdefault(fact["key"], fact["value"])
+    return facts
+
+
 def _select_experience_lines(scored: list[dict[str, Any]]) -> list[str]:
     """Build "## Past Experience" lines, keeping failures as signal not poison.
 
@@ -186,6 +202,14 @@ class MemoryManager:
         return self._working
 
     @property
+    def vectors(self) -> VectorStore:
+        return self._vectors
+
+    def reload_facts(self) -> None:
+        """Read the facts again after MEMORY.md or learned.md changed outside a run."""
+        self._working.facts = _markdown_facts()
+
+    @property
     def tiered(self) -> TieredMemoryManager:
         """Direct access to the tiered memory subsystem."""
         return self._tiered
@@ -204,31 +228,14 @@ class MemoryManager:
             return
         self._initialized = True
 
-        from rune.memory.markdown_store import (
-            ensure_memory_structure,
-            parse_learned_md,
-            parse_memory_md,
-        )
+        from rune.memory.markdown_store import ensure_memory_structure
 
         loop = asyncio.get_running_loop()
 
         # Ensure markdown structure exists on first run
         await loop.run_in_executor(None, ensure_memory_structure)
 
-        # Load facts from MEMORY.md (Zone 1)
-        sections = await loop.run_in_executor(None, parse_memory_md)
-        for lines in sections.values():
-            for line in lines:
-                if ":" in line:
-                    key, _, value = line.partition(":")
-                    self._working.facts[key.strip()] = value.strip()
-
-        # Load facts from learned.md (Zone 2)
-        learned = await loop.run_in_executor(None, parse_learned_md)
-        for fact in learned:
-            # MEMORY.md wins on conflict (already loaded)
-            if fact["key"] not in self._working.facts:
-                self._working.facts[fact["key"]] = fact["value"]
+        self._working.facts.update(await loop.run_in_executor(None, _markdown_facts))
 
         # Load safety rules from project rules.md if exists
         from rune.memory.markdown_store import parse_rules_md
@@ -279,8 +286,10 @@ class MemoryManager:
         # Reconcile: sync fact-meta.json with learned.md values.
         # If meta has eval data (eval_count > 0), meta wins — it has been
         # validated by actual task outcomes.  Otherwise learned.md wins.
+        from rune.memory.markdown_store import parse_learned_md
         from rune.memory.state import load_fact_meta, save_fact_meta
 
+        learned = await loop.run_in_executor(None, parse_learned_md)
         meta = await loop.run_in_executor(None, load_fact_meta)
         meta_changed = False
         for fact in learned:
@@ -354,7 +363,7 @@ class MemoryManager:
                 tasks=daily.total_tasks,
             )
 
-    async def get_tiered_context(self, goal: str | None = None) -> str:
+    async def get_tiered_context(self, goal: str | None = None, private: PrivateFilter | None = None) -> str:
         """Build combined context from all memory tiers for prompt injection.
 
         Merges session, daily, and durable memory into a single string
@@ -362,6 +371,7 @@ class MemoryManager:
         """
         from datetime import datetime
 
+        private = private or PrivateFilter(allow=True)
         parts: list[str] = []
 
         # --- Session context ---
@@ -375,7 +385,7 @@ class MemoryManager:
         # --- Daily context (today's summary) ---
         today = datetime.now(UTC).strftime("%Y-%m-%d")
         daily = self._tiered.get_daily_summary(today)
-        if daily:
+        if daily and private.daily(daily):
             parts.append("## Today's Progress")
             if daily.goal_summaries:
                 # Only state a success rate over tasks whose outcome was
@@ -405,6 +415,7 @@ class MemoryManager:
         # flat [:10] parse-order slice that buried just-saved facts.
         durable_facts = self._tiered.get_durable_facts("preference")
         durable_facts += self._tiered.get_durable_facts("project")
+        durable_facts = [fact for fact in durable_facts if private.fact(fact.key)]
         if durable_facts:
             ranked = _rank_durable_facts(durable_facts, goal)
             parts.append("## Durable Knowledge")
@@ -568,8 +579,26 @@ class MemoryManager:
         - Tiered context (session / daily / durable)
         - Lessons from top episodes
 
-        Respects a rough token budget of ~4000 characters.
+        Respects a rough token budget of ~4000 characters. Remembered connector answers go in
+        only once the web is closed to this machine (see rune.memory.provenance).
         """
+        private = PrivateFilter(allow=True)
+        context = await self._memory_context(goal, classification, private)
+        if private.used and not await allow_private("memory context"):
+            private = PrivateFilter(allow=False)
+            context = await self._memory_context(goal, classification, private)
+        if private.hits:
+            # A fact that reaches the prompt has been used. Without this, "most used" reads zero
+            # and `memory gc` decays every fact past 30 days, since the hit_count guard never trips.
+            try:
+                from rune.memory.state import increment_hit_counts
+
+                await asyncio.get_running_loop().run_in_executor(None, increment_hit_counts, private.hits)
+            except Exception as exc:
+                log.debug("hit_count_update_failed", error=str(exc)[:100])
+        return context
+
+    async def _memory_context(self, goal: str, classification: Any, private: PrivateFilter) -> str:
         max_chars = 4000
         parts: list[str] = []
         budget_used = 0
@@ -599,7 +628,7 @@ class MemoryManager:
             log.warning("learned_rules_injection_failed", error=f"{type(exc).__name__}: {str(exc)[:200]}")
 
         # 1. Scored episodes (vector/keyword) + entity search fallback
-        scored = await self.score_episodes(goal, limit=7)
+        scored = [entry for entry in await self.score_episodes(goal, limit=7) if private.episode(entry["episode"])]
 
         # Supplement with entity-based search: extract keywords from goal
         # and find episodes by entity match (catches cases where vector
@@ -610,7 +639,7 @@ class MemoryManager:
             try:
                 entity_eps = self._store.get_episodes_by_entity(word, limit=3)
                 for ep in entity_eps:
-                    if ep.id not in scored_ids:
+                    if ep.id not in scored_ids and private.episode(ep):
                         scored_ids.add(ep.id)
                         scored.append(
                             {
@@ -660,30 +689,22 @@ class MemoryManager:
             matching_facts = [
                 (k, v)
                 for k, v in self._working.facts.items()
-                if goal_lower in k.lower()
-                or goal_lower in v.lower()
-                or any(w in k.lower() or w in v.lower() for w in goal_lower.split()[:3])
-            ]
+                if (goal_lower in k.lower()
+                    or goal_lower in v.lower()
+                    or any(w in k.lower() or w in v.lower() for w in goal_lower.split()[:3]))
+            ][:5]
+            # Only the facts that would go in decide whether the web closes.
+            matching_facts = [(k, v) for k, v in matching_facts if private.fact(k)]
             if matching_facts:
                 chosen = matching_facts[:5]
                 lines = ["## Relevant Facts"]
                 for k, v in chosen:
                     lines.append(f"- {k}: {v}")
                 if _add_section("\n".join(lines) + "\n"):
-                    # A fact that reaches the prompt has been used. Without
-                    # this, "most used" reads zero and `memory gc` decays every
-                    # fact past 30 days, since the hit_count guard never trips.
-                    try:
-                        from rune.memory.state import increment_hit_counts
-
-                        await asyncio.get_running_loop().run_in_executor(
-                            None, increment_hit_counts, [k for k, _ in chosen]
-                        )
-                    except Exception as exc:
-                        log.debug("hit_count_update_failed", error=str(exc)[:100])
+                    private.hits.extend(k for k, _ in chosen)  # counted once this context is final
 
         # 4. Tiered context (session + daily + durable)
-        tiered = await self.get_tiered_context(goal)
+        tiered = await self.get_tiered_context(goal, private)
         if tiered.strip():
             _add_section(tiered)
 
@@ -819,6 +840,12 @@ class MemoryManager:
                 "zone": "learned_md",
             },
         )
+        # Saved during a run: it keeps the connectors that run called.
+        from rune.memory.provenance import contacted, note_facts
+
+        names = contacted()  # read here: the executor thread doesn't see this run's context
+        await loop.run_in_executor(None, lambda: note_facts([fact.key], connectors=names,
+                                                            kind=fact.source.split(":")[0]))
         self._working.facts[fact.key] = fact.value
 
     def log_command(self, command: str, success: bool, task_id: str = "") -> None:

@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
+from rune.memory.provenance import encode as encode_sources
 from rune.memory.store import Episode
 from rune.skills.lifecycle import SkillState
 from rune.skills.registry import get_skill_registry
@@ -508,6 +509,7 @@ async def save_agent_result_to_memory(
         import json as _json
 
         files = list(result.get("changed_files") or []) if isinstance(result, dict) else []
+        connectors = list(result.get("connectors") or []) if isinstance(result, dict) else []
 
         # Generate lessons from both success and failure
         if unresolved:
@@ -541,6 +543,7 @@ async def save_agent_result_to_memory(
             files_touched=_json.dumps(files) if files else "",
             duration_ms=duration_ms,
             utility=_utility,
+            sources=encode_sources(connectors),
         )
 
         await memory_manager.save_episode(episode)
@@ -674,6 +677,7 @@ async def save_agent_result_to_memory(
                 title=goal[:100],
                 actions=actions,
                 lessons=[lessons] if lessons else [],
+                connectors=connectors,
             )
         except Exception:
             pass  # Daily log failure must never block episode saving

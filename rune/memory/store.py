@@ -369,7 +369,7 @@ CREATE INDEX IF NOT EXISTS idx_replay_corpus_skill ON replay_corpus(skill_name);
 
 # MemoryStore
 
-_CURRENT_SCHEMA_VERSION = 11
+_CURRENT_SCHEMA_VERSION = 12
 
 
 class MemoryStore:
@@ -594,6 +594,13 @@ class MemoryStore:
             except apsw.SQLError:
                 pass  # Table already exists
 
+        if current_version < 12:
+            # Connectors each run called, so what it remembers can be traced and forgotten.
+            try:
+                conn.execute("ALTER TABLE episodes ADD COLUMN sources TEXT DEFAULT ''")
+            except apsw.SQLError:
+                pass  # Column already exists
+
         conn.execute(f"PRAGMA user_version = {_CURRENT_SCHEMA_VERSION}")
         log.info(
             "schema_migrated",
@@ -639,8 +646,8 @@ class MemoryStore:
                (id, timestamp, task_summary, intent, plan, result, lessons,
                 embedding, conversation_id, importance,
                 entities, files_touched, commitments, duration_ms, utility,
-                advisor_calls, advisor_followed_count, advisor_output_tokens)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                advisor_calls, advisor_followed_count, advisor_output_tokens, sources)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 episode.id, episode.timestamp, episode.task_summary,
                 episode.intent, episode.plan, episode.result,
@@ -652,6 +659,7 @@ class MemoryStore:
                 episode.advisor_calls,
                 episode.advisor_followed_count,
                 episode.advisor_output_tokens,
+                episode.sources,
             ),
         )
 
@@ -680,7 +688,24 @@ class MemoryStore:
             ep.advisor_followed_count = r[16] or 0
         if len(r) > 17:
             ep.advisor_output_tokens = r[17] or 0
+        if len(r) > 18:
+            ep.sources = r[18] or ""
         return ep
+
+    def episodes_with_sources(self) -> list[Episode]:
+        """Every episode whose run called a connector."""
+        rows = self.conn.execute("SELECT * FROM episodes WHERE sources IS NOT NULL AND sources != ''")
+        return [self._row_to_episode(r) for r in rows]
+
+    def delete_episodes(self, ids: list[str]) -> int:
+        """Delete these episodes and the commitments drawn from them."""
+        if not ids:
+            return 0
+        marks = ",".join("?" * len(ids))
+        with self.conn:
+            self.conn.execute(f"DELETE FROM episode_commitments WHERE episode_id IN ({marks})", tuple(ids))
+            self.conn.execute(f"DELETE FROM episodes WHERE id IN ({marks})", tuple(ids))
+        return self.conn.changes()
 
     def get_episodes_by_ids(self, ids: list[str]) -> list[Episode]:
         """The episodes with these ids that still exist, in no particular order."""

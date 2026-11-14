@@ -11,6 +11,7 @@ from rune.capabilities.registry import CapabilityRegistry
 from rune.capabilities.types import CapabilityDefinition
 from rune.connectors.client import BrokerUnavailable, call_broker, hosted_approval
 from rune.connectors.models import ConnectorRequest
+from rune.memory.provenance import record_connector
 from rune.safety.approval_context import approval_channel, parking, was_approved
 from rune.safety.approval_request import action_request, request_scope
 from rune.types import CapabilityResult, Domain, RiskLevel
@@ -37,6 +38,8 @@ async def connector_request(params: ConnectorRequest) -> CapabilityResult:
         return CapabilityResult(success=False, error="Connector request requires approval",
                                 metadata={"action_status": "not_executed", "requires_approval": True})
     payload = params.model_dump()
+    # Before it goes out: whatever comes back, what this run remembers may now hold its data.
+    record_connector(params.connector)
     stop = parking() if hosted else None
     if stop is not None:
         # The owner may take hours; the broker keeps a background request waiting longer.

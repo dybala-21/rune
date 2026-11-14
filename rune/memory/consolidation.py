@@ -261,14 +261,17 @@ async def consolidate_episode(episode_id: str) -> dict[str, list[str]] | None:
             from rune.memory.markdown_store import save_learned_fact
             from rune.memory.state import is_suppressed
 
+            saved: list[str] = []
             if _succeeded:
                 for d in result.get("decisions", []):
                     if isinstance(d, str) and len(d) > 5 and not is_suppressed(d[:80]):
                         save_learned_fact("decision", d[:80], d, 0.8)
+                        saved.append(d[:80])
 
                 for lesson in result.get("lessons", []):
                     if isinstance(lesson, str) and len(lesson) > 5 and not is_suppressed(lesson[:40]):
                         save_learned_fact("lesson", lesson[:40], lesson, 0.7)
+                        saved.append(lesson[:40])
 
                 # Conventions go to the "project" category at durable confidence
                 # (>=0.7), so build_memory_context injects them ("## Durable
@@ -276,6 +279,7 @@ async def consolidate_episode(episode_id: str) -> dict[str, list[str]] | None:
                 for conv in result.get("conventions", []):
                     if isinstance(conv, str) and len(conv) > 5 and not is_suppressed(conv[:80]):
                         save_learned_fact("project", conv[:80], conv, 0.8)
+                        saved.append(conv[:80])
 
                 # User facts form the durable user profile (Hermes USER.md
                 # equivalent). They go to "preference" so get_tiered_context's
@@ -286,6 +290,12 @@ async def consolidate_episode(episode_id: str) -> dict[str, list[str]] | None:
                 for uf in result.get("user_facts", []):
                     if isinstance(uf, str) and len(uf) > 5 and not is_suppressed(uf[:80]):
                         save_learned_fact("preference", uf[:80], uf, 0.8)
+                        saved.append(uf[:80])
+            # Each fact keeps the run it came from, and any connector that run called.
+            from rune.memory.provenance import decode, note_facts
+
+            note_facts(saved, connectors=decode(episode.sources), conversation=episode.conversation_id,
+                       episode=episode.id)
         except Exception as exc:
             log.debug("learned_md_write_failed", error=str(exc)[:100])
 

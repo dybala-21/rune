@@ -29,6 +29,8 @@ class Episode:
     advisor_calls: int = 0
     advisor_followed_count: int = 0
     advisor_output_tokens: int = 0
+    # JSON list of the connectors the run called, or "" when it called none.
+    sources: str = ""
 
 
 @dataclass(slots=True)
