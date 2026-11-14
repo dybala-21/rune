@@ -71,6 +71,16 @@ def test_hosted_tools_and_terminal_cannot_escape(monkeypatch, tmp_path):
     assert check_tool("bash_execute", {"cwd": str(tmp_path)}) is None
 
 
+def test_hosted_workers_can_recall_and_tune_their_own_memory(monkeypatch, tmp_path):
+    from rune.cloud.boundary import check_tool
+    monkeypatch.setenv("RUNE_CLOUD_WORKER", "1")
+    monkeypatch.setenv("RUNE_ISOLATION_ROOT", str(tmp_path))
+    assert check_tool("conversation_search", {"query": "dinner"}) is None
+    assert check_tool("memory_tune", {"preset": "accuracy"}) is None
+    for name in ("delegate_task", "document_read", "safety_tune", "service_connect"):
+        assert check_tool(name, {})
+
+
 async def test_hosted_authority_survives_environment_changes(monkeypatch, tmp_path):
     from fastapi import HTTPException
 
