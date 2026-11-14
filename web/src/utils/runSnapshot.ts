@@ -1,6 +1,7 @@
 import type { ChatMessage, FileChange, PendingApproval, PendingQuestion, TokenUsage, ToolCall, TrustInfo } from '../types';
 import { hasTrustContent } from './trust';
 import { abortedMessage } from './runEvents';
+import { latestTurn } from './retry';
 
 export interface RunSnapshot {
   runId: string;
@@ -37,8 +38,20 @@ export interface RunSnapshot {
   }>;
 }
 
+/** Keep unacknowledged local requests when an older run is restored. */
+export function shouldPreserveLocalRequest(messages: ChatMessage[], run: RunSnapshot | null): boolean {
+  const user = latestTurn(messages).user;
+  if (!user || user.requestId && user.requestId === run?.requestId) return false;
+  // An uncertain delivery keeps its identity until its own receipt is found.
+  if (user.delivery === 'unknown') return true;
+  return !!run && ['completed', 'failed', 'cancelled', 'interrupted'].includes(run.status)
+    && (user.delivery === 'pending' || user.delivery === 'rejected')
+    && user.timestamp >= run.startedAt;
+}
+
 export function restoreRunMessages(messages: ChatMessage[], run: RunSnapshot): ChatMessage[] {
   if (!messages.length && run.history) messages = run.history;
+  if (shouldPreserveLocalRequest(messages, run)) return messages;
   const userId = `${run.runId}:user`;
   let index = messages.findIndex(message => message.id === userId);
   if (index < 0) {

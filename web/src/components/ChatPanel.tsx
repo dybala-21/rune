@@ -14,7 +14,6 @@ import type {
 import { MessageBubble } from './MessageBubble';
 import { getLiveSessionId, type ConfigInfo } from '../api';
 import { TrustCard } from './TrustCard';
-import { ProactiveCard } from './ProactiveCard';
 import { ToolCallCard } from './ToolCallCard';
 import { ToolActivity } from './ToolActivity';
 import { SearchActivity } from './SearchActivity';
@@ -70,7 +69,6 @@ export function ChatPanel({
   isRunning,
   onRegenerate,
   onEditResend,
-  activitySummary,
   delegateEvents,
   compactionEvents,
   currentStepInfo,
@@ -139,7 +137,6 @@ export function ChatPanel({
   [messages, toolCalls, thinkingBlocks, delegateEvents, compactionEvents, streamingAnswerId]);
 
   const grouped = useMemo(() => groupConsecutiveTools(timeline), [timeline]);
-  const suggestions = messages.filter(message => message.suggestion);
 
   const isEmpty = timeline.length === 0;
   const desktopWait = desktopAttention(toolCalls, isRunning);
@@ -207,12 +204,6 @@ export function ChatPanel({
         flexDirection: 'column',
         gap: 2,
       }}>
-        {suggestions.length > 0 && <details className="suggestion-inbox">
-          <summary>Suggestions <span>{suggestions.length}</span></summary>
-          <div className="suggestion-inbox-items">
-            {suggestions.map(message => <ProactiveCard key={message.id} suggestion={message.suggestion!} />)}
-          </div>
-        </details>}
         {isEmpty && <WelcomePanel onSuggest={onDraft} config={config} connected={connected} onOpenSettings={onOpenSettings} />}
 
         {hiddenCount > 0 && (
@@ -322,12 +313,7 @@ export function ChatPanel({
           <RunningIndicator toolCalls={toolCalls} currentStepInfo={currentStepInfo} />
         )}
 
-        {!isRunning && activitySummary && activitySummary.totalToolCalls > 0 && (
-          <ActivitySummaryBar summary={activitySummary} />
-        )}
-
-        {/* In-stream extras (e.g. the workspace picker) — rendered inside the
-            scroll area so they can never sit under the floating composer. */}
+        {/* Keep inline controls above the composer. */}
         {streamFooter}
 
         <div ref={bottomRef} />
@@ -435,52 +421,6 @@ function RunningIndicator({ toolCalls, currentStepInfo }: { toolCalls: ToolCall[
   );
 }
 
-function ActivitySummaryBar({ summary }: { summary: ActivitySummary }) {
-  const items: Array<{ label: string; value: number }> = [];
-  if (summary.totalToolCalls > 0) items.push({ label: 'Tools', value: summary.totalToolCalls });
-  if (summary.filesRead > 0) items.push({ label: 'Read', value: summary.filesRead });
-  if (summary.filesWritten > 0) items.push({ label: 'Write', value: summary.filesWritten });
-  if (summary.bashExecutions > 0) items.push({ label: 'Bash', value: summary.bashExecutions });
-  if (summary.webSearches > 0) items.push({ label: 'Web', value: summary.webSearches });
-  if (summary.browserActions > 0) items.push({ label: 'Browser', value: summary.browserActions });
-
-  return (
-    <div className="fade-in" style={{
-      marginTop: 8,
-      padding: '10px 14px',
-      background: 'var(--bg-secondary)',
-      border: '1px solid var(--border-subtle)',
-      borderRadius: 'var(--radius-md)',
-      display: 'flex',
-      alignItems: 'center',
-      gap: 16,
-      fontSize: 12,
-    }}>
-      <span style={{
-        width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
-        background: summary.success ? 'var(--success)' : 'var(--danger)',
-      }} />
-      {items.map(item => (
-        <div key={item.label} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
-          <span style={{ color: 'var(--text-muted)' }}>{item.label}</span>
-          <span style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', fontWeight: 600 }}>
-            {item.value}
-          </span>
-        </div>
-      ))}
-      {summary.totalDurationMs > 0 && (
-        <span style={{
-          marginLeft: 'auto',
-          color: 'var(--text-muted)',
-          fontFamily: 'var(--font-mono)',
-        }}>
-          {formatDuration(summary.totalDurationMs)}
-        </span>
-      )}
-    </div>
-  );
-}
-
 function DelegateNotice({ event }: { event: DelegateItem }) {
   if (!event.stage?.trim() && !event.message?.trim()) return null;
   return (
@@ -572,14 +512,6 @@ function ToolGroup({ tools, active }: { tools: ToolCall[]; active: boolean }) {
   return normalizeToolName(tools[0].toolName) === 'web.search'
     ? <SearchActivity tools={tools} active={active} />
     : <ToolActivity tools={tools} active={active} />;
-}
-
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  const min = Math.floor(ms / 60_000);
-  const sec = Math.round((ms % 60_000) / 1000);
-  return `${min}m${sec}s`;
 }
 
 function formatTokens(tokens: number): string {

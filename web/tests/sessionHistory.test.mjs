@@ -126,16 +126,24 @@ test('chat search keeps current navigation and saved tasks outside the results',
   assert.match(html, /New chat/);
 });
 
-test('workspace file and change actions appear only for the selected live workspace', () => {
+test('workspace shortcuts follow file activity without crowding research or history', () => {
   const render = props => renderToStaticMarkup(createElement(WorkbenchPanel, {
     sessionId: 'live', toolCalls: [], isRunning: false, activitySummary: null, onClose() {}, ...props,
   }));
-  const selected = render({ workspacePath: '/projects/project-name' });
+  const workspacePath = '/projects/project-name';
+  const call = toolName => ({ id: toolName, toolName, args: { path: 'notes.txt' }, timestamp: 1 });
+  const selected = render({ workspacePath, toolCalls: [call('file_read')] });
   assert.match(selected, /aria-label="Workspace tools"/);
   assert.match(selected, />project-name</);
   assert.match(selected, />Open file</);
   assert.match(selected, />Changes</);
   assert.doesNotMatch(selected, /role="tab"[^>]*>Terminal/);
+  for (const toolCalls of [[], [call('web_search')], [call('browser_navigate')]]) {
+    const quiet = render({ workspacePath, toolCalls });
+    assert.doesNotMatch(quiet, /aria-label="Workspace tools"/);
+    assert.match(quiet, /aria-label="Panel tools"/);
+  }
+  assert.match(render({ workspacePath, fileChanges: [{ id: 'saved', path: 'notes.txt', kind: 'modified', patch: '-old\n+new' }] }), /aria-label="Workspace tools"/);
   assert.doesNotMatch(render({}), /aria-label="Workspace tools"/);
-  assert.doesNotMatch(render({ workspacePath: '/projects/project-name', historical: true }), /aria-label="Workspace tools"/);
+  assert.doesNotMatch(render({ workspacePath, toolCalls: [call('file_read')], historical: true }), /aria-label="Workspace tools"/);
 });

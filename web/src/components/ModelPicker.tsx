@@ -14,6 +14,7 @@ interface Props {
   config: ConfigInfo;
   openRequest?: ModelMenuRequest;
   onConfigure?: (action: ModelConnectionAction) => void;
+  onModelChange?: (model: { provider: string; model: string }) => void;
 }
 
 const RECENT_KEY = 'rune:recent-models';
@@ -24,7 +25,7 @@ function readRecent(): Array<{ provider: string; model: string }> {
   } catch { return []; }
 }
 
-export function ModelPicker({ config, openRequest, onConfigure }: Props) {
+export function ModelPicker({ config, openRequest, onConfigure, onModelChange }: Props) {
   const active = config.activeModel;
   const [query, setQuery] = useState('');
   const [recent, setRecent] = useState(readRecent);
@@ -35,11 +36,12 @@ export function ModelPicker({ config, openRequest, onConfigure }: Props) {
   const [effortOverride, setEffortOverride] = useState<{ model: ActiveModel; effort: ReasoningEffort | null } | null>(null);
   const [busy, setBusy] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
+  const [connectionExpanded, setConnectionExpanded] = useState(false);
   const requestPending = useRef(false);
   const requestedMenu = useRef(0);
   const catalogRequest = useRef(0);
   useEffect(() => () => { catalogRequest.current++; }, []);
-  useEffect(() => { setOverride(null); setView('models'); }, [active.provider, active.model]);
+  useEffect(() => { setOverride(null); setView('models'); setConnectionExpanded(false); }, [active.provider, active.model]);
   useEffect(() => { setEffortOverride(null); }, [active.provider, active.model, config.reasoningEffort]);
   const shown = override ?? active;
   const settingsReady = sameModel(shown, active);
@@ -60,6 +62,7 @@ export function ModelPicker({ config, openRequest, onConfigure }: Props) {
   const onOpen = () => {
     setView('models');
     setQuery('');
+    setConnectionExpanded(false);
     const requested = openRequest && openRequest.id !== requestedMenu.current;
     setSelProvider(requested ? openRequest.provider : shown.provider);
     if (openRequest) requestedMenu.current = openRequest.id;
@@ -76,6 +79,7 @@ export function ModelPicker({ config, openRequest, onConfigure }: Props) {
     try {
       const result = await setActiveModel(provider, model);
       setOverride({ ...result, source: 'active' });
+      onModelChange?.(result);
       const next = [{ provider, model }, ...recent.filter(item => item.provider !== provider || item.model !== model)].slice(0, 5);
       setRecent(next);
       try { localStorage.setItem(RECENT_KEY, JSON.stringify(next)); } catch { /* Browsing still works without local storage. */ }
@@ -153,13 +157,21 @@ export function ModelPicker({ config, openRequest, onConfigure }: Props) {
               if (matches[0] && !busy && !loadFailed) void pickModel(matches[0].provider, matches[0].model, close);
             }
           }} />
-        {query && <button type="button" aria-label="Clear model search" onClick={event => { event.currentTarget.parentElement?.querySelector('input')?.focus(); setQuery(''); }}>×</button>}
+        {query && <button type="button" data-picker-control tabIndex={-1} aria-label="Clear model search"
+          onClick={event => { event.currentTarget.parentElement?.querySelector('input')?.focus(); setQuery(''); }}>×</button>}
       </div>
       {connection && !search && <div className="model-connection" data-state={connection.state}>
-        <strong>{connection.state === 'needs_setup' ? 'Setup needed' : connection.state === 'configured' ? 'Configured · access not checked' : 'Connection not checked'}</strong>
-        <p>{connection.reason}</p>
-        {connection.action && onConfigure && <button type="button" role="menuitem" tabIndex={-1}
-          onClick={() => { close(); onConfigure(connection.action!); }}>{connection.action.label}</button>}
+        {connection.state === 'needs_setup' ? <strong>Setup needed</strong>
+          : <button type="button" role="menuitem" tabIndex={-1} className="model-connection-summary"
+            aria-expanded={connectionExpanded} onClick={() => setConnectionExpanded(expanded => !expanded)}>
+            <span>{connection.state === 'configured' ? 'Configured · access not checked' : 'Connection not checked'}</span>
+            <span aria-hidden="true">{connectionExpanded ? '−' : '+'}</span>
+          </button>}
+        {(connection.state === 'needs_setup' || connectionExpanded) && <>
+          <p>{connection.reason}</p>
+          {connection.action && onConfigure && <button type="button" role="menuitem" tabIndex={-1}
+            onClick={() => { close(); onConfigure(connection.action!); }}>{connection.action.label}</button>}
+        </>}
       </div>}
       {!search && (hasReasoning || !settingsReady) && <button type="button" role="menuitem" tabIndex={-1}
         className="picker-option model-reasoning-link" disabled={busy || !settingsReady}

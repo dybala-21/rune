@@ -10,6 +10,18 @@
 .env-provider-shortcuts span { font-size: 11px; color: var(--text-muted); }
 .env-detail { flex: 1; min-width: 0; overflow: hidden; display: flex; flex-direction: column; }
 .env-detail code { overflow-wrap: anywhere; }
+.env-detail-toolbar { flex-wrap: wrap; }
+.env-detail-toolbar > button { flex-shrink: 0; }
+.env-editor-title { min-width: 0; overflow-wrap: anywhere; }
+.env-scope-options > button { min-width: 0; min-height: 44px; overflow-wrap: anywhere; }
+.env-scope-options > button > div { min-width: 0; overflow-wrap: anywhere; text-transform: none; }
+.env-provider-chooser { padding: 24px 20px; overflow-y: auto; }
+.env-provider-chooser h2 { margin: 0 0 6px; color: var(--text-primary); font-size: 16px; font-weight: 600; }
+.env-provider-chooser p, .env-provider-help { margin: 0; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.env-provider-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 20px 0; }
+.env-provider-options button { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 14px 12px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg-secondary); color: var(--text-primary); text-align: left; cursor: pointer; }
+.env-provider-options strong { font-size: 12px; font-weight: 500; }
+.env-advanced-variable { padding: 6px 0; background: transparent; border: none; color: var(--accent); font-size: 12px; text-align: left; cursor: pointer; }
 .env-back { display: none; }
 .env-delete-overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgb(0 0 0 / 50%); z-index: 1001; }
 .env-delete-dialog { max-width: 360px; width: calc(100% - 32px); padding: 24px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--bg-secondary); box-shadow: var(--shadow-lg); }
@@ -29,6 +41,9 @@
   .env-layout[data-view="list"] .env-detail { display: none; }
   .env-layout:not([data-view="list"]) .env-list { display: none !important; }
   .env-back { display: block; align-self: flex-start; margin: 10px 14px 0; padding: 5px; background: none; border: 0; color: var(--text-secondary); font-size: 12px; cursor: pointer; }
+  .env-detail-toolbar { padding: 12px 14px !important; }
+  .env-detail-toolbar > button { min-width: 64px; min-height: 44px; }
+  .env-editor-title { flex-basis: 100% !important; }
 }
 
 .env-save-status { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px; padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--bg-secondary); color: var(--text-secondary); font-size: 12px; line-height: 1.5; }

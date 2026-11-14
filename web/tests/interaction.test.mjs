@@ -5,7 +5,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createServer } from 'vite';
 
-let server, latestTurn, retryAttachments, attachmentMime, ChatPanel, InputArea, WelcomePanel, retryRequestId, updateDelivery, pickerPlacement, StatusBar;
+let server, latestTurn, retryAttachments, attachmentMime, ChatPanel, InputArea, WelcomePanel, retryRequestId, updateDelivery, pickerPlacement, StatusBar, SuggestionsDialog;
 before(async () => {
   server = await createServer({
     root: fileURLToPath(new URL('..', import.meta.url)),
@@ -17,6 +17,7 @@ before(async () => {
   ({ attachmentMime } = await server.ssrLoadModule('/src/utils/attachments.ts'));
   ({ ChatPanel } = await server.ssrLoadModule('/src/components/ChatPanel.tsx'));
   ({ InputArea } = await server.ssrLoadModule('/src/components/InputArea.tsx'));
+  ({ SuggestionsDialog } = await server.ssrLoadModule('/src/components/SuggestionsDialog.tsx'));
   ({ StatusBar } = await server.ssrLoadModule('/src/components/StatusBar.tsx'));
   ({ WelcomePanel } = await server.ssrLoadModule('/src/components/WelcomePanel.tsx'));
   ({ pickerPlacement } = await server.ssrLoadModule('/src/components/PickerPopover.tsx'));
@@ -123,15 +124,19 @@ test('composer pickers open above the input and stay inside narrow viewports', (
   assert.ok(toolbar.top + toolbar.maxHeight <= 948);
 });
 
-test('restored proposals stay collapsed beside the welcome screen without hiding chat', () => {
+test('suggestions remain actionable in their inbox without interrupting a conversation', () => {
   const suggestion = message('proposal', 'system', { suggestion: {
     id: 'report', headline: '검토할 보고서', body: 'Inspect report', timestamp: 0,
     state: { response: 'pending', result: {} },
   } });
   const empty = chat([suggestion]);
-  assert.match(empty, /<details class="suggestion-inbox">/);
+  assert.doesNotMatch(empty, /suggestion-inbox|Inspect report/);
   assert.match(empty, /What’s on your list/);
-  assert.match(empty, /Inspect report/);
+  const inbox = renderToStaticMarkup(createElement(SuggestionsDialog, { suggestions: [suggestion.suggestion], onClose() {} }));
+  assert.match(inbox, /role="dialog"/);
+  assert.match(inbox, /Inspect report/);
+  assert.match(inbox, /Run once/);
+  assert.match(inbox, /Dismiss/);
   const ongoing = chat([message('1', 'user', { content: 'Keep this question' }), suggestion]);
   assert.match(ongoing, /Keep this question/);
   assert.doesNotMatch(ongoing, /welcome-title/);

@@ -9,7 +9,7 @@ const source = ts.transpileModule(fs.readFileSync(new URL('../src/components/Pic
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
 }).outputText;
 
-function mount() {
+function mount({ searchable = false } = {}) {
   const state = [], deps = [], cleanups = [], effects = [], listeners = new Map();
   let cursor = 0, inert = false;
   const document = { body: {}, activeElement: null,
@@ -22,10 +22,16 @@ function mount() {
     focus: () => { document.activeElement = anchor; },
     getBoundingClientRect: () => ({ top: 500, bottom: 530, left: 20 }),
   };
+  const focusable = tagName => ({ tagName, focus() { document.activeElement = this; } });
+  const search = focusable('INPUT');
+  const clear = focusable('BUTTON');
+  const items = [focusable('BUTTON'), focusable('BUTTON')];
+  const controls = searchable ? [search, clear, ...items] : items;
   const panel = {
-    contains: target => target === panel,
+    contains: target => target === panel || controls.includes(target),
     focus: () => { document.activeElement = panel; },
-    querySelectorAll: () => [], querySelector: () => null,
+    querySelectorAll: selector => selector.includes('data-picker-control') ? controls : items,
+    querySelector: selector => searchable && selector.includes('data-picker-search') ? search : null,
   };
   const useState = initial => {
     const i = cursor++;
@@ -55,10 +61,13 @@ function mount() {
     button.props.ref.current = anchor;
     if (content) content.props.ref.current = panel;
     effects.splice(0).forEach(run => run());
-    return { button: button.props, menu: content?.props };
+    return { button: button.props, menu: content ? { ...content.props,
+      onKeyDown: event => content.props.onKeyDown({ currentTarget: panel, target: document.activeElement, ...event,
+        preventDefault: event.preventDefault.bind(event), stopPropagation: event.stopPropagation.bind(event) }),
+    } : undefined };
   };
   return {
-    render, anchor, document,
+    render, anchor, document, search, clear, items,
     open() { render().button.onClick(); return render(); },
     focusOutside() { const target = {}; document.activeElement = target; listeners.get('focusin')({ target }); return target; },
     cover() { inert = true; render(); },
@@ -119,7 +128,7 @@ test('menu activation and escape do not reach background command handlers', () =
 
 
 test('search input keeps text-navigation keys while suppressing background shortcuts', () => {
-  const picker = mount();
+  const picker = mount({ searchable: true });
   const menu = picker.open().menu;
   for (const value of ['Home', 'End', 'ArrowLeft', 'ArrowRight']) {
     const event = key(value, { target: { tagName: 'INPUT' } });
@@ -127,4 +136,53 @@ test('search input keeps text-navigation keys while suppressing background short
     assert.equal(event.prevented, false);
     assert.equal(event.stopped, true);
   }
+});
+
+test('Tab and Shift+Tab reach search, Clear and results before exiting a searchable picker', () => {
+  const picker = mount({ searchable: true });
+  const menu = picker.open().menu;
+  assert.equal(picker.document.activeElement, picker.search);
+  for (const target of [picker.clear, ...picker.items]) {
+    const event = key('Tab');
+    menu.onKeyDown(event);
+    assert.equal(event.prevented, true);
+    assert.equal(picker.document.activeElement, target);
+    assert.ok(picker.render().menu);
+  }
+  for (const target of [picker.items[0], picker.clear, picker.search]) {
+    const event = key('Tab', { shiftKey: true });
+    menu.onKeyDown(event);
+    assert.equal(event.prevented, true);
+    assert.equal(picker.document.activeElement, target);
+    assert.ok(picker.render().menu);
+  }
+  const leave = key('Tab', { shiftKey: true });
+  menu.onKeyDown(leave);
+  assert.equal(leave.prevented, false, 'native Tab moves outside after restoring the trigger');
+  assert.equal(picker.document.activeElement, picker.anchor);
+  assert.equal(picker.render().menu, undefined);
+});
+
+test('arrow navigation returns from results to search without closing the menu', () => {
+  const picker = mount({ searchable: true });
+  const menu = picker.open().menu;
+  menu.onKeyDown(key('ArrowDown'));
+  assert.equal(picker.document.activeElement, picker.items[0]);
+  menu.onKeyDown(key('ArrowUp'));
+  assert.equal(picker.document.activeElement, picker.search);
+  menu.onKeyDown(key('ArrowUp'));
+  assert.equal(picker.document.activeElement, picker.items[1]);
+  menu.onKeyDown(key('ArrowDown'));
+  assert.equal(picker.document.activeElement, picker.search);
+  assert.ok(picker.render().menu);
+});
+
+test('non-search reasoning menus retain arrow cycling and Tab dismissal', () => {
+  const picker = mount();
+  const menu = picker.open().menu;
+  assert.equal(picker.document.activeElement, picker.items[0]);
+  menu.onKeyDown(key('ArrowUp'));
+  assert.equal(picker.document.activeElement, picker.items[1]);
+  menu.onKeyDown(key('Tab'));
+  assert.equal(picker.render().menu, undefined);
 });

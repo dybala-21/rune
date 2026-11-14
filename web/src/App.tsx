@@ -29,9 +29,11 @@ import { desktopAttention, shouldOpenWorkbench } from './utils/workbench';
 import { fetchConfig, fetchSessions, getLiveSessionId, type ConfigInfo, type ModelConnectionAction, type SessionInfo } from './api';
 import { watchPresence } from './utils/presence';
 import { ConnectionBanner } from './components/ConnectionBanner';
+import { SuggestionsDialog } from './components/SuggestionsDialog';
+import { getModelSetupConnection } from './utils/modelConnection';
+import './styles/conversation.css';
 
-// Tools that mean the agent is working in a folder — the signal to ask for a
-// workspace if none is pinned (zero false positives, unlike text guessing).
+// Ask for a workspace when file or command tools need one.
 function isWorkspaceTool(name: string): boolean {
   return isCodingToolName(name) || name === 'code.analyze';
 }
@@ -41,8 +43,11 @@ export function App() {
   useEffect(() => watchPresence(), []);
   const history = useSessionHistory();
   const [compact, setCompact] = useState(() => window.matchMedia('(max-width: 820px)').matches);
+  const [workbenchOverlay, setWorkbenchOverlay] = useState(() => window.matchMedia('(max-width: 960px)').matches);
   const [sidebarOpen, setSidebarOpen] = useState(() => !window.matchMedia('(max-width: 820px)').matches);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [suggestionsOpen, setSuggestionsOpen] = useState(false);
+  const [newChatConfirmOpen, setNewChatConfirmOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<'models' | undefined>();
   const [modelMenuRequest, setModelMenuRequest] = useState<{ provider: string; id: number }>();
   const [currentWorkspacePath, setCurrentWorkspacePath] = useState<string | null>(null);
@@ -57,6 +62,8 @@ export function App() {
   const [markdownPanelOpen, setMarkdownPanelOpen] = useState(false);
   const [memoryPanelOpen, setMemoryPanelOpen] = useState(false);
   const [configInfo, setConfigInfo] = useState<ConfigInfo | null>(null);
+  const [pendingModel, setPendingModel] = useState<{ provider: string; model: string }>();
+  useEffect(() => { setPendingModel(undefined); }, [configInfo]);
   const liveWorkbench = useWorkbenchState(getLiveSessionId());
   const historyWorkbench = useWorkbenchState(history.viewingSessionId);
   const viewedWorkbench = history.viewingSessionId ? historyWorkbench : liveWorkbench;
@@ -71,8 +78,14 @@ export function App() {
   const sidebarTriggerRef = useRef<HTMLButtonElement>(null);
   const settingsTriggerRef = useRef<HTMLButtonElement>(null);
   const settingsReturnFocus = useRef<HTMLElement | null>(null);
+  const suggestionsReturnFocus = useRef<HTMLElement | null>(null);
+  const newChatReturnFocus = useRef<HTMLElement | null>(null);
+  const openSuggestions = () => {
+    suggestionsReturnFocus.current = paletteOpen ? sidebarTriggerRef.current : document.activeElement as HTMLElement | null;
+    setSuggestionsOpen(true);
+  };
   const panelOpen = skillsPanelOpen || envPanelOpen || cronPanelOpen || mcpPanelOpen || markdownPanelOpen || memoryPanelOpen;
-  const overlayOpen = settingsOpen || panelOpen || paletteOpen;
+  const overlayOpen = settingsOpen || panelOpen || paletteOpen || suggestionsOpen || newChatConfirmOpen;
   const sidebarRef = useFocusTrap<HTMLDivElement>(compact && sidebarOpen && !overlayOpen, sidebarTriggerRef.current);
   const openSettings = () => {
     setSettingsSection(undefined);
@@ -110,9 +123,12 @@ export function App() {
 
   useEffect(() => {
     const media = window.matchMedia('(max-width: 820px)');
+    const workbenchMedia = window.matchMedia('(max-width: 960px)');
     const resize = () => { setCompact(media.matches); if (media.matches) setSidebarOpen(false); };
+    const resizeWorkbench = () => setWorkbenchOverlay(workbenchMedia.matches);
     media.addEventListener('change', resize);
-    return () => media.removeEventListener('change', resize);
+    workbenchMedia.addEventListener('change', resizeWorkbench);
+    return () => { media.removeEventListener('change', resize); workbenchMedia.removeEventListener('change', resizeWorkbench); };
   }, []);
 
   const touchedWorkspace = useMemo(
@@ -120,13 +136,11 @@ export function App() {
     [agent.toolCalls],
   );
 
-  // Derive current tool activity for StatusBar
   const currentActivity = useMemo(() => {
     if (agent.state !== 'running' || agent.toolCalls.length === 0) return null;
     const pending = [...agent.toolCalls].reverse().find(tc => tc.result === undefined);
     if (!pending) return null;
     const name = normalizeToolName(pending.toolName);
-    // Short human-readable labels
     if (name === 'file.read') return 'Reading files';
     if (name === 'file.edit') return 'Editing code';
     if (name === 'file.write') return 'Writing files';
@@ -139,7 +153,15 @@ export function App() {
     return name;
   }, [agent.state, agent.toolCalls]);
   const displayMessages = isViewingHistory ? (history.historyState?.messages ?? []) : agent.messages;
+  const suggestions = agent.messages.flatMap(message => message.suggestion ? [message.suggestion] : []);
+  const pendingSuggestions = suggestions.filter(item => !item.state || ['pending', 'unconfirmed'].includes(item.state.response)).length;
+  const modelSetup = getModelSetupConnection(configInfo && { ...configInfo, activeModel: pendingModel ? { ...pendingModel, source: 'active' } : configInfo.activeModel });
+  const newChatBlockedReason = agent.state !== 'idle' ? 'Finish or stop the current task before starting a new chat.'
+    : agent.loadingConversation ? 'Wait for the conversation to open.'
+    : agent.savedDraft.available ? 'Restore or discard the saved conversation before starting a new chat.' : undefined;
   const taskTitle = displayMessages.find(message => message.role === 'user')?.content?.trim().split('\n')[0];
+  const liveChatMessages = agent.messages.filter(message => !message.suggestion);
+  const unconfirmedDelivery = liveChatMessages.some(message => message.role === 'user' && ['pending', 'unknown', 'rejected'].includes(message.delivery ?? ''));
   const liveTitle = agent.messages.find(message => message.role === 'user')?.content?.trim().split('\n')[0];
   const displayToolCalls = isViewingHistory ? (history.historyState?.toolCalls ?? []) : agent.toolCalls;
   const displayThinkingBlocks = isViewingHistory ? (history.historyState?.thinkingBlocks ?? []) : agent.thinkingBlocks;
@@ -152,9 +174,7 @@ export function App() {
   viewedSessionRef.current = history.viewingSessionId ?? getLiveSessionId();
   const interruptedRun = isViewingHistory ? history.historyState?.run : agent.interruptedRun;
 
-  // One verdict across every surface (status pip, workbench, chat card) via the
-  // shared rule, so the pip never claims success while the trust card says it
-  // couldn't verify.
+  // Use the same verdict in chat, the workbench, and the status bar.
   const runVerdict = computeRunVerdict(displayTrust, displayActivitySummary);
 
   useEffect(() => {
@@ -186,19 +206,18 @@ export function App() {
 
   const hasWorkbenchContent = displayToolCalls.length > 0 || displayFileChanges.length > 0;
   useEffect(() => {
-    if (!hasWorkbenchContent || workbenchOpen || workbenchDismissed) return;
-    // Open once real work is visible: edits/commands for coding runs, or a
-    // research-shaped run (searches/pages) that never touches files.
+    if (workbenchOverlay || !hasWorkbenchContent || workbenchOpen || workbenchDismissed) return;
+    // Open the panel once tool results give it something to show.
     if (shouldOpenWorkbench(displayToolCalls, displayFileChanges)) {
       setWorkbenchOpen(true);
     }
-  }, [displayToolCalls, displayFileChanges, hasWorkbenchContent, workbenchOpen, workbenchDismissed, setWorkbenchOpen]);
+  }, [workbenchOverlay, displayToolCalls, displayFileChanges, hasWorkbenchContent, workbenchOpen, workbenchDismissed, setWorkbenchOpen]);
 
   // Let focused controls handle Escape before applying app shortcuts.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented) return;
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k' && !settingsOpen && !panelOpen) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k' && (!overlayOpen || paletteOpen)) {
         e.preventDefault();
         setPaletteOpen(o => !o);
         return;
@@ -222,11 +241,9 @@ export function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [isViewingHistory, agent.state, agent.abort, openComputer, workbenchOpen, setWorkbenchOpen, setWorkbenchDismissed, overlayOpen, settingsOpen, panelOpen]);
+  }, [isViewingHistory, agent.state, agent.abort, openComputer, workbenchOpen, setWorkbenchOpen, setWorkbenchDismissed, overlayOpen, paletteOpen, settingsOpen, panelOpen]);
 
-  // Dropping a file anywhere outside the composer would otherwise make the
-  // browser navigate away to that file, losing the session. Swallow drops that
-  // don't land on a registered drop zone.
+  // Prevent stray file drops from navigating away from the chat.
   useEffect(() => {
     const prevent = (e: DragEvent) => { e.preventDefault(); };
     window.addEventListener('dragover', prevent);
@@ -249,19 +266,27 @@ export function App() {
 
   const handleSelectSession = (sessionId: string | null) => {
     agent.cancelConversationLoad();
-    history.loadSession(sessionId);
+    history.loadSession(sessionId === getLiveSessionId() ? null : sessionId);
     if (window.matchMedia('(max-width: 820px)').matches) setSidebarOpen(false);
   };
 
-  // Clearing is not undoable — resetLiveConversation also drops the saved
-  // draft, so the restore banner can't bring it back. Confirm once there is
-  // something to lose. (⌘K puts "New chat" first, so Enter alone can hit it.)
-  const handleNewChat = () => {
-    const hasContent = agent.messages.length > 0 || agent.toolCalls.length > 0;
-    if (hasContent && !window.confirm('Start a new chat? This clears the current one.')) return;
+  const startNewChat = () => {
+    if (newChatBlockedReason) { toast.info(newChatBlockedReason); return; }
+    if (!agent.resetLiveConversation()) return;
+    setNewChatConfirmOpen(false);
     history.loadSession(null);
-    agent.resetLiveConversation();
-    if (window.matchMedia('(max-width: 820px)').matches) setSidebarOpen(false);
+    if (compact) setSidebarOpen(false);
+    // Restore focus after the closing dialog/sidebar releases its focus trap.
+    requestAnimationFrame(() => inputAreaRef.current?.focus());
+  };
+  const handleNewChat = () => {
+    if (newChatBlockedReason) { toast.info(newChatBlockedReason); return; }
+    if (unconfirmedDelivery || (!liveChatMessages.length && inputAreaRef.current?.hasDraft())) {
+      newChatReturnFocus.current = paletteOpen ? sidebarTriggerRef.current : document.activeElement as HTMLElement | null;
+      setNewChatConfirmOpen(true);
+    } else {
+      startNewChat();
+    }
   };
 
   const continueHistory = async (text?: string, attachments?: Parameters<typeof agent.sendMessage>[1]) => {
@@ -281,6 +306,7 @@ export function App() {
 
   const paletteCommands: Command[] = [
     { id: 'new', label: 'New chat', run: handleNewChat },
+    { id: 'suggestions', label: 'Open Suggestions', run: openSuggestions },
     { id: 'settings', label: 'Open Settings', run: openSettings },
   ];
   if (!isViewingHistory) {
@@ -368,6 +394,14 @@ export function App() {
                 onSelectSession={handleSelectSession}
                 onNewChat={handleNewChat}
                 liveTitle={liveTitle}
+                liveState={agent.state}
+                retainLive={!unconfirmedDelivery}
+                liveMessageCount={liveChatMessages.length}
+                liveUpdatedAt={liveChatMessages[liveChatMessages.length - 1]?.timestamp}
+                newChatDisabled={!!newChatBlockedReason}
+                newChatDisabledReason={newChatBlockedReason}
+                suggestionCount={pendingSuggestions}
+                onOpenSuggestions={openSuggestions}
                 onOpenSettings={openSettings}
                 onOpenSchedule={() => setCronPanelOpen(true)}
                 taskSelectionDisabled={agent.state !== 'idle' || agent.loadingConversation}
@@ -388,67 +422,17 @@ export function App() {
           minWidth: 0,
           position: 'relative',
         }}>
-          {taskTitle && <header className="task-heading">
-            {isViewingHistory && <span className="task-eyebrow">Past task</span>}
-            <h1 title={taskTitle}>{taskTitle}</h1>
+          {isViewingHistory && <header className="conversation-heading">
+            <h1 title={taskTitle}>{history.loading ? 'Opening chat…' : taskTitle || 'Saved chat'}</h1>
+            {['queued', 'running', 'waiting_input', 'waiting_approval'].includes(history.historyState?.run?.status ?? '') && <button type="button"
+              disabled={!agent.connected || history.loading || agent.loadingConversation || agent.state !== 'idle' || agent.savedDraft.available}
+              onClick={() => { void continueHistory().catch(error => toast.error(error instanceof Error ? error.message : 'Could not open this task.')); }}>
+              {agent.loadingConversation ? 'Opening task…' : 'View running task'}
+            </button>}
+            <button type="button" onClick={() => handleSelectSession(null)}>
+              {agent.state !== 'idle' ? 'Return to running task' : 'Back to current chat'}
+            </button>
           </header>}
-          {/* History banner */}
-          {isViewingHistory && (
-            <div className="fade-in" style={{
-              padding: '8px 20px',
-              background: 'var(--bg-surface)',
-              borderBottom: '1px solid var(--border)',
-              display: 'flex',
-              alignItems: 'center',
-              gap: 10,
-              flexWrap: 'wrap',
-              fontSize: 13,
-              color: 'var(--text-secondary)',
-            }}>
-              <span style={{
-                width: 6,
-                height: 6,
-                borderRadius: '50%',
-                background: 'var(--warning)',
-                flexShrink: 0,
-              }} />
-              <span style={{ flex: 1, minWidth: 130 }}>
-                Viewing a past task
-                {history.loading && ' ...'}
-              </span>
-              <div className="notice-actions">
-                <button
-                  onClick={() => { void continueHistory().catch(error => toast.error(error instanceof Error ? error.message : 'Could not load this chat.')); }}
-                  disabled={!agent.connected || agent.loadingConversation || agent.state !== 'idle'}
-                  style={{
-                    padding: '5px 14px',
-                    background: 'var(--bg-tertiary)',
-                    color: 'var(--text-primary)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 'var(--radius-md)',
-                    fontSize: 12,
-                    fontWeight: 600,
-                  }}
-                >
-                  {agent.loadingConversation ? 'Opening task…' : 'Continue this task'}
-                </button>
-                <button
-                  onClick={() => handleSelectSession(null)}
-                  style={{
-                    padding: '5px 14px',
-                    background: 'var(--accent)',
-                    color: 'var(--text-on-accent)',
-                    border: 'none',
-                    borderRadius: 'var(--radius-md)',
-                    fontSize: 12,
-                    fontWeight: 600,
-                  }}
-                >
-                  Back to current task
-                </button>
-              </div>
-            </div>
-          )}
 
           {interruptedRun?.status === 'interrupted' && interruptedRun.sessionId === viewedSessionRef.current && (
             <ResumeRunCard key={interruptedRun.runId} run={interruptedRun} connected={agent.connected}
@@ -515,12 +499,11 @@ export function App() {
             </div>
           )}
 
-          {/* Chat area + workbench — the split MORPHS: the chat column
-              squeezes and the workbench slides in beside it. The composer and
-              bubbles never move (grid tracks animate, content stays put). */}
+          {/* Keep the composer available beside every workbench view. */}
           <div
             className="chat-workbench-grid"
             data-bench={workbenchOpen ? 'open' : 'closed'}
+            data-workbench-tab={workbenchTab}
             data-computer={workbenchTab === 'computer'}
             data-expanded={computerExpanded}
             style={{
@@ -587,12 +570,12 @@ export function App() {
                 thinkingBlocks={displayThinkingBlocks}
                 isRunning={!isViewingHistory && agent.state === 'running'}
                 onRegenerate={
-                  !isViewingHistory && agent.connected && agent.state === 'idle'
+                  !isViewingHistory && agent.connected && agent.state === 'idle' && !modelSetup
                     ? agent.regenerate
                     : undefined
                 }
                 onEditResend={
-                  !isViewingHistory && agent.connected && agent.state === 'idle'
+                  !isViewingHistory && agent.connected && agent.state === 'idle' && !modelSetup
                     ? agent.sendMessage
                     : undefined
                 }
@@ -605,67 +588,22 @@ export function App() {
                 pendingApproval={isViewingHistory || agent.state === 'stopping' ? null : agent.pendingApproval}
                 onRespondApproval={agent.respondApproval}
                 onSuggest={
-                  !isViewingHistory && agent.connected && agent.state === 'idle'
+                  !isViewingHistory && agent.connected && agent.state === 'idle' && !modelSetup
                     ? agent.sendMessage
                     : undefined
                 }
                 onDraft={!isViewingHistory ? text => inputAreaRef.current?.setDraft(text) : undefined}
                 streamFooter={
-                  /* First coding activity with no pinned workspace → ask in
-                     the stream. The picker self-hides once a folder is set. */
+                  /* Prompt for a workspace when coding starts without one. */
                   !isViewingHistory && touchedWorkspace ? <InlineWorkspacePicker /> : null
                 }
               />}
 
-              {!workbenchOpen && shouldOpenWorkbench(displayToolCalls, displayFileChanges) && (
-                <button
-                  onClick={() => { setWorkbenchDismissed(false); setWorkbenchOpen(true); }}
-                  title="Show the Work panel (⌘J)"
-                  style={{
-                    position: 'absolute',
-                    top: 12,
-                    right: 16,
-                    zIndex: 15,
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 7,
-                    padding: '5px 11px',
-                    background: 'var(--bg-secondary)',
-                    border: '1px solid var(--accent-subtle)',
-                    borderRadius: 'var(--radius-md)',
-                    color: 'var(--text-secondary)',
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 11,
-                    cursor: 'pointer',
-                  }}
-                >
-                  Work {'›'}
-                </button>
-              )}
-
             </div>
             <div className="chat-composer">
-              {/* Input area */}
-              {isViewingHistory ? (
-                <div style={{
-                  textAlign: 'center',
-                  zIndex: 11,
-                  pointerEvents: 'none',
-                }}>
-                  <div className="glass" style={{
-                    display: 'inline-block',
-                    padding: '5px 14px',
-                    borderRadius: 'var(--radius-lg)',
-                    border: '1px solid var(--accent-subtle, var(--border))',
-                    color: 'var(--text-muted)',
-                    fontSize: 12,
-                  }}>
-                    Send a message to continue this task
-                  </div>
-                </div>
-              ) : null}
               <InputArea
-                settings={<ModelControls config={configInfo} openRequest={modelMenuRequest} onConfigure={configureModel} />}
+                settings={<ModelControls config={configInfo} openRequest={modelMenuRequest} onConfigure={configureModel}
+                  onModelChange={setPendingModel} />}
                 conversationKey={history.viewingSessionId ?? getLiveSessionId()}
                 ref={inputAreaRef}
                 onSend={isViewingHistory ? continueHistory : agent.sendMessage}
@@ -673,7 +611,7 @@ export function App() {
                 isRunning={!isViewingHistory && agent.state !== 'idle'}
                 isStopping={agent.state === 'stopping' || agent.state === 'submitting'}
                 attentionLabel={agent.state === 'submitting' ? 'Sending…' : agent.state === 'stopping' ? 'Stopping…' : attentionLabel}
-                sendBlockedReason={isViewingHistory && agent.state !== 'idle' ? 'Your current task is still running. Return to it to view or stop it.' : agent.loadingConversation ? 'Opening conversation…' : undefined}
+                sendBlockedReason={isViewingHistory && agent.state !== 'idle' ? 'Your current task is still running. Return to it to view or stop it.' : agent.loadingConversation ? 'Opening conversation…' : modelSetup?.reason || (modelSetup ? 'Set up this model before sending.' : undefined)}
                 disabled={!agent.connected}
               />
             </div>
@@ -682,6 +620,10 @@ export function App() {
           </div>
         </div>
       </div>
+
+      {newChatConfirmOpen && <NewChatConfirmation returnFocus={newChatReturnFocus.current}
+        blockedReason={newChatBlockedReason} onCancel={() => setNewChatConfirmOpen(false)} onConfirm={startNewChat} />}
+      {suggestionsOpen && <SuggestionsDialog returnFocus={suggestionsReturnFocus.current} suggestions={suggestions} onClose={() => setSuggestionsOpen(false)} />}
 
       {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} covered={panelOpen || paletteOpen}
         returnFocus={settingsReturnFocus.current}>
@@ -696,8 +638,7 @@ export function App() {
         />
       </SettingsDialog>}
 
-      {/* Panel overlays are lazy-loaded; show a placeholder so clicking a menu
-          item does something visible while its chunk downloads. */}
+      {/* Keep lazy-loaded panels visible and dismissible while loading. */}
       <Suspense fallback={<PanelLoading onDismiss={() => {
         setSkillsPanelOpen(false);
         setEnvPanelOpen(false);
@@ -739,6 +680,29 @@ export function App() {
       <Toaster />
     </div>
   );
+}
+
+function NewChatConfirmation({ onCancel, onConfirm, blockedReason, returnFocus }: {
+  onCancel: () => void;
+  onConfirm: () => void;
+  blockedReason?: string;
+  returnFocus: HTMLElement | null;
+}) {
+  const ref = useFocusTrap<HTMLDivElement>(true, returnFocus);
+  return <div className="new-chat-overlay" onClick={event => { if (event.target === event.currentTarget) onCancel(); }}>
+    <div ref={ref} className="new-chat-confirm" role="alertdialog" aria-modal="true" aria-labelledby="new-chat-title" aria-describedby="new-chat-description"
+      onKeyDown={event => {
+        if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); onCancel(); }
+      }}>
+      <h2 id="new-chat-title">Start a new chat?</h2>
+      <p id="new-chat-description">This chat has an unsent or unconfirmed message. Keep it here to retry or continue editing.</p>
+      {blockedReason && <p role="status">{blockedReason}</p>}
+      <div>
+        <button type="button" onClick={onCancel}>Keep chat</button>
+        <button type="button" disabled={!!blockedReason} onClick={onConfirm}>Start new chat</button>
+      </div>
+    </div>
+  </div>;
 }
 
 // Keep slow-loading panels dismissible.

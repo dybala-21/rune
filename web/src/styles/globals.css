@@ -472,7 +472,7 @@ a:focus-visible,
 
 /* Syntax highlighting (dependency-free tokenizer) */
 :root {
-  --syntax-comment: #6A717C;
+  --syntax-comment: #939ba6;
   --syntax-string:  #8FB99A;
   --syntax-number:  #D9A566;
   --syntax-keyword: #B48EAD;
@@ -562,7 +562,7 @@ a:focus-visible,
   --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.14);
   --shadow-glow: 0 8px 24px rgba(0, 0, 0, 0.14);
   /* Syntax colours retuned for a light background */
-  --syntax-comment: #7A828C;
+  --syntax-comment: #626b76;
   --syntax-string:  #397D4F;
   --syntax-number:  #9A5B18;
   --syntax-keyword: #8B3D8F;
@@ -596,9 +596,13 @@ a:focus-visible,
   border-color: var(--accent); color: var(--accent);
 }
 .msg-action-btn--primary:hover { background: var(--accent-subtle); color: var(--accent-hover); }
-/* Edit affordance only appears on hover, so it stays quiet until wanted. */
+/* Reveal editing controls on pointer or keyboard interaction. */
 .msg-edit-btn { opacity: 0; transition: opacity 0.12s; }
-.msg-hover:hover .msg-edit-btn { opacity: 1; }
+.msg-hover:hover .msg-edit-btn,
+.msg-edit-btn:focus-visible { opacity: 1; }
+@media (hover: none) {
+  .msg-edit-btn, .msg-actions { opacity: 1; }
+}
 
 /* Markdown tables & blockquotes */
 .md-table-scroll { overflow-x: auto; margin: 12px 0; }

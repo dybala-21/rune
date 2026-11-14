@@ -10,6 +10,8 @@ export interface InputAreaHandle {
   /** Attach files dropped elsewhere (e.g. the chat area). */
   addFiles: (files: FileList | File[]) => void;
   setDraft: (text: string) => void;
+  hasDraft: () => boolean;
+  focus: () => void;
 }
 
 interface InputAreaProps {
@@ -39,8 +41,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const attachmentBudget = useRef({ count: 0, bytes: 0, pending: 0 });
   const [readingFiles, setReadingFiles] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
-  // dragenter/dragleave fire for every child too; count depth so the highlight
-  // only clears when the pointer actually leaves the drop zone.
+  // Nested drag events must not clear the highlight while files remain over the drop zone.
   const dragDepthRef = useRef(0);
   const [showCommands, setShowCommands] = useState(false);
   const [cmdFilter, setCmdFilter] = useState('');
@@ -121,8 +122,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           if (res.ok && res.text) {
             const el = textareaRef.current;
             if (el) {
-              // Route through setValue so the box auto-grows and the caret lands
-              // at the end (a raw el.value write skips both).
+              // setValue also resizes the input and moves the caret to the end.
               setValue(el.value ? `${el.value} ${res.text}` : res.text);
               el.focus();
             }
@@ -202,6 +202,8 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
   useImperativeHandle(ref, () => ({
     addFiles: processFiles,
+    hasDraft: () => !!textareaRef.current?.value.trim() || attachmentsRef.current.length > 0,
+    focus: () => textareaRef.current?.focus(),
     setDraft(text) {
       const previous = textareaRef.current?.value ?? '';
       setValue(previous.trim() ? `${previous}\n${text}` : text);
@@ -328,10 +330,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       el.style.height = Math.min(el.scrollHeight, 160) + 'px';
 
       const val = el.value;
-      // A slash command is a single bare token — "/clear", "/goal". Anything
-      // with a separator is a path ("/Users/me/project cleanup please"), and
-      // opening the palette for it used to swallow Enter with no menu on
-      // screen, leaving the message unsendable.
+      // Paths beginning with / must remain sendable without opening the command menu.
       const cmd = /^\/([\w-]*)$/.exec(val);
       if (cmd && !isRunning && !disabled) {
         setShowCommands(true);
@@ -423,7 +422,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           overflow: showCommands ? 'visible' : 'hidden',
           position: 'relative',
         }}>
-        {/* Rejected-file feedback */}
         {attachNotice && (
           <div role="alert" style={{
             padding: '8px 16px 0',
@@ -435,7 +433,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           </div>
         )}
 
-        {/* Attachment previews */}
         {attachments.length > 0 && (
           <div style={{
             display: 'flex',
@@ -494,7 +491,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           </div>
         )}
 
-        {/* Input row */}
         <div className="composer-input-row" style={{
           display: 'flex',
           alignItems: 'flex-end',
@@ -509,7 +505,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               onClose={() => setShowCommands(false)}
             />
           )}
-          {/* Attach button */}
           <>
               <input
                 ref={fileInputRef}
@@ -639,18 +634,20 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
             </button>
           )}
         </div>
-        {settings && <div className="composer-settings">{settings}</div>}
-        <div className="composer-hint" style={{
-          fontSize: 11,
-          color: 'var(--text-muted)',
-          padding: '0 16px 8px',
-        }}>
-          {sendBlockedReason || (sending ? 'Preparing message…' : isRunning
-            ? `${attentionLabel || 'Rune is working'} · Send your draft when it finishes`
-            : disabled ? 'Reconnecting · Send your draft when connected'
-            : isDragOver
-              ? 'Drop to attach'
-              : 'Enter to send · Shift+Enter for a new line')}
+        <div className="composer-footer">
+          {settings && <div className="composer-settings">{settings}</div>}
+          <div className="composer-hint" data-notice={!!sendBlockedReason || sending || isRunning || disabled || isDragOver} style={{
+            fontSize: 11,
+            color: 'var(--text-muted)',
+            padding: '0 16px 8px',
+          }}>
+            {sendBlockedReason || (sending ? 'Preparing message…' : isRunning
+              ? `${attentionLabel || 'Rune is working'} · Send your draft when it finishes`
+              : disabled ? 'Reconnecting · Send your draft when connected'
+              : isDragOver
+                ? 'Drop to attach'
+                : 'Enter to send · Shift+Enter for a new line')}
+          </div>
         </div>
       </div>
     </div>

@@ -19,8 +19,6 @@ import { PickerPopover, SelectedCheck } from './PickerPopover';
 import { FolderIcon } from './icons';
 import './WorkbenchPanel.css';
 
-/** Saved code changes, execution progress, and live workspace tools. */
-
 interface WorkbenchPanelProps {
   sessionId: string;
   workspacePath?: string | null;
@@ -29,13 +27,11 @@ interface WorkbenchPanelProps {
   fileChanges?: FileChange[];
   isRunning: boolean;
   activitySummary: ActivitySummary | null;
-  /** The run's verify-or-fail verdict — the real Evidence Gate result, same
-      data the chat trust card uses. Preferred over the activity heuristic. */
+  /** Verification result shared with the chat status. */
   trust?: TrustInfo | null;
   currentStep?: StepInfo | null;
   orchestration?: OrchestrationState | null;
-  /** The agent is blocked on the user (approval or question) — surfaced in the
-      status band and as an attention dot on the Progress tab. */
+  /** Approval or question awaiting a response. */
   awaiting?: 'approval' | 'question' | null;
   connected?: boolean;
   historical?: boolean;
@@ -69,11 +65,7 @@ function diffLines(text: string): { lines: string[]; truncated: boolean } {
   return { lines: all.slice(0, DIFF_MAX_LINES), truncated: all.length > DIFF_MAX_LINES };
 }
 
-/**
- * Renders file.edit's search/replace args — not a real file diff. An empty
- * search is a pure insertion (show only + lines); an empty replace is a pure
- * deletion (show only − lines).
- */
+/** Preview the edit arguments; these are not a diff read from the file. */
 function EditDiff({ search, replace }: { search: string; replace: string }) {
   const del = search ? diffLines(search) : null;
   const add = replace ? diffLines(replace) : null;
@@ -105,7 +97,7 @@ function EditDiff({ search, replace }: { search: string; replace: string }) {
   );
 }
 
-// memo: the panel's 1s elapsed-timer re-render shouldn't re-diff unchanged commands.
+// Reuse command rows when the panel updates.
 const CommandLine = memo(function CommandLine({ tc, onOpenFile }: { tc: ToolCall; onOpenFile?: (path: string) => void }) {
   const name = normalizeToolName(tc.toolName);
   const pending = tc.result === undefined;
@@ -183,8 +175,31 @@ function formatElapsed(ms: number): string {
   return `${Math.floor(s / 60)}m${s % 60}s`;
 }
 
-// Leaf component owns the 1s tick so the timer re-renders one text node, not
-// the whole panel (which would re-derive phase/mode/coding every second).
+function RunDetails({ summary }: { summary: ActivitySummary }) {
+  const counts: Array<[string, number]> = [
+    ['Tool calls', summary.totalToolCalls],
+    ['Files read', summary.filesRead],
+    ['File writes', summary.filesWritten],
+    ['Shell commands', summary.bashExecutions],
+    ['Web lookups', summary.webSearches],
+    ['Browser actions', summary.browserActions],
+  ];
+  const duration = summary.totalDurationMs;
+  const durationLabel = duration < 1000 ? `${duration}ms`
+    : duration < 60_000 ? `${(duration / 1000).toFixed(1)}s`
+    : `${Math.floor(duration / 60_000)}m${Math.round((duration % 60_000) / 1000)}s`;
+  return <details className="workbench-run-details">
+    <summary>Run details</summary>
+    <dl>
+      {counts.filter(([, value]) => value > 0).map(([label, value]) => <div key={label}>
+        <dt>{label}</dt><dd>{value}</dd>
+      </div>)}
+      {duration > 0 && <div><dt>Duration</dt><dd>{durationLabel}</dd></div>}
+    </dl>
+  </details>;
+}
+
+// Keep timer updates inside the elapsed-time label.
 function Elapsed({ startedAt }: { startedAt: number }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -305,6 +320,11 @@ export function WorkbenchPanel({ sessionId, workspacePath, active = true, toolCa
     || key === 'outputs' && (outputs.length > 0 || preferredTab === 'outputs')
     || key === 'computer' && !historical || key === 'diff' && showDiffTab || key === 'terminal' && terminalConnected || key === tab);
   const selectTab = (next: BenchTab) => { setTab(next); setFollow(false); };
+  // Show workspace controls for file work; keep them accessible through Panel tools.
+  const showWorkspaceTools = workspacePath && !historical && (
+    coding.length > 0 || fileChanges.length > 0 || outputs.length > 0
+    || tab === 'diff' || tab === 'file' || tab === 'terminal' || tab === 'activity' || tab === 'outputs'
+  );
 
   return (
     <aside className="workbench-panel" data-tab={tab} style={{
@@ -367,7 +387,7 @@ export function WorkbenchPanel({ sessionId, workspacePath, active = true, toolCa
             title="Hide panel (⌘J)" aria-label="Hide panel"><ComputerIcon name="close" /></button>
         </div>
       </div>
-      {workspacePath && !historical && <div className="workbench-workspace" aria-label="Workspace tools">
+      {showWorkspaceTools && <div className="workbench-workspace" aria-label="Workspace tools">
         <span className="workbench-workspace-name" title={workspacePath}>
           <FolderIcon size={13} />
           <span>{workspacePath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || workspacePath}</span>
@@ -390,8 +410,8 @@ export function WorkbenchPanel({ sessionId, workspacePath, active = true, toolCa
         </button>
       </div>}
       <div className="workbench-content" id={`${panelId}-content`} role="tabpanel" aria-labelledby={`${panelId}-${tab}`} tabIndex={0}>
-      {/* Progress view — checklist, step timeline, evidence, verdict */}
       {tab === 'progress' && (
+        <>
         <ProgressPane
           toolCalls={toolCalls}
           mode={mode}
@@ -403,6 +423,8 @@ export function WorkbenchPanel({ sessionId, workspacePath, active = true, toolCa
           awaiting={awaiting}
           onOpenFile={historical ? undefined : openFile}
         />
+        {!isRunning && activitySummary && activitySummary.totalToolCalls > 0 && <RunDetails summary={activitySummary} />}
+        </>
       )}
 
       {tab === 'outputs' && <OutputsPane outputs={outputs} trust={trust} isRunning={isRunning} />}
@@ -426,7 +448,6 @@ export function WorkbenchPanel({ sessionId, workspacePath, active = true, toolCa
         </Suspense>
       </RetainedPane>}
 
-      {/* File view */}
       {tab === 'file' && (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           <form
@@ -471,7 +492,6 @@ export function WorkbenchPanel({ sessionId, workspacePath, active = true, toolCa
         </div>
       )}
 
-      {/* Command log */}
       {tab === 'activity' && (
       <div ref={logRef} style={{
         flex: 1,
