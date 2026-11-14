@@ -2,13 +2,15 @@
 
 import type { ProactiveFeedItem } from './types';
 import { noteResponse, presenceHeaders } from './utils/presence';
+import { accountScope, bindStorageScope, storageKey } from './utils/sessionContext';
 
 const BASE = '';
 
-/** Every request to the engine goes through here, so the hosted gateway can tell a person's
- * requests from the page's own (see utils/presence). */
+/** Presence headers distinguish user activity from background requests. */
 export async function apiFetch(input: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers);
+  const account = accountScope();
+  if (account) headers.set('X-Rune-Account', account);
   for (const [name, value] of Object.entries(presenceHeaders())) headers.set(name, value);
   const response = await fetch(input, { ...init, headers });
   noteResponse(response);
@@ -34,53 +36,84 @@ export async function fetchProactiveSuggestions(signal?: AbortSignal): Promise<P
 let _clientId: string | null = null;
 let _webAuthReady = false;
 let _webAuthPromise: Promise<void> | null = null;
+let _webAuthError: ApiError | null = null;
+let _authVersion = 0;
+export const AUTH_EVENT = 'rune:auth-required';
 
-async function bootstrapWebAuth(): Promise<void> {
+export function eventStreamUrl(): string {
+  const account = accountScope();
+  return account ? `/api/events?accountScope=${account}` : '/api/events';
+}
+export type AuthFailure = 'required' | 'forbidden' | null;
+
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number, readonly authGeneration?: number) { super(message); }
+}
+
+export function isStaleAuthFailure(error: unknown): boolean {
+  return error instanceof ApiError && (error.status === 401 || error.status === 403)
+    && error.authGeneration !== undefined && error.authGeneration !== _authVersion;
+}
+
+export function authFailure(error: unknown): AuthFailure {
+  if (!(error instanceof ApiError) || isStaleAuthFailure(error)) return null;
+  return error.status === 401 ? 'required' : error.status === 403 ? 'forbidden' : null;
+}
+
+async function bootstrapWebAuth(version: number): Promise<void> {
   const res = await apiFetch(`${BASE}/api/v1/auth/bootstrap`, {
-    method: 'POST',
-    credentials: 'include',
+    method: 'POST', credentials: 'include', signal: AbortSignal.timeout(10_000),
   });
-
-  // Older daemon versions may not expose bootstrap endpoint.
-  if (res.status === 404 || res.status === 405) {
-    _webAuthReady = true;
-    return;
+  const legacy = res.status === 404 || res.status === 405;
+  const body = legacy ? {} : await res.json().catch(() => ({ error: res.statusText }));
+  if (version !== _authVersion) throw new DOMException('Authentication changed', 'AbortError');
+  if (legacy && (accountScope() || res.headers.has('x-rune-machine'))) {
+    throw new ApiError('Could not refresh your account. Retry when the server is available.', 503);
   }
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error((err as { error?: string }).error || (typeof err.detail === 'string' ? err.detail : res.statusText));
+  if (!legacy && !res.ok) {
+    const error = new ApiError(body.error || (typeof body.detail === 'string' ? body.detail : res.statusText), res.status, version);
+    if (authFailure(error)) {
+      _webAuthError = error;
+      if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(AUTH_EVENT, { detail: authFailure(error) }));
+    }
+    throw error;
   }
-
+  if (bindStorageScope(legacy ? 'local' : body.storageScope)) {
+    // Reload before restoring another account's state.
+    if (typeof window !== 'undefined') window.location.assign('/');
+    throw new ApiError('Your account changed. Reopen Rune to continue.', 401);
+  }
   _webAuthReady = true;
 }
 
-/** SSE 연결 시 받은 clientId를 설정 (X-Client-Id 헤더로 전송) */
-export function setClientId(id: string) {
-  _clientId = id;
-}
+export function setClientId(id: string) { _clientId = id; }
 
 export async function ensureWebAuth(): Promise<void> {
   if (_webAuthReady) return;
+  if (_webAuthError) throw _webAuthError;
   if (_webAuthPromise) return _webAuthPromise;
-
-  _webAuthPromise = bootstrapWebAuth().finally(() => {
-    if (!_webAuthReady) {
-      _webAuthPromise = null;
-    }
-  });
-
-  return _webAuthPromise;
+  const pending = bootstrapWebAuth(_authVersion);
+  _webAuthPromise = pending;
+  try { await pending; }
+  finally { if (_webAuthPromise === pending) _webAuthPromise = null; }
 }
 
-/** Force the next request to re-bootstrap auth (e.g. after a 401 or a dropped stream). */
+// Explicit retries invalidate any older bootstrap still in flight.
 export function resetWebAuth(): void {
+  _authVersion++;
   _webAuthReady = false;
   _webAuthPromise = null;
+  _webAuthError = null;
 }
 
-export class ApiError extends Error {
-  constructor(message: string, readonly status: number) { super(message); }
+/** Cache a protected read's 401 when bootstrap cannot detect it. */
+export function requireWebAuth(): void {
+  if (_webAuthError?.status === 401) return;
+  _authVersion++;
+  _webAuthReady = false;
+  _webAuthPromise = null;
+  _webAuthError = new ApiError('Authentication is required to reconnect.', 401, _authVersion);
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(AUTH_EVENT, { detail: 'required' }));
 }
 
 export function uncertainDelivery(error: unknown): boolean {
@@ -89,6 +122,7 @@ export function uncertainDelivery(error: unknown): boolean {
 
 export async function post<T>(path: string, body?: unknown, retried = false, signal?: AbortSignal): Promise<T> {
   await ensureWebAuth();
+  const authVersion = _authVersion;
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (_clientId) {
@@ -102,14 +136,14 @@ export async function post<T>(path: string, body?: unknown, retried = false, sig
     body: body ? JSON.stringify(body) : undefined,
     signal,
   });
-  // Auth expired: re-bootstrap once and retry, so the app recovers without a reload.
-  if ((res.status === 401 || res.status === 403) && !retried) {
-    resetWebAuth();
+  // Refresh once after 401; a 403 does not invalidate the session.
+  if (res.status === 401 && !retried) {
+    if (authVersion === _authVersion) resetWebAuth();
     return post<T>(path, body, true, signal);
   }
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new ApiError((err as { error?: string }).error || (typeof err.detail === 'string' ? err.detail : res.statusText), res.status);
+    throw new ApiError((err as { error?: string }).error || (typeof err.detail === 'string' ? err.detail : res.statusText), res.status, authVersion);
   }
   return res.json() as Promise<T>;
 }
@@ -128,28 +162,32 @@ async function rpc<T>(method: string, params: unknown = {}, signal?: AbortSignal
 
 // Keep the conversation across reloads in this tab. New Chat rotates the ID.
 const LIVE_SESSION_KEY = 'rune.live.sessionId';
+let _memorySessionId: string | null = null;
 
 export function rotateLiveSessionId(): string {
   setCurrentRunId('');
   const id = typeof crypto !== 'undefined' && crypto.randomUUID
     ? `web_${crypto.randomUUID()}`
     : `web_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
-  try { sessionStorage.setItem(LIVE_SESSION_KEY, id); } catch { /* storage unavailable */ }
+  _memorySessionId = id;
+  try { const key = storageKey(LIVE_SESSION_KEY); if (key) sessionStorage.setItem(key, id); } catch { /* storage unavailable */ }
   return id;
 }
 
 function liveSessionId(): string {
   try {
-    return sessionStorage.getItem(LIVE_SESSION_KEY) ?? rotateLiveSessionId();
+    const key = storageKey(LIVE_SESSION_KEY);
+    return (key ? sessionStorage.getItem(key) : null) ?? _memorySessionId ?? rotateLiveSessionId();
   } catch {
-    return rotateLiveSessionId();
+    return _memorySessionId ?? rotateLiveSessionId();
   }
 }
 
 // Pin the live chat to an existing conversation (used by /load).
 export function setLiveSessionId(id: string): void {
   setCurrentRunId('');
-  try { sessionStorage.setItem(LIVE_SESSION_KEY, id); } catch { /* storage unavailable */ }
+  _memorySessionId = id;
+  try { const key = storageKey(LIVE_SESSION_KEY); if (key) sessionStorage.setItem(key, id); } catch { /* storage unavailable */ }
 }
 
 export function getLiveSessionId(): string {
@@ -221,13 +259,14 @@ export function stopComputer(runId: string): Promise<{ ok: boolean }> {
 
 export async function fetchRunSnapshot(sessionId: string): Promise<{ run: import('./utils/runSnapshot').RunSnapshot | null; available?: boolean }> {
   await ensureWebAuth();
+  const authGeneration = _authVersion;
   const response = await apiFetch(`/api/runs/snapshot?sessionId=${encodeURIComponent(sessionId)}`, {
     credentials: 'include', signal: AbortSignal.timeout(5000),
   });
   if (response.status === 404 || (response.ok && response.headers.get('content-type')?.includes('text/html'))) {
     return { run: null, available: false };
   }
-  if (!response.ok) throw new Error(`Could not restore run (${response.status}).`);
+  if (!response.ok) throw new ApiError(`Could not restore run (${response.status}).`, response.status, authGeneration);
   return response.json();
 }
 

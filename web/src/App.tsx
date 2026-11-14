@@ -302,7 +302,7 @@ export function App() {
         }}
       />
 
-      {!agent.connected && <ConnectionBanner />}
+      {!agent.connected && <ConnectionBanner authFailure={agent.authFailure} onRetry={agent.reconnect} />}
 
       <div className="app-body" data-sidebar={sidebarOpen} style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
         {sidebarOpen && <button type="button" className="sidebar-backdrop" aria-label="Hide tasks" tabIndex={-1}

@@ -121,3 +121,54 @@ def test_worker_websocket_never_follows_redirects():
     from rune.cloud.gateway import WorkerConnection
     error = InvalidStatus(Response(302, "Found", Headers({"Location": "wss://elsewhere.example/ws"})))
     assert WorkerConnection("ws://127.0.0.1/ws").process_redirect(error) is error
+
+
+async def test_bootstrap_storage_scope_follows_owner_and_worker_credentials(tenants):
+    store, alice, bob = tenants
+    app = create_gateway(store, "https://rune.example")
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://rune.example") as client:
+            async def bootstrap(token):
+                return await client.post("/api/v1/auth/bootstrap", headers={"Authorization": f"Bearer {token}"})
+
+            first = await bootstrap(alice)
+            assert first.headers["cache-control"] == "no-store"
+            scope = first.json()["storageScope"]
+            assert len(scope) == 64 and all(character in "0123456789abcdef" for character in scope)
+            assert (await bootstrap(alice)).json()["storageScope"] == scope
+            assert (await bootstrap(bob)).json()["storageScope"] != scope
+            assert "rune_alice_internal" not in first.text and "alice" not in scope
+            assert (await bootstrap("invalid")).status_code == 401
+            replacement = store.register("alice", "http://127.0.0.4:18789", "rune_new")
+            assert (await bootstrap(replacement)).json()["storageScope"] != scope
+
+
+async def test_account_switch_cannot_send_old_tabs_actions_to_another_worker(tenants):
+    store, alice, bob = tenants
+    requests = []
+
+    def upstream(request):
+        requests.append(request)
+        return httpx.Response(200, stream=Body(b'{}'), headers={"content-type": "application/json"})
+
+    app = create_gateway(store, "https://rune.example")
+    async with app.router.lifespan_context(app):
+        await app.state.upstream.aclose()
+        app.state.upstream = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="https://rune.example") as client:
+            first = await client.post("/api/v1/auth/bootstrap", headers={"Authorization": f"Bearer {alice}"})
+            alice_scope = first.json()["storageScope"]
+            headers = {"Authorization": f"Bearer {bob}", "X-Rune-Account": alice_scope}
+            bootstrap = await client.post("/api/v1/auth/bootstrap", headers=headers)
+            assert bootstrap.status_code == 200
+            bob_scope = bootstrap.json()["storageScope"]
+            assert bob_scope != alice_scope
+            assert (await client.post("/api/message", json={"goal": "send"}, headers=headers)).status_code == 401
+            for query in [alice_scope, f"{bob_scope}&accountScope={alice_scope}", ""]:
+                response = await client.get(f"/api/events?accountScope={query}", headers={"Authorization": f"Bearer {bob}"})
+                assert response.status_code == 401
+            assert requests == []
+            headers["X-Rune-Account"] = bob_scope
+            assert (await client.post("/api/message", json={}, headers=headers)).status_code == 200
+            assert len(requests) == 1 and "x-rune-account" not in requests[0].headers
+        await app.state.upstream.aclose()

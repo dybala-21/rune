@@ -3,6 +3,7 @@ import { CommandPalette } from './CommandPalette';
 import { transcribeAudio } from '../api';
 import type { PendingAttachment } from '../types';
 import { installMobileDraft } from '../utils/mobileDraft';
+import { readComposerDraft, saveComposerDraft } from '../utils/composerStore';
 
 import { attachmentMime, ATTACHMENT_ACCEPT, ATTACHMENT_HELP, MAX_ATTACHMENT_BYTES, MAX_TOTAL_BYTES, MAX_ATTACHMENTS } from '../utils/attachments';
 
@@ -62,18 +63,26 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   useLayoutEffect(() => {
     owner.current = conversationKey;
     const draft = drafts.current.get(conversationKey);
+    const saved = draft ? null : readComposerDraft(conversationKey);
     drafts.current.delete(conversationKey);
-    setValue(draft?.text ?? '');
+    setValue(draft?.text ?? saved?.text ?? '');
     const files = draft?.attachments ?? [];
     attachmentsRef.current = files;
     setAttachments(files);
     attachmentBudget.current = { count: files.length, bytes: files.reduce((sum, file) => sum + file.size, 0), pending: 0 };
-    setAttachNotice(draft?.notice ?? '');
+    setAttachNotice(draft?.notice ?? (saved?.hadAttachments ? 'Your text is restored. Reattach files before sending.' : ''));
     setReadingFiles(false);
     setRecState('idle');
     setShowCommands(false);
     histIdxRef.current = -1;
+    const saveDraft = () => saveComposerDraft(conversationKey, textareaRef.current?.value ?? '', attachmentsRef.current.length > 0 || readers.current.size > 0);
+    const onHidden = () => { if (document.hidden) saveDraft(); };
+    window.addEventListener('pagehide', saveDraft);
+    document.addEventListener('visibilitychange', onHidden);
     return () => {
+      saveDraft();
+      window.removeEventListener('pagehide', saveDraft);
+      document.removeEventListener('visibilitychange', onHidden);
       generation.current++;
       drafts.current.set(conversationKey, {
         text: textareaRef.current?.value ?? '', attachments: attachmentsRef.current,
@@ -255,6 +264,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           previous.attachments = previous.attachments.filter(file => !sentAttachments.some(sent => sent.id === file.id));
           sentAttachments.forEach(file => { if (file.preview) URL.revokeObjectURL(file.preview); });
           if (previous.text === draft) previous.text = '';
+          saveComposerDraft(draftOwner, previous.text, previous.attachments.length > 0);
         }
         return;
       }

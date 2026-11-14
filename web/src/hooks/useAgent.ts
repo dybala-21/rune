@@ -1,3 +1,4 @@
+import { storageKey } from '../utils/sessionContext';
 import { ConversationLoader } from '../utils/conversationLoader';
 import { latestTurn, retryAttachments } from '../utils/retry';
 import { retryRequestId, updateDelivery } from '../utils/messageDelivery';
@@ -168,7 +169,8 @@ function loadPersistedLiveState(): LoadedLiveDraft {
   }
 
   try {
-    const raw = window.localStorage.getItem(LIVE_STATE_STORAGE_KEY);
+    const key = storageKey(LIVE_STATE_STORAGE_KEY);
+    const raw = key ? window.localStorage.getItem(key) : null;
     if (!raw) {
       return {
         state: createEmptyLiveState(),
@@ -223,13 +225,15 @@ function withoutAttachmentData(messages: ChatMessage[]): ChatMessage[] {
 
 function persistLiveState(state: PersistedLiveState): void {
   if (typeof window === 'undefined') return;
+  const key = storageKey(LIVE_STATE_STORAGE_KEY);
+  if (!key) return;
   try {
     const payload: PersistedLiveEnvelope = {
       version: 1,
       savedAt: Date.now(),
       state: { ...state, messages: withoutAttachmentData(state.messages) },
     };
-    window.localStorage.setItem(LIVE_STATE_STORAGE_KEY, JSON.stringify(payload));
+    window.localStorage.setItem(key, JSON.stringify(payload));
   } catch {
     // ignore quota / storage errors
   }
@@ -1159,6 +1163,8 @@ export function useAgent() {
 
   return {
     connected,
+    authFailure: connection.authFailure,
+    reconnect: connection.reconnect,
     state,
     messages: visibleMessages,
     toolCalls,
