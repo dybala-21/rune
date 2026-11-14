@@ -167,6 +167,9 @@ async def memory_search(params: MemorySearchParams) -> CapabilityResult:
 
         manager = get_memory_manager()
         await manager.initialize()
+        from rune.memory.provenance import PrivateIndex
+
+        private = PrivateIndex()
 
         all_matches: list[dict] = []
         query_lower = params.query.lower()
@@ -181,6 +184,7 @@ async def memory_search(params: MemorySearchParams) -> CapabilityResult:
                     "key": key,
                     "summary": value,
                     "score": 0.9 * relevance,
+                    "private": key.lower() in private.keys,
                 }
             )
 
@@ -225,6 +229,7 @@ async def memory_search(params: MemorySearchParams) -> CapabilityResult:
                             "score": 0.85,
                             "entities": ep.entities,
                             "lessons": ep.lessons,
+                            "private": ep.id in private.episodes,
                         }
                     )
 
@@ -247,6 +252,7 @@ async def memory_search(params: MemorySearchParams) -> CapabilityResult:
                             "score": 0.75 * hit.score / best,
                             "entities": match.entities,
                             "lessons": match.lessons,
+                            "private": match.id in private.episodes,
                         }
                     )
         except Exception as exc:
@@ -263,6 +269,7 @@ async def memory_search(params: MemorySearchParams) -> CapabilityResult:
                             "key": r.metadata.id if r.metadata else "",
                             "summary": r.metadata.summary if r.metadata else r.text,
                             "score": r.score,
+                            "private": bool(r.metadata) and private.chunk(r.metadata.type, r.metadata.id),
                         }
                     )
         except Exception as exc:  # vector search is optional; keyword sources above still answer
@@ -276,6 +283,13 @@ async def memory_search(params: MemorySearchParams) -> CapabilityResult:
             if sig not in seen_summaries:
                 seen_summaries.add(sig)
                 unique_matches.append(m)
+
+        # What a connector returned goes back into the run only once the web is closed to it.
+        if any(m.get("private") for m in unique_matches[: params.limit]):
+            from rune.memory.provenance import allow_private
+
+            if not await allow_private("memory search"):
+                unique_matches = [m for m in unique_matches if not m.get("private")]
 
         if not unique_matches:
             return CapabilityResult(
@@ -344,8 +358,11 @@ async def memory_save(params: MemorySaveParams) -> CapabilityResult:
 
         await manager.save_fact(fact)
 
-        # Also attempt project memory append for preference/environment types
-        if params.type in ("preference", "environment"):
+        # Also attempt project memory append for preference/environment types. Not after a
+        # connector call: the project file keeps no origin, so it couldn't be found or forgotten.
+        from rune.memory.provenance import contacted
+
+        if params.type in ("preference", "environment") and not contacted():
             try:
                 import os
 
@@ -567,9 +584,13 @@ async def conversation_search(params: ConversationSearchParams) -> CapabilityRes
 
         ranked.sort(key=lambda t: t[0], reverse=True)
 
+        from rune.memory.provenance import PrivateIndex, allow_private
+
+        private = PrivateIndex().conversations
         # One window per conversation, best hit first.
         seen: set[str] = set()
         blocks: list[str] = []
+        withheld: set[int] = set()
         for score, turn in ranked:
             cid = turn["conversation_id"]
             if cid in seen or score < floor:  # drop weak/unrelated matches
@@ -582,9 +603,15 @@ async def conversation_search(params: ConversationSearchParams) -> CapabilityRes
             body = "\n".join(
                 f"- {w['role']}: {w['content'][:300]}" for w in win if (w["content"] or "").strip()
             )
+            if cid in private:
+                withheld.add(len(blocks))
             blocks.append(f"{head}\n{body}")
             if len(blocks) >= params.limit:
                 break
+
+        # A conversation whose run called a connector may repeat what it returned.
+        if withheld and not await allow_private("conversation search"):
+            blocks = [b for i, b in enumerate(blocks) if i not in withheld]
 
         if not blocks:
             return CapabilityResult(success=True, output="No past conversations match that.")

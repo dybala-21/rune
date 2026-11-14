@@ -732,6 +732,7 @@ class NativeAgentLoop(EventEmitter):
         self._task_context = None
         self._task_updates = False
         self._last_goal_type = ""
+        self.connectors_contacted: list[str] = []
         self._consecutive_reads_without_write = 0
         self._pending_verification_nudge = False
         self._files_written.clear()
@@ -1036,7 +1037,19 @@ class NativeAgentLoop(EventEmitter):
     @with_execution_environment
     @with_task_continuity
     @timed_run
-    async def run(
+    async def run(self, goal: str, **kwargs: Any) -> CompletionTrace:
+        """Run the task, recording the connectors it calls on the trace."""
+        from rune.memory.provenance import run_sources
+
+        with run_sources() as contacted:
+            try:
+                trace = await self._run(goal, **kwargs)
+            finally:
+                self.connectors_contacted = sorted(contacted)
+        trace.connectors = sorted(contacted)
+        return trace
+
+    async def _run(
         self,
         goal: str,
         *,

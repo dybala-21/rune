@@ -480,6 +480,7 @@ def _handle_non_interactive(
         if not _throwaway:
             try:
                 _learned = await post_process_agent_result(PostProcessInput(
+                    connectors=getattr(trace, "connectors", []),
                     verification=getattr(trace, "verification", None),
                     table_acceptance=getattr(trace, "table_acceptance", None),
                     requirement_acceptance=getattr(trace, "requirement_acceptance", None),
@@ -729,6 +730,7 @@ def _simple_repl(model: str | None = None, provider: str | None = None) -> None:
 
         with contextlib.suppress(Exception):
             await post_process_agent_result(PostProcessInput(
+                connectors=getattr(trace, "connectors", []),
                 classification_hint=getattr(run_loop, "_last_goal_type", "") or None,
                 verification=getattr(trace, "verification", None),
                 table_acceptance=getattr(trace, "table_acceptance", None),

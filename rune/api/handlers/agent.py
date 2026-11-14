@@ -270,6 +270,7 @@ async def _execute_agent(
         # 5. Post-process (memory persistence)
         try:
             await post_process_agent_result(PostProcessInput(
+                connectors=getattr(trace, "connectors", []),
                 classification_hint=getattr(loop, "_last_goal_type", "") or None,
                 verification=getattr(trace, "verification", None),
                 table_acceptance=getattr(trace, "table_acceptance", None),

@@ -29,6 +29,7 @@ interface SettingsSidebarProps {
   onOpenCronPanel: () => void;
   onOpenMcpPanel: () => void;
   onOpenMarkdownPanel?: () => void;
+  onOpenMemoryPanel?: () => void;
 }
 
 const CHANNEL_STATUS_COLORS: Record<string, string> = {
@@ -98,7 +99,7 @@ function toMemoryTuningDraft(config: ConfigInfo): MemoryTuningDraft {
   };
 }
 
-export function SettingsSidebar({ initialSection, onOpenSkillPanel, onOpenEnvPanel, onOpenProviderKeys, onOpenCronPanel, onOpenMcpPanel, onOpenMarkdownPanel }: SettingsSidebarProps) {
+export function SettingsSidebar({ initialSection, onOpenSkillPanel, onOpenEnvPanel, onOpenProviderKeys, onOpenCronPanel, onOpenMcpPanel, onOpenMarkdownPanel, onOpenMemoryPanel }: SettingsSidebarProps) {
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [envVars, setEnvVars] = useState<EnvVarInfo[]>([]);
   const [config, setConfig] = useState<ConfigInfo | null>(null);
@@ -510,6 +511,20 @@ export function SettingsSidebar({ initialSection, onOpenSkillPanel, onOpenEnvPan
             subtitle="MCP servers"
             onClick={onOpenMcpPanel}
           />
+
+          {onOpenMemoryPanel && (
+            <SettingsSection
+              icon={
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.2"/>
+                  <path d="M5 8h6M8 5v6" stroke="currentColor" strokeWidth="1.2"/>
+                </svg>
+              }
+              title="Memory"
+              subtitle="What RUNE remembers, and where it came from"
+              onClick={onOpenMemoryPanel}
+            />
+          )}
 
           {onOpenMarkdownPanel && (
             <SettingsSection

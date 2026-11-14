@@ -40,6 +40,8 @@ class DailyMemoryEntry:
     # How many of ``total_tasks`` carried a real outcome. Session events do not,
     # so a ratio built over unmeasured tasks would be invented.
     outcomes_recorded: int = 0
+    # Connectors the day's runs called: the entries may repeat what they returned.
+    connectors: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -145,6 +147,7 @@ class TieredMemoryManager:
                 daily.total_tasks += 1
                 daily.key_decisions.extend(entry.get("decisions", []))
                 daily.patterns_learned.extend(entry.get("lessons", []))
+                daily.connectors.extend(c for c in entry.get("connectors", []) if c not in daily.connectors)
             return daily
         except Exception as exc:
             log.warning("daily_summary_parse_failed", date=date, error=str(exc))

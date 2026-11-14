@@ -166,6 +166,32 @@ def append_to_memory_md(section: str, line: str, path: Path | None = None) -> No
     _atomic_write(path, content)
 
 
+def replace_section_line(section: str, old: str, new: str | None, path: Path | None = None) -> int:
+    """Replace the first bullet `old` under H1 `section` with `new`, or delete it when `new` is None.
+
+    Returns 1 when a line changed, 0 when no such line exists. The rest of the file is kept as is.
+    """
+    if path is None:
+        path = memory_dir() / "MEMORY.md"
+    if not path.exists():
+        return 0
+    lines = path.read_text(encoding="utf-8").split("\n")
+    current = ""
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            current = stripped[2:].strip()
+        elif current == section and stripped.startswith("- ") and stripped[2:].strip() == old:
+            _backup(path)
+            if new is None:
+                del lines[i]
+            else:
+                lines[i] = line[: len(line) - len(line.lstrip())] + f"- {new}"
+            _atomic_write(path, "\n".join(lines).rstrip("\n") + "\n")
+            return 1
+    return 0
+
+
 # learned.md parsing
 
 def parse_learned_md(path: Path | None = None) -> list[dict[str, Any]]:
@@ -350,8 +376,9 @@ def append_daily_entry(
     decisions: list[str] | None = None,
     date: str | None = None,
     time_str: str | None = None,
+    connectors: list[str] | None = None,
 ) -> Path:
-    """Append a task entry to today's daily log."""
+    """Append a task entry to today's daily log, with the connectors its run called."""
     if date is None:
         date = datetime.now(UTC).strftime("%Y-%m-%d")
     if time_str is None:
@@ -369,6 +396,8 @@ def append_daily_entry(
         lines.append(f"> lesson: {lesson}")
     for decision in (decisions or []):
         lines.append(f"> decision: {decision}")
+    if connectors:
+        lines.append(f"> connectors: {', '.join(sorted(set(connectors)))}")
 
     entry = "\n".join(lines) + "\n"
 
@@ -382,6 +411,29 @@ def append_daily_entry(
 
     _atomic_write(path, content)
     return path
+
+
+def _entry_calls(entry: list[str], connector: str) -> bool:
+    return any(connector in {c.strip() for c in line.strip()[13:].split(",")}
+               for line in entry if line.strip().startswith("> connectors:"))
+
+
+def remove_daily_entries(connector: str) -> int:
+    """Delete every daily-log entry whose run called `connector`. Returns how many."""
+    daily_dir = memory_dir() / "daily"
+    removed = 0
+    for path in sorted(daily_dir.glob("*.md")) if daily_dir.exists() else []:
+        # The text before the first entry, then one list of lines per "## " entry.
+        blocks: list[list[str]] = [[]]
+        for line in path.read_text(encoding="utf-8").split("\n"):
+            if line.strip().startswith("## "):
+                blocks.append([])
+            blocks[-1].append(line)
+        kept = [blocks[0]] + [b for b in blocks[1:] if not _entry_calls(b, connector)]
+        if len(kept) < len(blocks):
+            _atomic_write(path, "\n".join(line for block in kept for line in block))
+            removed += len(blocks) - len(kept)
+    return removed
 
 
 def parse_daily_log(path: Path) -> list[dict[str, Any]]:
@@ -412,6 +464,7 @@ def parse_daily_log(path: Path) -> list[dict[str, Any]]:
                 "actions": [],
                 "lessons": [],
                 "decisions": [],
+                "connectors": [],
                 "raw": stripped,
             }
         elif current is not None:
@@ -419,6 +472,8 @@ def parse_daily_log(path: Path) -> list[dict[str, Any]]:
                 current["lessons"].append(stripped[9:].strip())
             elif stripped.startswith("> decision:"):
                 current["decisions"].append(stripped[11:].strip())
+            elif stripped.startswith("> connectors:"):
+                current["connectors"] += [c.strip() for c in stripped[13:].split(",") if c.strip()]
             elif stripped.startswith("- "):
                 current["actions"].append(stripped[2:].strip())
 
