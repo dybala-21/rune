@@ -10,6 +10,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from rune.api.auth import TokenAuthDependency
+from rune.api.env_activation import EnvActivationInfo, env_activation, provider_for_env_key
+from rune.llm.models import PROVIDER_ENV_KEYS
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -33,6 +35,8 @@ _CATEGORY_PREFIXES: list[tuple[list[str], str]] = [
     (["GOOGLE_CHAT_"], "google-chat"),
 ]
 
+_PROVIDER_KEYS = frozenset(key for keys in PROVIDER_ENV_KEYS.values() for key in keys)
+
 _SECRET_PATTERNS = {"KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL"}
 
 
@@ -40,6 +44,8 @@ _SECRET_PATTERNS = {"KEY", "SECRET", "TOKEN", "PASSWORD", "CREDENTIAL"}
 
 
 def _categorize_key(key: str) -> str:
+    if key in _PROVIDER_KEYS or provider_for_env_key(key):
+        return "llm"
     for prefixes, category in _CATEGORY_PREFIXES:
         if any(key.startswith(p) for p in prefixes):
             return category
@@ -98,11 +104,15 @@ class EnvSetRequest(BaseModel):
 class EnvSetResponse(BaseModel):
     key: str
     updated: bool
+    activation: EnvActivationInfo
+    provider: str | None = None
 
 
 class EnvDeleteResponse(BaseModel):
     key: str
     deleted: bool
+    activation: EnvActivationInfo
+    provider: str | None = None
 
 
 # Routes
@@ -110,7 +120,7 @@ class EnvDeleteResponse(BaseModel):
 
 def _is_rune_key(key: str) -> bool:
     """Whether a variable belongs to RUNE rather than the ambient shell."""
-    if key.startswith("RUNE_"):
+    if key in _PROVIDER_KEYS or provider_for_env_key(key) or key.startswith("RUNE_"):
         return True
     return any(
         key.startswith(p) for prefixes, _ in _CATEGORY_PREFIXES for p in prefixes
@@ -173,7 +183,7 @@ async def set_env(key: str, req: EnvSetRequest) -> EnvSetResponse:
     from rune.utils.env import set_env as write_env
 
     try:
-        write_env(key, req.value, scope=req.scope)
+        saved_scope = write_env(key, req.value, scope=req.scope)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (OSError, UnicodeDecodeError) as exc:
@@ -185,7 +195,8 @@ async def set_env(key: str, req: EnvSetRequest) -> EnvSetResponse:
         ) from exc
 
     log.info("env_set", key=key, scope=req.scope)
-    return EnvSetResponse(key=key, updated=True)
+    return EnvSetResponse(key=key, updated=True, activation=env_activation(key, scope=saved_scope),
+                          provider=provider_for_env_key(key))
 
 
 @router.delete("/{key}", response_model=EnvDeleteResponse, dependencies=[Depends(auth)])
@@ -218,4 +229,5 @@ async def delete_env(key: str, scope: str = "project") -> EnvDeleteResponse:
         ) from exc
 
     log.info("env_unset", key=key, scope=scope)
-    return EnvDeleteResponse(key=key, deleted=True)
+    return EnvDeleteResponse(key=key, deleted=True, activation=env_activation(key, scope=scope),
+                             provider=provider_for_env_key(key))

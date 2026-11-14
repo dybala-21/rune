@@ -109,6 +109,7 @@ export function CommandPalette({ filter, onSelect, onClose }: Props) {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      if (listRef.current?.closest('[inert]')) return;
       const len = currentItems.length;
       if (!len) return;
       if (e.key === 'ArrowDown') { e.preventDefault(); setSelectedIdx(i => Math.min(i + 1, len - 1)); }

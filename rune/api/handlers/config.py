@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from rune.api.auth import TokenAuthDependency
+from rune.api.model_connection import ModelConnectionInfo, model_connection
 from rune.config.schema import (
     AzureDeployments,
     AzurePricingConfig,
@@ -52,6 +53,7 @@ class ConfigGetResponse(BaseModel):
     max_concurrency: int = Field(3, alias="maxConcurrency")
     version: str = VERSION
     active_model: ActiveModelInfo | None = Field(None, alias="activeModel")
+    model_connection: ModelConnectionInfo | None = Field(None, alias="modelConnection")
     memory_tuning: dict[str, Any] | None = Field(None, alias="memoryTuning")
     safety_tuning: dict[str, Any] | None = Field(None, alias="safetyTuning")
     advisor_enabled: bool = Field(False, alias="advisorEnabled")
@@ -144,9 +146,12 @@ def _apply_memory_tuning(
     plan: list[tuple[str, Any]], tuning: dict[str, Any]
 ) -> None:
     """Apply a plan produced by :func:`_plan_memory_tuning`."""
+    from rune.cloud.boundary import hosted
     from rune.utils.env import set_env
 
-    scope = tuning.get("scope")
+    # Hosted engines never load project .env files, including after a restart.
+    # Older clients still send project scope for these settings.
+    scope = "user" if hosted() else tuning.get("scope")
     scope = scope if scope in ("user", "project") else "user"
 
     for field, value in plan:
@@ -215,6 +220,7 @@ async def get_config_endpoint() -> ConfigGetResponse:
     cfg = _get_rune_config()
     effective = get_effective_model_selection()
     from rune.agent.decision_router import accelerator_status
+    from rune.api.azure import settings_unavailable_reason
     from rune.api.azure_settings import credential_revision
     from rune.api.azure_settings import revision as azure_revision
     from rune.cloud.boundary import hosted
@@ -247,6 +253,7 @@ async def get_config_endpoint() -> ConfigGetResponse:
     effort = cfg.llm.reasoning_efforts.get(reasoning_model_key(model))
     return ConfigGetResponse(
         azure={
+            "unavailableReason": settings_unavailable_reason(),
             "revision": azure_revision(),
             "credentialRevision": credential_revision(),
             "deploymentTestBlocked": ("Deployment tests are disabled by the configured request or cost limit. "
@@ -278,6 +285,7 @@ async def get_config_endpoint() -> ConfigGetResponse:
             "model": effective.model,
             "source": "active" if cfg.llm.active_model else "default",
         },
+        modelConnection=model_connection(effective.provider.value, effective.model),
         reasoningEffort=effort if effort in options else None,
         reasoningSupported=bool(options),
         reasoningOptions=list(options),
@@ -469,12 +477,14 @@ async def patch_config(req: ConfigPatchRequest) -> ConfigPatchResponse:
 
 
 def _local_models_state(cfg) -> dict[str, Any]:
+    from rune.cloud.boundary import hosted
     from rune.llm.context import model_environment
     from rune.llm.endpoints import OLLAMA_NAMES, is_free, key_name, ollama_root
     from rune.utils.env import effective_env_scope
 
     ollama_key = next((name for name in OLLAMA_NAMES if model_environment(name).strip()), OLLAMA_NAMES[0])
     return {
+        "endpointsPublicHttpsOnly": hosted(),
         "ollama": {"baseUrl": ollama_root(), "envKey": ollama_key, "scope": effective_env_scope(ollama_key)},
         "endpoints": {
             name: {**entry.model_dump(by_alias=True), "keyName": key_name(name),

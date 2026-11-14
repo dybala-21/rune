@@ -9,22 +9,33 @@ function basename(p: string): string {
 }
 
 // The selected folder is shared by chat, files, and diff.
-export function WorkspaceChip() {
+export function WorkspaceChip({ onWorkspaceChange }: { onWorkspaceChange?: (path: string | null) => void } = {}) {
   const [path, setPath] = useState('');
   const [open, setOpen] = useState(false);
   const [recents, setRecents] = useState<string[]>([]);
   const [error, setError] = useState('');
   const rootRef = useRef<HTMLDivElement>(null);
+  const workspaceRequest = useRef(0);
 
   const refresh = useCallback(() => {
-    fetchWorkspace().then(r => setPath(r.path)).catch(() => setPath(''));
-  }, []);
+    const request = ++workspaceRequest.current;
+    fetchWorkspace().then(r => {
+      if (request !== workspaceRequest.current) return;
+      setPath(r.path); onWorkspaceChange?.(r.path || null);
+    }).catch(() => {
+      if (request !== workspaceRequest.current) return;
+      setPath(''); onWorkspaceChange?.(null);
+    });
+  }, [onWorkspaceChange]);
 
   useEffect(() => {
     refresh();
     // The inline picker (or another tab) may pin the workspace elsewhere.
     window.addEventListener('rune:workspace-changed', refresh);
-    return () => window.removeEventListener('rune:workspace-changed', refresh);
+    return () => {
+      workspaceRequest.current++;
+      window.removeEventListener('rune:workspace-changed', refresh);
+    };
   }, [refresh]);
 
   useEffect(() => {
@@ -40,14 +51,18 @@ export function WorkspaceChip() {
   }, [open]);
 
   const pick = async (p: string) => {
+    const request = ++workspaceRequest.current;
     setError('');
     try {
       const r = await setWorkspace(p);
+      if (request !== workspaceRequest.current) return;
       setPath(r.path);
+      onWorkspaceChange?.(r.path || null);
       setOpen(false);
       // Let the inline picker and any other listeners refresh.
       window.dispatchEvent(new CustomEvent('rune:workspace-changed'));
     } catch (e) {
+      if (request !== workspaceRequest.current) return;
       setError(e instanceof Error ? e.message : "Couldn't set the workspace");
     }
   };

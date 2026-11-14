@@ -115,7 +115,7 @@ export function DecisionRoutingSettings({ routing, onSaved }: {
           <p className="decision-hint">{connection.keyScope === 'process'
             ? 'Managed by your launch environment. Update it there and restart Rune.'
             : connection.keyScope === 'project' ? 'Saved for this project. Other connections keep their own keys.'
-              : 'Saved on this device. Other connections keep their own keys.'}</p>
+              : 'Saved in the connected Rune engine. Other connections keep their own keys.'}</p>
         </div>}
       </fieldset>
       <p className="decision-status" role="status">{decisionStatusText(routing)}</p>

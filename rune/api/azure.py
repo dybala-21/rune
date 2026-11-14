@@ -33,11 +33,15 @@ class AzureTest(AzureConnection):
     model: str | None = Field(None, pattern=_NAME)
 
 
-def _credentials(req: AzureConnection) -> tuple[str, str]:
+def settings_unavailable_reason() -> str | None:
     from rune.cloud.boundary import hosted
 
-    if hosted():
-        raise HTTPException(403, "Azure settings are only available in local Rune.")
+    return "Azure resource setup is not available on this hosted engine." if hosted() else None
+
+
+def _credentials(req: AzureConnection) -> tuple[str, str]:
+    if reason := settings_unavailable_reason():
+        raise HTTPException(403, reason)
     if req.expectedRevision:
         from rune.api.azure_settings import revision
         if req.expectedRevision != revision():

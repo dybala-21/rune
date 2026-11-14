@@ -1,18 +1,26 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   fetchEnvVars,
   setEnvVar,
   unsetEnvVar,
   type EnvVarInfo,
+  type EnvActivation,
 } from '../api';
 import { useFocusTrap } from '../hooks/useFocusTrap';
+import './EnvPanel.css';
 
 interface EnvPanelProps {
   onClose: () => void;
+  initialMode?: 'providers' | 'all';
+  initialKey?: string;
+  onChooseModel?: (provider: string) => void;
+  managed?: boolean;
 }
 
-type ScopeFilter = 'all' | 'user' | 'project';
+type ScopeFilter = 'all' | 'user' | 'project' | 'process';
 type ViewMode = 'list' | 'view' | 'edit' | 'create';
+type SaveStatus = { key: string; action: 'saved' | 'removed'; activation: EnvActivation; provider?: string };
+const UNKNOWN_ACTIVATION: EnvActivation = { state: 'unknown', reason: 'The engine did not report when this change takes effect.' };
 
 const CATEGORY_CONFIG: Record<string, { label: string; order: number }> = {
   llm: { label: 'LLM Providers', order: 0 },
@@ -28,33 +36,51 @@ const CATEGORY_CONFIG: Record<string, { label: string; order: number }> = {
   other: { label: 'Other', order: 10 },
 };
 
+const PROVIDER_KEYS = [
+  { key: 'OPENAI_API_KEY', name: 'OpenAI', provider: 'openai' },
+  { key: 'ANTHROPIC_API_KEY', name: 'Anthropic', provider: 'anthropic' },
+  { key: 'GEMINI_API_KEY', name: 'Google Gemini', provider: 'gemini' },
+  { key: 'XAI_API_KEY', name: 'xAI', provider: 'xai' },
+];
+
+const providerForKey = (key: string) => PROVIDER_KEYS.find(provider => provider.key === key
+  || (provider.key === 'GEMINI_API_KEY' && key === 'GOOGLE_API_KEY'));
+
 const SCOPE_COLORS: Record<string, string> = {
   user: 'var(--accent)',
   project: 'var(--success)',
 };
 
-export function EnvPanel({ onClose }: EnvPanelProps) {
-  const trapRef = useFocusTrap<HTMLDivElement>();
+export function EnvPanel({ onClose, initialMode = 'all', initialKey, onChooseModel, managed = false }: EnvPanelProps) {
+  const [mode, setMode] = useState(initialMode);
   const [variables, setVariables] = useState<EnvVarInfo[]>([]);
   const [paths, setPaths] = useState<{ user: string; project: string }>({ user: '', project: '' });
   const [loading, setLoading] = useState(true);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [scopeFilter, setScopeFilter] = useState<ScopeFilter>('all');
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<EnvVarInfo | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>('list');
   const [saving, setSaving] = useState(false);
-  const [hasChanges, setHasChanges] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<SaveStatus | null>(null);
 
-  // Form state
   const [formKey, setFormKey] = useState('');
   const [formValue, setFormValue] = useState('');
   const [formScope, setFormScope] = useState<'user' | 'project'>('user');
 
   const [deleteConfirm, setDeleteConfirm] = useState<EnvVarInfo | null>(null);
+  const returnFocus = useRef(typeof document === 'undefined' ? null : document.activeElement as HTMLElement | null);
+  const deleteTrigger = useRef<HTMLElement | null>(null);
+  const listTrigger = useRef<HTMLElement | null>(null);
+  const detailRef = useRef<HTMLDivElement>(null);
+  const trapRef = useFocusTrap<HTMLDivElement>(!deleteConfirm, returnFocus.current);
+  const confirmRef = useFocusTrap<HTMLDivElement>(Boolean(deleteConfirm), deleteTrigger.current);
+  const editing = viewMode === 'edit' || viewMode === 'create';
 
   const loadVars = useCallback(async (): Promise<EnvVarInfo[] | null> => {
     setLoading(true);
+    setLoadFailed(false);
     setError(null);
     try {
       const result = await fetchEnvVars();
@@ -62,6 +88,7 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
       if (result.paths) setPaths(result.paths);
       return result.variables;
     } catch (err) {
+      setLoadFailed(true);
       setError(err instanceof Error ? err.message : "Couldn't load environment variables");
       return null;
     } finally {
@@ -69,29 +96,52 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
     }
   }, []);
 
-  useEffect(() => { loadVars(); }, [loadVars]);
+  useEffect(() => {
+    let active = true;
+    void loadVars().then(loaded => {
+      if (!active || !loaded || !initialKey) return;
+      const key = initialKey.trim().toUpperCase();
+      const existing = loaded.find(variable => variable.key === key
+        || (key === 'GEMINI_API_KEY' && variable.key === 'GOOGLE_API_KEY'));
+      setFormKey(key);
+      setFormValue('');
+      setSelected(existing ?? null);
+      setViewMode(existing ? 'view' : 'create');
+    });
+    return () => { active = false; };
+  }, [loadVars, initialKey]);
 
   useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        if (viewMode === 'edit' || viewMode === 'create') {
-          setViewMode(selected ? 'view' : 'list');
-        } else {
-          onClose();
-        }
-      }
-    };
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, [onClose, viewMode, selected]);
+    if (viewMode === 'view') detailRef.current?.querySelector<HTMLElement>('[data-env-title]')?.focus();
+  }, [viewMode, selected]);
+
+  const cancelEditing = () => {
+    if (saving) return;
+    setFormValue('');
+    setViewMode(selected ? 'view' : 'list');
+    if (!selected) requestAnimationFrame(() => (listTrigger.current?.isConnected ? listTrigger.current
+      : trapRef.current?.querySelector<HTMLElement>('[aria-label="Close environment settings"]'))?.focus());
+  };
+
+  const showList = () => {
+    if (saving) return;
+    setFormValue('');
+    setSelected(null);
+    setViewMode('list');
+    requestAnimationFrame(() => (listTrigger.current?.isConnected ? listTrigger.current
+      : trapRef.current?.querySelector<HTMLElement>('[aria-label="Close environment settings"]'))?.focus());
+  };
 
   const handleSelect = (v: EnvVarInfo) => {
     setSelected(v);
     setViewMode('view');
   };
 
-  const handleStartCreate = () => {
-    setFormKey('');
+  const handleStartCreate = (key = '') => {
+    if (loading || loadFailed || saving) return;
+    listTrigger.current = document.activeElement as HTMLElement | null;
+    setError(null);
+    setFormKey(key);
     setFormValue('');
     setFormScope('user');
     setSelected(null);
@@ -99,26 +149,36 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
   };
 
   const handleStartEdit = () => {
-    if (!selected) return;
+    if (!selected || selected.scope === 'process' || saving) return;
+    setError(null);
     setFormKey(selected.key);
     setFormValue('');
-    setFormScope(selected.scope);
+    setFormScope(managed ? 'user' : selected.scope);
     setViewMode('edit');
   };
 
   const handleSave = async () => {
+    if (saving || !formKey.trim() || !formValue.trim()) return;
+    const key = formKey.trim().toUpperCase();
+    if (variables.some(variable => variable.key === key && variable.scope === 'process')) {
+      setError('This value is inherited. Change it in the environment that starts Rune.');
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
-      const key = formKey.trim().toUpperCase();
-      await setEnvVar(key, formValue, formScope);
-      setHasChanges(true);
+      const result = await setEnvVar(key, formValue, managed ? 'user' : formScope);
+      setSaveStatus({ key, action: 'saved', activation: result?.activation ?? UNKNOWN_ACTIVATION,
+        provider: result?.provider ?? providerForKey(key)?.provider });
+      setFormValue('');
       const updatedList = await loadVars();
+      if (!updatedList) setVariables([]);
       const updated = updatedList?.find((v) => v.key === key);
       if (updated) {
         setSelected(updated);
         setViewMode('view');
       } else {
+        setSelected(null);
         setViewMode('list');
       }
     } catch (err) {
@@ -129,11 +189,14 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
   };
 
   const handleDelete = async (v: EnvVarInfo) => {
+    if (saving || v.scope === 'process') return;
     setSaving(true);
+    setError(null);
     try {
-      await unsetEnvVar(v.key, v.scope);
-      setHasChanges(true);
-      await loadVars();
+      const result = await unsetEnvVar(v.key, v.scope);
+      setSaveStatus({ key: v.key, action: 'removed', activation: result?.activation ?? UNKNOWN_ACTIVATION });
+      const updatedList = await loadVars();
+      if (!updatedList) setVariables([]);
       setSelected(null);
       setViewMode('list');
       setDeleteConfirm(null);
@@ -146,9 +209,10 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
 
   // Filter and group
   const filtered = variables.filter((v) => {
+    if (mode === 'providers' && v.category !== 'llm') return false;
     if (scopeFilter !== 'all' && v.scope !== scopeFilter) return false;
     if (search) {
-      return v.key.toLowerCase().includes(search.toLowerCase());
+      return `${v.key} ${providerForKey(v.key)?.name ?? ''}`.toLowerCase().includes(search.toLowerCase());
     }
     return true;
   });
@@ -175,18 +239,29 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
         alignItems: 'center',
         justifyContent: 'center',
       }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      onClick={(e) => { if (e.target === e.currentTarget && !saving && !editing && !deleteConfirm) onClose(); }}
+      onKeyDown={event => {
+        if (event.key !== 'Escape' || event.defaultPrevented) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (saving) return;
+        if (deleteConfirm) setDeleteConfirm(null);
+        else if (editing) cancelEditing();
+        else onClose();
+      }}
     >
       <div
         ref={trapRef}
         role="dialog"
         aria-modal="true"
-        aria-label="Environment variables"
-        className="fade-scale"
+        aria-label={mode === 'providers' ? 'API keys' : 'Environment variables'}
+        inert={Boolean(deleteConfirm)}
+        aria-hidden={deleteConfirm ? true : undefined}
+        className="env-dialog fade-scale"
         style={{
           width: '90vw',
           maxWidth: 960,
-          height: '80vh',
+          height: '80dvh',
           background: 'var(--bg-primary)',
           border: '1px solid var(--border)',
           borderRadius: 'var(--radius-xl)',
@@ -196,8 +271,7 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
           overflow: 'hidden',
         }}
       >
-        {/* Header */}
-        <div style={{
+        <div className="env-header" style={{
           display: 'flex',
           alignItems: 'center',
           gap: 12,
@@ -210,11 +284,19 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
             <path d="M10 1v2M10 17v2M1 10h2M17 10h2M3.93 3.93l1.41 1.41M14.66 14.66l1.41 1.41M3.93 16.07l1.41-1.41M14.66 5.34l1.41-1.41" />
           </svg>
           <span style={{ fontWeight: 600, fontSize: 15, color: 'var(--text-primary)' }}>
-            Environment Variables
+            {mode === 'providers' ? 'API keys' : 'Environment variables'}
           </span>
           <div style={{ flex: 1 }} />
+          <button className="env-mode-button" disabled={editing || saving} onClick={() => {
+            setMode(mode === 'providers' ? 'all' : 'providers');
+            setScopeFilter('all');
+            setSearch('');
+            setSelected(null);
+            setViewMode('list');
+          }}>{mode === 'providers' ? 'All environment variables' : 'Provider keys'}</button>
           <button
-            onClick={handleStartCreate}
+            onClick={() => handleStartCreate()}
+            disabled={loading || loadFailed || saving || editing}
             style={{
               padding: '6px 14px',
               background: 'var(--accent)',
@@ -226,11 +308,12 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
               cursor: 'pointer',
             }}
           >
-            + Add Variable
+            {mode === 'providers' ? 'Add key' : 'Add variable'}
           </button>
           <button
             onClick={onClose}
-            aria-label="Close"
+            disabled={saving}
+            aria-label="Close environment settings"
             style={{
               background: 'none',
               border: 'none',
@@ -245,29 +328,22 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
           </button>
         </div>
 
-        {/* Restart warning */}
-        {hasChanges && (
-          <div style={{
-            padding: '8px 20px',
-            background: 'rgba(234,179,8,0.1)',
-            borderBottom: '1px solid var(--warning)',
-            color: 'var(--warning)',
-            fontSize: 12,
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-          }}>
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
-              <path d="M7 1L1 13h12L7 1z" />
-              <path d="M7 5v3M7 10v.5" />
-            </svg>
-            <span>Changes require a daemon restart to take effect.</span>
+        {saveStatus && <div className="env-save-status" data-activation={saveStatus.activation.state}>
+          <div role="status" aria-live="polite" aria-atomic="true">
+            <strong>{saveStatus.key} {saveStatus.action}.</strong>{' '}
+            {saveStatus.activation.state === 'next_run' ? 'Applies to new runs.'
+              : saveStatus.activation.state === 'restart_required'
+                ? `${managed ? 'Restart the workspace engine' : 'Restart Rune’s engine'} to apply this change.`
+                : 'Activation timing is unknown.'}
+            {saveStatus.activation.reason && <p>{saveStatus.activation.reason}</p>}
           </div>
-        )}
+          {saveStatus.action === 'saved' && saveStatus.provider && onChooseModel && <button type="button"
+            disabled={saving || editing} onClick={() => onChooseModel(saveStatus.provider!)}>Choose model</button>}
+        </div>}
 
         {/* Error banner */}
         {error && (
-          <div style={{
+          <div role="alert" style={{
             padding: '8px 20px',
             background: 'rgba(239,68,68,0.1)',
             borderBottom: '1px solid var(--danger)',
@@ -278,31 +354,44 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
             gap: 8,
           }}>
             <span style={{ flex: 1 }}>{error}</span>
-            <button
+            {loadFailed && <button className="env-mode-button" onClick={() => void loadVars()}>Reload</button>}
+            {!loadFailed && <button
               onClick={() => setError(null)}
+              aria-label="Dismiss environment error"
               style={{ background: 'none', border: 'none', color: 'var(--danger)', cursor: 'pointer', fontSize: 14 }}
             >
               {'\u00D7'}
-            </button>
+            </button>}
           </div>
         )}
 
-        {/* Content */}
-        <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-          {/* Left: Variable list */}
-          <div style={{
-            width: 280,
+        {mode === 'providers' && <p className="env-intro">Choose a provider to add or update its key. {managed
+          ? 'Keys are saved in your hosted workspace.' : 'Keys are saved on your connected Rune engine.'}</p>}
+        <div className="env-layout" data-view={viewMode}>
+          <div className="env-list" style={{
             flexShrink: 0,
             borderRight: '1px solid var(--border)',
             display: 'flex',
             flexDirection: 'column',
             overflow: 'hidden',
           }}>
-            {/* Search */}
+            {mode === 'providers' && <div className="env-provider-shortcuts" aria-label="Provider keys">
+              {PROVIDER_KEYS.map(provider => {
+                const existing = variables.find(variable => variable.key === provider.key
+                  || (provider.key === 'GEMINI_API_KEY' && variable.key === 'GOOGLE_API_KEY'));
+                return <button key={provider.key} disabled={loading || loadFailed || saving || editing} onClick={event => {
+                  listTrigger.current = event.currentTarget;
+                  if (existing) handleSelect(existing);
+                  else handleStartCreate(provider.key);
+                }}><strong>{provider.name}</strong><span>{existing
+                  ? existing.scope === 'process' ? 'Inherited key' : 'Saved key' : 'Add key'}</span></button>;
+              })}
+            </div>}
             <div style={{ padding: '12px 12px 8px' }}>
               <input
                 type="text"
-                placeholder="Search variables..."
+                placeholder={mode === 'providers' ? 'Search providers or keys' : 'Search variables'}
+                aria-label="Search environment variables"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 style={{
@@ -322,7 +411,7 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
 
             {/* Scope filter */}
             <div style={{ display: 'flex', gap: 2, padding: '0 12px 8px' }}>
-              {(['all', 'user', 'project'] as ScopeFilter[]).map((s) => (
+              {(['all', 'user', ...(managed ? [] : ['project']), ...(variables.some(variable => variable.scope === 'process') ? ['process'] : [])] as ScopeFilter[]).map((s) => (
                 <button
                   key={s}
                   onClick={() => setScopeFilter(s)}
@@ -339,7 +428,7 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
                     textTransform: 'capitalize',
                   }}
                 >
-                  {s}
+                  {s === 'process' ? 'Inherited' : s}
                 </button>
               ))}
             </div>
@@ -352,7 +441,7 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
                 </div>
               ) : filtered.length === 0 ? (
                 <div style={{ padding: 20, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
-                  No variables found
+                  {loadFailed ? 'The saved variables could not be loaded.' : 'No variables found'}
                 </div>
               ) : (
                 sortedCategories.map((cat) => (
@@ -370,7 +459,8 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
                     {grouped.get(cat)!.map((v) => (
                       <button
                         key={`${v.key}-${v.scope}`}
-                        onClick={() => handleSelect(v)}
+                        disabled={saving || editing}
+                        onClick={event => { listTrigger.current = event.currentTarget; handleSelect(v); }}
                         style={{
                           display: 'block',
                           width: '100%',
@@ -416,9 +506,9 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
                             whiteSpace: 'nowrap',
                             flex: 1,
                           }}>
-                            {v.key}
+                            {mode === 'providers' ? providerForKey(v.key)?.name ?? v.key : v.key}
                           </span>
-                          <Badge label={v.scope} color={SCOPE_COLORS[v.scope] ?? 'var(--text-muted)'} />
+                          <Badge label={v.scope === 'process' ? 'Inherited' : v.scope} color={SCOPE_COLORS[v.scope] ?? 'var(--text-muted)'} />
                         </div>
                         <div style={{
                           fontSize: 10,
@@ -439,18 +529,23 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
             </div>
           </div>
 
-          {/* Right: Detail/Editor */}
-          <div style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+          <div ref={detailRef} className="env-detail">
+            {viewMode !== 'list' && <button className="env-back" disabled={saving} onClick={showList}>← Back to {mode === 'providers' ? 'keys' : 'variables'}</button>}
             {viewMode === 'list' && !selected && (
-              <EnvEmptyState onCreateNew={handleStartCreate} />
+              <EnvEmptyState providers={mode === 'providers'} disabled={loading || loadFailed} onCreateNew={() => handleStartCreate()} />
             )}
 
             {viewMode === 'view' && selected && (
               <EnvDetailView
                 envVar={selected}
                 paths={paths}
+                managed={managed}
                 onEdit={handleStartEdit}
-                onDelete={() => setDeleteConfirm(selected)}
+                onDelete={() => {
+                  deleteTrigger.current = document.activeElement as HTMLElement | null;
+                  setError(null);
+                  setDeleteConfirm(selected);
+                }}
               />
             )}
 
@@ -461,84 +556,35 @@ export function EnvPanel({ onClose }: EnvPanelProps) {
                 value={formValue}
                 scope={formScope}
                 paths={paths}
+                managed={managed}
                 saving={saving}
                 onKeyChange={setFormKey}
                 onValueChange={setFormValue}
                 onScopeChange={setFormScope}
                 onSave={handleSave}
-                onCancel={() => setViewMode(selected ? 'view' : 'list')}
+                onCancel={cancelEditing}
               />
             )}
           </div>
         </div>
 
-        {/* Delete confirmation */}
-        {deleteConfirm && (
-          <div style={{
-            position: 'absolute',
-            inset: 0,
-            background: 'rgba(0,0,0,0.5)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 10,
-          }}>
-            <div
-              className="fade-scale"
-              style={{
-                padding: '24px',
-                background: 'var(--bg-secondary)',
-                border: '1px solid var(--border)',
-                borderRadius: 'var(--radius-lg)',
-                boxShadow: 'var(--shadow-lg)',
-                maxWidth: 360,
-                width: '90%',
-              }}
-            >
-              <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 8 }}>
-                Remove Variable
-              </div>
-              <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 16 }}>
-                Remove <strong style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>{deleteConfirm.key}</strong> from{' '}
-                <strong>{deleteConfirm.scope}</strong> scope?
-              </div>
-              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-                <button
-                  onClick={() => setDeleteConfirm(null)}
-                  style={{
-                    padding: '6px 14px',
-                    background: 'var(--bg-tertiary)',
-                    border: 'none',
-                    borderRadius: 'var(--radius-md)',
-                    color: 'var(--text-secondary)',
-                    fontSize: 12,
-                    cursor: 'pointer',
-                  }}
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={() => handleDelete(deleteConfirm)}
-                  disabled={saving}
-                  style={{
-                    padding: '6px 14px',
-                    background: 'var(--danger)',
-                    border: 'none',
-                    borderRadius: 'var(--radius-md)',
-                    color: 'var(--text-on-danger)',
-                    fontSize: 12,
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                    opacity: saving ? 0.6 : 1,
-                  }}
-                >
-                  {saving ? 'Removing...' : 'Remove'}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
       </div>
+      {deleteConfirm && <div className="env-delete-overlay" onClick={event => {
+        if (event.target === event.currentTarget && !saving) setDeleteConfirm(null);
+      }}>
+        <div ref={confirmRef} className="env-delete-dialog fade-scale" role="alertdialog" aria-modal="true"
+          aria-labelledby="env-delete-title" aria-describedby="env-delete-description">
+          <h2 id="env-delete-title">Remove variable?</h2>
+          <p id="env-delete-description">Remove <strong>{deleteConfirm.key}</strong> from {deleteConfirm.scope} settings?</p>
+          {error && <p role="alert" className="env-delete-error">{error}</p>}
+          <div className="env-delete-actions">
+            <button disabled={saving} onClick={() => setDeleteConfirm(null)}>Cancel</button>
+            <button className="env-remove" disabled={saving} onClick={() => handleDelete(deleteConfirm)}>
+              {saving ? 'Removing…' : 'Remove'}
+            </button>
+          </div>
+        </div>
+      </div>}
     </div>
   );
 }
@@ -564,7 +610,7 @@ function Badge({ label, color }: { label: string; color: string }) {
   );
 }
 
-function EnvEmptyState({ onCreateNew }: { onCreateNew: () => void }) {
+function EnvEmptyState({ onCreateNew, providers, disabled }: { onCreateNew: () => void; providers: boolean; disabled: boolean }) {
   return (
     <div style={{
       flex: 1,
@@ -579,9 +625,10 @@ function EnvEmptyState({ onCreateNew }: { onCreateNew: () => void }) {
         <circle cx="20" cy="20" r="8" />
         <path d="M20 4v4M20 32v4M4 20h4M32 20h4M9.17 9.17l2.83 2.83M27.99 27.99l2.83 2.83M9.17 30.83l2.83-2.83M27.99 12.01l2.83-2.83" />
       </svg>
-      <div style={{ fontSize: 13 }}>Select a variable to view details</div>
+      <div style={{ fontSize: 13 }}>{providers ? 'Choose a provider to get started' : 'Select a variable to view details'}</div>
       <button
         onClick={onCreateNew}
+        disabled={disabled}
         style={{
           padding: '6px 16px',
           background: 'var(--bg-tertiary)',
@@ -592,7 +639,7 @@ function EnvEmptyState({ onCreateNew }: { onCreateNew: () => void }) {
           cursor: 'pointer',
         }}
       >
-        or add a new one
+        {providers ? 'Add another provider key' : 'Add a variable'}
       </button>
     </div>
   );
@@ -601,15 +648,18 @@ function EnvEmptyState({ onCreateNew }: { onCreateNew: () => void }) {
 function EnvDetailView({
   envVar,
   paths,
+  managed,
   onEdit,
   onDelete,
 }: {
   envVar: EnvVarInfo;
   paths: { user: string; project: string };
+  managed: boolean;
   onEdit: () => void;
   onDelete: () => void;
 }) {
-  const filePath = envVar.scope === 'user' ? paths.user : paths.project;
+  const inherited = envVar.scope === 'process';
+  const filePath = inherited ? null : envVar.scope === 'user' ? paths.user : paths.project;
 
   return (
     <div style={{ flex: 1, overflow: 'auto', display: 'flex', flexDirection: 'column' }}>
@@ -622,7 +672,8 @@ function EnvDetailView({
         borderBottom: '1px solid var(--border)',
         flexShrink: 0,
       }}>
-        <span style={{
+        <span data-env-title tabIndex={-1} style={{
+          overflowWrap: 'anywhere',
           fontSize: 15,
           fontWeight: 600,
           color: 'var(--text-primary)',
@@ -631,7 +682,7 @@ function EnvDetailView({
         }}>
           {envVar.key}
         </span>
-        <button
+        {!inherited && <><button
           onClick={onEdit}
           style={{
             padding: '5px 12px',
@@ -658,7 +709,7 @@ function EnvDetailView({
           }}
         >
           Remove
-        </button>
+        </button></>}
       </div>
 
       {/* Detail */}
@@ -689,7 +740,7 @@ function EnvDetailView({
         </DetailRow>
 
         <DetailRow label="Scope">
-          <Badge label={envVar.scope} color={SCOPE_COLORS[envVar.scope] ?? 'var(--text-muted)'} />
+          <Badge label={inherited ? 'Inherited' : envVar.scope} color={SCOPE_COLORS[envVar.scope] ?? 'var(--text-muted)'} />
         </DetailRow>
 
         <DetailRow label="Category">
@@ -698,17 +749,17 @@ function EnvDetailView({
           </span>
         </DetailRow>
 
-        <DetailRow label="File">
+        <DetailRow label={inherited ? 'Source' : 'File'}>
           <code style={{
             fontFamily: 'var(--font-mono)',
             fontSize: 11,
             color: 'var(--text-secondary)',
           }}>
-            {filePath}
+            {inherited ? managed ? 'Hosted server environment (read-only)' : 'Rune process environment (read-only)' : filePath}
           </code>
         </DetailRow>
 
-        {envVar.isSecret && (
+        {(envVar.isSecret || inherited) && (
           <div style={{
             padding: '10px 14px',
             background: 'var(--bg-secondary)',
@@ -718,8 +769,8 @@ function EnvDetailView({
             color: 'var(--text-muted)',
             lineHeight: 1.5,
           }}>
-            This is a secret value. The full value cannot be viewed through the web UI.
-            To update, click Edit and enter the new value.
+            {envVar.isSecret && 'Secret values are never displayed in full.'}
+            {inherited ? ' Change it in the environment that starts Rune.' : ' To update, choose Edit and enter the new value.'}
           </div>
         )}
       </div>
@@ -751,6 +802,7 @@ function EnvEditor({
   value,
   scope,
   paths,
+  managed,
   saving,
   onKeyChange,
   onValueChange,
@@ -763,6 +815,7 @@ function EnvEditor({
   value: string;
   scope: 'user' | 'project';
   paths: { user: string; project: string };
+  managed: boolean;
   saving: boolean;
   onKeyChange: (v: string) => void;
   onValueChange: (v: string) => void;
@@ -771,6 +824,7 @@ function EnvEditor({
   onCancel: () => void;
 }) {
   const [showValue, setShowValue] = useState(false);
+  const scopes = managed ? (['user'] as const) : (['user', 'project'] as const);
   const isValid = envKey.trim() && (mode === 'edit' ? value.trim() : value.trim() && envKey.trim());
 
   return (
@@ -827,11 +881,13 @@ function EnvEditor({
             <FormField label="Key" hint="e.g. OPENAI_API_KEY">
               <input
                 type="text"
+                aria-label="Variable name"
+                disabled={saving}
                 value={envKey}
                 onChange={(e) => onKeyChange(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, '_'))}
                 placeholder="MY_API_KEY"
                 style={inputStyle}
-                autoFocus
+                autoFocus={!envKey}
               />
             </FormField>
           )}
@@ -841,11 +897,14 @@ function EnvEditor({
             <div style={{ position: 'relative' }}>
               <input
                 type={showValue ? 'text' : 'password'}
+                aria-label="Value"
+                autoComplete="new-password"
+                disabled={saving}
                 value={value}
                 onChange={(e) => onValueChange(e.target.value)}
-                placeholder={mode === 'edit' ? 'Enter new value...' : 'sk-...'}
+                placeholder={mode === 'edit' ? 'Enter the replacement value' : 'Paste the value'}
                 style={{ ...inputStyle, paddingRight: 36 }}
-                autoFocus={mode === 'edit'}
+                autoFocus={mode === 'edit' || Boolean(envKey)}
               />
               <button
                 type="button"
@@ -879,12 +938,13 @@ function EnvEditor({
           </FormField>
 
           {/* Scope */}
-          <FormField label="Scope" hint="Where to save">
+          <FormField label="Scope" hint={managed ? 'This workspace engine uses user settings.' : 'Where to save'}>
             <div style={{ display: 'flex', gap: 8 }}>
-              {(['user', 'project'] as const).map((s) => (
+              {scopes.map((s) => (
                 <button
                   key={s}
                   onClick={() => onScopeChange(s)}
+                  disabled={saving}
                   style={{
                     flex: 1,
                     padding: '8px',

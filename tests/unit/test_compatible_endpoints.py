@@ -450,3 +450,19 @@ async def test_hosted_lookups_are_cached_and_async_callers_leave_the_event_loop(
     resolve_target("router/m", "openai_compatible")
     resolve_target("router/m", "openai_compatible")
     assert lookups == [False]
+
+
+@pytest.mark.parametrize("hosted", [False, True])
+def test_settings_report_the_endpoint_network_policy(servers, monkeypatch, hosted):
+    from rune.api.handlers.config import _local_models_state
+    from rune.config import get_config
+
+    if hosted:
+        monkeypatch.setenv("RUNE_CLOUD_WORKER", "1")
+    state = _local_models_state(get_config())
+    assert state["endpointsPublicHttpsOnly"] is hosted
+    if hosted:
+        with pytest.raises(ModelCompatibilityError, match="public HTTPS"):
+            endpoints.check_destination("http://127.0.0.1:8000")
+    else:
+        endpoints.check_destination("http://127.0.0.1:8000")

@@ -379,9 +379,10 @@ def invalidate_cache() -> None:
 
 
 async def selectable_models() -> list[tuple[str, str]]:
-    """Replace Grok fallbacks with the models available to the account."""
+    """Return models accepted by model selection, using discovered Grok IDs."""
     from rune.llm.endpoints import refresh_discovered
     from rune.llm.xai import available_model_ids
+    from rune.types import Provider
 
     await refresh_discovered()
     result = known_models()
@@ -389,7 +390,8 @@ async def selectable_models() -> list[tuple[str, str]]:
     if fetched is not None:
         result = [(provider, name) for provider, name in result if provider != "xai"]
         result.extend(("xai", name) for name in fetched)
-    return result
+    selectable = {provider.value for provider in Provider}
+    return [(provider, name) for provider, name in result if provider in selectable]
 
 
 def known_models() -> list[tuple[str, str]]:

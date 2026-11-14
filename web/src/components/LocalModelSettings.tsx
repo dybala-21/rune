@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   patchConfig, setEnvVar, testEndpoint,
-  type CompatibleEndpoint, type ConfigInfo, type EndpointTestResult,
+  type CompatibleEndpoint, type ConfigInfo, type EndpointTestResult, type EnvActivation,
 } from '../api';
 
 type State = NonNullable<ConfigInfo['localModels']>;
@@ -34,10 +34,11 @@ export function LocalModelSettings({ state, onSaved }: { state: State; onSaved: 
   const [rows, setRows] = useState(rowsFrom(state));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
-  const [saved, setSaved] = useState(false);
+  const [saved, setSaved] = useState<{ activation: EnvActivation; hasEndpoints: boolean } | null>(null);
   const [tests, setTests] = useState<Record<string, EndpointTestResult | 'running'>>({});
   const dirty = useRef(false);
-  const change = () => { dirty.current = true; setSaved(false); };
+  const revision = useRef(0);
+  const change = () => { dirty.current = true; revision.current++; setSaved(null); setTests({}); };
   const edit = (index: number, patch: Partial<Row>) => { change(); setRows(rows.map((row, i) => i === index ? { ...row, ...patch } : row)); };
 
   useEffect(() => {
@@ -45,10 +46,13 @@ export function LocalModelSettings({ state, onSaved }: { state: State; onSaved: 
   }, [state]);
 
   const save = async () => {
+    if (saving || !dirty.current) return;
     setSaving(true);
     setError('');
-    setSaved(false);
+    setSaved(null);
+    let persisted = false;
     try {
+      const activations: EnvActivation[] = [];
       const endpoints: Record<string, CompatibleEndpoint> = {};
       for (const row of rows) {
         const name = row.name.trim();
@@ -61,43 +65,73 @@ export function LocalModelSettings({ state, onSaved }: { state: State; onSaved: 
           visionModels: lines(row.visionModels), ...(row.free ? { free: row.free === 'true' } : {}),
         };
       }
+      const ollamaChanged = ollama.trim() !== state.ollama.baseUrl;
+      if (ollamaChanged) {
+        if (state.ollama.scope === 'process') throw new Error('Change the inherited Ollama address in the environment that starts Rune.');
+        let url: URL;
+        try { url = new URL(ollama.trim()); } catch { throw new Error('Enter an http(s) URL for the Ollama server.'); }
+        if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Enter an http(s) URL for the Ollama server.');
+      }
       await patchConfig({ endpoints });
+      persisted = true;
       for (const row of rows) {
         const keyName = state.endpoints[row.name.trim()]?.keyName
           ?? `RUNE_ENDPOINT_${row.name.trim().toUpperCase().replace(/[^A-Z0-9]/g, '_')}_API_KEY`;
-        if (row.key.trim()) await setEnvVar(keyName, row.key.trim(), 'effective');
+        if (row.key.trim()) {
+          const result = await setEnvVar(keyName, row.key.trim(), 'effective');
+          activations.push(result?.activation ?? { state: 'unknown', reason: '' });
+        }
       }
-      if (ollama.trim() && ollama.trim() !== state.ollama.baseUrl) await setEnvVar(state.ollama.envKey, ollama.trim(), 'effective');
+      if (ollamaChanged) {
+        const result = await setEnvVar(state.ollama.envKey, ollama.trim(), 'effective');
+        activations.push(result?.activation ?? { state: 'unknown', reason: '' });
+      }
       dirty.current = false;
       setRows(rows.map(row => ({ ...row, key: '' })));
-      await onSaved();
-      setSaved(true);
+      const activation = activations.find(item => item.state === 'restart_required')
+        ?? activations.find(item => item.state === 'unknown')
+        ?? activations[0] ?? { state: 'next_run' as const, reason: '' };
+      setSaved({ activation, hasEndpoints: rows.length > 0 });
+      try { await onSaved(); } catch {
+        setError('Settings were saved, but the updated settings could not be loaded. Reopen settings to refresh.');
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not save model servers.');
+      const detail = err instanceof Error ? err.message : 'Could not save model servers.';
+      setError(persisted ? `Some settings were saved. ${detail}` : detail);
     } finally { setSaving(false); }
   };
 
   const runTest = async (name: string) => {
+    const testedRevision = revision.current;
     setTests(current => ({ ...current, [name]: 'running' }));
     try {
       const result = await testEndpoint(name);
+      if (testedRevision !== revision.current) return;
       setTests(current => ({ ...current, [name]: result }));
     } catch (err) {
+      if (testedRevision !== revision.current) return;
       setTests(current => ({ ...current, [name]: { reachable: false, models: [], tools: 'unknown',
         detail: err instanceof Error ? err.message : 'The test failed.' } }));
     }
   };
 
   return <details style={{ padding: '12px 14px', borderBottom: '1px solid var(--border-subtle)', fontSize: 12 }}>
-    <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Open-weight model servers</summary>
+    <summary style={{ cursor: 'pointer', fontWeight: 600 }}>Model servers</summary>
     <p style={muted}>
-      Connect Ollama on another machine or any OpenAI-compatible server, such as vLLM, LM Studio or llama.cpp.
+      Connect Ollama or an OpenAI-compatible server. Addresses are reached from the connected Rune engine.
       Models appear in the model picker as endpoint/model.
     </p>
+    {state.endpointsPublicHttpsOnly === true && <p style={muted}>
+      Custom endpoints must use public HTTPS addresses. Private network addresses are not available on this engine.
+    </p>}
     <fieldset disabled={saving} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
       <label htmlFor="ollama-base">Ollama server</label>
       <input id="ollama-base" value={ollama} placeholder="http://localhost:11434" style={field}
         disabled={state.ollama.scope === 'process'} onChange={event => { change(); setOllama(event.target.value); }} />
+      {state.ollama.scope === 'process' && <p style={muted}>This address is inherited. Change it in the environment that starts Rune.</p>}
+      {rows.length > 0 && <p id="model-server-test-help" style={muted}>
+        Test lists models and sends one short model request. Usage charges may apply.
+      </p>}
       {rows.map((row, index) => {
         const stored = state.endpoints[row.name.trim()];
         const test = tests[row.name.trim()];
@@ -106,7 +140,8 @@ export function LocalModelSettings({ state, onSaved }: { state: State; onSaved: 
           <input id={`endpoint-name-${index}`} value={row.name} placeholder="gpu" style={field}
             onChange={event => edit(index, { name: event.target.value })} />
           <label htmlFor={`endpoint-url-${index}`}>Base URL</label>
-          <input id={`endpoint-url-${index}`} value={row.baseUrl} placeholder="http://192.168.0.20:8000/v1" style={field}
+          <input id={`endpoint-url-${index}`} value={row.baseUrl}
+            placeholder={state.endpointsPublicHttpsOnly === false ? 'http://192.168.0.20:8000/v1' : 'https://models.example.com/v1'} style={field}
             onChange={event => edit(index, { baseUrl: event.target.value })} />
           <label htmlFor={`endpoint-key-${index}`}>{stored?.hasKey ? 'Replace API key (optional)' : 'API key (optional)'}</label>
           <input id={`endpoint-key-${index}`} type="password" autoComplete="off" spellCheck={false} value={row.key}
@@ -138,7 +173,7 @@ export function LocalModelSettings({ state, onSaved }: { state: State; onSaved: 
           <button type="button" onClick={() => { change(); setRows(rows.filter((_, i) => i !== index)); }}
             aria-label={`Remove endpoint ${row.name || index + 1}`}>Remove</button>{' '}
           <button type="button" disabled={!stored || dirty.current || test === 'running'} onClick={() => runTest(row.name.trim())}
-            title="Lists models and sends one short tool request">{test === 'running' ? 'Testing…' : 'Test'}</button>
+            aria-describedby="model-server-test-help">{test === 'running' ? 'Testing…' : 'Test'}</button>
           {test && test !== 'running' && <p role="status" style={{ ...muted, marginTop: 6 }}>
             {test.reachable ? `${test.models.length} model(s) listed. ${TOOLS[test.tools]}` : 'Not reachable.'} {test.detail}
           </p>}
@@ -151,6 +186,13 @@ export function LocalModelSettings({ state, onSaved }: { state: State; onSaved: 
       <button type="button" onClick={save} disabled={!dirty.current}>{saving ? 'Saving…' : 'Save'}</button>
     </fieldset>
     {error && <p role="alert" style={{ color: 'var(--danger)' }}>{error}</p>}
-    {saved && <p role="status">Saved. Use Test to check the connection.</p>}
+    {saved && <p role="status">
+      Saved. {saved.activation.state === 'next_run' ? 'Applies to new runs. '
+        : saved.activation.state === 'restart_required' ? 'Restart the connected Rune engine to apply this change. '
+          : 'Activation timing is unknown. '}
+      {saved.activation.reason && `${saved.activation.reason} `}
+      Open the model picker to choose a model. {saved.hasEndpoints
+        ? 'Use Test to check an endpoint.' : 'The Ollama connection has not been tested.'}
+    </p>}
   </details>;
 }

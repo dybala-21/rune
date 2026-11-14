@@ -235,3 +235,22 @@ class TestConcurrentEnvWrites:
 
         assert not [p for p in env_home.iterdir() if ".tmp" in p.name]
         assert path.stat().st_mode & 0o777 == 0o600
+
+
+async def test_provider_keys_remain_visible_and_masked_in_settings(env_home, monkeypatch):
+    from rune.api.handlers.env import list_env as settings_env
+    from rune.llm.models import PROVIDER_ENV_KEYS
+
+    keys = {key for aliases in PROVIDER_ENV_KEYS.values() for key in aliases}
+    for key in keys:
+        monkeypatch.setenv(key, "fixture-provider-secret")
+    monkeypatch.setenv("GOOGLE_CHAT_TOKEN", "fixture-chat-secret")
+    monkeypatch.setenv("UNRELATED_SECRET", "fixture-unrelated-secret")
+    result = {entry.key: entry for entry in (await settings_env()).variables}
+    for key in keys:
+        assert result[key].category == "llm"
+        assert result[key].scope == "process"
+        assert result[key].is_secret
+        assert "fixture-provider-secret" not in result[key].masked_value
+    assert result["GOOGLE_CHAT_TOKEN"].category == "google-chat"
+    assert "UNRELATED_SECRET" not in result

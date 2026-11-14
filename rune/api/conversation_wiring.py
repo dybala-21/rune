@@ -159,6 +159,26 @@ async def list_web_conversations(limit: int = 20) -> list[Any]:
     return convs[:limit]
 
 
+async def list_web_conversations_page(
+    *, limit: int = 20, offset: int = 0, query: str = "", status: str | None = None,
+) -> tuple[list[Any], int]:
+    """Bounded, title-only history search in the existing local-surface scope."""
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("limit must be an integer from 1 to 100")
+    if type(offset) is not int or not 0 <= offset <= 1_000_000:
+        raise ValueError("offset must be an integer from 0 to 1000000")
+    if not isinstance(query, str) or len(query) > 200:
+        raise ValueError("query must be a title search of at most 200 characters")
+    if status not in (None, "active", "archived"):
+        raise ValueError("status must be active or archived")
+    manager = get_conv_manager()
+    if manager is None:
+        return [], 0
+    return await manager._store.list_page(
+        _LOCAL_SURFACE_USER_IDS, limit=limit, offset=offset, query=query.strip(), status=status,
+    )
+
+
 async def get_workspace(conversation_id: str) -> str | None:
     """Workspace directory pinned to a conversation, if any."""
     import json

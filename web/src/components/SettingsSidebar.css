@@ -1,0 +1,130 @@
+.settings-content {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px 8px 16px;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+}
+
+.settings-basics {
+  margin-bottom: 8px;
+}
+
+.settings-key-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: calc(100% - 28px);
+  margin: 8px 14px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-key-link:hover {
+  background: var(--bg-hover);
+}
+
+.settings-key-link:focus-visible,
+.settings-group > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.settings-key-link > span:first-child,
+.settings-group > summary > span {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.settings-key-link strong,
+.settings-group > summary strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.settings-key-link small,
+.settings-group > summary small {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.settings-group {
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-group > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 14px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.settings-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings-group > summary::after {
+  content: '+';
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-size: 18px;
+}
+
+.settings-group[open] > summary::after {
+  content: '−';
+}
+
+.settings-group > summary:hover {
+  background: var(--bg-hover);
+}
+
+.settings-group-content {
+  padding-bottom: 12px;
+}
+
+@media (max-width: 560px) {
+  .settings-content { padding-inline: 0; }
+  .settings-content input,
+  .settings-content select { font-size: 16px !important; }
+}
+
+.settings-environment {
+  margin: 8px 14px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.settings-appearance {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 8px 14px;
+  font-size: 13px;
+}
+
+.settings-environment-value {
+  margin: 8px 0 4px;
+  font-weight: 500;
+}
+
+.settings-environment-note {
+  margin: 6px 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}

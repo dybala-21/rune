@@ -251,6 +251,39 @@ class ConversationStore:
             for r in rows
         ]
 
+    async def list_page(
+        self, user_ids: tuple[str, ...], *, limit: int = 20, offset: int = 0,
+        query: str = "", status: str | None = None,
+    ) -> tuple[list[Conversation], int]:
+        """Page through owned conversation titles without loading their transcripts."""
+        if not user_ids:
+            return [], 0
+        placeholders = ",".join("?" for _ in user_ids)
+        where = f"user_id IN ({placeholders})"
+        params: list[Any] = list(user_ids)
+        if status:
+            where += " AND status = ?"
+            params.append(status)
+        if query:
+            # Literal substring matching: '%' and '_' in a title are not wildcards.
+            where += " AND instr(lower(title), lower(?)) > 0"
+            params.append(query)
+        total = self._conn.execute(
+            f"SELECT COUNT(*) FROM conversations WHERE {where}", tuple(params),
+        ).fetchone()[0]
+        rows = self._conn.execute(
+            "SELECT id, user_id, title, status, execution_context, created_at, updated_at, digest "
+            f"FROM conversations WHERE {where} ORDER BY updated_at DESC, id DESC LIMIT ? OFFSET ?",
+            (*params, limit, offset),
+        ).fetchall()
+        return [
+            Conversation(
+                id=r[0], user_id=r[1], title=r[2], status=r[3], execution_context=r[4],
+                created_at=_str_to_dt(r[5]), updated_at=_str_to_dt(r[6]), digest=r[7],
+            )
+            for r in rows
+        ], total
+
     async def delete(self, conversation_id: str) -> None:
         """Delete a conversation and its turns."""
         with self._conn:

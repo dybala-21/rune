@@ -7,6 +7,7 @@ import { useSessionHistory } from './hooks/useSessionHistory';
 import { ChatPanel } from './components/ChatPanel';
 import { SessionSidebar } from './components/SessionSidebar';
 import { SettingsSidebar } from './components/SettingsSidebar';
+import { SettingsDialog } from './components/SettingsDialog';
 import { StatusBar } from './components/StatusBar';
 import { InputArea, type InputAreaHandle } from './components/InputArea';
 import { ModelControls } from './components/ModelControls';
@@ -24,11 +25,9 @@ import { InlineWorkspacePicker } from './components/InlineWorkspacePicker';
 import { Toaster } from './components/Toaster';
 import { normalizeToolName, isCodingToolName, computeRunVerdict } from './utils/tooling';
 import { desktopAttention, shouldOpenWorkbench } from './utils/workbench';
-import { fetchConfig, fetchSessions, getLiveSessionId, type ConfigInfo, type SessionInfo } from './api';
+import { fetchConfig, fetchSessions, getLiveSessionId, type ConfigInfo, type ModelConnectionAction, type SessionInfo } from './api';
 import { watchPresence } from './utils/presence';
 import { ConnectionBanner } from './components/ConnectionBanner';
-
-type SidebarTab = 'chats' | 'settings';
 
 // Tools that mean the agent is working in a folder — the signal to ask for a
 // workspace if none is pinned (zero false positives, unlike text guessing).
@@ -42,15 +41,19 @@ export function App() {
   const history = useSessionHistory();
   const [compact, setCompact] = useState(() => window.matchMedia('(max-width: 820px)').matches);
   const [sidebarOpen, setSidebarOpen] = useState(() => !window.matchMedia('(max-width: 820px)').matches);
-  const [sidebarTab, setSidebarTab] = useState<SidebarTab>('chats');
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<'models' | undefined>();
+  const [modelMenuRequest, setModelMenuRequest] = useState<{ provider: string; id: number }>();
+  const [currentWorkspacePath, setCurrentWorkspacePath] = useState<string | null>(null);
   const [skillsPanelOpen, setSkillsPanelOpen] = useState(false);
   const [skillsPanelInitial, setSkillsPanelInitial] = useState<string | undefined>();
   const [envPanelOpen, setEnvPanelOpen] = useState(false);
+  const [envPanelMode, setEnvPanelMode] = useState<'providers' | 'all'>('all');
+  const [envInitialKey, setEnvInitialKey] = useState<string>();
+  const openEnvironment = (mode: 'providers' | 'all', key?: string | null) => { setEnvPanelMode(mode); setEnvInitialKey(key ?? undefined); setEnvPanelOpen(true); };
   const [cronPanelOpen, setCronPanelOpen] = useState(false);
   const [mcpPanelOpen, setMcpPanelOpen] = useState(false);
   const [markdownPanelOpen, setMarkdownPanelOpen] = useState(false);
-  const sidebarRef = useFocusTrap<HTMLDivElement>(compact && sidebarOpen
-    && !skillsPanelOpen && !envPanelOpen && !cronPanelOpen && !mcpPanelOpen && !markdownPanelOpen);
   const [configInfo, setConfigInfo] = useState<ConfigInfo | null>(null);
   const liveWorkbench = useWorkbenchState(getLiveSessionId());
   const historyWorkbench = useWorkbenchState(history.viewingSessionId);
@@ -63,6 +66,34 @@ export function App() {
   const chatDragDepth = useRef(0);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteSessions, setPaletteSessions] = useState<SessionInfo[]>([]);
+  const sidebarTriggerRef = useRef<HTMLButtonElement>(null);
+  const settingsTriggerRef = useRef<HTMLButtonElement>(null);
+  const settingsReturnFocus = useRef<HTMLElement | null>(null);
+  const panelOpen = skillsPanelOpen || envPanelOpen || cronPanelOpen || mcpPanelOpen || markdownPanelOpen;
+  const overlayOpen = settingsOpen || panelOpen || paletteOpen;
+  const sidebarRef = useFocusTrap<HTMLDivElement>(compact && sidebarOpen && !overlayOpen, sidebarTriggerRef.current);
+  const openSettings = () => {
+    setSettingsSection(undefined);
+    settingsReturnFocus.current = paletteOpen ? settingsTriggerRef.current : document.activeElement as HTMLElement | null;
+    setSettingsOpen(true);
+  };
+
+  const chooseProviderModel = (provider: string) => {
+    setEnvPanelOpen(false);
+    setSettingsOpen(false);
+    setModelMenuRequest(previous => ({ provider, id: (previous?.id ?? 0) + 1 }));
+  };
+  const configureModel = (action: ModelConnectionAction) => {
+    if (action.target === 'environment') {
+      openEnvironment('providers', action.key);
+    } else if (action.target === 'models') {
+      chooseProviderModel('');
+    } else {
+      openSettings();
+      setSettingsSection('models');
+    }
+  };
+  useEffect(() => { setCurrentWorkspacePath(null); }, [liveWorkbench.sessionId]);
 
   const isViewingHistory = history.viewingSessionId !== null;
   const openComputer = useCallback(() => {
@@ -165,6 +196,12 @@ export function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.defaultPrevented) return;
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k' && !settingsOpen && !panelOpen) {
+        e.preventDefault();
+        setPaletteOpen(o => !o);
+        return;
+      }
+      if (overlayOpen) return;
       if (e.key === 'Escape' && !isViewingHistory && agent.state === 'running') {
         e.preventDefault();
         agent.abort();
@@ -175,9 +212,6 @@ export function App() {
       if (key === 'b' && e.shiftKey && !isViewingHistory) {
         e.preventDefault();
         openComputer();
-      } else if (key === 'k') {
-        e.preventDefault();
-        setPaletteOpen(o => !o);
       } else if (key === 'j') {
         e.preventDefault();
         setWorkbenchDismissed(workbenchOpen);
@@ -186,7 +220,7 @@ export function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [isViewingHistory, agent.state, agent.abort, openComputer, workbenchOpen, setWorkbenchOpen, setWorkbenchDismissed]);
+  }, [isViewingHistory, agent.state, agent.abort, openComputer, workbenchOpen, setWorkbenchOpen, setWorkbenchDismissed, overlayOpen, settingsOpen, panelOpen]);
 
   // Dropping a file anywhere outside the composer would otherwise make the
   // browser navigate away to that file, losing the session. Swallow drops that
@@ -244,7 +278,8 @@ export function App() {
   };
 
   const paletteCommands: Command[] = [
-    { id: 'new', label: 'New task', run: handleNewChat },
+    { id: 'new', label: 'New chat', run: handleNewChat },
+    { id: 'settings', label: 'Open Settings', run: openSettings },
   ];
   if (!isViewingHistory) {
     paletteCommands.push({ id: 'computer', label: 'Open Computer', hint: '⌘⇧B', run: openComputer });
@@ -259,7 +294,7 @@ export function App() {
   }
   paletteCommands.push(
     { id: 'skills', label: 'Open Skills', run: () => handleOpenSkillPanel() },
-    { id: 'env', label: 'Open Environment variables', run: () => setEnvPanelOpen(true) },
+    { id: 'env', label: 'Open Environment variables', run: () => openEnvironment('all') },
     { id: 'cron', label: 'Open Scheduled tasks', run: () => setCronPanelOpen(true) },
     { id: 'mcp', label: 'Open MCP servers', run: () => setMcpPanelOpen(true) },
     { id: 'memory', label: 'Open Memory files', run: () => setMarkdownPanelOpen(true) },
@@ -282,6 +317,11 @@ export function App() {
       background: 'var(--bg-primary)',
     }}>
       <StatusBar
+        inert={overlayOpen}
+        workspaceLabel={configInfo ? configInfo.executionEnvironment?.managed ? 'Hosted workspace' : 'Connected engine' : 'Connecting'}
+        onOpenSettings={openSettings}
+        sidebarTriggerRef={sidebarTriggerRef}
+        settingsTriggerRef={settingsTriggerRef}
         connected={agent.connected}
         state={agent.state}
         sidebarOpen={sidebarOpen}
@@ -294,7 +334,7 @@ export function App() {
         approvalMode={configInfo?.approvalMode}
         lastRunSuccess={runVerdict}
         onOpenPalette={() => setPaletteOpen(true)}
-        trailing={!isViewingHistory ? <WorkspaceChip /> : null}
+        trailing={!isViewingHistory ? <WorkspaceChip key={liveWorkbench.sessionId} onWorkspaceChange={setCurrentWorkspacePath} /> : null}
         workbenchOpen={workbenchOpen}
         onToggleWorkbench={() => {
           setWorkbenchDismissed(workbenchOpen);
@@ -304,12 +344,12 @@ export function App() {
 
       {!agent.connected && <ConnectionBanner />}
 
-      <div className="app-body" data-sidebar={sidebarOpen} style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-        {sidebarOpen && <button type="button" className="sidebar-backdrop" aria-label="Hide tasks" tabIndex={-1}
+      <div className="app-body" data-sidebar={sidebarOpen} inert={overlayOpen} style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+        {sidebarOpen && <button type="button" className="sidebar-backdrop" aria-label="Hide chats" tabIndex={-1}
           onClick={() => setSidebarOpen(false)} />}
-        <div ref={sidebarRef} className="app-sidebar" data-section={sidebarTab}
+        <div ref={sidebarRef} className="app-sidebar"
           role={compact && sidebarOpen ? 'dialog' : undefined} aria-modal={compact && sidebarOpen || undefined}
-          aria-label="Tasks" inert={!sidebarOpen} aria-hidden={!sidebarOpen}
+          aria-label="Chats" inert={!sidebarOpen} aria-hidden={!sidebarOpen}
           onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setSidebarOpen(false); } }} style={{
           width: sidebarOpen ? 'var(--sidebar-width)' : 0,
           flexShrink: 0,
@@ -318,60 +358,21 @@ export function App() {
           borderRight: sidebarOpen ? '1px solid var(--border)' : 'none',
         }}>
           <div style={{ width: 'var(--sidebar-width)', height: '100%', display: 'flex', flexDirection: 'column' }}>
-            {compact && <button type="button" className="sidebar-close" onClick={() => setSidebarOpen(false)}>Close tasks <span aria-hidden="true">×</span></button>}
-            <div style={{
-              display: 'flex',
-              borderBottom: '1px solid var(--border)',
-              flexShrink: 0,
-            }}>
-              <SidebarTabButton
-                active={sidebarTab === 'chats'}
-                onClick={() => setSidebarTab('chats')}
-                icon={
-                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M2 3a1 1 0 011-1h8a1 1 0 011 1v6a1 1 0 01-1 1H5l-2 2V10H3a1 1 0 01-1-1V3z" />
-                  </svg>
-                }
-                label="Tasks"
-              />
-              <SidebarTabButton
-                active={sidebarTab === 'settings'}
-                onClick={() => setSidebarTab('settings')}
-                icon={
-                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="7" cy="7" r="2" />
-                    <path d="M7 1.5v1.5M7 11v1.5M1.5 7H3M11 7h1.5M3.2 3.2l1 1M9.8 9.8l1 1M3.2 10.8l1-1M9.8 4.2l1-1" />
-                  </svg>
-                }
-                label="Settings"
-              />
-            </div>
-
-            {/* Tab content */}
+            {compact && <button type="button" className="sidebar-close" onClick={() => setSidebarOpen(false)}>Close chats <span aria-hidden="true">×</span></button>}
             <div style={{ flex: 1, overflow: 'hidden' }}>
-              {sidebarTab === 'chats' && (
-                <SessionSidebar
-                  currentSessionId={history.viewingSessionId}
-                  onSelectSession={handleSelectSession}
-                  onNewChat={handleNewChat}
-                  liveTitle={liveTitle}
-                  onOpenSchedule={() => setCronPanelOpen(true)}
-                  taskSelectionDisabled={agent.state !== 'idle' || agent.loadingConversation}
-                  onSelectTask={id => {
-                    inputAreaRef.current?.setDraft(`Continue saved task ${id}.`);
-                    if (compact) setSidebarOpen(false);
-                  }}
-                />
-              )}
-              {sidebarTab === 'settings' && (
-                <SettingsSidebar
-                  onOpenSkillPanel={handleOpenSkillPanel}
-                  onOpenEnvPanel={() => setEnvPanelOpen(true)}
-                  onOpenCronPanel={() => setCronPanelOpen(true)}
-                  onOpenMcpPanel={() => setMcpPanelOpen(true)}
-                  onOpenMarkdownPanel={() => setMarkdownPanelOpen(true)}
-                />
-              )}
+              <SessionSidebar
+                currentSessionId={history.viewingSessionId}
+                onSelectSession={handleSelectSession}
+                onNewChat={handleNewChat}
+                liveTitle={liveTitle}
+                onOpenSettings={openSettings}
+                onOpenSchedule={() => setCronPanelOpen(true)}
+                taskSelectionDisabled={agent.state !== 'idle' || agent.loadingConversation}
+                onSelectTask={id => {
+                  inputAreaRef.current?.setDraft(`Continue saved task ${id}.`);
+                  if (compact) setSidebarOpen(false);
+                }}
+              />
             </div>
           </div>
         </div>
@@ -385,7 +386,7 @@ export function App() {
           position: 'relative',
         }}>
           {taskTitle && <header className="task-heading">
-            <span className="task-eyebrow">{isViewingHistory ? 'Past task' : 'Current task'}</span>
+            {isViewingHistory && <span className="task-eyebrow">Past task</span>}
             <h1 title={taskTitle}>{taskTitle}</h1>
           </header>}
           {/* History banner */}
@@ -574,6 +575,9 @@ export function App() {
                   {history.loading ? 'Loading conversation…' : 'No saved messages in this conversation.'}
                 </div>
               ) : <ChatPanel
+                config={configInfo}
+                connected={agent.connected}
+                onOpenSettings={openSettings}
                 conversationKey={history.viewingSessionId ?? getLiveSessionId()}
                 messages={displayMessages}
                 toolCalls={displayToolCalls}
@@ -602,7 +606,7 @@ export function App() {
                     ? agent.sendMessage
                     : undefined
                 }
-                onDraft={!isViewingHistory && agent.connected ? text => inputAreaRef.current?.setDraft(text) : undefined}
+                onDraft={!isViewingHistory ? text => inputAreaRef.current?.setDraft(text) : undefined}
                 streamFooter={
                   /* First coding activity with no pinned workspace → ask in
                      the stream. The picker self-hides once a folder is set. */
@@ -658,7 +662,7 @@ export function App() {
                 </div>
               ) : null}
               <InputArea
-                settings={<ModelControls config={configInfo} />}
+                settings={<ModelControls config={configInfo} openRequest={modelMenuRequest} onConfigure={configureModel} />}
                 conversationKey={history.viewingSessionId ?? getLiveSessionId()}
                 ref={inputAreaRef}
                 onSend={isViewingHistory ? continueHistory : agent.sendMessage}
@@ -671,10 +675,22 @@ export function App() {
               />
             </div>
 
-            <ConversationWorkbenches agent={agent} live={liveWorkbench} history={historyWorkbench} historyState={history.historyState} />
+            <ConversationWorkbenches workspacePath={currentWorkspacePath} agent={agent} live={liveWorkbench} history={historyWorkbench} historyState={history.historyState} />
           </div>
         </div>
       </div>
+
+      {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} covered={panelOpen || paletteOpen}
+        returnFocus={settingsReturnFocus.current}>
+        <SettingsSidebar initialSection={settingsSection}
+          onOpenSkillPanel={handleOpenSkillPanel}
+          onOpenEnvPanel={() => openEnvironment('all')}
+          onOpenProviderKeys={() => openEnvironment('providers')}
+          onOpenCronPanel={() => setCronPanelOpen(true)}
+          onOpenMcpPanel={() => setMcpPanelOpen(true)}
+          onOpenMarkdownPanel={() => setMarkdownPanelOpen(true)}
+        />
+      </SettingsDialog>}
 
       {/* Panel overlays are lazy-loaded; show a placeholder so clicking a menu
           item does something visible while its chunk downloads. */}
@@ -692,7 +708,8 @@ export function App() {
           />
         )}
         {envPanelOpen && (
-          <EnvPanel onClose={() => setEnvPanelOpen(false)} />
+          <EnvPanel initialMode={envPanelMode} initialKey={envInitialKey} onChooseModel={chooseProviderModel}
+            managed={configInfo?.executionEnvironment?.managed} onClose={() => setEnvPanelOpen(false)} />
         )}
         {cronPanelOpen && (
           <CronPanel onClose={() => setCronPanelOpen(false)} />
@@ -715,47 +732,9 @@ export function App() {
   );
 }
 
-function SidebarTabButton({ active, onClick, icon, label }: {
-  active: boolean;
-  onClick: () => void;
-  icon: React.ReactNode;
-  label: string;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        flex: 1,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: 6,
-        padding: '10px 0',
-        background: 'transparent',
-        border: 'none',
-        borderBottom: active ? '2px solid var(--accent)' : '2px solid transparent',
-        color: active ? 'var(--text-primary)' : 'var(--text-muted)',
-        fontSize: 11,
-        fontWeight: 500,
-        cursor: 'pointer',
-        transition: 'color 0.15s, border-color 0.15s',
-      }}
-    >
-      {icon}
-      {label}
-    </button>
-  );
-}
-
-/** Shown while a lazily-loaded panel chunk is still downloading. */
-/**
- * Shown while a lazily-loaded panel chunk downloads.
- *
- * Dismissible on purpose: if the chunk never arrives — offline, or a stale
- * asset hash after an app update — React never resolves the boundary, and a
- * click-through-proof overlay would lock the user out of the chat entirely.
- */
+// Keep slow-loading panels dismissible.
 function PanelLoading({ onDismiss }: { onDismiss: () => void }) {
+  const ref = useFocusTrap<HTMLDivElement>();
   const [stuck, setStuck] = useState(false);
   useEffect(() => {
     const t = setTimeout(() => setStuck(true), 6000);
@@ -764,8 +743,17 @@ function PanelLoading({ onDismiss }: { onDismiss: () => void }) {
 
   return (
     <div
-      role="status"
-      aria-live="polite"
+      ref={ref}
+      role="dialog"
+      aria-modal="true"
+      aria-label="Loading panel"
+      onKeyDown={event => {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          event.stopPropagation();
+          onDismiss();
+        }
+      }}
       style={{
         position: 'fixed',
         inset: 0,
@@ -780,12 +768,8 @@ function PanelLoading({ onDismiss }: { onDismiss: () => void }) {
         fontSize: 13,
       }}
     >
-      {stuck ? "This panel isn't loading." : 'Loading…'}
-      {stuck && (
-        <button className="msg-action-btn" onClick={onDismiss}>
-          Close
-        </button>
-      )}
+      <span role="status">{stuck ? "This panel isn't loading." : 'Loading…'}</span>
+      <button className="msg-action-btn" onClick={onDismiss}>Close</button>
     </div>
   );
 }

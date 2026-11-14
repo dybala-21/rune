@@ -410,6 +410,7 @@ export async function fetchSessions(params?: {
   status?: 'active' | 'archived';
   limit?: number;
   offset?: number;
+  query?: string;
 }): Promise<{ sessions: SessionInfo[]; total: number }> {
   return rpc('sessions.list', params ?? {});
 }
@@ -494,7 +495,7 @@ export async function deleteSkill(name: string): Promise<void> {
 export interface EnvVarInfo {
   key: string;
   maskedValue: string;
-  scope: 'user' | 'project';
+  scope: 'user' | 'project' | 'process';
   isSecret: boolean;
   category: string;
 }
@@ -503,12 +504,29 @@ export async function fetchEnvVars(scope?: 'user' | 'project'): Promise<{ variab
   return rpc('env.list', scope ? { scope } : {});
 }
 
-export async function setEnvVar(key: string, value: string, scope: 'user' | 'project' | 'effective'): Promise<void> {
-  return rpc('env.set', { key, value, scope });
+export interface EnvActivation {
+  state: 'next_run' | 'restart_required' | 'unknown';
+  reason: string;
 }
 
-export async function unsetEnvVar(key: string, scope: 'user' | 'project'): Promise<void> {
-  return rpc('env.unset', { key, scope });
+export interface EnvMutationResult {
+  key: string;
+  updated?: boolean;
+  deleted?: boolean;
+  activation?: EnvActivation;
+  provider?: string | null;
+}
+
+export async function setEnvVar(key: string, value: string, scope: 'user' | 'project' | 'effective'): Promise<EnvMutationResult> {
+  const result = await rpc<EnvMutationResult>('env.set', { key, value, scope });
+  window.dispatchEvent(new Event('rune:config-changed'));
+  return result;
+}
+
+export async function unsetEnvVar(key: string, scope: 'user' | 'project'): Promise<EnvMutationResult> {
+  const result = await rpc<EnvMutationResult>('env.unset', { key, scope });
+  window.dispatchEvent(new Event('rune:config-changed'));
+  return result;
 }
 
 // Config API
@@ -552,14 +570,31 @@ export interface DecisionConnection {
   status: DecisionStatus;
 }
 
+export interface ModelConnectionAction {
+  target: 'environment' | 'azure' | 'localModels' | 'models' | 'operator';
+  label: string;
+  key?: string | null;
+}
+
+export interface ModelConnection {
+  state: 'needs_setup' | 'configured' | 'unknown';
+  provider: string;
+  model: string;
+  reason: string;
+  action: ModelConnectionAction | null;
+}
+
 export interface ConfigInfo {
+  modelConnection?: ModelConnection;
   localModels?: {
+    endpointsPublicHttpsOnly?: boolean;
     ollama: { baseUrl: string; envKey: string; scope: EnvScope };
     endpoints: Record<string, CompatibleEndpoint & {
       keyName: string; hasKey: boolean; keyScope: EnvScope; selfHosted: boolean;
     }>;
   };
   azure?: {
+    unavailableReason?: string | null;
     revision: string;
     credentialRevision: string;
     deploymentTestBlocked?: string | null;

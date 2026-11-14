@@ -5,7 +5,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createServer } from 'vite';
 
-let server, latestTurn, retryAttachments, attachmentMime, ChatPanel, InputArea, retryRequestId, updateDelivery, pickerPlacement;
+let server, latestTurn, retryAttachments, attachmentMime, ChatPanel, InputArea, WelcomePanel, retryRequestId, updateDelivery, pickerPlacement, StatusBar;
 before(async () => {
   server = await createServer({
     root: fileURLToPath(new URL('..', import.meta.url)),
@@ -17,6 +17,8 @@ before(async () => {
   ({ attachmentMime } = await server.ssrLoadModule('/src/utils/attachments.ts'));
   ({ ChatPanel } = await server.ssrLoadModule('/src/components/ChatPanel.tsx'));
   ({ InputArea } = await server.ssrLoadModule('/src/components/InputArea.tsx'));
+  ({ StatusBar } = await server.ssrLoadModule('/src/components/StatusBar.tsx'));
+  ({ WelcomePanel } = await server.ssrLoadModule('/src/components/WelcomePanel.tsx'));
   ({ pickerPlacement } = await server.ssrLoadModule('/src/components/PickerPopover.tsx'));
 });
 after(async () => { await server?.close(); });
@@ -69,6 +71,15 @@ test('running composer permits drafts, attachments and stop, but never send', ()
   assert.match(html, /Send your draft when it finishes/);
 });
 
+test('offline composer keeps drafts editable while sending stays disabled', () => {
+  const html = renderToStaticMarkup(createElement(InputArea, { isRunning: false, disabled: true, onSend() {}, onAbort() {} }));
+  const textarea = html.match(/<textarea[^>]*>/)?.[0];
+  assert.ok(textarea);
+  assert.doesNotMatch(textarea, /disabled|readonly/);
+  assert.match(html, /<button[^>]*disabled=""[^>]*aria-label="Send message"/);
+  assert.match(html, /Send your draft when connected/);
+});
+
 test('office files are recognized when the browser omits their MIME type', () => {
   assert.equal(attachmentMime({ name: '매출.CSV', type: '' }), 'text/csv');
   assert.match(attachmentMime({ name: '계획.docx', type: '' }), /wordprocessingml/);
@@ -119,9 +130,48 @@ test('restored proposals stay collapsed beside the welcome screen without hiding
   } });
   const empty = chat([suggestion]);
   assert.match(empty, /<details class="suggestion-inbox">/);
-  assert.match(empty, /What’s next/);
+  assert.match(empty, /What’s on your list/);
   assert.match(empty, /Inspect report/);
   const ongoing = chat([message('1', 'user', { content: 'Keep this question' }), suggestion]);
   assert.match(ongoing, /Keep this question/);
   assert.doesNotMatch(ongoing, /welcome-title/);
+});
+
+test('getting started distinguishes a selected model from a working connection', () => {
+  for (const managed of [true, false]) {
+    const html = renderToStaticMarkup(createElement(WelcomePanel, {
+      config: { activeModel: { provider: 'custom', model: 'my-model' }, executionEnvironment: { managed } },
+      connected: false, onSuggest() {}, onOpenSettings() {},
+    }));
+    assert.match(html, /Selected model<\/dt><dd>my-model/);
+    assert.match(html, managed ? /Hosted workspace/ : /Connected engine/);
+    assert.match(html, /Rune is reconnecting/);
+    assert.match(html, /Open settings/);
+    assert.doesNotMatch(html, /This Mac|Choose the folder|disabled=""|Model connected|Ready to go/);
+  }
+  const unloaded = renderToStaticMarkup(createElement(WelcomePanel, { onSuggest() {} }));
+  assert.match(unloaded, /Not loaded yet/);
+  assert.doesNotMatch(unloaded, /Hosted workspace|Connected engine|Choose the folder/);
+});
+
+
+test('a quiet header keeps usage accessible without claiming incomplete costs', () => {
+  const header = cost => renderToStaticMarkup(createElement(StatusBar, {
+    connected: true, state: 'idle', workspaceLabel: 'Hosted workspace', onOpenSettings() {},
+    tokenUsage: { input: 100, output: 20, total: 120, cost },
+  }));
+  const complete = header({ usd: 0.027 });
+  assert.match(complete, /~\$0.03/);
+  assert.match(complete, /aria-label="Usage and cost"/);
+  assert.match(complete, /aria-label="Open settings"/);
+  assert.doesNotMatch(complete, /toolbar-status|Open settings · Hosted/);
+  for (const cost of [{ usd: 0.027, incomplete: true }, { usd: 0.027, pending: true }]) {
+    assert.doesNotMatch(header(cost), /~\$0.03/);
+    assert.match(header(cost), />Usage<\/span>/);
+  }
+  const blocked = renderToStaticMarkup(createElement(StatusBar, {
+    connected: true, state: 'waiting_approval', approvalMode: 'bypass',
+  }));
+  assert.match(blocked, /Waiting for approval/);
+  assert.match(blocked, /Approvals off/);
 });

@@ -274,7 +274,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // When command palette is open, let it handle Enter/Arrow/Escape
-    if (showCommands) {
+    if (showCommands && !disabled) {
       if (e.key === 'Enter' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
         e.preventDefault();
         return;
@@ -333,7 +333,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
       // opening the palette for it used to swallow Enter with no menu on
       // screen, leaving the message unsendable.
       const cmd = /^\/([\w-]*)$/.exec(val);
-      if (cmd && !isRunning) {
+      if (cmd && !isRunning && !disabled) {
         setShowCommands(true);
         setCmdFilter(cmd[1]);
       } else {
@@ -502,7 +502,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           padding: '12px 12px 8px',
           position: 'relative',
         }}>
-          {showCommands && (
+          {showCommands && !disabled && (
             <CommandPalette
               filter={cmdFilter}
               onSelect={handleCommandSelect}
@@ -577,13 +577,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               isDragOver
                 ? 'Drop files here'
                 : disabled
-                  ? 'Connecting…'
+                  ? 'Draft while Rune reconnects…'
                   : isRunning
                     ? 'Draft your next message…'
                     : 'Message Rune…'
             }
-            disabled={disabled}
-            aria-disabled={disabled}
             autoFocus
             onKeyDown={handleKeyDown}
             onInput={handleInput}
@@ -649,7 +647,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         }}>
           {sendBlockedReason || (sending ? 'Preparing message…' : isRunning
             ? `${attentionLabel || 'Rune is working'} · Send your draft when it finishes`
-            : disabled ? ''
+            : disabled ? 'Reconnecting · Send your draft when connected'
             : isDragOver
               ? 'Drop to attach'
               : 'Enter to send · Shift+Enter for a new line')}

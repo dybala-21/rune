@@ -18,10 +18,14 @@ import { DecisionRoutingSettings } from './DecisionRoutingSettings';
 import { RunLimitSettings } from './RunLimitSettings';
 import { AzureSettings } from './AzureSettings';
 import { LocalModelSettings } from './LocalModelSettings';
+import { ThemeToggle } from './ThemeToggle';
+import './SettingsSidebar.css';
 
 interface SettingsSidebarProps {
+  initialSection?: 'models';
   onOpenSkillPanel: (selectedName?: string) => void;
   onOpenEnvPanel: () => void;
+  onOpenProviderKeys?: () => void;
   onOpenCronPanel: () => void;
   onOpenMcpPanel: () => void;
   onOpenMarkdownPanel?: () => void;
@@ -94,17 +98,24 @@ function toMemoryTuningDraft(config: ConfigInfo): MemoryTuningDraft {
   };
 }
 
-export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPanel, onOpenMcpPanel, onOpenMarkdownPanel }: SettingsSidebarProps) {
+export function SettingsSidebar({ initialSection, onOpenSkillPanel, onOpenEnvPanel, onOpenProviderKeys, onOpenCronPanel, onOpenMcpPanel, onOpenMarkdownPanel }: SettingsSidebarProps) {
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [envVars, setEnvVars] = useState<EnvVarInfo[]>([]);
   const [config, setConfig] = useState<ConfigInfo | null>(null);
   const [channels, setChannels] = useState<ChannelInfo[]>([]);
   const [cronCount, setCronCount] = useState(0);
   const [loading, setLoading] = useState(true);
+  const modelGroup = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    if (!loading && initialSection === 'models' && modelGroup.current) {
+      modelGroup.current.open = true;
+      modelGroup.current.querySelector('summary')?.focus();
+    }
+  }, [initialSection, loading]);
   const [toggling, setToggling] = useState(false);
   const [restarting, setRestarting] = useState<string | null>(null);
   const [memoryDraft, setMemoryDraft] = useState<MemoryTuningDraft | null>(null);
-  // Preserve unsaved memory edits across the 30-second refresh.
+  // Preserve unsaved memory edits when settings refresh.
   const memoryDirtyRef = useRef(false);
   const editMemoryDraft: typeof setMemoryDraft = (v) => { memoryDirtyRef.current = true; setMemoryDraft(v); };
   const [savingMemory, setSavingMemory] = useState(false);
@@ -147,7 +158,7 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
       await patchConfig({ proactiveEnabled: !config.proactiveEnabled });
       const updated = await fetchConfig();
       setConfig(updated);
-      setMemoryDraft(toMemoryTuningDraft(updated));
+      if (!memoryDirtyRef.current) setMemoryDraft(toMemoryTuningDraft(updated));
     } catch {
       toast.error("Couldn't change the proactive setting");
     } finally {
@@ -162,7 +173,7 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
       await patchConfig({ advisorEnabled: !config.advisorEnabled });
       const updated = await fetchConfig();
       setConfig(updated);
-      setMemoryDraft(toMemoryTuningDraft(updated));
+      if (!memoryDirtyRef.current) setMemoryDraft(toMemoryTuningDraft(updated));
     } catch {
       toast.error("Couldn't change the advisor setting");
     } finally {
@@ -191,7 +202,7 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
 
       await patchConfig({
         memoryTuning: {
-          scope: 'project',
+          scope: config?.executionEnvironment?.managed === true ? 'user' : 'project',
           ...(memoryDraft.preset !== 'custom' ? { preset: memoryDraft.preset } : {}),
           policyMode: memoryDraft.policyMode,
           semanticLimit,
@@ -263,63 +274,16 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
   }
 
   return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      height: '100%',
-      background: 'var(--bg-primary)',
-    }}>
-      <div style={{ flex: 1, overflowY: 'auto', padding: '8px 0' }}>
-        {config?.decisionRouting && (
-          <DecisionRoutingSettings routing={config.decisionRouting}
-            onSaved={async () => { setConfig(await fetchConfig()); }} />
-        )}
-        {config?.runLimits && <RunLimitSettings limits={config.runLimits} onSaved={load} />}
-        {config?.vertexLocation && <div style={{ padding: '10px 14px', fontSize: 13 }}>
-          <label htmlFor="vertex-location">Gemini (Vertex AI) location</label>
-          <select id="vertex-location" value={config.vertexLocation} disabled={toggling}
-            onChange={async event => {
-              setToggling(true);
-              try {
-                await patchConfig({ vertexLocation: event.target.value });
-                setConfig(await fetchConfig());
-              } catch (error) {
-                toast.error(error instanceof Error ? error.message : "Couldn't change the Gemini location");
-              } finally { setToggling(false); }
-            }} style={{ display: 'block', marginTop: 8, width: '100%' }}>
-            <option value="auto">Automatic</option>
-            <option value="global">Global</option>
-            <option value="us-central1">Iowa (us-central1)</option>
-            {!['auto', 'global', 'us-central1'].includes(config.vertexLocation)
-              && <option value={config.vertexLocation}>{config.vertexLocation}</option>}
-          </select>
-          <p style={{ color: 'var(--text-muted)', fontSize: 12 }}>
-            Automatic uses the Global endpoint. Requests may be processed outside your region.
-            Applies to new runs.
-          </p>
-        </div>}
-        {config && <div style={{ padding: '10px 14px', fontSize: 13 }}>
-          <label htmlFor="command-environment">Command environment</label>
-          <select id="command-environment" disabled={toggling || config.executionEnvironment?.managed}
-            value={config.executionEnvironment?.backend || 'local'}
-            onChange={async event => {
-              setToggling(true);
-              try {
-                await patchConfig({ executionEnvironment: { backend: event.target.value as 'local' | 'container' } });
-                setConfig(await fetchConfig());
-              } catch { toast.error("Couldn't change the command environment"); }
-              finally { setToggling(false); }
-            }} style={{ display: 'block', marginTop: 8, width: '100%' }}>
-            <option value="local">Local computer</option>
-            <option value="container">Isolated container</option>
-          </select>
-          {config.executionEnvironment?.backend === 'container' && <p style={{ color: 'var(--text-muted)', fontSize: 12 }}>
-            {config.executionEnvironment.managed
-              ? 'Commands run in your private server workspace. This setting is managed by the server operator.'
-              : `Uses ${config.executionEnvironment.image}. Docker and this image must already be installed. Browser and native apps stay local.`}
-            {!config.executionEnvironment.allowNetwork && ' Command network access is off.'}
-          </p>}
-        </div>}
+    <div className="settings-content">
+      <div className="settings-basics">
+        <p className="settings-environment">{config?.executionEnvironment?.managed === true
+          ? 'Settings apply to your hosted Rune workspace.'
+          : config ? 'Settings apply to the connected Rune engine.' : 'Connection details are not available yet.'}</p>
+        <div className="settings-appearance"><span>Appearance</span><ThemeToggle /></div>
+        <button type="button" className="settings-key-link" onClick={onOpenProviderKeys ?? onOpenEnvPanel}>
+          <span><strong>API keys</strong><small>Add or update a provider key</small></span>
+          <span aria-hidden="true">↗</span>
+        </button>
         {config && (
           <div style={{ padding: '6px 14px', marginBottom: 4 }}>
             <button
@@ -347,10 +311,10 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
               </svg>
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
-                  Proactive
+                  Suggestions
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 1 }}>
-                  Autonomous suggestions
+                  Let Rune suggest useful follow-ups
                 </div>
               </div>
               <div style={{
@@ -377,404 +341,421 @@ export function SettingsSidebar({ onOpenSkillPanel, onOpenEnvPanel, onOpenCronPa
             </button>
           </div>
         )}
+      </div>
+      {config?.runLimits && <details className="settings-group">
+        <summary><span><strong>Run limits</strong><small>
+          {config.runLimits.modelRequests.toLocaleString()} model requests per run · {config.runLimits.costUsd === null
+            ? 'No token cost limit' : `$${config.runLimits.costUsd} token cost limit`}
+        </small></span></summary>
+        <div className="settings-group-content"><RunLimitSettings limits={config.runLimits} onSaved={load} /></div>
+      </details>}
+      <details ref={modelGroup} className="settings-group">
+        <summary><span><strong>Models and connections</strong><small>Providers, model servers and channels</small></span></summary>
+        <div className="settings-group-content">
+          {config?.azure && <AzureSettings connection={config.azure} activeModel={config.activeModel} onSaved={load} />}
+          {config?.vertexLocation && <div style={{ padding: '10px 14px', fontSize: 13 }}>
+            <label htmlFor="vertex-location">Gemini (Vertex AI) location</label>
+            <select id="vertex-location" value={config.vertexLocation} disabled={toggling}
+              onChange={async event => {
+                setToggling(true);
+                try {
+                  await patchConfig({ vertexLocation: event.target.value });
+                  setConfig(await fetchConfig());
+                } catch (error) {
+                  toast.error(error instanceof Error ? error.message : "Couldn't change the Gemini location");
+                } finally { setToggling(false); }
+              }} style={{ display: 'block', marginTop: 8, width: '100%' }}>
+              <option value="auto">Automatic</option>
+              <option value="global">Global</option>
+              <option value="us-central1">Iowa (us-central1)</option>
+              {!['auto', 'global', 'us-central1'].includes(config.vertexLocation)
+                && <option value={config.vertexLocation}>{config.vertexLocation}</option>}
+            </select>
+            <p style={{ color: 'var(--text-muted)', fontSize: 12 }}>
+              Automatic uses the Global endpoint. Requests may be processed outside your region.
+              Applies to new runs.
+            </p>
+          </div>}
+          {config?.localModels && <LocalModelSettings state={config.localModels} onSaved={load} />}
+          {channels.length > 0 && (
+            <div style={{ marginBottom: 4 }}>
+              <div style={{
+                padding: '8px 14px 4px',
+                fontSize: 12,
+                fontWeight: 600,
+                color: 'var(--text-muted)',
+                textTransform: 'uppercase',
+                letterSpacing: '0.5px',
+              }}>
+                Channels
+              </div>
+              {channels.map((ch) => (
+                <div
+                  key={ch.name}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                    padding: '7px 14px',
+                  }}
+                >
+                  <span style={{
+                    width: 6,
+                    height: 6,
+                    borderRadius: '50%',
+                    background: CHANNEL_STATUS_COLORS[ch.status] ?? 'var(--text-muted)',
+                    flexShrink: 0,
+                  }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{
+                      fontSize: 11,
+                      fontWeight: 500,
+                      color: 'var(--text-primary)',
+                      textTransform: 'capitalize',
+                    }}>
+                      {ch.name}
+                    </div>
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                      {ch.status} · {ch.sessionCount} session{ch.sessionCount !== 1 ? 's' : ''}
+                    </div>
+                  </div>
+                  {ch.status === 'error' || ch.status === 'disconnected' ? (
+                    <button
+                      onClick={() => handleRestart(ch.name)}
+                      disabled={restarting === ch.name}
+                      style={{
+                        padding: '2px 8px',
+                        background: 'var(--bg-tertiary)',
+                        border: '1px solid var(--border)',
+                        borderRadius: 'var(--radius-sm)',
+                        color: 'var(--text-secondary)',
+                        fontSize: 12,
+                        cursor: restarting === ch.name ? 'wait' : 'pointer',
+                        opacity: restarting === ch.name ? 0.6 : 1,
+                      }}
+                    >
+                      {restarting === ch.name ? '...' : 'Restart'}
+                    </button>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </details>
+      <details className="settings-group">
+        <summary><span><strong>Tools and memory</strong><small>Skills, connected tools, schedules and instructions</small></span></summary>
+        <div className="settings-group-content">
+          <SettingsSection
+            icon={
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M2.5 2.5h3.5l1.25 1.25H11a.75.75 0 01.75.75v6a.75.75 0 01-.75.75H2.5a.75.75 0 01-.75-.75v-7.25a.75.75 0 01.75-.75z" />
+                <path d="M5.5 7.5l1.25 1.25L9.5 6" />
+              </svg>
+            }
+            title="Skills"
+            subtitle={`${skills.length} registered`}
+            onClick={() => onOpenSkillPanel()}
+          >
+            {skills.slice(0, 5).map((s) => (
+              <SettingsItem
+                key={s.name}
+                label={s.name}
+                detail={s.scope}
+                detailColor={s.scope === 'user' ? 'var(--accent)' : s.scope === 'project' ? 'var(--success)' : 'var(--text-muted)'}
+                onClick={() => onOpenSkillPanel(s.name)}
+                mono
+              />
+            ))}
+            {skills.length > 5 && (
+              <button
+                onClick={() => onOpenSkillPanel()}
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  padding: '4px 14px 4px 36px',
+                  background: 'transparent',
+                  border: 'none',
+                  color: 'var(--text-muted)',
+                  fontSize: 12,
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                }}
+              >
+                +{skills.length - 5} more...
+              </button>
+            )}
+          </SettingsSection>
 
-        {config && (
-          <div style={{ padding: '6px 14px', marginBottom: 4 }}>
-            <button
-              role="switch" aria-checked={config.advisorEnabled}
-              onClick={handleToggleAdvisor}
-              disabled={toggling}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 10,
-                width: '100%',
+          <SettingsSection
+            icon={
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round">
+                <circle cx="7" cy="7" r="5" />
+                <path d="M7 4.5V7l1.7 1" />
+              </svg>
+            }
+            title="Scheduled tasks"
+            subtitle={`${cronCount} jobs`}
+            onClick={onOpenCronPanel}
+          />
+
+          <SettingsSection
+            icon={
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <path d="M8 1L14 4.5V11.5L8 15L2 11.5V4.5L8 1Z" stroke="currentColor" strokeWidth="1.2"/>
+                <circle cx="8" cy="8" r="2" stroke="currentColor" strokeWidth="1.2"/>
+              </svg>
+            }
+            title="Connected tools"
+            subtitle="MCP servers"
+            onClick={onOpenMcpPanel}
+          />
+
+          {onOpenMarkdownPanel && (
+            <SettingsSection
+              icon={
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path d="M3 2h7l3 3v9a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" strokeWidth="1.2"/>
+                  <path d="M10 2v3h3" stroke="currentColor" strokeWidth="1.2"/>
+                  <path d="M5 8h6M5 11h4" stroke="currentColor" strokeWidth="1.2"/>
+                </svg>
+              }
+              title="Memory and instructions"
+              subtitle="Memory, profile, heartbeat"
+              onClick={onOpenMarkdownPanel}
+            />
+          )}
+        </div>
+      </details>
+      <details className="settings-group">
+        <summary><span><strong>Advanced</strong><small>Decision models, command execution and memory tuning</small></span></summary>
+        <div className="settings-group-content">
+          <SettingsSection
+            icon={
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+                <rect x="2" y="6.5" width="10" height="5.5" rx="1" />
+                <path d="M4 6.5V4.5a3 3 0 016 0v2" />
+              </svg>
+            }
+            title="Environment variables"
+            subtitle={`${envVars.length} variables`}
+            onClick={onOpenEnvPanel}
+          />
+          {config?.decisionRouting && (
+            <DecisionRoutingSettings routing={config.decisionRouting}
+              onSaved={async () => { setConfig(await fetchConfig()); }} />
+          )}
+          <div style={{ padding: '10px 14px', fontSize: 13 }}>
+            {config?.executionEnvironment?.managed === true ? <>
+              <span>Command environment</span>
+              <p className="settings-environment-value">{config.executionEnvironment.backend === 'container'
+                ? 'Isolated container' : 'Connected engine'}</p>
+              <p className="settings-environment-note">Managed by the server operator. Commands use your hosted workspace.
+                {config.executionEnvironment.backend === 'container' && !config.executionEnvironment.allowNetwork
+                  && ' Command network access is off.'}</p>
+            </> : config?.executionEnvironment?.managed === false ? <>
+              <label htmlFor="command-environment">Command environment</label>
+              <select id="command-environment" disabled={toggling} value={config.executionEnvironment.backend}
+                onChange={async event => {
+                  setToggling(true);
+                  try {
+                    await patchConfig({ executionEnvironment: { backend: event.target.value as 'local' | 'container' } });
+                    setConfig(await fetchConfig());
+                  } catch { toast.error("Couldn't change the command environment"); }
+                  finally { setToggling(false); }
+                }} style={{ display: 'block', marginTop: 8, width: '100%' }}>
+                <option value="local">Connected engine</option>
+                <option value="container">Isolated container</option>
+              </select>
+              {config.executionEnvironment.backend === 'container' && <p className="settings-environment-note">
+                Uses {config.executionEnvironment.image}. Docker and this image must be installed on the connected engine.
+                {!config.executionEnvironment.allowNetwork && ' Command network access is off.'}
+              </p>}
+            </> : <><span>Command environment</span><p className="settings-environment-note">
+              Execution settings are not available from this engine yet.
+            </p></>}
+          </div>
+          {config && (
+            <div style={{ padding: '6px 14px', marginBottom: 4 }}>
+              <button
+                role="switch" aria-checked={config.advisorEnabled}
+                onClick={handleToggleAdvisor}
+                disabled={toggling}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  width: '100%',
+                  padding: '10px 12px',
+                  background: 'var(--bg-secondary)',
+                  border: '1px solid var(--border-subtle)',
+                  borderRadius: 'var(--radius-md)',
+                  cursor: toggling ? 'wait' : 'pointer',
+                  textAlign: 'left',
+                  opacity: toggling ? 0.6 : 1,
+                  transition: 'opacity 0.15s',
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke={config.advisorEnabled ? 'var(--accent)' : 'var(--text-muted)'} strokeWidth="1.3" strokeLinecap="round">
+                  <path d="M7 1.5 L12 4.5 L12 9.5 L7 12.5 L2 9.5 L2 4.5 Z" />
+                  <path d="M7 5 L7 9 M5 7 L9 7" />
+                </svg>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
+                    Advisor
+                  </div>
+                  <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 1 }}>
+                    Stronger-model guidance at key moments
+                  </div>
+                </div>
+                <div style={{
+                  width: 32,
+                  height: 18,
+                  borderRadius: 9,
+                  background: config.advisorEnabled ? 'var(--accent)' : 'var(--bg-tertiary)',
+                  position: 'relative',
+                  transition: 'background 0.2s',
+                  flexShrink: 0,
+                }}>
+                  <div style={{
+                    width: 14,
+                    height: 14,
+                    borderRadius: '50%',
+                    background: 'white',
+                    position: 'absolute',
+                    top: 2,
+                    left: config.advisorEnabled ? 16 : 2,
+                    transition: 'left 0.2s',
+                    boxShadow: '0 1px 2px rgba(0,0,0,0.2)',
+                  }} />
+                </div>
+              </button>
+            </div>
+          )}
+          {config && memoryDraft && (
+            <div style={{ padding: '6px 14px', marginBottom: 6 }}>
+              <div style={{
                 padding: '10px 12px',
                 background: 'var(--bg-secondary)',
                 border: '1px solid var(--border-subtle)',
                 borderRadius: 'var(--radius-md)',
-                cursor: toggling ? 'wait' : 'pointer',
-                textAlign: 'left',
-                opacity: toggling ? 0.6 : 1,
-                transition: 'opacity 0.15s',
-              }}
-            >
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke={config.advisorEnabled ? 'var(--accent)' : 'var(--text-muted)'} strokeWidth="1.3" strokeLinecap="round">
-                <path d="M7 1.5 L12 4.5 L12 9.5 L7 12.5 L2 9.5 L2 4.5 Z" />
-                <path d="M7 5 L7 9 M5 7 L9 7" />
-              </svg>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
-                  Advisor
-                </div>
-                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 1 }}>
-                  Stronger-model guidance at key moments
-                </div>
-              </div>
-              <div style={{
-                width: 32,
-                height: 18,
-                borderRadius: 9,
-                background: config.advisorEnabled ? 'var(--accent)' : 'var(--bg-tertiary)',
-                position: 'relative',
-                transition: 'background 0.2s',
-                flexShrink: 0,
               }}>
-                <div style={{
-                  width: 14,
-                  height: 14,
-                  borderRadius: '50%',
-                  background: 'white',
-                  position: 'absolute',
-                  top: 2,
-                  left: config.advisorEnabled ? 16 : 2,
-                  transition: 'left 0.2s',
-                  boxShadow: '0 1px 2px rgba(0,0,0,0.2)',
-                }} />
-              </div>
-            </button>
-          </div>
-        )}
-
-        {channels.length > 0 && (
-          <div style={{ marginBottom: 4 }}>
-            <div style={{
-              padding: '8px 14px 4px',
-              fontSize: 12,
-              fontWeight: 600,
-              color: 'var(--text-muted)',
-              textTransform: 'uppercase',
-              letterSpacing: '0.5px',
-            }}>
-              Channels
-            </div>
-            {channels.map((ch) => (
-              <div
-                key={ch.name}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '7px 14px',
-                }}
-              >
-                <span style={{
-                  width: 6,
-                  height: 6,
-                  borderRadius: '50%',
-                  background: CHANNEL_STATUS_COLORS[ch.status] ?? 'var(--text-muted)',
-                  flexShrink: 0,
-                }} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{
-                    fontSize: 11,
-                    fontWeight: 500,
-                    color: 'var(--text-primary)',
-                    textTransform: 'capitalize',
-                  }}>
-                    {ch.name}
-                  </div>
-                  <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
-                    {ch.status} · {ch.sessionCount} session{ch.sessionCount !== 1 ? 's' : ''}
-                  </div>
+                <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
+                  Memory tuning
                 </div>
-                {ch.status === 'error' || ch.status === 'disconnected' ? (
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2, marginBottom: 10 }}>
+                  {config.executionEnvironment?.managed === true
+                    ? 'Saves to this workspace’s user settings'
+                    : 'Saved for this project in .rune/.env'}
+                </div>
+
+                <div style={{ display: 'grid', gap: 8 }}>
+                  <div style={{ display: 'grid', gap: 6 }}>
+                    <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Preset</span>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      {MEMORY_PRESET_ORDER.map((preset) => {
+                        const active = memoryDraft.preset === preset;
+                        return (
+                          <button
+                            key={preset}
+                            onClick={() => applyPreset(preset)}
+                            style={{
+                              flex: 1,
+                              padding: '4px 6px',
+                              borderRadius: 'var(--radius-sm)',
+                              border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
+                              background: active ? 'var(--accent-subtle)' : 'var(--bg-tertiary)',
+                              color: active ? 'var(--accent)' : 'var(--text-secondary)',
+                              fontSize: 12,
+                              fontWeight: 600,
+                              cursor: 'pointer',
+                              textTransform: 'capitalize',
+                            }}
+                          >
+                            {preset}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <label style={{ display: 'grid', gap: 4 }}>
+                    <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Policy mode</span>
+                    <select
+                      value={memoryDraft.policyMode}
+                      onChange={(e) => {
+                        const next = e.target.value as MemoryPolicyMode;
+                        editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', policyMode: next } : prev));
+                      }}
+                      style={memoryInputStyle}
+                    >
+                      {MEMORY_POLICY_MODES.map((mode) => (
+                        <option key={mode} value={mode}>{mode}</option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <MemoryField
+                    label="Semantic limit (1–20)"
+                    value={memoryDraft.semanticLimit}
+                    onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', semanticLimit: value } : prev))}
+                  />
+                  <MemoryField
+                    label="Minimum semantic score (0–1)"
+                    value={memoryDraft.semanticMinScore}
+                    onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', semanticMinScore: value } : prev))}
+                  />
+                  <MemoryField
+                    label="Uncertain semantic limit (1–20)"
+                    value={memoryDraft.uncertainSemanticLimit}
+                    onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', uncertainSemanticLimit: value } : prev))}
+                  />
+                  <MemoryField
+                    label="Minimum uncertain semantic score (0–1)"
+                    value={memoryDraft.uncertainSemanticMinScore}
+                    onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', uncertainSemanticMinScore: value } : prev))}
+                  />
+                  <MemoryField
+                    label="Maximum episodes (1–50)"
+                    value={memoryDraft.maxEpisodes}
+                    onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', maxEpisodes: value } : prev))}
+                  />
+                  <MemoryField
+                    label="Context limit (1,000–32,000 characters)"
+                    value={memoryDraft.contextMaxChars}
+                    onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', contextMaxChars: value } : prev))}
+                  />
+                </div>
+
+                {memoryError && (
+                  <div style={{ marginTop: 8, fontSize: 12, color: 'var(--danger)' }}>
+                    {memoryError}
+                  </div>
+                )}
+
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 10 }}>
                   <button
-                    onClick={() => handleRestart(ch.name)}
-                    disabled={restarting === ch.name}
+                    onClick={handleSaveMemoryTuning}
+                    disabled={savingMemory}
                     style={{
-                      padding: '2px 8px',
-                      background: 'var(--bg-tertiary)',
-                      border: '1px solid var(--border)',
+                      padding: '4px 10px',
+                      background: savingMemory ? 'var(--bg-tertiary)' : 'var(--accent)',
+                      border: 'none',
                       borderRadius: 'var(--radius-sm)',
-                      color: 'var(--text-secondary)',
+                      color: savingMemory ? 'var(--text-muted)' : 'white',
                       fontSize: 12,
-                      cursor: restarting === ch.name ? 'wait' : 'pointer',
-                      opacity: restarting === ch.name ? 0.6 : 1,
+                      fontWeight: 600,
+                      cursor: savingMemory ? 'wait' : 'pointer',
                     }}
                   >
-                    {restarting === ch.name ? '...' : 'Restart'}
+                    {savingMemory ? 'Saving...' : 'Save memory settings'}
                   </button>
-                ) : null}
-              </div>
-            ))}
-          </div>
-        )}
-
-        {(config || channels.length > 0) && (
-          <div style={{
-            height: 1,
-            background: 'var(--border)',
-            margin: '4px 14px 8px',
-          }} />
-        )}
-
-        <SettingsSection
-          icon={
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M2.5 2.5h3.5l1.25 1.25H11a.75.75 0 01.75.75v6a.75.75 0 01-.75.75H2.5a.75.75 0 01-.75-.75v-7.25a.75.75 0 01.75-.75z" />
-              <path d="M5.5 7.5l1.25 1.25L9.5 6" />
-            </svg>
-          }
-          title="Skills"
-          subtitle={`${skills.length} registered`}
-          onClick={() => onOpenSkillPanel()}
-        >
-          {skills.slice(0, 5).map((s) => (
-            <SettingsItem
-              key={s.name}
-              label={s.name}
-              detail={s.scope}
-              detailColor={s.scope === 'user' ? 'var(--accent)' : s.scope === 'project' ? 'var(--success)' : 'var(--text-muted)'}
-              onClick={() => onOpenSkillPanel(s.name)}
-              mono
-            />
-          ))}
-          {skills.length > 5 && (
-            <button
-              onClick={() => onOpenSkillPanel()}
-              style={{
-                display: 'block',
-                width: '100%',
-                padding: '4px 14px 4px 36px',
-                background: 'transparent',
-                border: 'none',
-                color: 'var(--text-muted)',
-                fontSize: 12,
-                cursor: 'pointer',
-                textAlign: 'left',
-              }}
-            >
-              +{skills.length - 5} more...
-            </button>
-          )}
-        </SettingsSection>
-
-        <SettingsSection
-          icon={
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round">
-              <circle cx="7" cy="7" r="5" />
-              <path d="M7 4.5V7l1.7 1" />
-            </svg>
-          }
-          title="Automation"
-          subtitle={`${cronCount} jobs`}
-          onClick={onOpenCronPanel}
-        >
-          <SettingsItem
-            label="Cron Jobs"
-            detail={cronCount > 0 ? String(cronCount) : 'none'}
-            onClick={onOpenCronPanel}
-          />
-        </SettingsSection>
-
-        <SettingsSection
-          icon={
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-              <path d="M8 1L14 4.5V11.5L8 15L2 11.5V4.5L8 1Z" stroke="currentColor" strokeWidth="1.2"/>
-              <circle cx="8" cy="8" r="2" stroke="currentColor" strokeWidth="1.2"/>
-            </svg>
-          }
-          title="MCP Servers"
-          subtitle="External tools"
-          onClick={onOpenMcpPanel}
-        >
-          <SettingsItem
-            label="Manage Servers"
-            detail="configure"
-            onClick={onOpenMcpPanel}
-          />
-        </SettingsSection>
-
-        {onOpenMarkdownPanel && (
-          <SettingsSection
-            icon={
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                <path d="M3 2h7l3 3v9a1 1 0 01-1 1H3a1 1 0 01-1-1V3a1 1 0 011-1z" stroke="currentColor" strokeWidth="1.2"/>
-                <path d="M10 2v3h3" stroke="currentColor" strokeWidth="1.2"/>
-                <path d="M5 8h6M5 11h4" stroke="currentColor" strokeWidth="1.2"/>
-              </svg>
-            }
-            title="Config Files"
-            subtitle="Heartbeat, Memory, Profile"
-            onClick={onOpenMarkdownPanel}
-          >
-            <SettingsItem
-              label="Edit Files"
-              detail="markdown"
-              onClick={onOpenMarkdownPanel}
-            />
-          </SettingsSection>
-        )}
-
-        {config?.azure && <AzureSettings connection={config.azure} activeModel={config.activeModel} onSaved={load} />}
-        <details className="advanced-settings">
-          <summary>Advanced settings</summary>
-        {config?.localModels && <LocalModelSettings state={config.localModels} onSaved={load} />}
-
-        {config && memoryDraft && (
-          <div style={{ padding: '6px 14px', marginBottom: 6 }}>
-            <div style={{
-              padding: '10px 12px',
-              background: 'var(--bg-secondary)',
-              border: '1px solid var(--border-subtle)',
-              borderRadius: 'var(--radius-md)',
-            }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
-                Memory Tuning
-              </div>
-              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 2, marginBottom: 10 }}>
-                Scope: project (.rune/.env)
-              </div>
-
-              <div style={{ display: 'grid', gap: 8 }}>
-                <div style={{ display: 'grid', gap: 6 }}>
-                  <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Preset</span>
-                  <div style={{ display: 'flex', gap: 6 }}>
-                    {MEMORY_PRESET_ORDER.map((preset) => {
-                      const active = memoryDraft.preset === preset;
-                      return (
-                        <button
-                          key={preset}
-                          onClick={() => applyPreset(preset)}
-                          style={{
-                            flex: 1,
-                            padding: '4px 6px',
-                            borderRadius: 'var(--radius-sm)',
-                            border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
-                            background: active ? 'var(--accent-subtle)' : 'var(--bg-tertiary)',
-                            color: active ? 'var(--accent)' : 'var(--text-secondary)',
-                            fontSize: 12,
-                            fontWeight: 600,
-                            cursor: 'pointer',
-                            textTransform: 'capitalize',
-                          }}
-                        >
-                          {preset}
-                        </button>
-                      );
-                    })}
-                  </div>
                 </div>
-
-                <label style={{ display: 'grid', gap: 4 }}>
-                  <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Policy Mode</span>
-                  <select
-                    value={memoryDraft.policyMode}
-                    onChange={(e) => {
-                      const next = e.target.value as MemoryPolicyMode;
-                      editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', policyMode: next } : prev));
-                    }}
-                    style={memoryInputStyle}
-                  >
-                    {MEMORY_POLICY_MODES.map((mode) => (
-                      <option key={mode} value={mode}>{mode}</option>
-                    ))}
-                  </select>
-                </label>
-
-                <MemoryField
-                  label="Semantic Limit (1~20)"
-                  value={memoryDraft.semanticLimit}
-                  onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', semanticLimit: value } : prev))}
-                />
-                <MemoryField
-                  label="Semantic Min Score (0~1)"
-                  value={memoryDraft.semanticMinScore}
-                  onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', semanticMinScore: value } : prev))}
-                />
-                <MemoryField
-                  label="Uncertain Semantic Limit (1~20)"
-                  value={memoryDraft.uncertainSemanticLimit}
-                  onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', uncertainSemanticLimit: value } : prev))}
-                />
-                <MemoryField
-                  label="Uncertain Semantic Min Score (0~1)"
-                  value={memoryDraft.uncertainSemanticMinScore}
-                  onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', uncertainSemanticMinScore: value } : prev))}
-                />
-                <MemoryField
-                  label="Max Episodes (1~50)"
-                  value={memoryDraft.maxEpisodes}
-                  onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', maxEpisodes: value } : prev))}
-                />
-                <MemoryField
-                  label="Context Max Chars (1000~32000)"
-                  value={memoryDraft.contextMaxChars}
-                  onChange={(value) => editMemoryDraft((prev) => (prev ? { ...prev, preset: 'custom', contextMaxChars: value } : prev))}
-                />
-              </div>
-
-              {memoryError && (
-                <div style={{ marginTop: 8, fontSize: 12, color: 'var(--danger)' }}>
-                  {memoryError}
-                </div>
-              )}
-
-              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 10 }}>
-                <button
-                  onClick={handleSaveMemoryTuning}
-                  disabled={savingMemory}
-                  style={{
-                    padding: '4px 10px',
-                    background: savingMemory ? 'var(--bg-tertiary)' : 'var(--accent)',
-                    border: 'none',
-                    borderRadius: 'var(--radius-sm)',
-                    color: savingMemory ? 'var(--text-muted)' : 'white',
-                    fontSize: 12,
-                    fontWeight: 600,
-                    cursor: savingMemory ? 'wait' : 'pointer',
-                  }}
-                >
-                  {savingMemory ? 'Saving...' : 'Save Memory Tuning'}
-                </button>
               </div>
             </div>
-          </div>
-        )}
-
-        <SettingsSection
-          icon={
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
-              <rect x="2" y="6.5" width="10" height="5.5" rx="1" />
-              <path d="M4 6.5V4.5a3 3 0 016 0v2" />
-            </svg>
-          }
-          title="Environment"
-          subtitle={`${envVars.length} variables`}
-          onClick={onOpenEnvPanel}
-        >
-          {envVars.slice(0, 5).map((v) => (
-            <SettingsItem
-              key={`${v.key}-${v.scope}`}
-              label={v.key}
-              detail={v.maskedValue.length > 16 ? v.maskedValue.slice(0, 16) + '...' : v.maskedValue}
-              onClick={onOpenEnvPanel}
-              mono
-            />
-          ))}
-          {envVars.length > 5 && (
-            <button
-              onClick={onOpenEnvPanel}
-              style={{
-                display: 'block',
-                width: '100%',
-                padding: '4px 14px 4px 36px',
-                background: 'transparent',
-                border: 'none',
-                color: 'var(--text-muted)',
-                fontSize: 12,
-                cursor: 'pointer',
-                textAlign: 'left',
-              }}
-            >
-              +{envVars.length - 5} more...
-            </button>
           )}
-        </SettingsSection>
-
-        </details>
-      </div>
+        </div>
+      </details>
     </div>
   );
 }
