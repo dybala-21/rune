@@ -16,11 +16,14 @@ import { ComputerPane } from './ComputerPane';
 import { OutputsPane } from './OutputsPane';
 import { ComputerIcon } from './ComputerIcon';
 import { PickerPopover, SelectedCheck } from './PickerPopover';
+import { FolderIcon } from './icons';
+import './WorkbenchPanel.css';
 
 /** Saved code changes, execution progress, and live workspace tools. */
 
 interface WorkbenchPanelProps {
   sessionId: string;
+  workspacePath?: string | null;
   active?: boolean;
   toolCalls: ToolCall[];
   fileChanges?: FileChange[];
@@ -214,7 +217,7 @@ const TABS: Array<[BenchTab, string]> = [
 
 const NO_CHANGES: FileChange[] = [];
 
-export function WorkbenchPanel({ sessionId, active = true, toolCalls, fileChanges = NO_CHANGES, isRunning, activitySummary, trust, currentStep = null, orchestration = null, awaiting = null, connected = true, historical = false, computerRequest = 0, onTabChange, expanded = false, onToggleExpand, onClose }: WorkbenchPanelProps) {
+export function WorkbenchPanel({ sessionId, workspacePath, active = true, toolCalls, fileChanges = NO_CHANGES, isRunning, activitySummary, trust, currentStep = null, orchestration = null, awaiting = null, connected = true, historical = false, computerRequest = 0, onTabChange, expanded = false, onToggleExpand, onClose }: WorkbenchPanelProps) {
   const panelId = useId();
   // Share the verdict with chat and status indicators; null means no verdict yet.
   const verdictOk = computeRunVerdict(trust, activitySummary);
@@ -364,6 +367,18 @@ export function WorkbenchPanel({ sessionId, active = true, toolCalls, fileChange
             title="Hide panel (⌘J)" aria-label="Hide panel"><ComputerIcon name="close" /></button>
         </div>
       </div>
+      {workspacePath && !historical && <div className="workbench-workspace" aria-label="Workspace tools">
+        <span className="workbench-workspace-name" title={workspacePath}>
+          <FolderIcon size={13} />
+          <span>{workspacePath.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || workspacePath}</span>
+        </span>
+        <div className="workbench-workspace-actions">
+          <button type="button" onClick={() => selectTab('file')}>Open file</button>
+          <button type="button" onClick={() => { loadDiff(); selectTab('diff'); }} disabled={diffLoading}>
+            {diffLoading ? 'Loading…' : 'Changes'}
+          </button>
+        </div>
+      </div>}
       {(!connected || waitingLabel && (tab !== 'progress' || !awaiting) || isRunning && tab !== 'computer' && tab !== 'progress') && <div className="workbench-notice" role="status">
         <span>{!connected ? 'Connection lost. Reconnecting…' : waitingLabel || `${PHASE_LABEL[phase]}…`}</span>
         {isRunning && startedAt !== null && <Elapsed startedAt={startedAt} />}

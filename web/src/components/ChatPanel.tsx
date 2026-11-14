@@ -12,7 +12,7 @@ import type {
   PendingQuestion,
 } from '../types';
 import { MessageBubble } from './MessageBubble';
-import { getLiveSessionId } from '../api';
+import { getLiveSessionId, type ConfigInfo } from '../api';
 import { TrustCard } from './TrustCard';
 import { ProactiveCard } from './ProactiveCard';
 import { ToolCallCard } from './ToolCallCard';
@@ -30,6 +30,9 @@ import {
 } from '../shared/ui-copy.ts';
 
 interface ChatPanelProps {
+  config?: ConfigInfo | null;
+  connected?: boolean;
+  onOpenSettings?: () => void;
   /** Identity of the shown conversation ('live' or a session id); scroll re-anchors when it changes. */
   conversationKey: string;
   messages: ChatMessage[];
@@ -57,6 +60,9 @@ interface ChatPanelProps {
 }
 
 export function ChatPanel({
+  config,
+  connected,
+  onOpenSettings,
   conversationKey,
   messages,
   toolCalls,
@@ -207,7 +213,7 @@ export function ChatPanel({
             {suggestions.map(message => <ProactiveCard key={message.id} suggestion={message.suggestion!} />)}
           </div>
         </details>}
-        {isEmpty && <WelcomePanel onSuggest={onDraft} />}
+        {isEmpty && <WelcomePanel onSuggest={onDraft} config={config} connected={connected} onOpenSettings={onOpenSettings} />}
 
         {hiddenCount > 0 && (
           <button

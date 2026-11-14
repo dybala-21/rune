@@ -187,17 +187,11 @@ export function describeTrust(trust: TrustInfo): TrustPresentation {
     presentation = { ...presentation, note: `${presentation.note} Some numbers appear only in search excerpts; their use in this answer was not checked.`.trim(),
       tone: 'warning', showCard: true };
   }
-  const reserveNote = {
-    budget: 'Further retrieval stopped to preserve the remaining request budget for this answer.',
-    time: 'Further retrieval stopped to leave time for this answer before the run deadline.',
-    tool_rounds: 'The tool-round limit was reached. This answer uses the sources already retrieved.',
-    '': '',
-  }[trust.answerReserveReason || ''];
-  if (!reserveNote || ['cancelled', 'interrupted', 'failed'].includes(completionStatus(trust))) return presentation;
-  if (presentation.title === 'Completed') {
-    return { ...presentation, title: 'Response returned', note: `${presentation.note} ${reserveNote}`.trim(), showCard: true, ok: null, glyph: '·' };
+  if (trust.answerReserveReason && presentation.title === 'Completed') {
+    // Hide the reserve notice without turning a limited answer into a passing verdict.
+    presentation = { ...presentation, ok: null, glyph: '·' };
   }
-  return { ...presentation, note: `${presentation.note} ${reserveNote}`, showCard: true };
+  return presentation;
 }
 
 export function checkEvidence(trust: TrustInfo): string {

@@ -199,3 +199,23 @@ async def test_client_disconnect_cancels_the_outbound_check(connection, monkeypa
     with pytest.raises(HTTPException) as error:
         await handler._checked(AzureConnection(endpoint=BASE), SimpleNamespace(is_disconnected=disconnected))
     assert error.value.status_code == 499 and cancelled.is_set()
+
+
+@pytest.mark.parametrize("hosted", [False, True])
+async def test_azure_availability_matches_the_route_guard(connection, monkeypatch, hosted):
+    from rune.api.handlers.config import get_config_endpoint
+
+    if hosted:
+        monkeypatch.setenv("RUNE_CLOUD_WORKER", "1")
+    calls = mock_response(monkeypatch, data={"data": []})
+    reason = (await get_config_endpoint()).azure["unavailableReason"]
+    if hosted:
+        assert reason
+        with pytest.raises(HTTPException) as error:
+            await _request(AzureConnection(endpoint=BASE))
+        assert error.value.status_code == 403 and error.value.detail == reason
+        assert not calls
+    else:
+        assert reason is None
+        assert (await _request(AzureConnection(endpoint=BASE)))["ok"]
+        assert len(calls) == 1

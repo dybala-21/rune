@@ -18,15 +18,18 @@ const cases = [
     title: 'Completed', tone: 'warning', ok: true, card: true, escalate: false },
   { name: 'answer reservation keeps source caveats visible',
     trace: { answer_reserve_reason: 'budget', source_review: { status: 'not_checked', excerptOnlyNumbers: ['3200'] } },
-    title: 'Response returned', tone: 'warning', ok: null, card: true, escalate: false },
+    title: 'Completed', tone: 'warning', ok: null, card: true, escalate: false },
   ...['budget', 'time', 'tool_rounds'].map(reason => ({
-    name: `answer reservation preserves its ${reason} cause`, trace: { answer_reserve_reason: reason },
-    title: 'Response returned', tone: 'neutral', ok: null, card: true,
+    name: `answer reservation stays quiet for ${reason}`, trace: { answer_reserve_reason: reason },
+    title: 'Completed', tone: 'neutral', ok: null, card: false,
   })),
   { name: 'answer reservation leaves failed source checks visible', trace: {
     reason: 'completed_gate_warnings', answer_reserve_reason: 'budget',
     completion_check: { name: 'Source retrieval', detail: 'No source body was retrieved.' },
   }, title: 'Review needed', tone: 'warning', ok: false, card: true },
+  { name: 'an actual budget stop remains visible after answer reservation', trace: {
+    reason: 'request_budget_exhausted', answer_reserve_reason: 'budget',
+  }, title: 'Incomplete', tone: 'warning', ok: false, card: true },
   { name: 'answer reservation cannot hide a runtime error', trace: {
     reason: 'error: connection lost', answer_reserve_reason: 'budget',
   }, title: 'Run failed', tone: 'danger', ok: false, card: true },
@@ -307,12 +310,7 @@ cases.forEach((c, i) => test(c.name, () => {
   // Contradictory activity heuristics must not replace the server's result.
   assert.equal(computeRunVerdict(trust, { success: !c.ok }), c.ok);
   const card = renderToStaticMarkup(createElement(TrustCard, { trust }));
-  if (trust.answerReserveReason && trust.completionStatus !== 'failed') {
-    const note = { budget: 'remaining request budget', time: 'run deadline', tool_rounds: 'tool-round limit' }[trust.answerReserveReason];
-    assert.ok(view.note.includes(note), view.note);
-    assert.ok(card.includes(note), card);
-    if (trust.answerReserveReason === 'budget') assert.doesNotMatch(view.note, /time limit|deadline/i);
-  }
+  assert.doesNotMatch(card, /Response returned|Further retrieval stopped|This answer uses the sources already retrieved/);
   if (c.card) assert.ok(card.includes(c.title), card);
   else assert.ok(!card.includes(`>${c.title}<`), card);
   if (trust.evidenceGate?.lastVerdict === 'fail') assert.ok(!card.includes('1 check passed'));
@@ -324,7 +322,7 @@ cases.forEach((c, i) => test(c.name, () => {
   }));
   if (c.card) assert.ok(progress.includes(c.title), progress);
   else assert.ok(!progress.includes(`>${c.title}<`), progress);
-  if (trust.answerReserveReason && trust.completionStatus !== 'failed') assert.ok(progress.includes(view.note), progress);
+  assert.doesNotMatch(progress, /Response returned|Further retrieval stopped|This answer uses the sources already retrieved/);
   assert.ok(!progress.includes('Not verified'));
   if (trust.workspaceWarning) assert.ok(progress.includes(trust.workspaceWarning), progress);
   if (trust.unsourcedNumbers?.length) {

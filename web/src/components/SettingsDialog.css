@@ -1,0 +1,40 @@
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgb(0 0 0 / 40%);
+}
+.settings-dialog {
+  width: min(680px, 100%);
+  height: min(760px, 100%);
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+.settings-dialog-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 24px;
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+.settings-dialog-header h1 { font-size: 20px; font-weight: 600; letter-spacing: -.5px; }
+.settings-dialog-header p { color: var(--text-muted); font-size: 13px; margin-top: 4px; }
+.settings-dialog-body { flex: 1; min-height: 0; }
+@media (max-width: 560px) {
+  .settings-overlay { padding: 0; }
+  .settings-dialog { width: 100%; height: 100dvh; border: 0; border-radius: 0; }
+  .settings-dialog-header { padding: max(18px, env(safe-area-inset-top)) 18px 18px; }
+  .settings-dialog-body { padding-bottom: env(safe-area-inset-bottom); }
+  .settings-dialog-header button { min-width: 44px; min-height: 44px; }
+}

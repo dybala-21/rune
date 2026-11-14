@@ -6,6 +6,7 @@ interface PickerPopoverProps {
   trigger: ReactNode;
   children: (close: () => void) => ReactNode;
   onOpen?: () => void;
+  openRequest?: number;
   menuKey?: string;
   className?: string;
   busy?: boolean;
@@ -25,13 +26,14 @@ export function pickerPlacement(anchor: Pick<DOMRect, 'top' | 'bottom' | 'left'>
   };
 }
 
-export function PickerPopover({ label, trigger, children, onOpen, menuKey, className = '', busy }: PickerPopoverProps) {
+export function PickerPopover({ label, trigger, children, onOpen, openRequest, menuKey, className = '', busy }: PickerPopoverProps) {
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<ReturnType<typeof pickerPlacement>>({ top: 0, left: 0, width: 320, maxHeight: 480, transform: undefined });
   const buttonRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const enterFromEnd = useRef(false);
   const id = useId();
+  const handledRequest = useRef(0);
 
   const close = () => {
     setOpen(false);
@@ -41,6 +43,16 @@ export function PickerPopover({ label, trigger, children, onOpen, menuKey, class
     onOpen?.();
     setOpen(true);
   };
+
+  useEffect(() => {
+    if (!openRequest || openRequest === handledRequest.current) return;
+    handledRequest.current = openRequest;
+    show();
+  }, [openRequest]);
+
+  useLayoutEffect(() => {
+    if (open && buttonRef.current?.closest('[inert]')) setOpen(false);
+  });
 
   useLayoutEffect(() => {
     if (!open) return;
@@ -62,27 +74,46 @@ export function PickerPopover({ label, trigger, children, onOpen, menuKey, class
     if (!open) return;
     const panel = panelRef.current;
     const items = panel?.querySelectorAll<HTMLButtonElement>('[role^="menuitem"]:not(:disabled)');
+    const search = panel?.querySelector<HTMLInputElement>('[data-picker-search]');
+    if (search && document.activeElement === search) return;
     const selected = panel?.querySelector<HTMLButtonElement>('[aria-checked="true"]:not(:disabled)');
-    const target = enterFromEnd.current ? items?.[items.length - 1] : selected ?? items?.[0];
+    const target = enterFromEnd.current ? items?.[items.length - 1] : search ?? selected ?? items?.[0];
     (target ?? panel)?.focus();
     enterFromEnd.current = false;
   }, [open, menuKey]);
 
   useEffect(() => {
     if (!open) return;
-    const dismiss = (event: PointerEvent) => {
+    const dismiss = (event: PointerEvent | FocusEvent) => {
       const target = event.target as Node;
       if (!buttonRef.current?.contains(target) && !panelRef.current?.contains(target)) setOpen(false);
     };
     document.addEventListener('pointerdown', dismiss);
-    return () => document.removeEventListener('pointerdown', dismiss);
+    document.addEventListener('focusin', dismiss);
+    return () => {
+      document.removeEventListener('pointerdown', dismiss);
+      document.removeEventListener('focusin', dismiss);
+    };
   }, [open]);
 
   const navigate = (event: KeyboardEvent<HTMLDivElement>) => {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+      close();
+      return;
+    }
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.stopPropagation();
+      return;
+    }
     if (event.key === 'Escape' || event.key === 'Tab') {
       if (event.key === 'Escape') event.preventDefault();
       event.stopPropagation();
       close();
+      return;
+    }
+    const typing = ['INPUT', 'TEXTAREA'].includes((event.target as HTMLElement)?.tagName);
+    if (typing && ['Home', 'End', 'ArrowLeft', 'ArrowRight'].includes(event.key)) {
+      event.stopPropagation();
       return;
     }
     const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role^="menuitem"]:not(:disabled)'));
@@ -106,8 +137,17 @@ export function PickerPopover({ label, trigger, children, onOpen, menuKey, class
       aria-busy={busy || undefined}
       onClick={() => open ? close() : show()}
       onKeyDown={event => {
+        if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+          if (open) close();
+          return;
+        }
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.stopPropagation();
+          return;
+        }
         if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
         event.preventDefault();
+        event.stopPropagation();
         enterFromEnd.current = event.key === 'ArrowUp';
         show();
       }}

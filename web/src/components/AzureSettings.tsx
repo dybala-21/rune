@@ -28,6 +28,11 @@ export function AzureSettings({ connection, activeModel, onSaved }: {
   const fieldProps = (id: string) => ({ id, 'aria-invalid': !!form.errors[id],
     'aria-describedby': form.errors[id] ? `${id}-error` : undefined });
 
+  if (connection.unavailableReason) return <details className="azure-settings">
+    <summary>Azure Foundry <span className="azure-summary-state">Unavailable on this engine</span></summary>
+    <p>{connection.unavailableReason}</p>
+  </details>;
+
   return <details className="azure-settings" open={open} onToggle={event => setOpen(event.currentTarget.open)}>
     <summary>Azure Foundry <span className="azure-summary-state">{connection.hasKey ? `${Object.keys(connection.deployments).length} deployments saved` : 'Set up connection'}</span></summary>
     <p>Connect your Azure resource, then add the deployments you want to use.</p>

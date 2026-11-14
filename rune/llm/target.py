@@ -100,13 +100,15 @@ def resolve_target(model: str, provider: str | None = None, *, options: dict | N
         wire = f"azure/{name}"
     else:
         wire = name if provider == "openai" and not separator else f"{provider}/{name}"
-    if provider not in {"ollama", "openai_compatible"}:
-        key_names = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY", "xai": "XAI_API_KEY",
-                     "gemini": "GEMINI_API_KEY", "mistral": "MISTRAL_API_KEY", "deepseek": "DEEPSEEK_API_KEY",
-                     "cohere": "COHERE_API_KEY", "azure": "AZURE_API_KEY"}
-        if not wire.startswith("vertex_ai/") and (key_name := key_names.get(provider)):
+    if provider not in {"ollama", "openai_compatible"} and not wire.startswith("vertex_ai/"):
+        from rune.llm.models import PROVIDER_ENV_KEYS
+
+        # Resolve aliases inside the run's environment snapshot as well. Leaving
+        # them to the SDK would let a live os.environ edit change in-flight auth.
+        for key_name in PROVIDER_ENV_KEYS.get(provider, ()):
             if key := model_environment(key_name):
                 extra.setdefault("api_key", key)
+                break
     if gateway:
         extra = gateway_options(provider, extra)
     return ModelTarget(provider, name.removeprefix("responses/"), wire, tuple(extra.items()))

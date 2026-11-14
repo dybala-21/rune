@@ -239,8 +239,8 @@ def effective_env_scope(key: str) -> str | None:
     return _effective_scope(key, _read_env_file(_user_env_path()), _read_env_file(_project_env_path()))
 
 
-def set_env(key: str, value: str, scope: str = "user") -> None:
-    """Set a file and process variable; effective scope updates the file supplying its value."""
+def set_env(key: str, value: str, scope: str = "user") -> str:
+    """Set a file and process variable, returning the resolved persistence scope."""
     with _env_write_lock:
         if scope == "effective":
             user = _parse_env_file(_read_for_edit(_user_env_path()))
@@ -253,6 +253,7 @@ def set_env(key: str, value: str, scope: str = "user") -> None:
         current = _read_for_edit(file_path)
         _write_sensitive_env_file(file_path, _apply_env_edits(current, {key: value}))
         os.environ[key] = value
+        return scope
 
 
 def unset_env(key: str, scope: str = "user") -> None:

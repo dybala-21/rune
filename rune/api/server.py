@@ -1735,9 +1735,13 @@ def create_app() -> Any:
             if method == "sessions.list":
                 from rune.api import conversation_wiring
 
-                convs = await conversation_wiring.list_web_conversations(
-                    limit=params.get("limit", 20),
-                )
+                try:
+                    convs, total = await conversation_wiring.list_web_conversations_page(
+                        limit=params.get("limit", 20), offset=params.get("offset", 0),
+                        query=params.get("query", ""), status=params.get("status"),
+                    )
+                except ValueError as exc:
+                    return _err("invalid_params", str(exc))
                 manager = conversation_wiring.get_conv_manager()
                 sessions = []
                 for c in convs:
@@ -1757,7 +1761,7 @@ def create_app() -> Any:
                         "createdAt": c.created_at.isoformat(),
                         "updatedAt": c.updated_at.isoformat(),
                     })
-                return _ok({"sessions": sessions, "total": len(sessions)})
+                return _ok({"sessions": sessions, "total": total})
 
             elif method == "sessions.turns":
                 from rune.api import conversation_wiring

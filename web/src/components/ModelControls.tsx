@@ -1,15 +1,15 @@
-import type { ConfigInfo } from '../api';
-import { ModelPicker } from './ModelPicker';
-import { ReasoningPicker } from './ReasoningPicker';
+import type { ConfigInfo, ModelConnectionAction } from '../api';
+import { ModelPicker, type ModelMenuRequest } from './ModelPicker';
+import './ModelControls.css';
 
-export function ModelControls({ config }: { config: ConfigInfo | null }) {
-  const model = config?.activeModel;
-  if (!model) return null;
+export function ModelControls({ config, openRequest, onConfigure }: {
+  config: ConfigInfo | null;
+  openRequest?: ModelMenuRequest;
+  onConfigure?: (action: ModelConnectionAction) => void;
+}) {
+  if (!config?.activeModel) return null;
   return <div className="composer-models" aria-label="Model settings">
-    <ModelPicker active={model} />
-    {config.reasoningSupported && !!config.reasoningOptions?.length && <ReasoningPicker
-      key={`${model.provider}/${model.model}`} model={model}
-      effort={config.reasoningEffort ?? null} options={config.reasoningOptions}
-      budgets={config.reasoningBudgets} />}
+    <ModelPicker config={config} openRequest={openRequest} onConfigure={onConfigure} />
+
   </div>;
 }

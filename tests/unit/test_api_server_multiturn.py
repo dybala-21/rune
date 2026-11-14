@@ -962,3 +962,41 @@ def test_artifact_download_rejects_escape_and_unknown_session(client, tmp_path, 
     monkeypatch.setattr("rune.api.conversation_wiring.get_workspace", AsyncMock(return_value=None))
     response = client.get("/api/v1/files/download", params={"sessionId": "missing", "path": "outside.pdf"})
     assert response.status_code == 404
+
+
+def test_sessions_rpc_pages_and_searches_only_owned_titles(client, tmp_path):
+    from rune.api.conversation_wiring import WEB_SESSION_USER_ID
+
+    def rpc(**params):
+        return client.post("/api/v1/rpc", json={"method": "sessions.list", "params": params}).json()
+
+    assert rpc()["success"]
+    now = datetime.now()
+    with sqlite3.connect(tmp_path / "conversations.db") as db:
+        for index in range(61):
+            updated = (now - timedelta(minutes=index)).isoformat()
+            db.execute(
+                "INSERT INTO conversations(id,user_id,title,status,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                (f"page-{index:02}", WEB_SESSION_USER_ID,
+                 "Older 100%_complete" if index == 60 else f"Chat {index}",
+                 "archived" if index == 60 else "active", updated, updated),
+            )
+        db.execute(
+            "INSERT INTO conversations(id,user_id,title,created_at,updated_at) VALUES(?,?,?,?,?)",
+            ("external", "remote:other", "Older 100%_complete", now.isoformat(), now.isoformat()),
+        )
+
+    first = rpc(limit=50)["data"]
+    second = rpc(limit=50, offset=50)["data"]
+    assert first["total"] == second["total"] == 61
+    assert len(first["sessions"]) == 50 and len(second["sessions"]) == 11
+    assert not set(s["id"] for s in first["sessions"]) & set(s["id"] for s in second["sessions"])
+    assert second["sessions"][-1]["id"] == "page-60"
+    result = rpc(query="%_", status="archived")["data"]
+    assert result["total"] == 1 and result["sessions"][0]["id"] == "page-60"
+    assert rpc(query="OLDER", status="active")["data"]["total"] == 0
+    assert rpc(offset=100)["data"] == {"sessions": [], "total": 61}
+    for params in ({"limit": -1}, {"limit": 101}, {"offset": -1}, {"query": "a" * 201},
+                   {"limit": True}, {"query": []}, {"status": "unknown"}):
+        response = rpc(**params)
+        assert not response["success"] and response["error"]["code"] == "invalid_params"

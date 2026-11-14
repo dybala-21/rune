@@ -9,9 +9,10 @@ interface Props {
   live: WorkbenchState;
   history: WorkbenchState;
   historyState: SessionHistoryState | null;
+  workspacePath?: string | null;
 }
 
-export function ConversationWorkbenches({ agent, live, history, historyState }: Props) {
+export function ConversationWorkbenches({ agent, live, history, historyState, workspacePath }: Props) {
   const viewingHistory = history.sessionId !== null;
   const shown = viewingHistory ? history : live;
   const close = () => { shown.setOpen(false); shown.setDismissed(true); };
@@ -24,6 +25,7 @@ export function ConversationWorkbenches({ agent, live, history, historyState }: 
       <RetainedPane key={live.sessionId} active={!viewingHistory && live.open}>
         <WorkbenchPanel
           sessionId={live.sessionId!}
+          workspacePath={workspacePath}
           active={!viewingHistory && live.open}
           computerRequest={live.computerRequest}
           onTabChange={live.setTab}

@@ -6,6 +6,7 @@ const FOCUSABLE = [
   'textarea:not([disabled])',
   'input:not([disabled])',
   'select:not([disabled])',
+  'summary',
   '[tabindex]:not([tabindex="-1"])',
 ].join(', ');
 
@@ -13,7 +14,7 @@ const FOCUSABLE = [
  * Confines Tab focus to a modal and restores it to the trigger on unmount.
  * Attach the returned ref to the overlay root; focus moves inside on open.
  */
-export function useFocusTrap<T extends HTMLElement>(active = true) {
+export function useFocusTrap<T extends HTMLElement>(active = true, restoreTo?: HTMLElement | null) {
   const ref = useRef<T>(null);
 
   useEffect(() => {
@@ -21,11 +22,12 @@ export function useFocusTrap<T extends HTMLElement>(active = true) {
     const container = ref.current;
     if (!container) return;
 
-    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const previouslyFocused = restoreTo ?? document.activeElement as HTMLElement | null;
 
     const focusables = () =>
       Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE))
-        .filter(el => el.offsetParent !== null);
+        // Closed details can retain layout boxes even though their controls cannot receive focus.
+        .filter(el => el.offsetParent !== null && !el.closest('details:not([open]) > :not(summary), [inert]'));
 
     // Only pull focus in if it isn't already inside (some panels autofocus a field).
     if (!container.contains(document.activeElement)) {
@@ -62,11 +64,11 @@ export function useFocusTrap<T extends HTMLElement>(active = true) {
     container.addEventListener('keydown', onKeyDown);
     return () => {
       container.removeEventListener('keydown', onKeyDown);
-      if (previouslyFocused && typeof previouslyFocused.focus === 'function') {
+      if (previouslyFocused?.isConnected) {
         previouslyFocused.focus();
       }
     };
-  }, [active]);
+  }, [active, restoreTo]);
 
   return ref;
 }

@@ -1,0 +1,25 @@
+.composer-models .model-effort {
+  flex-shrink: 0;
+  padding-left: 7px;
+  border-left: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 450;
+}
+
+.model-reasoning-link { margin-bottom: 6px; }
+.model-reasoning-value { color: var(--text-muted); font-size: 11px; }
+.model-reasoning-link:disabled { cursor: wait; }
+
+.model-search { display: flex; gap: 4px; align-items: center; margin: 0 4px 8px; padding: 0 9px; border: 1px solid var(--border); border-radius: 8px; }
+.model-search:focus-within { border-color: var(--accent); }
+.model-search input { width: 100%; min-width: 0; background: transparent; border: 0; outline: none; padding: 10px 0; font: inherit; font-size: 12px; color: var(--text-primary); }
+.model-search button { width: 24px; min-height: 28px; color: var(--text-secondary); background: transparent; }
+.model-list-label { padding: 5px 10px; color: var(--text-muted); font-size: 10px; }
+.model-recent { border-bottom: 1px solid var(--border); padding-bottom: 6px; margin-bottom: 6px; }
+.model-connection { margin: 0 4px 8px; padding: 8px; border-radius: 7px; background: var(--bg-secondary); font-size: 11px; color: var(--text-secondary); }
+.model-connection strong { font-weight: 500; }
+.model-connection p { margin-top: 4px; line-height: 1.5; }
+.model-connection button, .model-setup-notice button { padding: 3px 0; background: transparent; color: var(--accent); font: inherit; text-align: left; }
+.model-setup-notice { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; font-size: 11px; color: var(--text-muted); }
+.model-setup-notice button { text-decoration: underline; text-underline-offset: 3px; }

@@ -1,0 +1,8 @@
+.workbench-workspace { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--border); color: var(--text-secondary); font-size: 12px; }
+.workbench-workspace-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.workbench-workspace-name svg { flex-shrink: 0; }
+.workbench-workspace-name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workbench-workspace-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.workbench-workspace-actions button { min-height: 30px; padding: 5px 8px; border-radius: 6px; background: transparent; color: var(--text-secondary); font-size: 12px; }
+.workbench-workspace-actions button:hover { background: var(--bg-hover); color: var(--text-primary); }
+.workbench-workspace-actions button:disabled { opacity: .6; }
