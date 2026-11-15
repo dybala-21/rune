@@ -1,29 +1,29 @@
 :root {
-  --bg-primary: #1c1d1b;
-  --bg-secondary: #232420;
-  --bg-tertiary: #2b2d27;
-  --bg-hover: #33362e;
-  --bg-surface: #232420;
-  --bg-sidebar: #20221e;
-  --border: #3c4036;
-  --border-subtle: #30342d;
-  --text-primary: #eef0e7;
-  --text-secondary: #c3c8bb;
-  --text-muted: #acb3a4;
-  --accent: #f1ad92;
-  --text-on-accent: #1c1d1b;
-  --accent-hover: #ffd0ba;
-  --accent-subtle: #3b2b24;
+  --bg-primary: #1c1c1c;
+  --bg-secondary: #242424;
+  --bg-tertiary: #2d2d2d;
+  --bg-hover: #353535;
+  --bg-surface: #242424;
+  --bg-sidebar: #202020;
+  --border: #3c3c3c;
+  --border-subtle: #303030;
+  --text-primary: #ededed;
+  --text-secondary: #c5c5c5;
+  --text-muted: #a8a8a8;
+  --accent: #dedede;
+  --text-on-accent: #1c1c1c;
+  --accent-hover: #ffffff;
+  --accent-subtle: #303030;
   --success: #a9c8a9;
   --success-subtle: #2a372b;
   --warning: #e7bc83;
   --warning-subtle: #3d3224;
   --danger: #edaaa2;
-  --text-on-danger: #1c1d1b;
+  --text-on-danger: #1c1c1c;
   --danger-subtle: #3c2926;
-  --code-bg: #181b17;
-  --button-primary: #dce5d2;
-  --button-foreground: #242e20;
+  --code-bg: #191a1b;
+  --button-primary: #ededed;
+  --button-foreground: #252525;
 
   /* Typography */
   --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Segoe UI", sans-serif;
@@ -85,13 +85,12 @@ body {
   font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
 }
 
-/* Inline styles can't express :focus-within, so the composer ring lives here. */
 .composer-shell {
   transition: border-color 0.15s, box-shadow 0.2s;
 }
 .composer-shell:focus-within {
   border-color: var(--accent) !important;
-  box-shadow: 0 0 0 3px var(--accent-subtle), var(--shadow-lg);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
 }
 
 /* Scrollbar */
@@ -426,7 +425,6 @@ a:focus-visible,
 }
 
 /* Reduced motion */
-/* Honors OS "reduce motion": state still changes, it just doesn't animate. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -470,7 +468,7 @@ a:focus-visible,
   .chat-workbench-grid { transition: none; }
 }
 
-/* Syntax highlighting (dependency-free tokenizer) */
+/* Syntax highlighting */
 :root {
   --syntax-comment: #939ba6;
   --syntax-string:  #8FB99A;
@@ -532,21 +530,21 @@ a:focus-visible,
 :root { color-scheme: dark; }
 :root[data-theme="light"] {
   color-scheme: light;
-  --bg-primary: #fafaf7;
-  --bg-secondary: #ffffff;
-  --bg-tertiary: #f0f1eb;
-  --bg-hover: #e8eae2;
+  --bg-primary: #ffffff;
+  --bg-secondary: #f7f7f7;
+  --bg-tertiary: #f5f5f5;
+  --bg-hover: #ededed;
   --bg-surface: #ffffff;
-  --bg-sidebar: #f0f1eb;
-  --border: #dedfd7;
-  --border-subtle: #e9eae3;
-  --text-primary: #262b25;
-  --text-secondary: #555d50;
-  --text-muted: #697061;
-  --accent: #a3442c;
+  --bg-sidebar: #fafafa;
+  --border: #d9d9d9;
+  --border-subtle: #e9e9e9;
+  --text-primary: #252525;
+  --text-secondary: #595959;
+  --text-muted: #646464;
+  --accent: #333333;
   --text-on-accent: #fff;
-  --accent-hover: #83351f;
-  --accent-subtle: #f7eae3;
+  --accent-hover: #111111;
+  --accent-subtle: #eeeeee;
   --success: #42634b;
   --success-subtle: #edf3ed;
   --warning: #825a20;
@@ -554,8 +552,8 @@ a:focus-visible,
   --danger: #a13f34;
   --text-on-danger: #fff;
   --danger-subtle: #faeae6;
-  --code-bg: #f3f4ee;
-  --button-primary: #303b2d;
+  --code-bg: #f5f5f5;
+  --button-primary: #303030;
   --button-foreground: #ffffff;
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.08);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.10);
@@ -631,7 +629,7 @@ a:focus-visible,
 }
 .md-quote > div { margin: 2px 0; }
 
-/* Markdown typography (readability) */
+/* Markdown typography */
 .md-p { margin: 8px 0; line-height: 1.7; }
 .md-p:first-child { margin-top: 0; }
 .md-p:last-child { margin-bottom: 0; }

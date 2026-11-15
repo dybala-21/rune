@@ -20,7 +20,6 @@ interface SessionSidebarProps {
   suggestionCount?: number;
   onOpenSuggestions?: () => void;
   onOpenSchedule?: () => void;
-  onOpenSettings?: () => void;
   onSelectTask?: (id: string) => void;
   taskSelectionDisabled?: boolean;
 }
@@ -49,7 +48,7 @@ function dateLabel(iso: string): string {
 
 export function SessionSidebar({ currentSessionId, onSelectSession, onNewChat, newChatDisabled, newChatDisabledReason,
   liveTitle, liveState = 'idle', liveMessageCount, liveUpdatedAt, retainLive = true, suggestionCount = 0, onOpenSuggestions,
-  onOpenSchedule, onOpenSettings, onSelectTask, taskSelectionDisabled }: SessionSidebarProps) {
+  onOpenSchedule, onSelectTask, taskSelectionDisabled }: SessionSidebarProps) {
   const [search, setSearch] = useState('');
   const [list, setList] = useState(emptySessionList);
   const [loader] = useState(() => new SessionListLoader(fetchSessions, setList));
@@ -120,9 +119,9 @@ export function SessionSidebar({ currentSessionId, onSelectSession, onNewChat, n
             const selected = isLive ? currentSessionId === null : currentSessionId === session.id;
             return <button type="button" className="session-item" key={session.id}
               aria-current={selected ? 'page' : undefined}
-              onClick={() => onSelectSession(isLive ? null : session.id)} title={session.title || 'Untitled chat'}>
+              onClick={() => onSelectSession(isLive ? null : session.id)} title={`${session.title || 'Untitled chat'} · ${session.turnCount} messages · ${dateLabel(session.updatedAt)}`}>
               <span className="session-title">{session.title || 'Untitled chat'}</span>
-              <span className="session-meta">
+              <span className={`session-meta${isLive && liveState !== 'idle' ? '' : ' session-meta--quiet'}`}>
                 {isLive ? <span className="session-live-status" data-active={liveState !== 'idle' || undefined}>{LIVE_STATUS[liveState]}</span>
                   : <span>{session.turnCount} {session.turnCount === 1 ? 'message' : 'messages'}</span>}
                 <time dateTime={session.updatedAt}>{dateLabel(session.updatedAt)}</time>
@@ -148,9 +147,6 @@ export function SessionSidebar({ currentSessionId, onSelectSession, onNewChat, n
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4m10-4v4M3 11h18"/></svg>
       Scheduled tasks
     </button>}
-    {onOpenSettings && <button type="button" onClick={onOpenSettings}>
-      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" aria-hidden="true"><circle cx="8" cy="8" r="2.5"/><path d="M8 1v2m0 10v2M1 8h2m10 0h2M3 3l1.5 1.5m7 7L13 13M3 13l1.5-1.5m7-7L13 3"/></svg>
-      Settings
-    </button>}</div>
+    </div>
   </nav>;
 }

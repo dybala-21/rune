@@ -46,12 +46,10 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   const dragDepthRef = useRef(0);
   const [showCommands, setShowCommands] = useState(false);
   const [cmdFilter, setCmdFilter] = useState('');
-  // Feedback for files that couldn't be attached (wrong type / too big / unreadable).
   const [attachNotice, setAttachNotice] = useState('');
   // Sent messages for ↑/↓ recall; histIdx -1 = live draft.
   const historyRef = useRef<string[]>([]);
   const histIdxRef = useRef(-1);
-  // Voice input (MediaRecorder → server STT)
   const [recState, setRecState] = useState<'idle' | 'recording' | 'transcribing'>('idle');
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recChunksRef = useRef<Blob[]>([]);
@@ -285,7 +283,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // When command palette is open, let it handle Enter/Arrow/Escape
+    // Let the command menu handle navigation keys while open.
     if (showCommands && !disabled) {
       if (e.key === 'Enter' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
         e.preventDefault();
@@ -297,7 +295,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         return;
       }
     }
-    // ↑/↓ recall only when the caret is at the very start, so multi-line editing keeps the arrows.
+    // Recall sent messages only at the start of the draft.
     const el = textareaRef.current;
     const hist = historyRef.current;
     if (el && hist.length > 0 && !isRunning && el.selectionStart === 0 && el.selectionEnd === 0) {
@@ -426,7 +424,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
         style={{
           maxWidth: 800,
           margin: '0 auto',
-          borderRadius: 'var(--radius-md)',
+          borderRadius: 20,
           border: isDragOver ? '2px solid var(--accent)' : '1px solid var(--border)',
           pointerEvents: 'auto',
           overflow: showCommands ? 'visible' : 'hidden',
@@ -501,13 +499,7 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
           </div>
         )}
 
-        <div className="composer-input-row" style={{
-          display: 'flex',
-          alignItems: 'flex-end',
-          gap: 2,
-          padding: '12px 12px 8px',
-          position: 'relative',
-        }}>
+        <div className="composer-input-row">
           {showCommands && !disabled && (
             <CommandPalette
               filter={cmdFilter}
@@ -515,65 +507,6 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               onClose={() => setShowCommands(false)}
             />
           )}
-          <>
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                accept={ATTACHMENT_ACCEPT}
-                style={{ display: 'none' }}
-                onChange={(e) => {
-                  if (e.target.files) processFiles(e.target.files);
-                  e.target.value = '';
-                }}
-              />
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={disabled}
-                title={ATTACHMENT_HELP}
-                aria-label="Attach file"
-                style={{
-                  width: 36, height: 36, borderRadius: '50%',
-                  background: 'none', border: 'none',
-                  color: disabled ? 'var(--text-muted)' : 'var(--text-secondary)',
-                  cursor: disabled ? 'default' : 'pointer',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  flexShrink: 0, marginBottom: 4,
-                }}
-              >
-                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M19 11l-8 8a4 4 0 0 1-6-6l9-9a2.7 2.7 0 0 1 4 4l-8.5 8.5a1.4 1.4 0 0 1-2-2l7.5-7.5" />
-                </svg>
-              </button>
-              <button
-                type="button"
-                onClick={() => (recState === 'recording' ? stopRecording() : startRecording())}
-                disabled={disabled || recState === 'transcribing'}
-                title={recState === 'recording' ? 'Stop recording' : recState === 'transcribing' ? 'Transcribing...' : 'Voice input'}
-                aria-label={recState === 'recording' ? 'Stop recording' : 'Voice input'}
-                style={{
-                  width: 36, height: 36, borderRadius: '50%',
-                  background: recState === 'recording' ? 'var(--danger)' : 'none',
-                  border: 'none',
-                  color: recState === 'recording'
-                    ? 'white'
-                    : disabled || recState === 'transcribing'
-                      ? 'var(--text-muted)'
-                      : 'var(--text-secondary)',
-                  cursor: disabled ? 'default' : 'pointer',
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  flexShrink: 0, marginBottom: 4,
-                }}
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-                  <rect x="9" y="2" width="6" height="11" rx="3" />
-                  <path d="M5 10v1a7 7 0 0 0 14 0v-1" />
-                  <path d="M12 18v4" />
-                </svg>
-              </button>
-          </>
-
           <textarea
             ref={textareaRef}
             aria-label="Message RUNE"
@@ -596,11 +529,11 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
               minWidth: 0,
               background: 'transparent',
               border: 'none',
-              padding: '10px 8px',
+              padding: '14px 16px 8px',
               color: 'var(--text-primary)',
               fontSize: 15,
               lineHeight: 1.5,
-              minHeight: 44,
+              minHeight: 48,
               maxHeight: 160,
               outline: 'none',
               resize: 'none',
@@ -608,9 +541,73 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
 
             }}
           />
+        </div>
+        <div className="composer-footer">
+          <div className="composer-tools">
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              accept={ATTACHMENT_ACCEPT}
+              style={{ display: 'none' }}
+              onChange={(e) => {
+                if (e.target.files) processFiles(e.target.files);
+                e.target.value = '';
+              }}
+            />
+            <button
+              type="button"
+              className="composer-action"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={disabled}
+              title={ATTACHMENT_HELP}
+              aria-label="Attach file"
+              style={{
+                width: 36, height: 36, borderRadius: '50%',
+                background: 'none', border: 'none',
+                color: disabled ? 'var(--text-muted)' : 'var(--text-secondary)',
+                cursor: disabled ? 'default' : 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0,
+              }}
+            >
+              <svg aria-hidden="true" focusable="false" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M19 11l-8 8a4 4 0 0 1-6-6l9-9a2.7 2.7 0 0 1 4 4l-8.5 8.5a1.4 1.4 0 0 1-2-2l7.5-7.5" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              className="composer-action"
+              onClick={() => (recState === 'recording' ? stopRecording() : startRecording())}
+              disabled={disabled || recState === 'transcribing'}
+              title={recState === 'recording' ? 'Stop recording' : recState === 'transcribing' ? 'Transcribing...' : 'Voice input'}
+              aria-label={recState === 'recording' ? 'Stop recording' : 'Voice input'}
+              style={{
+                width: 36, height: 36, borderRadius: '50%',
+                background: recState === 'recording' ? 'var(--danger)' : 'none',
+                border: 'none',
+                color: recState === 'recording'
+                  ? 'white'
+                  : disabled || recState === 'transcribing'
+                    ? 'var(--text-muted)'
+                    : 'var(--text-secondary)',
+                cursor: disabled ? 'default' : 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0,
+              }}
+            >
+              <svg aria-hidden="true" focusable="false" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="9" y="2" width="6" height="11" rx="3" />
+                <path d="M5 10v1a7 7 0 0 0 14 0v-1" />
+                <path d="M12 18v4" />
+              </svg>
+            </button>
+          </div>
+          {settings && <div className="composer-settings">{settings}</div>}
           {isRunning ? (
             <button
               type="button"
+              className="composer-action composer-send"
               onClick={onAbort}
               disabled={isStopping}
               title={isStopping ? attentionLabel ?? 'Stopping…' : 'Stop'}
@@ -619,14 +616,15 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 width: 36, height: 36, borderRadius: '50%',
                 background: 'var(--danger)', color: 'var(--text-on-danger)',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                flexShrink: 0, fontSize: 14, marginBottom: 4,
+                flexShrink: 0, fontSize: 14,
               }}
             >
-              {'\u25A0'}
+              <span aria-hidden="true">{'\u25A0'}</span>
             </button>
           ) : (
             <button
               type="button"
+              className="composer-action composer-send"
               onClick={handleSubmit}
               disabled={disabled || readingFiles || sending || !!sendBlockedReason}
               title={sendBlockedReason || (sending ? 'Preparing message…' : readingFiles ? 'Reading attachments…' : 'Send')}
@@ -637,28 +635,21 @@ export const InputArea = forwardRef<InputAreaHandle, InputAreaProps>(function In
                 color: disabled ? 'var(--text-muted)' : 'var(--button-foreground)',
                 fontWeight: 700,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                flexShrink: 0, fontSize: 16, marginBottom: 4,
+                flexShrink: 0, fontSize: 16,
               }}
             >
-              {'\u2191'}
+              <span aria-hidden="true">{'\u2191'}</span>
             </button>
           )}
         </div>
-        <div className="composer-footer">
-          {settings && <div className="composer-settings">{settings}</div>}
-          <div className="composer-hint" data-notice={!!sendBlockedReason || sending || isRunning || disabled || isDragOver} style={{
-            fontSize: 11,
-            color: 'var(--text-muted)',
-            padding: '0 16px 8px',
-          }}>
+        {(sendBlockedReason || sending || isRunning || disabled || isDragOver) && (
+          <div className="composer-hint" role="status">
             {sendBlockedReason || (sending ? 'Preparing message…' : isRunning
               ? `${attentionLabel || 'Rune is working'} · Send your draft when it finishes`
               : disabled ? 'Reconnecting · Send your draft when connected'
-              : isDragOver
-                ? 'Drop to attach'
-                : 'Enter to send · Shift+Enter for a new line')}
+              : 'Drop to attach')}
           </div>
-        </div>
+        )}
       </div>
     </div>
   );

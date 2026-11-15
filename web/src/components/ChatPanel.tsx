@@ -1,5 +1,5 @@
 import { latestTurn } from '../utils/retry';
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type {
   ChatMessage,
   ToolCall,
@@ -7,19 +7,23 @@ import type {
   ActivitySummary,
   DelegateItem,
   CompactionItem,
-  StepInfo,
   PendingApproval,
   PendingQuestion,
 } from '../types';
 import { MessageBubble } from './MessageBubble';
-import { getLiveSessionId, type ConfigInfo } from '../api';
+import { getLiveSessionId, getCurrentRunId, type ConfigInfo } from '../api';
 import { TrustCard } from './TrustCard';
 import { ToolCallCard } from './ToolCallCard';
 import { ToolActivity } from './ToolActivity';
 import { SearchActivity } from './SearchActivity';
+import { ToolActivityIcon } from './ToolActivityIcon';
+import { activityStatus, toolState } from '../utils/toolActivity';
+import { searchPreview, searchStatus } from '../utils/searchActivity';
 import { ThinkingBlockView } from './ThinkingBlock';
-import { normalizeToolName, inferWorkPhase } from '../utils/tooling';
+import { normalizeToolName } from '../utils/tooling';
 import { WelcomePanel } from './WelcomePanel';
+import { RuneMark } from './RuneMark';
+import { runActivity } from '../utils/runActivity';
 import { DesktopTaskNotice } from './DesktopTaskNotice';
 import { ConnectAccountCard } from './ConnectAccountCard';
 import { LoginCard } from './LoginCard';
@@ -34,8 +38,9 @@ interface ChatPanelProps {
   config?: ConfigInfo | null;
   connected?: boolean;
   onOpenSettings?: () => void;
-  /** Identity of the shown conversation ('live' or a session id); scroll re-anchors when it changes. */
+  /** Re-anchor scrolling when the shown conversation changes. */
   conversationKey: string;
+  historical?: boolean;
   messages: ChatMessage[];
   toolCalls: ToolCall[];
   thinkingBlocks: ThinkingBlock[];
@@ -47,7 +52,6 @@ interface ChatPanelProps {
   activitySummary: ActivitySummary | null;
   delegateEvents: DelegateItem[];
   compactionEvents: CompactionItem[];
-  currentStepInfo: StepInfo | null;
   pendingQuestion: PendingQuestion | null;
   onRespondQuestion: (answer: string, selectedIndex?: number) => Promise<void>;
   pendingApproval: PendingApproval | null;
@@ -65,6 +69,7 @@ export function ChatPanel({
   connected,
   onOpenSettings,
   conversationKey,
+  historical = false,
   messages,
   toolCalls,
   thinkingBlocks,
@@ -73,7 +78,6 @@ export function ChatPanel({
   onEditResend,
   delegateEvents,
   compactionEvents,
-  currentStepInfo,
   pendingQuestion,
   onRespondQuestion,
   pendingApproval,
@@ -82,12 +86,18 @@ export function ChatPanel({
   onDraft,
   streamFooter,
 }: ChatPanelProps) {
-  const bottomRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   // Follow new content only while the user is near the bottom.
   const atBottomRef = useRef(true);
 
   const [showScrollBtn, setShowScrollBtn] = useState(false);
+  const scrollToLatest = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    // Scroll the conversation without moving its surrounding panels.
+    container.scrollTo({ top: container.scrollHeight,
+      behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
+  }, []);
 
   type TimelineItem =
     | { type: 'message'; item: ChatMessage }
@@ -141,7 +151,7 @@ export function ChatPanel({
   const grouped = useMemo(() => groupConsecutiveTools(timeline), [timeline]);
 
   const isEmpty = timeline.length === 0;
-  const desktopWait = desktopAttention(toolCalls, isRunning);
+  const desktopWait = desktopAttention(toolCalls, isRunning, getCurrentRunId());
   const lastTool = toolCalls[toolCalls.length - 1];
   const desktopSetup = !isRunning && !!onRegenerate && lastTool?.success === false
     && normalizeToolName(lastTool.toolName) === 'desktop.connect'
@@ -150,22 +160,22 @@ export function ChatPanel({
   useEffect(() => {
     if (!atBottomRef.current || isEmpty) return;
     const timer = requestAnimationFrame(() => {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+      scrollToLatest();
     });
     return () => cancelAnimationFrame(timer);
-  }, [messages, toolCalls, thinkingBlocks, delegateEvents, compactionEvents, pendingApproval, pendingQuestion, isEmpty]);
+  }, [messages, toolCalls, thinkingBlocks, delegateEvents, compactionEvents, pendingApproval, pendingQuestion, isEmpty, scrollToLatest]);
 
   // Open live chat at the latest turn and history at the start.
   useEffect(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
-    const isLive = conversationKey === 'live';
+    const isLive = !historical;
     atBottomRef.current = isLive;
     const timer = requestAnimationFrame(() => {
       container.scrollTop = isLive && !isEmpty ? container.scrollHeight : 0;
     });
     return () => cancelAnimationFrame(timer);
-  }, [conversationKey, isEmpty]);
+  }, [conversationKey, isEmpty, historical]);
 
   useEffect(() => {
     const container = scrollContainerRef.current;
@@ -244,7 +254,7 @@ export function ChatPanel({
               );
             }
             return (
-              <div key={item.item.id} style={{ marginTop: needsGap ? 12 : 0 }}>
+              <div key={item.item.id} style={{ marginTop: idx > 0 && item.item.role === 'user' ? 28 : needsGap ? 12 : 0 }}>
                 <MessageBubble
                   message={item.item}
                   sessionId={conversationKey === 'live' ? getLiveSessionId() : conversationKey}
@@ -328,19 +338,18 @@ export function ChatPanel({
           kind="setup"
         />}
 
-        {isRunning && !pendingApproval && !pendingQuestion && !desktopWait && (
-          <RunningIndicator toolCalls={toolCalls} currentStepInfo={currentStepInfo} />
+        {isRunning && connected !== false && !pendingApproval && !pendingQuestion && !desktopWait && (
+          <RunningIndicator toolCalls={toolCalls} />
         )}
 
         {/* Keep inline controls above the composer. */}
         {streamFooter}
 
-        <div ref={bottomRef} />
       </div>
 
       {showScrollBtn && (
         <button
-          onClick={() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' })}
+          onClick={scrollToLatest}
           aria-label="Scroll to bottom"
           className="glass"
           style={{
@@ -361,83 +370,12 @@ export function ChatPanel({
   );
 }
 
-const TOOL_ACTIVITIES: Record<string, string> = {
-  file_read: 'Reviewing files...',
-  file_write: 'Updating files...',
-  file_edit: 'Editing code...',
-  file_list: 'Scanning the workspace...',
-  file_search: 'Searching the project...',
-  bash: 'Running a command...',
-  web_search: 'Looking things up...',
-  web_fetch: 'Checking the source...',
-  browser_navigate: 'Opening the page...',
-  browser_observe: 'Inspecting the page...',
-  browser_act: 'Interacting with the page...',
-  think: 'Planning the approach...',
-  memory_search: 'Checking past context...',
-  memory_save: 'Saving context...',
-  project_map: 'Mapping the project...',
-  code_analyze: 'Tracing the code path...',
-  delegate_task: 'Handing off a subtask...',
-  delegate_orchestrate: 'Coordinating the work...',
-};
-
-const PHASE_LABELS: Record<string, string> = {
-  analyzing: 'Analyzing',
-  implementing: 'Implementing',
-  verifying: 'Verifying',
-};
-
-const PHASE_COLORS: Record<string, string> = {
-  analyzing: 'var(--accent)',
-  implementing: 'var(--warning)',
-  verifying: 'var(--success)',
-};
-
-function RunningIndicator({ toolCalls, currentStepInfo }: { toolCalls: ToolCall[]; currentStepInfo: StepInfo | null }) {
-  const pendingTool = [...toolCalls].reverse().find(tc => tc.result === undefined);
-  const activityKey = pendingTool ? normalizeToolName(pendingTool.toolName).replace(/\./g, '_') : null;
-  const activity = activityKey ? TOOL_ACTIVITIES[activityKey] : null;
-  const phase = toolCalls.length > 0 ? inferWorkPhase(toolCalls) : null;
-
-  return (
-    <div className="fade-in" style={{
-      padding: '10px 0',
-      display: 'flex',
-      alignItems: 'center',
-      gap: 10,
-      color: 'var(--text-secondary)',
-    }}>
-      <span className="shimmer-text" style={{ fontSize: 13, fontWeight: 500 }}>
-        {activity || 'Thinking...'}
-      </span>
-      {currentStepInfo && (
-        <span style={{
-          fontSize: 11,
-          color: 'var(--text-muted)',
-          marginLeft: 'auto',
-          fontFamily: 'var(--font-mono)',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-        }}>
-          {phase && (
-            <span style={{
-              color: PHASE_COLORS[phase],
-              fontWeight: 600,
-              padding: '1px 6px',
-              borderRadius: 3,
-              background: `color-mix(in srgb, ${PHASE_COLORS[phase]} 15%, transparent)`,
-            }}>
-              {PHASE_LABELS[phase]}
-            </span>
-          )}
-          Step {currentStepInfo.stepNumber}
-          {currentStepInfo.tokens > 0 && ` \u00B7 ${formatTokens(currentStepInfo.tokens)}`}
-        </span>
-      )}
-    </div>
-  );
+function RunningIndicator({ toolCalls }: { toolCalls: ToolCall[] }) {
+  const activity = runActivity(toolCalls, getCurrentRunId());
+  return <div className="run-presence" role="status" aria-live="polite">
+    <span aria-hidden="true"><RuneMark state={activity.state} size={32} /></span>
+    <span>{activity.label}</span>
+  </div>;
 }
 
 function DelegateNotice({ event }: { event: DelegateItem }) {
@@ -484,13 +422,19 @@ type TimelineItemType =
   | { type: 'delegate'; item: DelegateItem }
   | { type: 'compaction'; item: CompactionItem };
 
+function completedWebRead(tool: ToolCall): boolean {
+  if (tool.result === undefined && tool.completedAt === undefined) return false;
+  const name = normalizeToolName(tool.toolName);
+  return name === 'web.search' || (name === 'web.fetch' && ['GET', 'HEAD'].includes(String(tool.args.method ?? 'GET').toUpperCase()));
+}
+
 function groupConsecutiveTools(timeline: TimelineItemType[]): GroupedEntry[] {
   const result: GroupedEntry[] = [];
   let currentGroup: ToolCall[] = [];
   let currentToolName = '';
 
   const flushGroup = () => {
-    if (currentGroup.length >= (normalizeToolName(currentToolName) === 'web.search' ? 2 : 3)) {
+    if (currentGroup.length >= (currentGroup.every(completedWebRead) || normalizeToolName(currentToolName) === 'web.search' ? 2 : 3)) {
       result.push({
         type: 'group',
         key: `group-${currentGroup[0].id}`,
@@ -509,8 +453,10 @@ function groupConsecutiveTools(timeline: TimelineItemType[]): GroupedEntry[] {
   for (const entry of timeline) {
     if (entry.type === 'tool' && normalizeToolName(entry.item.toolName) !== 'ask.user') {
       const previous = currentGroup[currentGroup.length - 1];
-      if (normalizeToolName(entry.item.toolName) === normalizeToolName(currentToolName)
-          && entry.item.run === previous?.run && entry.item.runId === previous?.runId) {
+      const sameActivity = previous && (completedWebRead(entry.item) && completedWebRead(previous)
+        || !completedWebRead(entry.item) && !completedWebRead(previous)
+          && normalizeToolName(entry.item.toolName) === normalizeToolName(currentToolName));
+      if (sameActivity && entry.item.run === previous.run && entry.item.runId === previous.runId) {
         currentGroup.push(entry.item);
       } else {
         flushGroup();
@@ -528,14 +474,38 @@ function groupConsecutiveTools(timeline: TimelineItemType[]): GroupedEntry[] {
 }
 
 function ToolGroup({ tools, active }: { tools: ToolCall[]; active: boolean }) {
-  return normalizeToolName(tools[0].toolName) === 'web.search'
-    ? <SearchActivity tools={tools} active={active} />
-    : <ToolActivity tools={tools} active={active} />;
+  if (tools.every(completedWebRead)) return <WebActivity tools={tools} />;
+  return tools.every(tool => normalizeToolName(tool.toolName) === 'web.search')
+    ? <SearchActivity tools={tools} active={active} /> : <ToolActivity tools={tools} active={active} />;
 }
 
-function formatTokens(tokens: number): string {
-  if (tokens < 1000) return `${tokens}`;
-  return `${(tokens / 1000).toFixed(1)}k`;
+function WebActivity({ tools }: { tools: ToolCall[] }) {
+  const [open, setOpen] = useState(false);
+  const searches = tools.filter(tool => normalizeToolName(tool.toolName) === 'web.search');
+  const reads = tools.length - searches.length;
+  const empty = searches.filter(tool => searchStatus(tool, false) === 'complete' && searchPreview(tool).count === 0).length;
+  const problems = tools.filter(tool => toolState(tool, false) !== 'succeeded');
+  const status = activityStatus(problems, false);
+  const counts = [searches.length ? `${searches.length} search${searches.length === 1 ? '' : 'es'}` : '',
+    reads ? `${reads} page request${reads === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ');
+  const problemNotice = !problems.length ? '' : problems.length > 1 ? `${problems.length} requests: ${status.text}` : {
+    failed: '1 request failed', 'check-failed': '1 request failed checks',
+    unconfirmed: '1 request has unconfirmed checks', unknown: '1 request has no saved status',
+    interrupted: '1 request interrupted', waiting: '1 request waiting for you', pending: '1 request running', succeeded: '',
+  }[status.state];
+  const notice = [problemNotice, empty ? `${empty} search${empty === 1 ? '' : 'es'} without results` : ''].filter(Boolean).join(' · ');
+  return <details className={`tool-activity web-activity${problems.length ? ` tool-state-${status.state}` : ''}`}
+    onToggle={event => setOpen(event.currentTarget.open)}>
+    <summary className="tool-activity-summary" aria-label={`Web activity · ${counts}${notice ? ` · ${notice}` : ''}`}>
+      <span className="tool-activity-symbol"><ToolActivityIcon kind="web" /></span>
+      <span className="tool-summary-body"><span className="tool-heading">Web activity</span><span className="tool-target">{counts}</span></span>
+      {notice && <span className={`tool-status${problems.length ? ` tool-state-${status.state}` : ''}`}>{notice}</span>}
+      <svg className="tool-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><path d="m9 5 7 7-7 7" /></svg>
+    </summary>
+    {open && <div className="tool-activity-content">
+      {tools.map(tool => <ToolCallCard key={tool.id} toolCall={tool} />)}
+    </div>}
+  </details>;
 }
 
 export function InlineQuestionCard({

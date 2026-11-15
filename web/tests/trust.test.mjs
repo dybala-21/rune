@@ -15,10 +15,10 @@ const gate = last_verdict => ({ has_check: true, last_verdict, verdict_counts: {
 const cases = [
   { name: 'excerpt-only numbers remain visible after a completed lookup',
     trace: { source_review: { status: 'not_checked', excerptOnlyNumbers: ['3200'] } },
-    title: 'Completed', tone: 'warning', ok: true, card: true, escalate: false },
+    title: 'Completed', tone: 'neutral', ok: true, card: false, escalate: false },
   { name: 'answer reservation keeps source caveats visible',
     trace: { answer_reserve_reason: 'budget', source_review: { status: 'not_checked', excerptOnlyNumbers: ['3200'] } },
-    title: 'Completed', tone: 'warning', ok: null, card: true, escalate: false },
+    title: 'Completed', tone: 'neutral', ok: null, card: false, escalate: false },
   ...['budget', 'time', 'tool_rounds'].map(reason => ({
     name: `answer reservation stays quiet for ${reason}`, trace: { answer_reserve_reason: reason },
     title: 'Completed', tone: 'neutral', ok: null, card: false,
@@ -190,18 +190,32 @@ for (const [awaiting, label] of [['approval', 'Waiting for your approval'], ['qu
   });
 }
 
-test('native access waits remain actionable in chat without the work panel', async () => {
+test('native access waits remain actionable in chat without the work panel', async t => {
   const { ChatPanel } = await server.ssrLoadModule('/src/components/ChatPanel.tsx');
   const { InputArea } = await server.ssrLoadModule('/src/components/InputArea.tsx');
   const { desktopAttention } = await server.ssrLoadModule('/src/utils/workbench.ts');
+  const api = await server.ssrLoadModule('/src/api.ts');
+  const previousStorage = globalThis.sessionStorage;
+  const previousRunId = api.getCurrentRunId();
+  const previousSessionId = api.getLiveSessionId();
+  globalThis.sessionStorage = { getItem: () => 'native-session', setItem() {} };
+  api.setLiveSessionId('native-session');
+  api.setCurrentRunId('native-run');
+  t.after(() => {
+    api.setLiveSessionId(previousSessionId);
+    api.setCurrentRunId(previousRunId);
+    if (previousStorage === undefined) delete globalThis.sessionStorage;
+    else globalThis.sessionStorage = previousStorage;
+  });
   const call = { id: 'connect', runId: 'native-run', toolName: 'desktop_connect', args: {}, timestamp: 1 };
   const props = {
-    conversationKey: 'native-session', messages: [], toolCalls: [call], thinkingBlocks: [],
+    conversationKey: 'live', connected: true, messages: [], toolCalls: [call], thinkingBlocks: [],
     isRunning: true, activitySummary: null, delegateEvents: [], compactionEvents: [],
     currentStepInfo: null, pendingQuestion: null, pendingApproval: null,
     onRespondQuestion: async () => {}, onRespondApproval: async () => {},
   };
   const html = renderToStaticMarkup(createElement(ChatPanel, props));
+  assert.equal(api.getCurrentRunId(), 'native-run');
   assert.match(html, /Waiting for app access/);
   assert.match(html, /Connect an app/);
   assert.match(html, /Cancel task/);
@@ -454,6 +468,32 @@ test('required conditions and failed artifact checks stay visible without a comp
     assert.match(visible, /Still to check/);
     assert.match(visible, /Confirm the recipient/);
     assert.doesNotMatch(visible, />Completed</);
+  }
+});
+
+test('source figures use one disclosure without inventing a completion verdict', () => {
+  const sourceReview = { status: 'not_checked', excerptOnlyNumbers: ['9569'] };
+  for (const trust of [
+    { ...completedLookup, sourceReview },
+    { ...completedLookup, answerReserveReason: 'budget', sourceReview },
+  ]) {
+    for (const html of resultViews(trust)) {
+      assert.doesNotMatch(html, />Completed<|>Task details</);
+      assert.equal((html.match(/<details/g) ?? []).length, 1);
+      assert.match(html, /<details(?![^>]*\bopen\b)[^>]*><summary[^>]*>Source figures need review<\/summary>/);
+      assert.match(html, /Found only in search excerpts: 9569/);
+      assert.match(html, /Their use in this answer was not checked/);
+    }
+  }
+  for (const trust of [
+    { ...completedLookup, verificationStatus: 'failed', sourceReview },
+    { ...completedLookup, reason: 'task_incomplete', completionStatus: 'incomplete', sourceReview },
+  ]) {
+    for (const html of resultViews(trust)) {
+      assert.match(html.split('<details')[0], /Checks failed|Incomplete/);
+      assert.match(html, /Source figures need review/);
+    }
+    assert.equal(computeRunVerdict(trust), false);
   }
 });
 

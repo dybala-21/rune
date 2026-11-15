@@ -24,13 +24,14 @@ import { CommandK, type Command } from './components/CommandK';
 import { WorkspaceChip } from './components/WorkspaceChip';
 import { InlineWorkspacePicker } from './components/InlineWorkspacePicker';
 import { Toaster } from './components/Toaster';
-import { normalizeToolName, isCodingToolName, computeRunVerdict } from './utils/tooling';
+import { normalizeToolName, isCodingToolName } from './utils/tooling';
 import { desktopAttention, shouldOpenWorkbench } from './utils/workbench';
-import { fetchConfig, fetchSessions, getLiveSessionId, type ConfigInfo, type ModelConnectionAction, type SessionInfo } from './api';
+import { fetchConfig, fetchSessions, getLiveSessionId, getCurrentRunId, type ConfigInfo, type ModelConnectionAction, type SessionInfo } from './api';
 import { watchPresence } from './utils/presence';
 import { ConnectionBanner } from './components/ConnectionBanner';
 import { SuggestionsDialog } from './components/SuggestionsDialog';
 import { getModelSetupConnection } from './utils/modelConnection';
+import { runActivity } from './utils/runActivity';
 import './styles/conversation.css';
 
 // Ask for a workspace when file or command tools need one.
@@ -118,7 +119,7 @@ export function App() {
     setWorkbenchDismissed(false);
     setWorkbenchOpen(true);
   }, [isViewingHistory, setComputerRequest, setWorkbenchTab, setWorkbenchDismissed, setWorkbenchOpen]);
-  const desktopWait = desktopAttention(agent.toolCalls, !isViewingHistory && agent.state === 'running');
+  const desktopWait = desktopAttention(agent.toolCalls, !isViewingHistory && agent.state === 'running', getCurrentRunId());
   const attentionLabel = desktopWait === 'connection' ? 'Waiting for app access' : desktopWait === 'action' ? 'Action needs review' : undefined;
 
   useEffect(() => {
@@ -136,22 +137,8 @@ export function App() {
     [agent.toolCalls],
   );
 
-  const currentActivity = useMemo(() => {
-    if (agent.state !== 'running' || agent.toolCalls.length === 0) return null;
-    const pending = [...agent.toolCalls].reverse().find(tc => tc.result === undefined);
-    if (!pending) return null;
-    const name = normalizeToolName(pending.toolName);
-    if (name === 'file.read') return 'Reading files';
-    if (name === 'file.edit') return 'Editing code';
-    if (name === 'file.write') return 'Writing files';
-    if (name === 'bash') return 'Running command';
-    if (name.startsWith('browser.')) return 'Browsing';
-    if (name === 'web.search') return 'Searching web';
-    if (name === 'web.fetch') return 'Fetching page';
-    if (name.startsWith('code.')) return 'Analyzing code';
-    if (name === 'think') return 'Thinking';
-    return name;
-  }, [agent.state, agent.toolCalls]);
+  const activeRunId = getCurrentRunId();
+  const currentActivity = useMemo(() => runActivity(agent.toolCalls, activeRunId), [agent.toolCalls, activeRunId]);
   const displayMessages = isViewingHistory ? (history.historyState?.messages ?? []) : agent.messages;
   const suggestions = agent.messages.flatMap(message => message.suggestion ? [message.suggestion] : []);
   const pendingSuggestions = suggestions.filter(item => !item.state || ['pending', 'unconfirmed'].includes(item.state.response)).length;
@@ -168,14 +155,10 @@ export function App() {
   const displayActivitySummary = isViewingHistory ? (history.historyState?.activitySummary ?? null) : agent.activitySummary;
   const displayDelegateEvents = isViewingHistory ? (history.historyState?.delegateEvents ?? []) : agent.delegateEvents;
   const displayCompactionEvents = isViewingHistory ? (history.historyState?.compactionEvents ?? []) : agent.compactionEvents;
-  const displayTrust = isViewingHistory ? (history.historyState?.trust ?? null) : agent.lastTrust;
   const displayFileChanges = isViewingHistory ? (history.historyState?.run?.fileChanges ?? []) : agent.fileChanges;
   const viewedSessionRef = useRef('');
   viewedSessionRef.current = history.viewingSessionId ?? getLiveSessionId();
   const interruptedRun = isViewingHistory ? history.historyState?.run : agent.interruptedRun;
-
-  // Use the same verdict in chat, the workbench, and the status bar.
-  const runVerdict = computeRunVerdict(displayTrust, displayActivitySummary);
 
   useEffect(() => {
     let cancelled = false;
@@ -207,7 +190,7 @@ export function App() {
   const hasWorkbenchContent = displayToolCalls.length > 0 || displayFileChanges.length > 0;
   useEffect(() => {
     if (workbenchOverlay || !hasWorkbenchContent || workbenchOpen || workbenchDismissed) return;
-    // Open the panel once tool results give it something to show.
+    // Open the panel when tools need a dedicated work view.
     if (shouldOpenWorkbench(displayToolCalls, displayFileChanges)) {
       setWorkbenchOpen(true);
     }
@@ -356,12 +339,11 @@ export function App() {
         sidebarOpen={sidebarOpen}
         onToggleSidebar={() => setSidebarOpen(!sidebarOpen)}
         tokenUsage={!isViewingHistory ? agent.tokenUsage : undefined}
-        currentStepInfo={!isViewingHistory ? agent.currentStepInfo : undefined}
-        currentActivity={currentActivity}
+        currentActivity={currentActivity.label}
         attentionLabel={attentionLabel}
         activeModel={configInfo?.activeModel ?? null}
         approvalMode={configInfo?.approvalMode}
-        lastRunSuccess={runVerdict}
+        showRunActivity={isViewingHistory || (workbenchOverlay && workbenchOpen)}
         onOpenPalette={() => setPaletteOpen(true)}
         trailing={!isViewingHistory ? <WorkspaceChip key={liveWorkbench.sessionId} onWorkspaceChange={setCurrentWorkspacePath} /> : null}
         workbenchOpen={workbenchOpen}
@@ -402,7 +384,6 @@ export function App() {
                 newChatDisabledReason={newChatBlockedReason}
                 suggestionCount={pendingSuggestions}
                 onOpenSuggestions={openSuggestions}
-                onOpenSettings={openSettings}
                 onOpenSchedule={() => setCronPanelOpen(true)}
                 taskSelectionDisabled={agent.state !== 'idle' || agent.loadingConversation}
                 onSelectTask={id => {
@@ -565,6 +546,7 @@ export function App() {
                 connected={agent.connected}
                 onOpenSettings={openSettings}
                 conversationKey={history.viewingSessionId ?? getLiveSessionId()}
+                historical={isViewingHistory}
                 messages={displayMessages}
                 toolCalls={displayToolCalls}
                 thinkingBlocks={displayThinkingBlocks}
@@ -582,7 +564,6 @@ export function App() {
                 activitySummary={displayActivitySummary}
                 delegateEvents={displayDelegateEvents}
                 compactionEvents={displayCompactionEvents}
-                currentStepInfo={isViewingHistory ? null : agent.currentStepInfo}
                 pendingQuestion={isViewingHistory || agent.state === 'stopping' ? null : agent.pendingQuestion}
                 onRespondQuestion={agent.respondQuestion}
                 pendingApproval={isViewingHistory || agent.state === 'stopping' ? null : agent.pendingApproval}

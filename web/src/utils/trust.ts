@@ -183,10 +183,6 @@ function describeCompletion(trust: TrustInfo): TrustPresentation {
 /** Shared status for chat and the work panel. */
 export function describeTrust(trust: TrustInfo): TrustPresentation {
   let presentation = describeCompletion(trust);
-  if (completionStatus(trust) === 'completed' && trust.sourceReview?.excerptOnlyNumbers?.length) {
-    presentation = { ...presentation, note: `${presentation.note} Some numbers appear only in search excerpts; their use in this answer was not checked.`.trim(),
-      tone: 'warning', showCard: true };
-  }
   if (trust.answerReserveReason && presentation.title === 'Completed') {
     // Hide the reserve notice without turning a limited answer into a passing verdict.
     presentation = { ...presentation, ok: null, glyph: '·' };

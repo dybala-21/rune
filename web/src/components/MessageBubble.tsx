@@ -14,7 +14,7 @@ interface MessageBubbleProps {
   onEdit?: (text: string) => void;
 }
 
-// memo: only the streaming message's ref changes, so other bubbles skip re-parsing markdown.
+// Skip Markdown parsing for unchanged messages.
 export const MessageBubble = memo(function MessageBubble({ message, sessionId, streaming = false, onRegenerate, onEdit }: MessageBubbleProps) {
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
@@ -55,10 +55,12 @@ export const MessageBubble = memo(function MessageBubble({ message, sessionId, s
         <div className="slide-up" style={{ display: 'flex', justifyContent: 'flex-end', padding: '6px 0' }}>
           <div style={{ maxWidth: '75%', width: '100%', display: 'flex', flexDirection: 'column', gap: 6 }}>
             <textarea
+              aria-label="Edit message"
               autoFocus
               value={draft}
               onChange={e => setDraft(e.target.value)}
               onKeyDown={e => {
+                if (e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229) return;
                 if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
                 if (e.key === 'Escape') { setEditing(false); setDraft(message.content); }
               }}
@@ -113,7 +115,6 @@ export const MessageBubble = memo(function MessageBubble({ message, sessionId, s
     );
   }
 
-  // Assistant message - full-width card style
   return (
     <div className="slide-up msg-hover" style={{
       padding: '8px 0',
@@ -163,9 +164,7 @@ function formatClock(ts: number): string {
 }
 
 
-// ── Attachments ──
-
-/** Images render inline; a restored message has no data, so it falls back to a chip. */
+/** Show a filename when restored attachments have no image data. */
 function Attachments({ items }: { items: SentAttachment[] }) {
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 }}>
@@ -203,8 +202,6 @@ function Attachments({ items }: { items: SentAttachment[] }) {
   );
 }
 
-
-// ── Simple content (user messages) ──
 
 function SimpleContent({ text }: { text: string }) {
   const parts = text.split(/(`[^`]+`)/g);

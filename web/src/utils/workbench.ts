@@ -1,10 +1,11 @@
 import type { FileChange, ToolCall, TrustInfo } from '../types';
-import { argString, inferActivityMode, normalizeToolName } from './tooling';
+import { argString, normalizeToolName } from './tooling';
 
-export function desktopAttention(calls: ToolCall[], running: boolean): 'connection' | 'action' | null {
+export function desktopAttention(calls: ToolCall[], running: boolean, currentRunId?: string): 'connection' | 'action' | null {
   if (!running) return null;
-  const runId = calls[calls.length - 1]?.runId;
-  const pending = [...calls].reverse().find(call => call.runId === runId && call.result === undefined);
+  const runId = currentRunId ?? calls[calls.length - 1]?.runId;
+  const pending = [...calls].reverse().find(call => call.runId === runId
+    && call.result === undefined && call.completedAt === undefined);
   const name = pending && normalizeToolName(pending.toolName);
   return name === 'desktop.connect' ? 'connection' : name === 'desktop.act' ? 'action' : null;
 }
@@ -17,8 +18,7 @@ export function shouldOpenWorkbench(calls: ToolCall[], changes: FileChange[]): b
   return changes.length > 0 || hasFileEdits(calls) || hasDocumentWork(calls)
     || calls.some(call => normalizeToolName(call.toolName) === 'bash')
     || calls.some(call => normalizeToolName(call.toolName).startsWith('browser.'))
-    || calls.some(call => normalizeToolName(call.toolName).startsWith('desktop.'))
-    || inferActivityMode(calls) === 'research';
+    || calls.some(call => normalizeToolName(call.toolName).startsWith('desktop.'));
 }
 
 export function preferredWorkbenchTab(calls: ToolCall[], changes: FileChange[]): 'diff' | 'activity' | 'progress' | 'computer' | 'outputs' {
