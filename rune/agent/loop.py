@@ -1430,7 +1430,11 @@ class NativeAgentLoop(EventEmitter):
         elif "document_read" in tools and kind != "calculation":
             tools = list(dict.fromkeys([*tools, "document_preview"]))
         from rune.connectors.client import hosted_approval
+        from rune.proactive.long_task import in_step
 
+        if in_step():
+            # A long task's step ends by parking until the next one.
+            tools = list(dict.fromkeys([*tools, "task_park"]))
         if "browser_navigate" in tools and hosted_approval():
             tools = list(dict.fromkeys([*tools, "browser_login"]))
         if broker_available() and kind != "calculation":

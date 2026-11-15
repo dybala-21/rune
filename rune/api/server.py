@@ -2052,6 +2052,11 @@ def create_app() -> Any:
                 return _ok(result)
 
             # cron
+            elif method == "task.stalled":
+                # The control plane gave up starting a long task's step (rune.proactive.long_task).
+                from rune.capabilities.cron import task_stalled
+                return _ok(await task_stalled(params.get("jobId"), params.get("scheduledMinute")))
+
             elif method == "cron.list":
                 from rune.api.handlers.cron import list_cron_jobs
                 result = await list_cron_jobs()
