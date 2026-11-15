@@ -95,6 +95,9 @@ async def _get_browser(profile: str | None = None) -> tuple[Any, Any]:
             context = await new_context(
                 session.browser, viewport={"width": config.viewport_width, "height": config.viewport_height},
             )
+            from rune.capabilities.browser.login import attach
+
+            await attach(context)
             session.page = await context.new_page()
             return session.browser, session.page
         except BaseException:

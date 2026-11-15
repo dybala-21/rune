@@ -44,6 +44,8 @@ class BrowserSession:
     native_target: str = ""
     tabs: list[dict] = field(default_factory=list)
     acquire_control: Callable[[], Awaitable[None]] | None = None
+    # Gives the browser to the owner (True) while a tool waits for them, or takes it back (False).
+    hand_to_owner: Callable[[bool], Awaitable[None]] | None = None
     last_input: dict[str, Any] | None = None
     pending_verification: dict[str, Any] | None = None
     last_effect: dict[str, Any] | None = None

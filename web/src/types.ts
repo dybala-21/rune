@@ -195,7 +195,8 @@ export interface TextDeltaData {
   text?: string;
   reset?: boolean;
 }
-export interface ApprovalRequestData { id: string; command: string; riskLevel: string; reason?: string; timeoutMs: number; external?: { url: string; connect?: { label: string; detail: string } } }
+export interface ApprovalRequestData { id: string; command: string; riskLevel: string; reason?: string; timeoutMs: number; external?: { url: string; connect?: { label: string; detail: string } };
+  login?: { site: string; url: string; sessionId: string; keepUrl: string } }
 export interface QuestionData {
   id: string;
   question: string;
@@ -406,6 +407,8 @@ export interface PendingApproval {
   externalUrl?: string;
   /** An account to connect on that page (Gmail, Calendar), shown as a card to connect it. */
   connect?: { label: string; detail: string };
+  /** A site the owner signs in to in this conversation's browser, shown live in the card. */
+  login?: { site: string; url: string; sessionId: string; keepUrl: string };
 }
 
 /** 활동 요약 (완료 후 표시) */

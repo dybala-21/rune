@@ -542,6 +542,18 @@ async def _control_state(target: Any) -> dict[str, Any]:
 
 def register_browser_capabilities(registry: CapabilityRegistry) -> None:
     """Register all browser capabilities."""
+    from rune.capabilities.browser.login import BrowserLoginParams, browser_login
+
+    registry.register(CapabilityDefinition(
+        name="browser_login",
+        description=(
+            "When a site needs the owner signed in, open it and let the owner sign in themselves in a card in "
+            "the chat. Never ask for a password, and never type one. Returns once the owner hands the browser "
+            "back; observe the page before acting. Rune may then stay signed in for later tasks."
+        ),
+        domain=Domain.BROWSER, risk_level=RiskLevel.LOW, group="browser",
+        parameters_model=BrowserLoginParams, execute=browser_login,
+    ))
     from rune.capabilities.browser.stay_evidence import register_stay_evidence
     register_stay_evidence(registry)
     from rune.capabilities.browser.extended import (

@@ -772,6 +772,7 @@ export function useAgent() {
         receivedAt: Date.now(),
         externalUrl: data.external?.url,
         connect: data.external?.connect,
+        login: data.login,
       });
     }));
 

@@ -11,6 +11,9 @@ from uuid import uuid4
 
 from rune.agent.timing import timed
 
+# The least a sign-in card waits for the owner.
+LOGIN_TIMEOUT_MS = 15 * 60 * 1000
+
 
 def approval_granted(result: dict[str, Any] | None) -> bool:
     return bool(result and str(result.get("decision", "")).strip().lower()
@@ -100,5 +103,47 @@ def approval_callback(
                         await work
                 await emit("approval_closed", {"id": approval_id, "runId": run_id})
 
+    async def login(command: str, reason: str, login: dict[str, str], kept: Callable[[], Awaitable[Any]],
+                    stop: Callable[[], None]) -> tuple[str, Any]:
+        """Show a card where the owner signs in to a site in this conversation's browser.
+
+        `login` is {site, url, sessionId, keepUrl}: the card shows the browser of `sessionId` live,
+        and, with a `keepUrl`, a link to keep the site on the approval page while `kept` waits for
+        that. Returns ("kept", result) when `kept` finishes, ("done", None) when the owner is done
+        here without keeping it, ("declined", None) or ("timeout", None). Signing in takes longer
+        than an approval, so the card waits at least 15 minutes.
+        """
+        async with lock:
+            approval_id = f"approval:{run_id}:{uuid4().hex}"
+            loop = asyncio.get_running_loop()
+            waits = max(timeout_ms, LOGIN_TIMEOUT_MS)
+            deadline = loop.time() + waits / 1000
+            work = asyncio.ensure_future(kept())
+            future: asyncio.Future[dict[str, Any]] = loop.create_future()
+            pending[approval_id] = future
+            try:
+                await emit("approval_request", {
+                    "id": approval_id, "command": command, "riskLevel": "", "reason": reason,
+                    "timeoutMs": waits, "expiresAt": time.time() * 1000 + waits, "runId": run_id, "login": login,
+                })
+                finished, _ = await asyncio.wait({work, future}, timeout=max(0.0, deadline - loop.time()),
+                                                 return_when=asyncio.FIRST_COMPLETED)
+                if work in finished and work.result() is not None:
+                    return "kept", work.result()
+                stop()
+                if future in finished:
+                    return ("done" if approval_granted(future.result()) else "declined"), None
+                return "timeout", None
+            finally:
+                pending.pop(approval_id, None)
+                if not future.done():
+                    future.cancel()
+                if not work.done():
+                    work.cancel()
+                    with contextlib.suppress(BaseException):
+                        await work
+                await emit("approval_closed", {"id": approval_id, "runId": run_id})
+
     request.external = external
+    request.login = login
     return request
