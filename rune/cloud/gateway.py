@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from contextlib import asynccontextmanager
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request, WebSocket
-from fastapi.responses import HTMLResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 from websockets.asyncio.client import connect
 from websockets.exceptions import WebSocketException
 
@@ -94,8 +101,15 @@ def create_gateway(store: CloudStore, public_origin: str) -> FastAPI:
             if path == "" and request.method == "GET":
                 return HTMLResponse(_LOGIN, headers={"Cache-Control": "no-store", "Content-Security-Policy": "default-src 'none'; form-action 'self'; frame-ancestors 'none'"})
             raise HTTPException(401, "Sign in to Rune")
+        scope = hashlib.sha256(f"{worker['owner']}\0{worker['upstream_token']}".encode()).hexdigest()
         if path == "api/v1/auth/bootstrap":
-            return {"ok": True}
+            return JSONResponse({"ok": True, "storageScope": scope}, headers={"Cache-Control": "no-store"})
+        supplied_scopes = request.query_params.getlist("accountScope") if path == "api/events" else []
+        header_scope = request.headers.get("x-rune-account")
+        if header_scope is not None:
+            supplied_scopes.append(header_scope)
+        if any(supplied != scope for supplied in supplied_scopes):
+            raise HTTPException(401, "Your signed-in account changed. Reopen Rune to continue.")
         if "token" in request.query_params:
             raise HTTPException(400, "Tokens must not appear in URLs")
         body = await bounded_body(request, 32 * 1024 * 1024)

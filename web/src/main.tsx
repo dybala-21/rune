@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import './styles/globals.css';
 import './styles/workspace.css';
 import { App } from './App';
+import { SessionBoundary } from './components/SessionBoundary';
 import { applyStoredTheme } from './utils/theme';
 
 // Apply the saved theme before first paint so there is no palette flash.
@@ -13,9 +14,9 @@ const root = createRoot(document.getElementById('root')!);
 if (import.meta.env.DEV) {
   root.render(
     <StrictMode>
-      <App />
+      <SessionBoundary><App /></SessionBoundary>
     </StrictMode>,
   );
 } else {
-  root.render(<App />);
+  root.render(<SessionBoundary><App /></SessionBoundary>);
 }
