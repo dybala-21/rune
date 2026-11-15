@@ -55,8 +55,11 @@ def approval_callback(
                                                **({"suspended": True} if suspended else {})})
 
     async def external(command: str, reason: str, url: str, done: Callable[[], Awaitable[Any]],
-                       stop: Callable[[], None]) -> tuple[str, Any]:
+                       stop: Callable[[], None], *, connect: dict[str, str] | None = None) -> tuple[str, Any]:
         """Show an approval that is decided somewhere else, at `url`, while `done` waits for it.
+
+        With `connect` ({label, detail}) the app shows it as a card to connect an account, not as
+        an approval.
 
         Returns ("done", result) when `done` finishes, ("declined", None) when the user declines
         here, or ("timeout", None). Approving here does nothing: that is the point of an approval
@@ -72,7 +75,7 @@ def approval_callback(
                 await emit("approval_request", {
                     "id": approval_id, "command": command, "riskLevel": "", "reason": reason,
                     "timeoutMs": timeout_ms, "expiresAt": time.time() * 1000 + timeout_ms,
-                    "runId": run_id, "external": {"url": url},
+                    "runId": run_id, "external": {"url": url, **({"connect": connect} if connect else {})},
                 })
                 while True:
                     future: asyncio.Future[dict[str, Any]] = loop.create_future()

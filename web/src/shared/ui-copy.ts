@@ -18,6 +18,13 @@ export const APPROVAL_COPY = {
   externalDeclineLabel: 'Decline',
 } as const;
 
+export const CONNECT_COPY = {
+  hint: 'Sign in to the account in the page that opens. Rune carries on by itself once it is connected.',
+  waiting: 'Finish in the page that opened. Rune carries on by itself once it is connected.',
+  again: 'Open it again',
+  notNow: 'Not now',
+} as const;
+
 export const QUESTION_COPY = {
   title: 'Question',
   answeredLabel: 'Answered',
