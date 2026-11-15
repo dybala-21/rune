@@ -662,3 +662,35 @@ def test_api_resume_restores_accepted_question_and_creates_one_continuation(tmp_
             assert [t["role"] for t in turns["data"]["turns"]] == ["user", "assistant"]
     finally:
         conversation_wiring._reset_for_tests()
+
+
+async def test_stopping_a_command_waits_until_its_group_is_gone(monkeypatch):
+    # dash forks the command where bash execs it, so after the shell is reaped the command can still
+    # be running for a moment (SIGKILL is delivered asynchronously). Returning then let a cancelled
+    # command act after the journal said it stopped; on Linux CI this test above failed now and then.
+    import signal
+
+    from rune.capabilities import command_output
+
+    seen: list[int] = []
+
+    def killpg(group: int, sig: int) -> None:
+        seen.append(sig)
+        if sig == 0 and seen.count(0) >= 3:
+            raise ProcessLookupError
+
+    class Proc:
+        pid, returncode = 4242, -9
+
+    async def drained() -> None:
+        return None
+
+    monkeypatch.setattr(command_output.os, "killpg", killpg)
+    await command_output.stop_capture(Proc(), asyncio.ensure_future(drained()))
+    assert seen == [signal.SIGKILL, 0, 0, 0], "killed, then polled until the group was gone"
+
+    monkeypatch.setattr(command_output, "GROUP_EXIT_WAIT", 0.05)
+    seen.clear()
+    monkeypatch.setattr(command_output.os, "killpg", lambda group, sig: seen.append(sig))
+    await command_output.stop_capture(Proc(), asyncio.ensure_future(drained()))
+    assert seen[0] == signal.SIGKILL and 1 < len(seen) < 20, "gives up after the wait instead of hanging"

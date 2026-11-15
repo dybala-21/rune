@@ -74,11 +74,17 @@ async def capture_output(process: asyncio.subprocess.Process, limit: int) -> tup
     return stdout, stderr
 
 
+# How long a stopped command's process group gets to die and be reaped before we return anyway.
+GROUP_EXIT_WAIT = 2.0
+
+
 async def stop_capture(process: asyncio.subprocess.Process, capture: asyncio.Task) -> None:
+    killed_group = False
     try:
         if hasattr(os, "killpg"):
             # The session leader may have exited while a child still holds its pipes.
             os.killpg(process.pid, signal.SIGKILL)
+            killed_group = True
         elif process.returncode is None:
             process.kill()
     except ProcessLookupError:
@@ -93,3 +99,26 @@ async def stop_capture(process: asyncio.subprocess.Process, capture: asyncio.Tas
         log.warning("command_output_drain_timeout", pid=process.pid)
     except Exception as exc:
         log.debug("command_output_drain_failed", pid=process.pid, error=str(exc))
+    if killed_group:
+        await _group_gone(process.pid)
+
+
+async def _group_gone(group: int) -> None:
+    """Return once nothing in the group is left, so a stopped command can't act after we say it stopped.
+
+    SIGKILL is delivered asynchronously: when the shell itself has been reaped, a command it forked
+    (dash forks where bash execs) can still be running for a moment, and is then reaped by init.
+    """
+    deadline = asyncio.get_running_loop().time() + GROUP_EXIT_WAIT
+    while True:
+        try:
+            os.killpg(group, 0)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            log.debug("command_group_not_ours", pid=group)
+            return
+        if asyncio.get_running_loop().time() >= deadline:
+            log.warning("command_group_still_present", pid=group)
+            return
+        await asyncio.sleep(0.01)
