@@ -268,7 +268,7 @@ class AgentLoopController:
                     except Exception:
                         pass
 
-                if HeartbeatScheduler._matches_cron(job.schedule, now):
+                if not job.schedule.startswith("@") and HeartbeatScheduler._matches_cron(job.schedule, now):
                     # Mark as running BEFORE execution to prevent duplicate triggers
                     try:
                         from rune.capabilities.cron import _get_store

@@ -26,6 +26,8 @@ class BackgroundTask:
     timeout_seconds: float = 120
     token_budget: int = 50_000
     continuation: str = ""
+    # Always told first, ahead of the continuation or the recovery context (a long task's step brief).
+    preamble: str = ""
     approved_action: dict | None = None
     file_changes: dict | None = None
     routing: dict | None = None
@@ -87,6 +89,8 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
         "verified": False, "status": "unverified", "output": "", "error": None,
     }
     scope = _current_task.set(task)
+    from rune.proactive.long_task import park_slot, parked_result, release_slot
+    slot, slot_token = park_slot(control) if task.source == "task" else (None, None)
     try:
         # One source scope for the approved action and the run that continues it.
         with control_scope(control), approval_required(), parking_scope(needs_approval), environment_scope(workspace), \
@@ -117,6 +121,8 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
                     context["recovery_written_files"] = recovery_written_files(journal.previous)
                     continuation = recovery_context({"runId": journal.run_id, "fileChanges": task.file_changes,
                                                      "completedAction": result.get("approved_action")}, journal.previous)
+                if task.preamble:
+                    continuation = f"{task.preamble}\n{continuation}" if continuation else task.preamble
                 extra = {"extra_system_context": continuation} if continuation else {}
                 if classification is not None:
                     extra["classification"] = classification
@@ -149,6 +155,8 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
         result["status"] = "interrupted"
     finally:
         _current_task.reset(scope)
+        if slot_token is not None:
+            release_slot(slot_token)
         control.stop()
         result["duration_ms"] = round((time.monotonic() - started) * 1000, 1)
         result["timings"] = getattr(loop, "_last_run_timings", {})
@@ -158,4 +166,6 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
                           pending_approval=pending)
             if "outcome" in result:
                 result["outcome"].update(completionStatus="incomplete", reason="approval_required")
+        # A long task's step that parked: the loop ended because task_park stopped it.
+        parked_result(result, slot)
     return result

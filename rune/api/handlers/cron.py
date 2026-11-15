@@ -37,6 +37,9 @@ class CronJobInfo(BaseModel):
     run_count: int = Field(0, alias="runCount")
     max_runs: int | None = Field(None, alias="maxRuns")
     fingerprint: str = ""
+    # A long task's state, and the minute its next step starts (rune.proactive.long_task).
+    task: dict[str, Any] | None = None
+    wake_at: int | None = Field(None, alias="wakeAt")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -114,6 +117,7 @@ class RoutineApprovalRequest(RoutineOperationRequest):
 def _job_dict_to_info(j: dict[str, Any]) -> CronJobInfo:
     from rune.capabilities.cron import _row_to_cronjob
     from rune.proactive.execution_store import ExecutionStore
+    from rune.proactive.long_task import can_run
     from rune.proactive.routine import task_fingerprint
     from rune.proactive.routine_budget import budget_state
     from rune.utils.paths import rune_data
@@ -123,6 +127,8 @@ def _job_dict_to_info(j: dict[str, Any]) -> CronJobInfo:
     try:
         runs = records.recent(f"cron:{job.id}:")
         budget = budget_state(job.policy, records.usage(f"cron:{job.id}:"))
+        # A step that already has a record isn't offered again: it ran, and settling it moves on.
+        ran = job.wake_at is not None and records.get(f"cron:{job.id}:{job.wake_at}") is not None
     finally:
         records.close()
     return CronJobInfo(
@@ -142,6 +148,8 @@ def _job_dict_to_info(j: dict[str, Any]) -> CronJobInfo:
         maxRuns=j.get("max_runs"),
         # Lets an external scheduler detect a changed definition without diffing every field.
         fingerprint=task_fingerprint(job),
+        task=job.task,
+        wakeAt=job.wake_at if not ran and can_run(job, int(j.get("run_count") or 0), j.get("max_runs")) else None,
     )
 
 
@@ -155,13 +163,26 @@ def _validate_cron_schedule(schedule: str) -> None:
 # Routes
 
 
+# Sends of long tasks' kept messages, held until done.
+_notices: set = set()
+
+
 @router.get("", response_model=CronListResponse, dependencies=[Depends(auth)])
 async def list_cron_jobs() -> CronListResponse:
     """List all user-defined cron jobs."""
     store = get_memory_store()
     rows = store.list_cron_jobs()
     jobs = [_job_dict_to_info(j) for j in rows]
-    from rune.daemon.external_schedule import schedule_timezone
+    from rune.daemon.external_schedule import external_scheduler, schedule_timezone
+
+    if external_scheduler():
+        # The host lists jobs each minute while the machine runs: a long task's message kept while it
+        # was stopping goes out then.
+        import asyncio
+
+        from rune.capabilities.cron import tell_task_notices
+        _notices.add(task := asyncio.create_task(tell_task_notices()))
+        task.add_done_callback(_notices.discard)
 
     return CronListResponse(jobs=jobs, timezone=schedule_timezone())
 
@@ -227,7 +248,13 @@ async def update_cron_job(job_id: str, req: CronUpdateRequest) -> CronUpdateResp
         kwargs["name"] = req.name.strip()
     if req.schedule is not None:
         kwargs["schedule"] = req.schedule.strip()
-    if any(value is not None for value in (req.command, req.goal, req.policy, req.notify_channel)):
+    from rune.capabilities.cron import task_change
+    try:
+        task = task_change(existing, req.enabled, req.max_runs if "max_runs" in req.model_fields_set else existing.get("max_runs"),
+                           setting_max_runs="max_runs" in req.model_fields_set)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    if any(value is not None for value in (req.command, req.goal, req.policy, req.notify_channel)) or task is not None:
         command = req.command.strip() if req.command is not None else current.command
         goal = req.goal.strip() if req.goal is not None else current.goal
         if bool(command) == bool(goal):
@@ -235,7 +262,7 @@ async def update_cron_job(job_id: str, req: CronUpdateRequest) -> CronUpdateResp
         channel = current.notify_channel if req.notify_channel is None else req.notify_channel.strip()
         kwargs["command"] = _pack_command(command, goal, channel,
                                         current.description, current.policy.patched(req.policy) if req.policy else current.policy,
-                                        owner=current.owner)
+                                        owner=current.owner, task=task if task is not None else current.task)
     if req.enabled is not None:
         kwargs["enabled"] = req.enabled
     if "max_runs" in req.model_fields_set:
@@ -255,6 +282,20 @@ async def update_cron_job(job_id: str, req: CronUpdateRequest) -> CronUpdateResp
 async def toggle_cron_job(job_id: str) -> CronToggleResponse:
     """Toggle the enabled state of a cron job."""
     store = get_memory_store()
+    existing = store.get_cron_job(job_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"Cron job not found: {job_id}")
+    from rune.capabilities.cron import _pack_command, _row_to_cronjob, task_change
+    try:
+        # Turning a long task on goes on with its next step, as PATCH does.
+        task = task_change(existing, not existing.get("enabled", True), existing.get("max_runs"))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    if task is not None:
+        current = _row_to_cronjob(existing)
+        store.update_cron_job(job_id, command=_pack_command(current.command, current.goal, current.notify_channel,
+                                                            current.description, current.policy, owner=current.owner,
+                                                            task=task))
     new_state = store.toggle_cron_job(job_id)
 
     if new_state is None:

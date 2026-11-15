@@ -53,6 +53,9 @@ async def execution_slot():
                 _slots.pop(loop, None)
 
 
+from rune.proactive.long_task import is_task  # noqa: E402
+
+
 class CronDispatcher:
     def __init__(self, path: Path | None = None) -> None:
         self._db = sqlite3.connect(path or rune_data() / "schedule.db", isolation_level=None)
@@ -72,6 +75,13 @@ class CronDispatcher:
         self._failed.clear()
         now = int(time.time() // 60)
         jobs = {job.id: job for job in get_active_cron_jobs()}
+        from rune.capabilities.cron import tell_task_notices
+        from rune.proactive.execution_store import ExecutionStore
+        try:
+            await tell_task_notices()
+        except Exception as exc:
+            log.warning("long_task_notices_failed", error=type(exc).__name__)
+        records = ExecutionStore(rune_data() / "routine-executions.db")
         rows = {row[0]: row[1:] for row in self._db.execute("SELECT * FROM schedules")}
         for removed in rows.keys() - jobs.keys():
             self._db.execute("DELETE FROM schedules WHERE job=?", (removed,))
@@ -83,6 +93,12 @@ class CronDispatcher:
             if not config.enabled or external_scheduler():
                 # An external scheduler owns the clock: never queue local occurrences.
                 cursor, pending = now, None
+            elif is_task(job.schedule):
+                # A long task's next step is due at its wake minute, however late the machine is back;
+                # once it has a record, it ran (or is running) and isn't queued again.
+                wake = job.wake_at
+                cursor, pending = now, (wake if wake is not None and wake <= now
+                                        and records.get(f"cron:{job.id}:{wake}") is None else None)
             elif now >= cursor:
                 first = max(cursor + 1, now - config.misfire_grace_seconds // 60)
                 for minute in range(now, first - 1, -1):
@@ -95,6 +111,7 @@ class CronDispatcher:
                     pending = None
             self._db.execute("INSERT OR REPLACE INTO schedules VALUES (?, ?, ?, ?)",
                              (job.id, fingerprint, cursor, pending))
+        records.close()
         self._dispatch(jobs)
 
     def _dispatch(self, jobs) -> None:
@@ -108,7 +125,7 @@ class CronDispatcher:
             if len(self._active) >= config.max_concurrent:
                 break
             if job_id not in self._active and job_id not in self._failed and job_id in jobs:
-                if (now - minute > config.misfire_grace_seconds // 60
+                if ((now - minute > config.misfire_grace_seconds // 60 and not is_task(jobs[job_id].schedule))
                         or fingerprint != task_fingerprint(jobs[job_id])):
                     self._db.execute("UPDATE schedules SET pending=NULL WHERE job=?", (job_id,))
                     continue
