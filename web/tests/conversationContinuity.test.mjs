@@ -99,7 +99,7 @@ test('snapshot protection does not prevent a newer run or explicit conversation 
     question: null, approval: null, trust: null };
   assert.equal(shouldPreserveLocalRequest(rejected, run), false);
   assert.equal(shouldPreserveLocalRequest(rejected, { ...run, status: 'completed' }), false);
-  const { agent } = hookFixture(t, () => response({ success: true, data: { turns: [], run } }),
+  const { agent } = await hookFixture(t, () => response({ success: true, data: { turns: [], run } }),
     [{ ...rejected[0], delivery: 'unknown' }]);
   agent.restoreSavedDraft();
   assert.equal(await agent.loadConversation('another-chat'), true);
@@ -134,10 +134,12 @@ const deferred = () => {
 const response = data => new Response(JSON.stringify(data), { headers: { 'Content-Type': 'application/json' } });
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
-function hookFixture(t, request, savedMessages = [{ id: 'saved', role: 'user', content: 'Saved draft', timestamp: 1 }]) {
+async function hookFixture(t, request, savedMessages = [{ id: 'saved', role: 'user', content: 'Saved draft', timestamp: 1 }]) {
   const session = new Map([['rune.live.sessionId', 'original-chat']]);
   const draft = new Map([['rune:web:live-state:v1', JSON.stringify({ version: 1, messages: savedMessages })]]);
-  t.mock.method(globalThis, 'fetch', async (url, init) => url.endsWith('/auth/bootstrap') ? response({}) : request(url, init));
+  // A local daemon has no bootstrap route (404), which binds the "local" storage scope.
+  t.mock.method(globalThis, 'fetch', async (url, init) => url.endsWith('/auth/bootstrap')
+    ? new Response('', { status: 404 }) : request(url, init));
   const originalWindow = globalThis.window, originalStorage = globalThis.sessionStorage;
   globalThis.sessionStorage = { getItem: key => session.get(key) ?? null, setItem: (key, value) => session.set(key, value) };
   globalThis.window = { localStorage: { getItem: key => draft.get(key) ?? null, setItem: (key, value) => draft.set(key, value) }, dispatchEvent() {} };
@@ -147,6 +149,8 @@ function hookFixture(t, request, savedMessages = [{ id: 'saved', role: 'user', c
     api.resetWebAuth(); api.setCurrentRunId('');
   });
   api.resetWebAuth();
+  // As SessionBoundary does, settle the account before the hook restores anything.
+  await api.ensureWebAuth();
   let agent;
   function Harness() { agent = useAgent(); return null; }
   renderToStaticMarkup(createElement(Harness));
@@ -155,7 +159,7 @@ function hookFixture(t, request, savedMessages = [{ id: 'saved', role: 'user', c
 
 test('reset refuses in-flight submission, running and stopping without losing run identity or saved draft', async t => {
   const submitted = deferred(), stopped = deferred();
-  const { agent, draft, savedDraft } = hookFixture(t, url => {
+  const { agent, draft, savedDraft } = await hookFixture(t, url => {
     if (url === '/api/message') return submitted.promise;
     if (url === '/api/abort') return stopped.promise;
     assert.fail(`Unexpected request: ${url}`);
@@ -186,7 +190,7 @@ test('reset preserves a chat waiting for approval or an answer', async t => {
         status: waiting === 'approval' ? 'waiting_approval' : 'waiting_input', text: '', stepNumber: 1, toolCalls: [], trust: null,
         approval: waiting === 'approval' ? { id: 'approval', expiresAt: Date.now() + 60_000 } : null,
         question: waiting === 'question' ? { id: 'question', expiresAt: Date.now() + 60_000 } : null };
-      const { agent, draft } = hookFixture(t, url => {
+      const { agent, draft } = await hookFixture(t, url => {
         assert.equal(url, '/api/v1/rpc');
         return response({ success: true, data: { turns: [], run } });
       });

@@ -47,7 +47,7 @@ def read_permit(path: Path = PERMIT, boot_file: Path = BOOT_ID) -> str | None:
         boot = boot_file.read_text().strip()
         if not boot or permit.get("bootId") != boot:
             return None
-        return permit["operationId"]
+        return str(permit["operationId"])
     finally:
         os.close(directory)
 
@@ -74,13 +74,13 @@ def create_activation_app(*, permit: Path = PERMIT, boot_file: Path = BOOT_ID,
             raise HTTPException(503, "Worker activation permit is invalid") from error
 
     @app.get("/api/runtime/readiness")
-    async def readiness(request: Request):
+    async def readiness(request: Request) -> dict[str, object]:
         authenticate(request)
         return {"ready": True, "activationRequired": True, "protocol": PROTOCOL,
                 "operationId": authorized_operation()}
 
     @app.post("/api/runtime/activate")
-    async def activate(request: Request):
+    async def activate(request: Request) -> JSONResponse:
         authenticate(request)
         body = bytearray()
         async for chunk in request.stream():
@@ -105,7 +105,7 @@ def create_activation_app(*, permit: Path = PERMIT, boot_file: Path = BOOT_ID,
         return JSONResponse({"accepted": True, "operationId": operation}, status_code=202)
 
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
-    async def unavailable(request: Request):
+    async def unavailable(request: Request) -> JSONResponse:
         authenticate(request)
         return JSONResponse({"detail": "Worker is waiting for host activation"}, status_code=503,
                             headers={"Retry-After": "2"})
