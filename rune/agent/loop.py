@@ -1429,9 +1429,11 @@ class NativeAgentLoop(EventEmitter):
             tools = list(dict.fromkeys([*tools, "file_write", "document_preview"]))
         elif "document_read" in tools and kind != "calculation":
             tools = list(dict.fromkeys([*tools, "document_preview"]))
-        if broker_available() and kind != "calculation":
-            from rune.connectors.client import hosted_approval
+        from rune.connectors.client import hosted_approval
 
+        if "browser_navigate" in tools and hosted_approval():
+            tools = list(dict.fromkeys([*tools, "browser_login"]))
+        if broker_available() and kind != "calculation":
             connect = ["connect_account"] if hosted_approval() else []
             return list(dict.fromkeys([*tools, "connector_list", "connector_request", *connect]))
         return [name for name in tools if not name.startswith("connector_") and name != "connect_account"]

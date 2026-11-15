@@ -32,7 +32,7 @@ TOOL_GROUPS: dict[str, list[str]] = {
     "write": ["file_write", "file_edit", "file_delete", "credential_save",
               "skill_create", "skill_promote", "memory_tune", "document_create", "document_bundle", "document_bundle_update"],
     "runtime": ["bash_execute"],
-    "browser": ["browser_navigate", "browser_observe", "browser_act",
+    "browser": ["browser_navigate", "browser_login", "browser_observe", "browser_act",
                  "browser_batch", "browser_extract", "browser_find",
                  "browser_workflow", "browser_screenshot", "browser_profile", "browser_stay_evidence"],
     "web": ["web_search", "web_fetch", "connector_list", "connector_request", "connect_account", "service_connect", "service_status",

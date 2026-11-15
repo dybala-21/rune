@@ -11,7 +11,7 @@ _TOOLS = frozenset({
     "think", "ask_user", "task_blocked", "task_create", "task_update", "task_list",
     "file_read", "file_write", "file_edit", "file_delete", "file_list", "file_search",
     "bash_execute", "web_search", "web_fetch", "connector_list", "connector_request", "connect_account",
-    "browser_navigate", "browser_open", "browser_observe", "browser_act", "browser_batch", "browser_extract",
+    "browser_navigate", "browser_login", "browser_open", "browser_observe", "browser_act", "browser_batch", "browser_extract",
     "browser_find", "browser_screenshot", "browser_discover_apis", "browser_workflow",
     "memory_search", "memory_save", "memory_tune", "conversation_search", "cron_create", "cron_list", "cron_update", "cron_delete",
 })

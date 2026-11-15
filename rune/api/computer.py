@@ -132,6 +132,7 @@ class Computers:
         assert entry.control is not None
         control = entry.control
         entry.browser.acquire_control = lambda: self.acquire_browser(entry, control)
+        entry.browser.hand_to_owner = lambda owner: self.hand_over(entry, control, owner)
         entry.browser.bound_task = asyncio.current_task()
         entry.browser.bound_control = control
         try:
@@ -140,6 +141,7 @@ class Computers:
                     yield
         finally:
             entry.browser.acquire_control = None
+            entry.browser.hand_to_owner = None
             entry.browser.bound_task = None
             entry.browser.bound_control = None
 
@@ -155,6 +157,30 @@ class Computers:
                 entry.lease += 1
                 entry.browser.needs_observation = entry.browser.page is not None
                 entry.invalidate_frame()
+
+    async def hand_over(self, entry: Computer, control: RunControl, owner: bool) -> None:
+        """Let the owner use the browser while the run waits in a tool (signing in), or take it back.
+
+        The same as taking control, without pausing the run: the tool that waits does nothing with
+        the browser meanwhile, and the run looks at the page again afterwards.
+        """
+        async with entry.lock:
+            if entry.control is not control:
+                raise RuntimeError("The browser belongs to a different run.")
+            if entry.human == owner:
+                return
+            if owner and (entry.browser.page is None or entry.browser.page.is_closed()):
+                raise RuntimeError("The browser has not opened yet.")
+            await set_native_control(entry, owner)
+            entry.human = owner
+            entry.lease += 1
+            async with entry.browser.operation():
+                entry.browser.invalidate_evidence()
+                if entry.browser.elements is not None:
+                    await entry.browser.elements.release()
+                entry.browser.needs_observation = entry.browser.page is not None
+                entry.browser.uncertain_action = False
+            entry.invalidate_frame()
 
     async def wait_desktop(self, entry: Computer) -> DesktopSession:
         from rune.computer.protocol import DesktopError

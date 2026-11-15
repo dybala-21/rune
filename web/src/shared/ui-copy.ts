@@ -25,6 +25,16 @@ export const CONNECT_COPY = {
   notNow: 'Not now',
 } as const;
 
+export const LOGIN_COPY = {
+  title: (site: string) => `Sign in to ${site}`,
+  hint: 'Sign in below yourself: Rune waits and never sees your password.',
+  keeping: 'Confirm on the page that opened. Rune carries on by itself once it is kept.',
+  loading: 'Opening the page…',
+  keep: 'Keep me signed in',
+  done: 'Done',
+  notNow: 'Not now',
+} as const;
+
 export const QUESTION_COPY = {
   title: 'Question',
   answeredLabel: 'Answered',
