@@ -98,6 +98,15 @@ def _pack_command(command: str, goal: str, notify_channel: str, description: str
     return command
 
 
+def _zone_label() -> str:
+    """The zone a schedule is read in, for the owner to check "7 am" landed where they meant."""
+    from datetime import datetime
+
+    from rune.daemon.external_schedule import schedule_timezone
+
+    return schedule_timezone() or datetime.now().astimezone().tzname() or "local time"
+
+
 # Parameter schemas
 
 class CronCreateParams(BaseModel):
@@ -105,7 +114,8 @@ class CronCreateParams(BaseModel):
     max_runs: int | None = Field(None, ge=1, description="Maximum started runs; unset means no count limit")
     name: str = Field(description="Unique name for the cron job")
     schedule: str = Field(
-        description="Cron expression (minute hour day month weekday)"
+        description="Cron expression (minute hour day month weekday) in this machine's local time, "
+                    "the zone shown with the current time in the Environment section"
     )
     command: str = Field(default="", description="Bash command to execute (use 'goal' for agent tasks)")
     goal: str = Field(
@@ -133,7 +143,7 @@ class CronDeleteParams(BaseModel):
 class CronUpdateParams(BaseModel):
     """Parameters for updating a cron job."""
     job_id: str = Field(description="ID of the cron job to update")
-    schedule: str | None = Field(default=None, description="New cron schedule expression")
+    schedule: str | None = Field(default=None, description="New cron schedule expression, in this machine's local time")
     command: str | None = Field(default=None, description="New command to execute")
     goal: str | None = Field(default=None, description="New agent goal")
     notify_channel: str | None = Field(default=None, description="Change notification channel (telegram/discord/slack/tui)")
@@ -249,7 +259,7 @@ async def cron_create(params: CronCreateParams) -> CapabilityResult:
         action = params.goal or params.command
         output_parts = [
             f"Cron job '{params.name}' created (id: {job_id}).",
-            f"Schedule: {params.schedule}",
+            f"Schedule: {params.schedule} ({_zone_label()})",
             f"{mode}: {action}",
         ]
         if params.notify_channel:

@@ -10,6 +10,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -20,6 +21,7 @@ from rune.channels.types import (
     IncomingMessage,
     OutgoingMessage,
 )
+from rune.daemon import recipients
 from rune.proactive.channel_delivery import ChannelDeliveryManager
 from rune.utils.logger import get_logger
 
@@ -135,6 +137,7 @@ class ChannelGateway:
         "_running",
         "_routing",
         "_default_recipients",
+        "_recipients_path",
         "_proactive_unsubscribe",
         "_pending_questions",
         "_pending_approvals",
@@ -150,6 +153,7 @@ class ChannelGateway:
         *,
         routing: list[ChannelRoutingRule] | None = None,
         default_recipients: dict[str, str] | None = None,
+        recipients_path: Path | None = None,
     ) -> None:
         self._registry = channel_registry
         self._scheduler = agent_scheduler
@@ -158,7 +162,10 @@ class ChannelGateway:
         self._working: set[str] = set()
         self._running = False
         self._routing = routing or list(DEFAULT_ROUTING)
-        self._default_recipients: dict[str, str] = dict(default_recipients or {})
+        # Learned recipients survive restarts when a path is given (rune.daemon.recipients).
+        self._recipients_path = recipients_path
+        self._default_recipients: dict[str, str] = {
+            **(recipients.load(recipients_path) if recipients_path else {}), **(default_recipients or {})}
         self._proactive_unsubscribe: Callable[[], None] | None = None
         self._pending_questions: dict[str, _PendingAskQuestion] = {}
         self._pending_approvals: dict[str, _PendingApproval] = {}
@@ -628,9 +635,14 @@ class ChannelGateway:
         """Return the names of all currently registered channels."""
         return self._registry.list()
 
+    def _save_recipients(self) -> None:
+        if self._recipients_path is not None:
+            recipients.save(self._recipients_path, self._default_recipients)
+
     def set_default_recipient(self, channel_name: str, recipient_id: str) -> None:
         """Set the default recipient for proactive notifications on a channel."""
         self._default_recipients[channel_name] = recipient_id
+        self._save_recipients()
         log.info(
             "gateway_default_recipient_set",
             channel=channel_name,
@@ -664,6 +676,7 @@ class ChannelGateway:
                 or message.sender_id
             )
             self._default_recipients[channel_name] = str(default_recipient)
+            self._save_recipients()
             log.info(
                 "gateway_auto_registered_recipient",
                 channel=channel_name,

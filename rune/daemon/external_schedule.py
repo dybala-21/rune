@@ -7,7 +7,9 @@ for a connector approval waits on the host's approval page, and the control plan
 with ``connector.decided`` once the owner decides.
 
 Scheduled minutes are interpreted in this machine's local time zone, exactly like the
-local dispatcher; run hosted machines in UTC so the control plane computes the same minutes.
+local dispatcher. A hosted machine runs in its owner's zone (``TZ``), so "0 7 * * *" means 7 am
+where the owner is; ``cron.list`` reports that zone (``schedule_timezone``) and the control plane
+matches minutes in it.
 
 An occurrence is identified by ``(job id, scheduled minute)``, the same key the local
 dispatcher claims (``cron:<job>:<minute>``). That key is the idempotency key: firing an
@@ -50,6 +52,25 @@ _REASONS = {
 def external_scheduler() -> bool:
     """True when a control plane, not the local dispatcher, fires cron occurrences."""
     return os.environ.get("RUNE_EXTERNAL_SCHEDULER", "").strip() == "1"
+
+
+def schedule_timezone() -> str | None:
+    """The IANA zone this machine's schedules are read in, when ``TZ`` names one.
+
+    None means TZ is unset or not a zone name, and the machine's local time is whatever the system
+    says; the control plane then keeps reading schedules in UTC, as hosted machines once ran.
+    """
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    name = os.environ.get("TZ", "").strip()
+    if not name or name.startswith(":"):
+        return None
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        log.warning("schedule_timezone_unknown", tz=name)
+        return None
+    return name
 
 
 def occurrence_id(job_id: str, minute: int) -> str:
