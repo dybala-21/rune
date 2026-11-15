@@ -45,6 +45,8 @@ class CronListResponse(BaseModel):
     jobs: list[CronJobInfo]
     builtin_tasks: list[dict[str, Any]] = Field(default_factory=list, alias="builtinTasks")
     heartbeat_active: bool = Field(False, alias="heartbeatActive")
+    # The zone schedules are read in (rune.daemon.external_schedule.schedule_timezone).
+    timezone: str | None = None
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -159,7 +161,9 @@ async def list_cron_jobs() -> CronListResponse:
     store = get_memory_store()
     rows = store.list_cron_jobs()
     jobs = [_job_dict_to_info(j) for j in rows]
-    return CronListResponse(jobs=jobs)
+    from rune.daemon.external_schedule import schedule_timezone
+
+    return CronListResponse(jobs=jobs, timezone=schedule_timezone())
 
 
 @router.post("", response_model=CronCreateResponse, dependencies=[Depends(auth)])

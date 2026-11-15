@@ -779,6 +779,7 @@ export async function fetchCronJobs(params?: { includeBuiltin?: boolean }): Prom
   jobs: CronJobInfo[];
   builtinTasks?: CronBuiltinTaskInfo[];
   heartbeatActive: boolean;
+  timezone?: string | null;
 }> {
   return rpc('cron.list', params ?? {});
 }

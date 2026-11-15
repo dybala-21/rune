@@ -954,7 +954,10 @@ class RuneDaemon:
             # Connect adapter message callbacks to the gateway after opening channels.
             try:
                 from rune.daemon.gateway import ChannelGateway, set_gateway
-                gw = ChannelGateway(self._channel_registry)
+                from rune.utils.paths import rune_data
+
+                gw = ChannelGateway(self._channel_registry,
+                                    recipients_path=rune_data() / "channel-recipients.json")
                 set_gateway(gw)
                 if discovered:
                     await gw.start()

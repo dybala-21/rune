@@ -30,6 +30,7 @@ export function CronPanel({ onClose }: CronPanelProps) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [heartbeatActive, setHeartbeatActive] = useState(true);
+  const [timezone, setTimezone] = useState<string | null>(null);
 
   const [mode, setMode] = useState<FormMode>('create');
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -52,6 +53,7 @@ export function CronPanel({ onClose }: CronPanelProps) {
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
       setJobs(sorted);
       setHeartbeatActive(result.heartbeatActive);
+      setTimezone(result.timezone ?? null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't load cron jobs");
     } finally {
@@ -396,7 +398,7 @@ export function CronPanel({ onClose }: CronPanelProps) {
                 style={{ ...inputStyle, fontFamily: 'var(--font-mono)' }}
               />
               <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-muted)' }}>
-                Five cron fields in Rune’s local time zone. Example: 0 9 * * 1-5 runs weekdays at 9 AM.
+                Five cron fields in {timezone ?? 'Rune’s local time zone'}. Example: 0 9 * * 1-5 runs weekdays at 9 AM.
               </div>
             </LabeledField>
 
