@@ -32,7 +32,7 @@ _continuation_call: ContextVar[str | None] = ContextVar("continuation_call", def
 _READS = frozenset({
     "file_read", "file_query", "file_list", "file_search", "code_analyze", "code_find_def", "code_find_refs",
     "code_impact", "project_map", "document_read", "document_bundle_inspect", "web_search",
-    "think", "memory_search", "task_list", "cron_list", "service_status", "service_list", "connector_list",
+    "think", "memory_search", "task_list", "cron_list", "service_status", "service_list", "connector_list", "connect_account",
     "table_requirements", "table_verify", "skill_load", "skill_search", "document_preview",
     "browser_observe", "browser_find", "browser_extract", "browser_discover_apis",
     "browser_stay_evidence",

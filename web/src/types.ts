@@ -195,7 +195,7 @@ export interface TextDeltaData {
   text?: string;
   reset?: boolean;
 }
-export interface ApprovalRequestData { id: string; command: string; riskLevel: string; reason?: string; timeoutMs: number; external?: { url: string } }
+export interface ApprovalRequestData { id: string; command: string; riskLevel: string; reason?: string; timeoutMs: number; external?: { url: string; connect?: { label: string; detail: string } } }
 export interface QuestionData {
   id: string;
   question: string;
@@ -404,6 +404,8 @@ export interface PendingApproval {
   receivedAt: number;
   /** Decided on a separate approval page (hosted connectors); this card can only decline. */
   externalUrl?: string;
+  /** An account to connect on that page (Gmail, Calendar), shown as a card to connect it. */
+  connect?: { label: string; detail: string };
 }
 
 /** 활동 요약 (완료 후 표시) */

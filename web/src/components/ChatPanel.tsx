@@ -21,6 +21,7 @@ import { ThinkingBlockView } from './ThinkingBlock';
 import { normalizeToolName, inferWorkPhase } from '../utils/tooling';
 import { WelcomePanel } from './WelcomePanel';
 import { DesktopTaskNotice } from './DesktopTaskNotice';
+import { ConnectAccountCard } from './ConnectAccountCard';
 import { desktopAttention } from '../utils/workbench';
 import {
   APPROVAL_COPY,
@@ -289,7 +290,15 @@ export function ChatPanel({
           return <ThinkingBlockView key={item.item.id} block={item.item} />;
         })}
 
-        {pendingApproval && (
+        {pendingApproval?.connect && pendingApproval.externalUrl ? (
+          <ConnectAccountCard
+            key={pendingApproval.id}
+            url={pendingApproval.externalUrl}
+            label={pendingApproval.connect.label}
+            detail={pendingApproval.connect.detail}
+            onDecline={() => onRespondApproval('deny')}
+          />
+        ) : pendingApproval && (
           <InlineApprovalCard
             key={pendingApproval.id}
             approval={pendingApproval}

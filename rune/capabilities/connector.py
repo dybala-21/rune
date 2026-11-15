@@ -3,9 +3,10 @@
 import asyncio
 import json
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, TypeAdapter
+import httpx
+from pydantic import BaseModel, Field, TypeAdapter
 
 from rune.capabilities.registry import CapabilityRegistry
 from rune.capabilities.types import CapabilityDefinition
@@ -53,6 +54,16 @@ async def connector_request(params: ConnectorRequest) -> CapabilityResult:
         return TypeAdapter(CapabilityResult).validate_python(result)
     except BrokerUnavailable as exc:
         return CapabilityResult(success=False, error=str(exc), metadata={"action_status": "not_executed"})
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 400:
+            # Both brokers refuse with 400 before anything goes out: a connector that isn't there,
+            # or a request that doesn't parse.
+            hint = " If the owner's account isn't connected yet, use connect_account." if hosted else ""
+            return CapabilityResult(success=False,
+                                    error=f"The broker refused this request; nothing was sent. List connectors and use one exactly as listed.{hint}",
+                                    metadata={"action_status": "not_executed"})
+        return CapabilityResult(success=False, error=f"Connector result unavailable ({type(exc).__name__}); do not repeat a write without checking its outcome",
+                                metadata={"action_status": "unknown"})
     except Exception as exc:
         return CapabilityResult(success=False, error=f"Connector result unavailable ({type(exc).__name__}); do not repeat a write without checking its outcome",
                                 metadata={"action_status": "unknown"})
@@ -122,6 +133,86 @@ async def _wait_for_owner(params: ConnectorRequest, payload: dict[str, Any], pen
                                       **({"approval_decision": "denied"} if outcome == "declined" else {})})
 
 
+# Accounts a hosted owner connects on their approval page (`<approval_url>connect/<kind>`), and
+# the connector each becomes once connected.
+ACCOUNTS: dict[str, tuple[str, str, str]] = {
+    "gmail-read": ("gmail", "Connect Gmail", "Lets Rune read your mail. It can't send any."),
+    "gmail-send": ("gmail-send", "Let Rune send mail", "Each message still waits for your approval."),
+    "calendar-read": ("calendar", "Connect Google Calendar", "Lets Rune read your calendar."),
+}
+# How often a shown connect card checks whether the account is connected yet.
+CONNECT_POLL_SECONDS = 3.0
+
+
+class ConnectAccountParams(BaseModel):
+    kind: Literal["gmail-read", "gmail-send", "calendar-read"] = Field(
+        description="gmail-read to read mail, gmail-send to send it, calendar-read to read the calendar")
+
+
+def _listed(listing: dict[str, Any], name: str) -> dict[str, Any] | None:
+    for entry in listing.get("connectors") or []:
+        if isinstance(entry, dict) and entry.get("name") == name:
+            return entry
+    return None
+
+
+async def connect_account(params: ConnectAccountParams) -> CapabilityResult:
+    """Have the owner connect an account, with one button in the chat, and wait until it is.
+
+    The owner connects on their approval page, signed in to Google there; this machine never sees
+    the account's tokens. Their host then adds the connector, which the broker lists from then on.
+    """
+    name, label, detail = ACCOUNTS[params.kind]
+    if not hosted_approval():
+        return CapabilityResult(success=False, error="Connecting an account here is done with `rune connector add`.",
+                                metadata={"action_status": "not_executed"})
+    try:
+        if entry := _listed(await call_broker("list", {}), name):
+            return _connected(entry)
+        page = str((await call_broker("status", {})).get("approval_url") or "")
+    except Exception as exc:
+        return CapabilityResult(success=False, error=f"Connector broker unavailable ({type(exc).__name__})",
+                                metadata={"action_status": "not_executed"})
+    if not page.startswith("https://"):
+        return CapabilityResult(success=False, error="This machine has no approval page to connect accounts on.",
+                                metadata={"action_status": "not_executed"})
+    url = f"{page.rstrip('/')}/connect/{params.kind}"
+    external = getattr(approval_channel(), "external", None)
+    if external is None or parking() is not None:
+        # Nowhere to show a button that waits (a chat app, or a background run): the owner opens the
+        # link themselves, and the next try finds the connector.
+        return CapabilityResult(success=False,
+                                error=f"Not connected yet. Give the owner this link to connect it: {url} (signed in to Google there), then try again.",
+                                metadata={"action_status": "not_executed", "connect_url": url})
+
+    stopped = asyncio.Event()
+
+    async def connected() -> dict[str, Any] | None:
+        while True:
+            try:
+                await asyncio.wait_for(stopped.wait(), CONNECT_POLL_SECONDS)
+                return None
+            except TimeoutError:
+                pass
+            try:
+                if entry := _listed(await call_broker("list", {}), name):
+                    return entry
+            except Exception:  # noqa: BLE001 - a broker that blinks while the owner connects; ask again
+                continue
+
+    outcome, entry = await external(label, detail, url, connected, stopped.set,
+                                    connect={"label": label, "detail": detail})
+    if outcome == "done" and entry:
+        return _connected(entry)
+    error = ("The owner chose not to connect it now. Don't ask again in this task unless they do."
+             if outcome == "declined" else "The owner didn't connect it in time.")
+    return CapabilityResult(success=False, error=error, metadata={"action_status": "not_executed", "connect_url": url})
+
+
+def _connected(entry: dict[str, Any]) -> CapabilityResult:
+    return CapabilityResult(success=True, output=json.dumps({"connected": True, "connector": entry}))
+
+
 def register_connector_capabilities(registry: CapabilityRegistry) -> None:
     registry.register(CapabilityDefinition(
         name="connector_list", domain=Domain.GENERAL, group="web", risk_level=RiskLevel.LOW,
@@ -132,4 +223,12 @@ def register_connector_capabilities(registry: CapabilityRegistry) -> None:
         name="connector_request", domain=Domain.GENERAL, group="web", risk_level=RiskLevel.HIGH,
         description="Call a configured API using its connector name. List connectors first. Requires approval; credentials stay in the broker. Never repeat an uncertain write.",
         parameters_model=ConnectorRequest, execute=connector_request,
+    ))
+    registry.register(CapabilityDefinition(
+        name="connect_account", domain=Domain.GENERAL, group="web", risk_level=RiskLevel.LOW,
+        description="When the task needs the owner's Gmail or Google Calendar and connector_list doesn't have it, "
+                    "show the owner a button to connect it, and wait until they have. Returns the new connector "
+                    "to use with connector_request. Ask for only what the task needs: reading mail and sending it "
+                    "are separate.",
+        parameters_model=ConnectAccountParams, execute=connect_account,
     ))
