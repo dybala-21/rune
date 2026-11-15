@@ -1,17 +1,6 @@
 import { useState } from 'react';
 
-/**
- * The provider's logo, for the model picker.
- *
- * Logos are served from /logos rather than inlined: the CSP already allows
- * same-origin images, so this keeps them out of the JS bundle and lets the
- * browser cache them. The set covers every provider `models.list` returns; a
- * provider added later — or a self-hosted endpoint — falls back to a monogram
- * instead of a missing-image icon.
- *
- * Files come from litellm's bundled vendor assets, so each mark is the one its
- * vendor publishes rather than an approximation.
- */
+// Vendor logos from LiteLLM are served from /logos; other providers use a monogram.
 
 const HAS_LOGO = new Set([
   'openai', 'anthropic', 'gemini', 'xai', 'azure', 'cohere', 'mistral', 'deepseek',
@@ -34,8 +23,7 @@ function monogram(provider: string): string {
 
 export function ProviderMark({ provider, size = 16 }: { provider: string; size?: number }) {
   const key = provider.toLowerCase();
-  // A logo file can go missing on a partial deploy; drop to the monogram
-  // rather than leaving a broken-image glyph in the menu.
+  // Fall back to a monogram if the logo fails to load.
   const [failed, setFailed] = useState(false);
 
   if (HAS_LOGO.has(key) && !failed) {
@@ -43,6 +31,8 @@ export function ProviderMark({ provider, size = 16 }: { provider: string; size?:
       <img
         src={`/logos/${key}.svg`}
         alt=""
+        aria-hidden="true"
+        draggable={false}
         width={size}
         height={size}
         onError={() => setFailed(true)}

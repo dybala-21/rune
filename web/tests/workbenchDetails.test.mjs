@@ -5,7 +5,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createServer } from 'vite';
 
-let server, ChatPanel, WorkbenchPanel;
+let server, ChatPanel, WorkbenchPanel, ProgressPane, shouldOpenWorkbench, preferredWorkbenchTab, desktopAttention;
 before(async () => {
   server = await createServer({
     configFile: false, esbuild: { jsx: 'automatic' },
@@ -15,6 +15,8 @@ before(async () => {
   });
   ({ ChatPanel } = await server.ssrLoadModule('/src/components/ChatPanel.tsx'));
   ({ WorkbenchPanel } = await server.ssrLoadModule('/src/components/WorkbenchPanel.tsx'));
+  ({ ProgressPane } = await server.ssrLoadModule('/src/components/ProgressPane.tsx'));
+  ({ shouldOpenWorkbench, preferredWorkbenchTab, desktopAttention } = await server.ssrLoadModule('/src/utils/workbench.ts'));
 });
 after(async () => { await server?.close(); });
 
@@ -56,4 +58,67 @@ test('chat keeps its answer and inline activity without a duplicate totals card'
   assert.match(html, /The release is ready\./);
   assert.match(html, /Web search/);
   assert.doesNotMatch(html, />Tools<|>Web<|1m2s|Run details/);
+});
+
+
+test('lookups stay in chat while code, documents and Computer still open their work panel', () => {
+  const lookups = ['web_search', 'web_fetch', 'file_read'].map((toolName, i) => ({
+    id: String(i), toolName, args: {}, timestamp: i,
+  }));
+  assert.equal(shouldOpenWorkbench(lookups, []), false);
+  assert.equal(preferredWorkbenchTab(lookups, []), 'progress');
+  for (const [toolName, tab] of [['file_edit', 'diff'], ['bash_execute', 'activity'],
+    ['document_create', 'outputs'], ['browser_navigate', 'computer'], ['desktop_observe', 'computer']]) {
+    const calls = [...lookups, { id: 'work', toolName, args: {}, timestamp: 4 }];
+    assert.equal(shouldOpenWorkbench(calls, []), true, toolName);
+    assert.equal(preferredWorkbenchTab(calls, []), tab, toolName);
+  }
+  assert.equal(shouldOpenWorkbench(lookups, [{ path: 'src/app.ts' }]), true);
+});
+
+const progress = calls => renderToStaticMarkup(createElement(ProgressPane, {
+  toolCalls: calls, mode: 'research', isRunning: false, currentStep: null,
+  trust: null, activitySummary: null, orchestration: null,
+}));
+
+test('recorded activity never implies that missing results or unconfirmed checks succeeded', () => {
+  const base = toolCalls[0];
+  for (const extra of [{ result: undefined, success: undefined }, { success: undefined },
+    { checkStatus: 'inconclusive' }, { checkStatus: 'fail' }]) {
+    const html = progress([{ ...base, ...extra }]);
+    assert.match(html, /aria-label="Activity recorded"/);
+    assert.doesNotMatch(html, /aria-label="Succeeded"/);
+  }
+  assert.match(progress([base]), /aria-label="Succeeded"/);
+});
+
+test('source details preserve complete queries and safe page links without displaying URL paths', () => {
+  const query = 'Compare annual releases with their compatibility and support windows';
+  const url = 'https://example.org/releases/%EC%83%88%EB%A1%9C%EC%9A%B4?version=1';
+  const html = progress([
+    { ...toolCalls[0], args: { query } },
+    { ...toolCalls[0], id: 'page', toolName: 'web_fetch', args: { url } },
+    { ...toolCalls[0], id: 'unsafe', toolName: 'web_fetch', args: { url: 'javascript:alert(1)' } },
+    { ...toolCalls[0], id: 'credentials', toolName: 'web_fetch', args: { url: 'https://user:secret@example.org/' } },
+  ]);
+  assert.match(html, /<details(?![^>]*\bopen\b)[^>]*><summary[^>]*>Sources · 2<\/summary>/);
+  assert.ok(html.includes(`href="${url}"`));
+  assert.ok(html.includes(`aria-label="${url}"`));
+  assert.ok(html.includes(query));
+  const visible = html.replace(/<[^>]*>/g, '');
+  assert.match(visible, /example\.org/);
+  assert.doesNotMatch(visible, /%EC%|javascript:|secret/);
+});
+
+
+test('desktop attention excludes completed calls and pending calls from another run', () => {
+  const pending = { id: 'connect', toolName: 'desktop_connect', args: {}, timestamp: 1, runId: 'previous' };
+  assert.equal(desktopAttention([pending], true), 'connection');
+  assert.equal(desktopAttention([pending], true, 'previous'), 'connection');
+  assert.equal(desktopAttention([pending], true, 'current'), null);
+  assert.equal(desktopAttention([{ ...pending, completedAt: 2 }], true, 'previous'), null);
+  assert.equal(desktopAttention([{ ...pending, result: 'Connected' }], true, 'previous'), null);
+  assert.equal(desktopAttention([pending], false, 'previous'), null);
+  const action = { ...pending, id: 'action', toolName: 'desktop_act', runId: 'current' };
+  assert.equal(desktopAttention([pending, action], true, 'current'), 'action');
 });

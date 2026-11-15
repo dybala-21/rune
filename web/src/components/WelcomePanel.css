@@ -1,4 +1,4 @@
-.welcome-panel.welcome-start { width: 100%; max-width: 560px; margin: auto; padding: 36px 0; }
+.welcome-panel.welcome-start { width: 100%; max-width: 560px; margin: auto; padding: 28px 0; }
 .welcome-panel.welcome-start h1 { margin-bottom: 10px; font-size: clamp(25px, 3vw, 32px); line-height: 1.2; font-weight: 600; letter-spacing: -.035em; }
 .welcome-start-description { margin: 0; color: var(--text-secondary); font-size: 14px; line-height: 1.7; }
 .welcome-start-suggestions { display: grid; gap: 3px; margin-top: 25px; }
@@ -15,7 +15,7 @@
 .welcome-start-copy strong { font-size: 13px; font-weight: 550; }
 .welcome-start-copy small { color: var(--text-muted); font-size: 12px; line-height: 1.45; }
 .welcome-start-arrow { margin-left: auto; padding-left: 8px; color: var(--text-muted); }
-.welcome-start-help { margin-top: 24px; border-top: 1px solid var(--border); }
+.welcome-start-help { margin-top: 24px; border-top: 1px solid var(--border-subtle); }
 .welcome-start-help > summary {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   min-height: 44px; padding: 8px 2px; color: var(--text-secondary); font-size: 12px;
@@ -47,3 +47,5 @@
   .welcome-start-help { margin-top: 16px; }
   .welcome-start-context > div { grid-template-columns: 96px minmax(0, 1fr); }
 }
+
+.welcome-wolf { margin: 0 0 18px; width: fit-content; }

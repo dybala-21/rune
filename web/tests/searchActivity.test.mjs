@@ -76,7 +76,7 @@ test('search grouping preserves messages and run boundaries', () => {
     activitySummary: null, delegateEvents: [], compactionEvents: [], currentStepInfo: null,
     pendingQuestion: null, pendingApproval: null, onRespondQuestion: async () => {}, onRespondApproval: async () => {} };
   const calls = [tool('a'), tool('b', { toolName: 'web.search', timestamp: 2 })];
-  const count = html => (html.match(/class="search-activity"/g) ?? []).length;
+  const count = html => (html.match(/class="(?:search-activity"|tool-activity web-activity)/g) ?? []).length;
   assert.equal(count(render(ChatPanel, { ...props, toolCalls: calls })), 1);
   assert.equal(count(render(ChatPanel, { ...props, toolCalls: [calls[0], { ...calls[1], run: 2 }] })), 2);
   assert.equal(count(render(ChatPanel, { ...props, toolCalls: calls,
