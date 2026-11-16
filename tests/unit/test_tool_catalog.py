@@ -693,3 +693,31 @@ def test_large_artifact_catalog_keeps_browser_entry_point_callable():
     catalog = ToolCatalog(schemas)
     assert {"file_write","web_fetch","browser_navigate"} <= catalog.loaded
     assert "browser_batch" not in catalog.loaded
+
+
+@pytest.mark.parametrize("lookup", [False, True])
+def test_a_long_task_s_step_always_sees_task_park(lookup):
+    from rune.agent.goal_classifier import ClassificationResult
+    from rune.agent.litellm_adapter import LiteLLMAgent
+    from rune.agent.tool_adapter import ToolWrapper
+    from rune.agent.tool_catalog import deferred_for_task
+    from rune.proactive import long_task
+
+    classification = (ClassificationResult("web", .9, 2, needs_web_evidence=True, browser_effect="view") if lookup
+                      else ClassificationResult("full", .9, 2))
+    # Enough tools that the catalog defers some behind tool_search.
+    names = [*(f"extra_{i}_tool" for i in range(40)), "task_park", "task_blocked", "web_search", "web_fetch"]
+    wrappers = [ToolWrapper(name=name, description="x" * 900, function=AsyncMock()) for name in names]
+
+    def loaded():
+        agent = LiteLLMAgent("openai/gpt-6-astra", tools=wrappers, compact_tools=lookup,
+                            deferred_tools=deferred_for_task(names, classification))
+        assert agent._tool_catalog is not None, "the catalog defers tools here"
+        return agent._tool_catalog.loaded
+
+    assert "task_park" not in loaded(), "outside a step it waits behind tool_search"
+    _, token = long_task.park_slot(object())
+    try:
+        assert "task_park" in loaded()
+    finally:
+        long_task.release_slot(token)
