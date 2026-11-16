@@ -7,6 +7,14 @@ from collections.abc import Collection
 from rune.agent.tool_output import RejectedToolResult
 
 _CORE = {"browser_navigate", "think", "ask_user", "task_blocked", "bash_execute", "project_map", "table_requirements", "table_verify"}
+# Loaded from the start only where they apply: a long task's step ends with task_park, so its step
+# must never have to search for it.
+def _pinned() -> set[str]:
+    from rune.proactive.long_task import in_step
+
+    return {"task_park"} if in_step() else set()
+
+
 _BROWSER = ("browser_observe", "browser_act", "browser_navigate", "browser_extract", "browser_batch", "browser_stay_evidence")
 
 
@@ -43,10 +51,12 @@ class ToolCatalog:
     def __init__(self, schemas: list[dict], *, deferred_tools: Collection[str] | None = None,
                  initial_tools: Collection[str] | None = None) -> None:
         self.all = {tool["function"]["name"]: tool for tool in schemas if tool.get("type") == "function"}
+        pinned = _pinned()
+        deferred_tools = set(deferred_tools or ()) - pinned
         # Provider-native tools stay in the request without passing through discovery.
         self.schemas = [tool for tool in schemas if tool.get("type") != "function"
-                        or tool["function"]["name"] not in (deferred_tools or ())
-                        and (tool["function"]["name"] in _CORE
+                        or tool["function"]["name"] not in deferred_tools
+                        and (tool["function"]["name"] in _CORE or tool["function"]["name"] in pinned
                              or tool["function"]["name"] in (initial_tools or ())
                              or tool["function"]["name"].startswith(("file_", "code_", "web_", "desktop_")))]
         self.loaded = {tool["function"]["name"] for tool in self.schemas if tool.get("type") == "function"}
