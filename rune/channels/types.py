@@ -245,6 +245,22 @@ class ChannelAdapter(ABC):
                 timed_out=True,
             )
 
+    def expect_approval(self, approval_id: str) -> asyncio.Future[ApprovalResponse]:
+        """Register ``approval_id`` so a button press for it resolves the returned Future.
+
+        For a caller that waits on more than the buttons (the gateway also takes a typed
+        answer); it removes the id with ``forget_approval`` once it has its answer.
+        """
+        future: asyncio.Future[ApprovalResponse] = asyncio.get_running_loop().create_future()
+        self._pending_approvals[approval_id] = future
+        return future
+
+    def forget_approval(self, approval_id: str) -> None:
+        """Stop waiting for a button press on ``approval_id``; a later press resolves nothing."""
+        future = self._pending_approvals.pop(approval_id, None)
+        if future is not None and not future.done():
+            future.cancel()
+
     def _resolve_approval(
         self,
         approval_id: str,
