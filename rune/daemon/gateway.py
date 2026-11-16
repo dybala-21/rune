@@ -550,15 +550,6 @@ class ChannelGateway:
         if adapter is None:
             return ApprovalResponse(decision="deny", approved=False, timed_out=False)
 
-        # Try native adapter approval first
-        try:
-            approval_id = f"approval:{session_key}:{int(time.monotonic() * 1000)}"
-            await adapter.send_approval(recipient_id, command, approval_id)
-            # Native approval still resolves through the pending-response pipeline.
-        except NotImplementedError:
-            pass  # Fall through to text prompt
-
-        # Text-based approval fallback
         loop = asyncio.get_running_loop()
         future: asyncio.Future[ApprovalResponse] = loop.create_future()
 
@@ -568,11 +559,44 @@ class ChannelGateway:
                 RuntimeError("Replaced by a newer approval request")
             )
 
-        self._pending_approvals[session_key] = _PendingApproval(
+        pending = _PendingApproval(
             command=command,
             future=future,
             expires_at=time.monotonic() + timeout,
         )
+        self._pending_approvals[session_key] = pending
+
+        # Buttons answer the same request as a typed reply. The id stays short: Telegram keeps
+        # at most 64 bytes of a button's callback data.
+        approval_id = uuid4().hex[:16]
+        pressed = adapter.expect_approval(approval_id)
+
+        def _on_press(done: asyncio.Future[Any]) -> None:
+            if done.cancelled() or future.done():
+                return
+            answer = done.result()
+            if self._pending_approvals.get(session_key) is pending:
+                self._pending_approvals.pop(session_key, None)
+            future.set_result(ApprovalResponse(decision=str(answer.decision), approved=answer.approved,
+                                               timed_out=answer.timed_out))
+            log.info("gateway_approval_resolved", session_key=session_key, decision=str(answer.decision),
+                     via="button")
+
+        pressed.add_done_callback(_on_press)
+        try:
+            return await self._await_approval(adapter, recipient_id, session_key, future, command=command,
+                                              risk_level=risk_level, reason=reason, suggestions=suggestions,
+                                              timeout=timeout, approval_id=approval_id)
+        finally:
+            adapter.forget_approval(approval_id)
+
+    async def _await_approval(self, adapter: Any, recipient_id: str, session_key: str,
+                              future: asyncio.Future[ApprovalResponse], *, command: str, risk_level: str,
+                              reason: str, suggestions: list[str] | None, timeout: float,
+                              approval_id: str) -> ApprovalResponse:
+        """Show the request (buttons where the channel has them, and numbered choices) and wait."""
+        with contextlib.suppress(NotImplementedError):
+            await adapter.send_approval(recipient_id, command, approval_id)
 
         prompt = _build_approval_prompt(
             command=command,

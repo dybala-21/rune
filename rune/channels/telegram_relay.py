@@ -33,6 +33,8 @@ log = get_logger(__name__)
 RELAY_URL = "RUNE_CHANNEL_RELAY_URL"
 _SEEN = 1000
 _SIGNED_FOR = 45
+# A button pressed on a request nothing waits for any more.
+_NOT_WAITING = "This request is no longer waiting"
 
 
 class RelayUnavailable(RuntimeError):
@@ -170,11 +172,17 @@ class RelayTelegramAdapter(ChannelAdapter):
         action, approval_id = parts[1], parts[2]
         decision = {"allow": ApprovalDecision.APPROVE_ONCE, "allow_once": ApprovalDecision.APPROVE_ONCE,
                     "allow_always": ApprovalDecision.APPROVE_ALWAYS}.get(action, ApprovalDecision.DENY)
-        self._resolve_approval(approval_id, decision)
-        text = "Denied" if decision == ApprovalDecision.DENY else "Approved"
-        await self._try("answerCallbackQuery", {"callback_query_id": query_id, "text": f"{text}!"})
         message = query.get("message") or {}
         chat_id = (message.get("chat") or {}).get("id")
+        if not self._resolve_approval(approval_id, decision):
+            # Answered already, timed out, or from before a restart: nothing is waiting on it.
+            await self._try("answerCallbackQuery", {"callback_query_id": query_id, "text": _NOT_WAITING})
+            if isinstance(chat_id, int) and "message_id" in message:
+                await self._try("editMessageReplyMarkup", {"chat_id": chat_id, "message_id": message["message_id"],
+                                                           "reply_markup": {"inline_keyboard": []}})
+            return
+        text = "Denied" if decision == ApprovalDecision.DENY else "Approved"
+        await self._try("answerCallbackQuery", {"callback_query_id": query_id, "text": f"{text}!"})
         if isinstance(chat_id, int) and "message_id" in message:
             name = (query.get("from") or {}).get("username") or "someone"
             await self._try("editMessageText", {"chat_id": chat_id, "message_id": message["message_id"],

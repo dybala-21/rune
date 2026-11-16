@@ -433,8 +433,19 @@ class TelegramAdapter(ChannelAdapter):
             else:
                 decision = ApprovalDecision.DENY
 
-            # Use base-class resolver
-            self._resolve_approval(approval_id, decision)
+            if not self._resolve_approval(approval_id, decision):
+                # Answered already, timed out, or from before a restart: nothing is waiting on it.
+                try:
+                    await callback_query.answer(text="This request is no longer waiting")
+                    if callback_query.message and self._bot is not None:
+                        await self._bot.edit_message_reply_markup(
+                            chat_id=callback_query.message.chat.id,
+                            message_id=callback_query.message.message_id,
+                            reply_markup=None,
+                        )
+                except Exception as exc:
+                    log.warning("telegram_approval_update_failed", error=str(exc))
+                return
 
             # Update message with result
             if decision != ApprovalDecision.DENY:
