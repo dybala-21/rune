@@ -247,7 +247,8 @@ async def test_editing_a_briefing_job_keeps_it_a_briefing(store):
 async def test_the_scheduled_run_sends_the_briefing_with_its_buttons(store, monkeypatch):
     minute = int(time.time() // 60)
     made = await briefing_tool.briefing_set(briefing_tool.BriefingSetParams(
-        time=f"{datetime.fromtimestamp(minute * 60, SEOUL):%H:%M}"))
+        # The machine's local time, as fire() reads the schedule (CI runs in UTC).
+        time=f"{datetime.fromtimestamp(minute * 60):%H:%M}"))
     composed = {"status": "completed", "success": True, "verified": True, "output": "Good morning.",
                 "buttons": [{"text": "Connect Gmail", "url": "https://approve.example/connect/gmail-read"}]}
     monkeypatch.setattr("rune.briefing.job.run_briefing", AsyncMock(return_value=composed))
