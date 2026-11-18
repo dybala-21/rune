@@ -25,7 +25,15 @@ from typing import Any
 import httpx
 
 from rune.channels.telegram import _MAX_MESSAGE_LENGTH, TelegramResponseFormatter, _split_text
-from rune.channels.types import ApprovalDecision, ChannelAdapter, IncomingMessage, OutgoingMessage
+from rune.channels.types import (
+    ApprovalDecision,
+    ChannelAdapter,
+    IncomingMessage,
+    LinkButton,
+    OutgoingMessage,
+    buttons_as_text,
+    shown_buttons,
+)
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -55,6 +63,8 @@ class RelayTelegramAdapter(ChannelAdapter):
         self._formatter = TelegramResponseFormatter()
         self._seen: OrderedDict[int, None] = OrderedDict()
         self._tasks: set[asyncio.Task[None]] = set()
+
+    link_buttons = True
 
     @property
     def name(self) -> str:
@@ -192,9 +202,21 @@ class RelayTelegramAdapter(ChannelAdapter):
 
     async def send(self, channel_id: str, message: OutgoingMessage) -> str | None:
         text = self._formatter.format_text(message.text)
+        chunks = _split_text(text, _MAX_MESSAGE_LENGTH)
+        markup = link_keyboard(message.buttons)
         sent = None
-        for chunk in _split_text(text, _MAX_MESSAGE_LENGTH):
-            sent = await self._try("sendMessage", {"chat_id": int(channel_id), "text": chunk, "parse_mode": "HTML"})
+        for i, chunk in enumerate(chunks):
+            params: dict[str, Any] = {"chat_id": int(channel_id), "text": chunk, "parse_mode": "HTML"}
+            if markup and i == len(chunks) - 1:
+                params["reply_markup"] = markup
+            sent = await self._try("sendMessage", params)
+            if sent is None and "reply_markup" in params:
+                # Telegram turns down the whole message over one link it won't show; the links go as text.
+                log.warning("telegram_link_buttons_refused")
+                tail = self._formatter.format_text(buttons_as_text("", message.buttons).strip())
+                params = {"chat_id": int(channel_id), "text": f"{chunk}\n\n{tail}"[:_MAX_MESSAGE_LENGTH],
+                          "parse_mode": "HTML"}
+                sent = await self._try("sendMessage", params)
         if message.attachments:
             # Files don't go through the relay yet.
             await self._try("sendMessage", {"chat_id": int(channel_id),
@@ -234,6 +256,12 @@ class RelayTelegramAdapter(ChannelAdapter):
         ]]}
         await self._try("sendMessage", {"chat_id": int(channel_id), "text": f"Approval required\n\n{shown}",
                                         "reply_markup": keyboard})
+
+
+def link_keyboard(buttons: list[LinkButton]) -> dict[str, Any] | None:
+    """Telegram's inline keyboard for link buttons, one to a row."""
+    kept = shown_buttons(buttons)
+    return {"inline_keyboard": [[{"text": b.text, "url": b.url}] for b in kept]} if kept else None
 
 
 def _attachments(message: dict[str, Any]) -> list[dict[str, Any]]:

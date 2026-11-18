@@ -40,6 +40,8 @@ class CronJobInfo(BaseModel):
     # A long task's state, and the minute its next step starts (rune.proactive.long_task).
     task: dict[str, Any] | None = None
     wake_at: int | None = Field(None, alias="wakeAt")
+    # Run by code, not an agent: "briefing" lets the host hand over headlines before it fires.
+    kind: str = ""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -150,6 +152,7 @@ def _job_dict_to_info(j: dict[str, Any]) -> CronJobInfo:
         fingerprint=task_fingerprint(job),
         task=job.task,
         wakeAt=job.wake_at if not ran and can_run(job, int(j.get("run_count") or 0), j.get("max_runs")) else None,
+        kind=job.kind,
     )
 
 
@@ -262,7 +265,8 @@ async def update_cron_job(job_id: str, req: CronUpdateRequest) -> CronUpdateResp
         channel = current.notify_channel if req.notify_channel is None else req.notify_channel.strip()
         kwargs["command"] = _pack_command(command, goal, channel,
                                         current.description, current.policy.patched(req.policy) if req.policy else current.policy,
-                                        owner=current.owner, task=task if task is not None else current.task)
+                                        owner=current.owner, task=task if task is not None else current.task,
+                                        kind=current.kind)
     if req.enabled is not None:
         kwargs["enabled"] = req.enabled
     if "max_runs" in req.model_fields_set:
@@ -295,7 +299,7 @@ async def toggle_cron_job(job_id: str) -> CronToggleResponse:
         current = _row_to_cronjob(existing)
         store.update_cron_job(job_id, command=_pack_command(current.command, current.goal, current.notify_channel,
                                                             current.description, current.policy, owner=current.owner,
-                                                            task=task))
+                                                            task=task, kind=current.kind))
     new_state = store.toggle_cron_job(job_id)
 
     if new_state is None:

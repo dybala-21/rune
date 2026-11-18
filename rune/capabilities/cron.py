@@ -40,6 +40,8 @@ class CronJob:
     task: dict | None = field(default=None, compare=False)
     # What a long task's step is told about the task, ahead of everything else (`step_brief`).
     preamble: str = field(default="", compare=False)
+    # Run by code instead of bash or an agent: "briefing" (rune.briefing.job).
+    kind: str = ""
 
     @property
     def wake_at(self) -> int | None:
@@ -88,13 +90,15 @@ def _row_to_cronjob(row: dict) -> CronJob:
         policy=policy,
         owner=payload.get("owner", "local") if isinstance(payload, dict) else "local",
         task=payload.get("task") if isinstance(payload, dict) and isinstance(payload.get("task"), dict) else None,
+        kind=payload.get("kind", "") if isinstance(payload, dict) and isinstance(payload.get("kind"), str) else "",
     )
 
 
 def _pack_command(command: str, goal: str, notify_channel: str, description: str,
-                  policy: RoutinePolicy | None = None, *, owner: str | None = None, task: dict | None = None) -> str:
+                  policy: RoutinePolicy | None = None, *, owner: str | None = None, task: dict | None = None,
+                  kind: str = "") -> str:
     """Keep the goal, owner, execution policy and a long task's state in the existing command column."""
-    if goal or notify_channel or policy is not None or task is not None:
+    if goal or notify_channel or policy is not None or task is not None or kind:
         from rune.agent.task_continuity import current_scope
 
         packed = {
@@ -107,6 +111,8 @@ def _pack_command(command: str, goal: str, notify_channel: str, description: str
         }
         if task is not None:
             packed["task"] = task
+        if kind:
+            packed["kind"] = kind
         return _json.dumps(packed, ensure_ascii=False)
     return command
 
@@ -390,7 +396,7 @@ async def cron_update(params: CronUpdateParams) -> CapabilityResult:
                 return CapabilityResult(success=False, error="Provide one command or agent goal")
             policy = current.policy.patched(params.policy) if params.policy else current.policy
             updates["command"] = _pack_command(new_cmd, new_goal, new_notify, new_desc, policy, owner=current.owner,
-                                               task=task if task is not None else current.task)
+                                               task=task if task is not None else current.task, kind=current.kind)
         if updates:
             store.update_cron_job(job_id, **updates)
 
@@ -586,7 +592,7 @@ async def _execute_cron_job(job: CronJob, *, approval_from: str | None = None, r
             try:
                 started = True
                 async with asyncio.timeout(job.policy.timeout_seconds):
-                    result = await run_while_current(job, store, _execute_goal_job if job.goal else _execute_bash_job)
+                    result = await run_while_current(job, store, _executor(job))
             except BudgetExceeded as exc:
                 result = {"status": "budget_exhausted", "success": False, "verified": False,
                           "output": "", "error": str(exc)}
@@ -616,7 +622,7 @@ async def _execute_cron_job(job: CronJob, *, approval_from: str | None = None, r
             output = result.get("output") or result.get("error") or result["status"]
             if not result.get("verified"):
                 output = f"{result['status']}: {output}"
-            await _send_to_channel(job.notify_channel, job.name, output)
+            await _send_to_channel(job.notify_channel, job.name, output, result.get("buttons"))
     except (asyncio.CancelledError, Exception) as exc:
         cancelled = isinstance(exc, asyncio.CancelledError)
         if decision == "claimed":
@@ -635,6 +641,14 @@ async def _execute_cron_job(job: CronJob, *, approval_from: str | None = None, r
         log.warning("cron_execution_failed", job_id=job.id, error=str(exc))
     finally:
         claims.close()
+
+
+def _executor(job: CronJob):
+    if job.kind == "briefing":
+        from rune.briefing.job import run_briefing
+
+        return run_briefing
+    return _execute_goal_job if job.goal else _execute_bash_job
 
 
 async def _execute_bash_job(job: CronJob) -> dict:
@@ -849,9 +863,10 @@ async def task_stalled(job_id: object, minute: object) -> dict:
     return {"state": "ended"}
 
 
-async def _send_to_channel(channel_name: str, job_name: str, text: str) -> None:
+async def _send_to_channel(channel_name: str, job_name: str, text: str, buttons: list[dict] | None = None) -> None:
     """Route a job result by channel and priority, with a local notification fallback."""
     try:
+        from rune.channels.types import LinkButton
         from rune.daemon.gateway import GatewayNotification, get_gateway
 
         gateway = get_gateway()
@@ -865,6 +880,7 @@ async def _send_to_channel(channel_name: str, job_name: str, text: str) -> None:
             priority="high" if channel_name else "medium",
             source="cron",
             channel=channel_name,
+            buttons=[LinkButton(str(b.get("text", "")), str(b.get("url", ""))) for b in buttons or [] if isinstance(b, dict)],
         )
         await gateway.route_notification(notification)
         log.info("cron_result_routed", name=job_name)
@@ -893,9 +909,11 @@ def get_active_cron_jobs() -> list[CronJob]:
 
 def register_cron_capabilities(registry: CapabilityRegistry) -> None:
     """Register cron capabilities, and the long-task ones (rune.capabilities.task_tools)."""
+    from rune.capabilities.briefing import register_briefing_capabilities
     from rune.capabilities.task_tools import register_task_capabilities
 
     register_task_capabilities(registry)
+    register_briefing_capabilities(registry)
     registry.register(CapabilityDefinition(
         name="cron_create",
         description=(

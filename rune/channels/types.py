@@ -67,6 +67,14 @@ class IncomingMessage:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class LinkButton:
+    """A button that opens ``url``. Only https links are shown."""
+
+    text: str
+    url: str
+
+
 @dataclass(slots=True)
 class OutgoingMessage:
     """A message to be sent to a channel."""
@@ -75,6 +83,22 @@ class OutgoingMessage:
     attachments: list[dict[str, Any]] = field(default_factory=list)
     reply_to: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Under the message where the channel has buttons; as "text: url" lines where it hasn't.
+    buttons: list[LinkButton] = field(default_factory=list)
+
+
+def shown_buttons(buttons: list[LinkButton]) -> list[LinkButton]:
+    """The buttons that may be shown: an https link and a label, nothing else."""
+    kept = [b for b in buttons if b.text.strip() and b.url.startswith("https://")]
+    if len(kept) != len(buttons):
+        log.warning("link_buttons_dropped", dropped=len(buttons) - len(kept))
+    return kept
+
+
+def buttons_as_text(text: str, buttons: list[LinkButton]) -> str:
+    """For a channel without buttons: the links written out under the text."""
+    lines = [f"{b.text}: {b.url}" for b in shown_buttons(buttons)]
+    return "\n".join([text, "", *lines]) if lines else text
 
 
 @dataclass(slots=True)
@@ -195,8 +219,13 @@ class ChannelAdapter(ABC):
             f"{self.name} does not support message deletion"
         )
 
-    async def send_notification(self, channel_id: str, text: str) -> None:
-        await self.send(channel_id, OutgoingMessage(text=text))
+    # True where ``send`` shows ``OutgoingMessage.buttons`` as buttons.
+    link_buttons: bool = False
+
+    async def send_notification(self, channel_id: str, text: str, buttons: list[LinkButton] | None = None) -> None:
+        if buttons and not self.link_buttons:
+            text, buttons = buttons_as_text(text, buttons), None
+        await self.send(channel_id, OutgoingMessage(text=text, buttons=list(buttons or [])))
 
     async def send_typing_indicator(self, channel_id: str) -> None:
         pass
