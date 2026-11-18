@@ -65,10 +65,13 @@ def claim_occurrence(job, scheduled_minute: int | None = None) -> tuple[Executio
 
 
 def should_notify(policy: RoutinePolicy, result: dict, previous: dict | None) -> bool:
+    if (result.get("status") == "model_budget" and previous is not None
+            and previous.get("status") == "model_budget" and previous.get("error") == result.get("error")):
+        return False  # the month's model budget is still used up: said once is enough
     if policy.notify == "always":
         return True
     if policy.notify == "failures" and result.get("status") not in (
-        "failed", "unverified", "needs_approval", "interrupted", "budget_exhausted",
+        "failed", "unverified", "needs_approval", "interrupted", "budget_exhausted", "model_budget",
     ):
         return False
     if result.get("status") == "unchanged":

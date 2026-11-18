@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from rune.agent.run_control import RunControl, control_scope
 from rune.agent.run_outcome import run_outcome
+from rune.llm import gateway_budget
 from rune.memory.provenance import run_sources
 from rune.safety.approval_context import approval_required, parking_scope
 from rune.safety.execution_environment import environment_scope
@@ -103,8 +104,15 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
                 async def remember_routing(value):
                     if saved := snapshot(key, value, task.goal):
                         result["routing"] = saved
+                changes: list[str] = []  # calls that could change something (rune.agent.action_receipts)
+
+                def note_call(event):
+                    from rune.agent.action_receipts import may_change
+                    if isinstance(event, dict) and may_change(str(event.get("name")), event.get("params") or {}):
+                        changes.append(str(event.get("name")))
                 if on := getattr(loop, "on", None):
                     on("goal_classified", remember_routing)
+                    on("tool_call", note_call)
                 validate = None
                 if task.verification:
                     from rune.agent.goal_validate import make_validate_fn
@@ -142,6 +150,18 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
                     output=getattr(trace, "answer", "") or getattr(loop, "_last_answer_text", ""),
                     error=getattr(trace, "error", None),
                 )
+                if outcome.reason == gateway_budget.REASON and (refused := getattr(loop, "_gateway_budget", None)):
+                    from rune.config import get_config
+                    locale = get_config().general.locale
+                    if changes:
+                        # It had changed things before the refusal: they may not be repeated blindly.
+                        result.update(status="interrupted", success=False, verified=False, execution_unknown=True,
+                                      error=refused.stopped_midway(locale), resume_at=refused.resume_minute)
+                    else:
+                        # Nothing was changed: the step that goes on reads what the one before it left.
+                        result.update(status=gateway_budget.STATUS, success=False, verified=False, output="",
+                                      not_started=True, error=refused.waiting(locale),
+                                      resume_at=refused.resume_minute)
                 if outcome.reason == "request_budget_exhausted":
                     detail = (getattr(trace, "completion_check", None) or {}).get("detail")
                     result.update(status="budget_exhausted", error=detail or "The model request exceeded the remaining budget.")

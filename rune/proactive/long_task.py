@@ -184,6 +184,14 @@ def after_step(job, result: dict[str, Any], run_count: int, max_runs: int | None
     if not enabled and status in {"interrupted", "cancelled"}:
         # The owner turned it off during the step: on hold, not over. Turning it on goes on.
         return {"wake_at": None, "paused": True}, None
+    if status == "model_budget" and result.get("resume_at"):
+        # The hosted gateway refused for the month's budget (rune.llm.gateway_budget) before the step
+        # did anything, and nothing can be done until the month ends: it waits for that.
+        if run_count >= most_steps(max_runs):
+            return ({"wake_at": None, "ended": "step_limit"},
+                    f"Stopped after {run_count} steps, the most it may take: the last one found this month's "
+                    f"model budget used up. Where it got to: {output}".strip())
+        return {"wake_at": int(result["resume_at"])}, error or None
     # A park the observed-files check marked unverified is still a park.
     if (park.get("resume_at") and status in {"parked", "unverified"} and not result.get("execution_unknown")
             and not result.get("pending_approval")):
@@ -204,6 +212,9 @@ def after_step(job, result: dict[str, Any], run_count: int, max_runs: int | None
         return {"wake_at": int(time.time() // 60) + DEFAULT_RESUME_MINUTES}, None
     if status == "budget_exhausted":
         return {"wake_at": None, "ended": status}, f"Stopped: it used up its budget. {error}".strip()
+    if status == "interrupted" and result.get("resume_at") and error:
+        # Refused for the month's budget after it had done things (rune.agent.background).
+        return {"wake_at": None, "ended": status}, error
     if status == "interrupted":
         return ({"wake_at": None, "ended": status},
                 "Stopped part way through a step (it ran out of time, changed while it ran, or the machine "
