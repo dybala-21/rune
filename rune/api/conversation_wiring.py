@@ -149,8 +149,10 @@ async def list_web_conversations(limit: int = 20) -> list[Any]:
     manager = get_conv_manager()
     if manager is None:
         return []
+    from rune.daemon.owner_thread import listed_owners
+
     convs: list[Any] = []
-    for user_id in _LOCAL_SURFACE_USER_IDS:
+    for user_id in (*_LOCAL_SURFACE_USER_IDS, *listed_owners()):
         try:
             convs.extend(await manager._store.list(user_id, limit=limit))
         except Exception as exc:
@@ -174,8 +176,10 @@ async def list_web_conversations_page(
     manager = get_conv_manager()
     if manager is None:
         return [], 0
+    from rune.daemon.owner_thread import listed_owners
+
     return await manager._store.list_page(
-        _LOCAL_SURFACE_USER_IDS, limit=limit, offset=offset, query=query.strip(), status=status,
+        (*_LOCAL_SURFACE_USER_IDS, *listed_owners()), limit=limit, offset=offset, query=query.strip(), status=status,
     )
 
 

@@ -17,8 +17,11 @@ from rune.channels.types import (
     ApprovalDecision,
     ChannelAdapter,
     IncomingMessage,
+    LinkButton,
     OutgoingMessage,
     ResponseFormatter,
+    buttons_as_text,
+    shown_buttons,
 )
 from rune.utils.logger import get_logger
 
@@ -77,6 +80,8 @@ class TelegramAdapter(ChannelAdapter):
         self._dispatcher: Any = None
         self._polling_task: asyncio.Task[None] | None = None
         self._formatter = TelegramResponseFormatter()
+
+    link_buttons = True
 
     @property
     def name(self) -> str:
@@ -178,11 +183,21 @@ class TelegramAdapter(ChannelAdapter):
 
         text = self._formatter.format_text(message.text)
         chunks = _split_text(text, _MAX_MESSAGE_LENGTH)
-        for chunk in chunks:
+        markup = _link_markup(message.buttons)
+        for i, chunk in enumerate(chunks):
+            extra = {"reply_markup": markup} if markup is not None and i == len(chunks) - 1 else {}
             try:
-                await self._bot.send_message(chat_id=int(channel_id), text=chunk)
+                await self._bot.send_message(chat_id=int(channel_id), text=chunk, **extra)
             except Exception as exc:
                 log.error("telegram_send_failed", error=str(exc))
+                if extra:
+                    # Telegram turns down the whole message over one link it won't show; the links go as text.
+                    tail = self._formatter.format_text(buttons_as_text("", message.buttons).strip())
+                    try:
+                        await self._bot.send_message(chat_id=int(channel_id),
+                                                     text=f"{chunk}\n\n{tail}"[:_MAX_MESSAGE_LENGTH])
+                    except Exception as retry_exc:
+                        log.error("telegram_send_failed", error=str(retry_exc), retried=True)
 
         for attachment in message.attachments:
             await self._send_attachment(channel_id, attachment)
@@ -470,6 +485,16 @@ class TelegramAdapter(ChannelAdapter):
         else:
             with contextlib.suppress(Exception):
                 await callback_query.answer()
+
+
+def _link_markup(buttons: list[LinkButton]) -> Any:
+    """An aiogram inline keyboard of link buttons, one to a row, or None."""
+    kept = shown_buttons(buttons)
+    if not kept:
+        return None
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=b.text, url=b.url)] for b in kept])
 
 
 def _split_text(text: str, max_length: int) -> list[str]:

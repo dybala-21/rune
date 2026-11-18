@@ -19,6 +19,7 @@ from rune.api.event_logger import append_event
 from rune.channels.registry import ChannelRegistry
 from rune.channels.types import (
     IncomingMessage,
+    LinkButton,
     OutgoingMessage,
 )
 from rune.daemon import recipients
@@ -45,6 +46,7 @@ class GatewayNotification:
     priority: NotificationPriority = "medium"
     source: str = ""
     channel: str = ""
+    buttons: list[LinkButton] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -371,6 +373,7 @@ class ChannelGateway:
             )
             # TUI-only: emit event for local consumption
             self._emit("notification", notification)
+            await self._keep_in_app(notification)
             return
 
         delivered = False
@@ -390,8 +393,17 @@ class ChannelGateway:
 
             try:
                 text = f"{notification.title}\n{notification.body}" if notification.body else notification.title
-                await adapter.send_notification(recipient_id, text)
+                if notification.buttons:
+                    await adapter.send_notification(recipient_id, text, notification.buttons)
+                else:
+                    await adapter.send_notification(recipient_id, text)
                 delivered = True
+                from rune.channels.types import buttons_as_text
+                from rune.daemon import owner_thread
+
+                # With the links written out: the app shows the turn without the chat's buttons.
+                await owner_thread.remember(await self._get_conv_manager(), recipient_id,
+                                            buttons_as_text(text, notification.buttons))
                 log.info(
                     "gateway_notification_delivered",
                     channel=channel_name,
@@ -408,6 +420,19 @@ class ChannelGateway:
         if not delivered:
             # No channel accepted the notification - emit for TUI fallback
             self._emit("notification", notification)
+            await self._keep_in_app(notification)
+
+    async def _keep_in_app(self, notification: GatewayNotification) -> None:
+        """What reached no chat app is kept in the app's RUNE conversation (rune.daemon.owner_thread)."""
+        from rune.channels.types import buttons_as_text
+        from rune.daemon import owner_thread
+
+        if notification.source != "cron":
+            # Only a scheduled result has nowhere else to go: a suggestion already shows as a card
+            # in the app (suggestion_created), and a plan's progress is for whoever watches it run.
+            return
+        text = f"{notification.title}\n{notification.body}" if notification.body else notification.title
+        await owner_thread.remember_in_app(await self._get_conv_manager(), buttons_as_text(text, notification.buttons))
 
     # Orchestrator event relay
 
@@ -1049,13 +1074,11 @@ class ChannelGateway:
         if self._conv_manager is not None:
             return self._conv_manager
         try:
+            # The app's manager: a channel conversation the app opens is then the same object,
+            # not a second copy whose save would drop the other's turns.
+            from rune.api.conversation_wiring import get_conv_manager
 
-            from rune.conversation.manager import ConversationManager
-            from rune.conversation.store import ConversationStore
-            from rune.utils.paths import conversations_db_path
-
-            store = ConversationStore(conversations_db_path())
-            self._conv_manager = ConversationManager(store)
+            self._conv_manager = get_conv_manager()
         except Exception as exc:
             log.debug("gateway_conv_manager_init_failed", error=str(exc)[:100])
             self._conv_manager = None

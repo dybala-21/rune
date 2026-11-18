@@ -1743,6 +1743,9 @@ def create_app() -> Any:
                 except ValueError as exc:
                     return _err("invalid_params", str(exc))
                 manager = conversation_wiring.get_conv_manager()
+                from rune.daemon.owner_thread import listed_owners
+
+                _owners = set(listed_owners())
                 sessions = []
                 for c in convs:
                     turn_count = 0
@@ -1756,7 +1759,8 @@ def create_app() -> Any:
                         "userId": c.user_id,
                         "title": c.title or "",
                         "status": c.status,
-                        "channel": "web",
+                        # The owner's Telegram chat, with what RUNE sent there (rune.daemon.owner_thread).
+                        "channel": "telegram" if c.user_id in _owners else "web",
                         "turnCount": turn_count,
                         "createdAt": c.created_at.isoformat(),
                         "updatedAt": c.updated_at.isoformat(),
@@ -2129,6 +2133,14 @@ def create_app() -> Any:
                 result = await list_channels()
                 return _ok(result)
 
+            elif method == "briefing.news":
+                # Headlines the host fetched for the briefing (rune.briefing.news); replaces the last set.
+                from rune.briefing import news as _news
+
+                try:
+                    return _ok({"stored": await asyncio.to_thread(_news.store, params.get("items"))})
+                except ValueError as exc:
+                    return _err("invalid", str(exc))
             elif method == "channel.deliver":
                 # Updates the host's rune-relay stored for this machine's channel (rune-bot control).
                 from rune.channels.registry import get_channel_registry
