@@ -31,6 +31,7 @@ _PROPERTIES = {
     "needs_web_evidence": {"type": "boolean"},
     "needs_current_source": {"type": "boolean"},
     "lookup_only": {"type": "boolean"},
+    "schedules": {"type": "boolean"},
     "source_output": {"type": "string", "enum": ["none", "verbatim", "derived", "summary"]},
     "browser_effect": {"type": "string", "enum": ["view", "edit", "change"]},
     "browser_requirements": response_schema(),
@@ -106,8 +107,11 @@ def decode_response(response: Any) -> dict[str, Any]:
 
 
 def validate_decision(data: dict[str, Any]) -> dict[str, Any]:
-    if set(data) - {"resume_task", "task_scope", "browser_requirements", "stay_query", "complexity"} != set(_PROPERTIES) - {"browser_requirements", "stay_query", "complexity"}:
+    # "schedules" may be absent: the choice backends (rune.llm.system_one) don't ask it, and absent reads as false.
+    if set(data) - {"resume_task", "task_scope", "browser_requirements", "stay_query", "complexity", "schedules"} != set(_PROPERTIES) - {"browser_requirements", "stay_query", "complexity", "schedules"}:
         raise InvalidClassification("invalid_fields")
+    if type(data.get("schedules", False)) is not bool:
+        raise InvalidClassification("invalid_schedules")
     if "complexity" in data and (not isinstance(data["complexity"], str) or data["complexity"] not in COMPLEXITY_CRITERIA):
         raise InvalidClassification("invalid_complexity")
     if data["goal_type"] not in _PROPERTIES["goal_type"]["enum"]:
