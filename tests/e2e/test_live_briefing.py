@@ -145,7 +145,7 @@ async def desk(workflow, monkeypatch, tmp_path):
         return run
 
     # A socket's path is short, so the broker's home is not under pytest's own directory.
-    with tempfile.TemporaryDirectory(prefix="rune-briefing-e2e-", dir="/private/tmp") as directory:
+    with tempfile.TemporaryDirectory(prefix="rune-briefing-e2e-", dir="/tmp") as directory:
         root = Path(directory)
         monkeypatch.setenv("RUNE_BROKER_HOME", str(root))
         accounts = ConnectorStore(root)
