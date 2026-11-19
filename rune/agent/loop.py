@@ -638,6 +638,7 @@ class NativeAgentLoop(EventEmitter):
         # Requirement-Adherence Gate (opt-in via RUNE_REQUIREMENT_GATE); None when off.
         self._requirement_gate_obj: RequirementGate | None = None
         self._last_answer_text: str = ""  # latest final-answer text, for the gate's artifact
+        self._gateway_budget = None  # the hosted gateway's budget refusal that stopped this run
         self._task_evidence = None
         self._source_context = None
         self._citation_urls: set[str] = set()
@@ -726,6 +727,7 @@ class NativeAgentLoop(EventEmitter):
         self._step_start_time = 0.0
         self._last_activity = 0.0
         self._last_answer_text = ""
+        self._gateway_budget = None
         self._task_evidence = None
         self._source_context = None
         self._citation_urls.clear()
@@ -1379,6 +1381,11 @@ class NativeAgentLoop(EventEmitter):
                                     artifact_receipts=list(self._artifact_receipts))
             if isinstance(exc, BudgetExceeded):
                 trace.completion_check = {"name": "Model budget", "detail": str(exc)}
+            elif await self._stop_for_gateway_budget(exc, trace):
+                self._finalize_browser_answer(trace)
+                mark_interrupted(self, "interrupted")
+                await self.emit("completed", trace)
+                return trace
             self._finalize_browser_answer(trace)
             mark_interrupted(self, "interrupted")
             log.error("agent_loop_error", error=str(exc))
@@ -1386,6 +1393,26 @@ class NativeAgentLoop(EventEmitter):
             return trace
         finally:
             self._running = False
+
+    async def _stop_for_gateway_budget(self, exc: BaseException, trace) -> bool:
+        """The hosted gateway refused for the month's budget: say so, and when it starts again,
+        instead of an error. Retrying or another model can't help (rune.llm.gateway_budget)."""
+        from rune.config import get_config
+        from rune.llm.gateway_budget import REASON, refusal
+
+        found = refusal(exc)
+        if found is None:
+            return False
+        message = found.message(get_config().general.locale)
+        log.info("gateway_budget_exhausted", code=found.code, resumes=found.resumes.isoformat())
+        self._record_completion_block("Model budget", message)
+        self._gateway_budget = found
+        self._last_answer_text = message
+        await self.emit("text_delta", message)
+        trace.reason = REASON
+        trace.final_step = self._step
+        trace.completion_check = {"name": "Model budget", "detail": message}
+        return True
 
     async def cancel(self) -> None:
         """Request cancellation of the running loop."""
@@ -3518,6 +3545,8 @@ class NativeAgentLoop(EventEmitter):
                     await self.emit("text_delta", self._last_answer_text)
                     trace.reason = "desktop_blocked"
                     trace.final_step = self._step
+                    break
+                if await self._stop_for_gateway_budget(exc, trace):
                     break
                 error_text = str(exc) or type(exc).__name__
                 if isinstance(exc, TimeoutError) and request_timeout is not None and request_timeout.expired():

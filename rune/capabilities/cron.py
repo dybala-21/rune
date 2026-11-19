@@ -620,7 +620,9 @@ async def _execute_cron_job(job: CronJob, *, approval_from: str | None = None, r
             await _settle_task(job, result, occurrence=occurrence)
         elif job.notify_channel and should_notify(job.policy, result, previous):
             output = result.get("output") or result.get("error") or result["status"]
-            if not result.get("verified"):
+            if result.get("status") == "model_budget":
+                output = result["error"]  # already says what happened and when it starts again
+            elif not result.get("verified"):
                 output = f"{result['status']}: {output}"
             await _send_to_channel(job.notify_channel, job.name, output, result.get("buttons"))
     except (asyncio.CancelledError, Exception) as exc:
