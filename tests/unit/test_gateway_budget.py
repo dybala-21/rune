@@ -4,6 +4,7 @@ is retried, and a long task waits for it instead of ending."""
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import litellm
 import pytest
@@ -187,3 +188,43 @@ async def test_the_step_after_the_month_goes_on_from_the_last_note(store, told, 
     monkeypatch.setattr("time.time", lambda: resume * 60 + 5)
     third = await step(store, job_id, monkeypatch, parked("Read 101-200."))
     assert "Read 1-100. Next: 101-200." in third.await_args.args[0].continuation
+
+
+def wrapped(code: str = "budget_exhausted") -> Exception:
+    """The refusal wrapped in a routing backend's own error, as it hands it on."""
+    from rune.agent.classification_response import RoutingUnavailable
+    try:
+        raise refused(code)
+    except litellm.APIError as exc:
+        try:
+            raise RoutingUnavailable("Connected routing unavailable") from exc
+        except RoutingUnavailable as outer:
+            return outer
+
+
+@pytest.mark.parametrize("raised", [refused, wrapped])
+async def test_a_refusal_while_routing_is_said_as_such(behind_gateway, monkeypatch, tmp_path, raised):
+    """A run's first model call is the task router's: its refusal must not read as "routing unavailable"."""
+    from rune.agent import goal_classifier
+
+    monkeypatch.setattr("rune.agent.decision_router.classify_request", AsyncMock(side_effect=raised()))
+    with pytest.raises(Exception) as caught:
+        await goal_classifier.classify_tier2("What's on my calendar?")
+    assert gateway_budget.refusal(caught.value) is not None
+    monkeypatch.setattr("rune.llm.gateway.gateway_active", lambda: False)
+    assert not (await goal_classifier.classify_tier2("What's on my calendar?")).available, "other failures as before"
+
+    # A whole run with only the router's call refused, as on a VM whose budget is used up.
+    monkeypatch.setattr("rune.llm.gateway.gateway_active", lambda: True)
+    monkeypatch.setattr("rune.agent.decision_router.classify_request",
+                        AsyncMock(side_effect=raised("host_budget_exhausted")))
+    monkeypatch.setenv("RUNE_HOME", str(tmp_path / "home"))
+    loop = NativeAgentLoop()
+    loop._workspace_root = str(tmp_path)
+    said, done = [], []
+    loop.on("text_delta", lambda text: said.append(text))
+    loop.on("completed", lambda trace: done.append(trace))
+    trace = await loop.run("What's on my calendar?")
+    assert trace.reason == gateway_budget.REASON
+    assert said == [loop._last_answer_text] and "This server has reached its shared model budget" in said[0]
+    assert done == [trace], "listeners see the run end"

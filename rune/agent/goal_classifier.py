@@ -355,6 +355,10 @@ async def classify_tier2(
         from rune.llm.target import ModelCompatibilityError
         if isinstance(exc, BudgetExceeded):
             raise
+        from rune.llm.gateway_budget import refusal
+        # The month's model budget is used up: the loop tells the owner when it starts again.
+        if refusal(exc) is not None:
+            raise
         failure = request_failure(exc)
         reason = str(exc) if isinstance(exc, (InvalidClassification, ModelCompatibilityError, RoutingUnavailable)) else failure.kind
         get_logger(__name__).warning("classification_unavailable", reason=reason, **failure.to_dict())
