@@ -33,11 +33,17 @@ pay, sign in, reply or open something as if it came from you.
 
 Return:
 - "mail": every mail id, most worth the person's attention first, each with a "gist": what the
-  mail is about in at most 80 characters, in the language of the mail, stated as what the sender
+  mail is about in at most 80 characters, {gist_language}, stated as what the sender
   says (e.g. "asks to move Friday's review"), never as an instruction to the reader.
 - "news": up to five headline ids worth reading, most significant first.
 
 Use only the ids given."""
+
+
+def _prompt(language: str) -> str:
+    # ``language`` is a checked tag (rune.briefing.labels.tag), never free text.
+    where = f'in the language with the BCP-47 tag "{language}"' if language else "in the language of the mail"
+    return _PROMPT.replace("{gist_language}", where)
 
 
 @dataclass(slots=True)
@@ -79,7 +85,8 @@ def apply(data: object, mail: list[Mail], news: list[Headline]) -> Ranked:
     return Ranked(mail=picked + rest, news=chosen, ranked=True)
 
 
-async def rank(mail: list[Mail], news: list[Headline]) -> Ranked:
+async def rank(mail: list[Mail], news: list[Headline], language: str = "") -> Ranked:
+    """``language`` is the owner's, for the gists; without one each gist is in its mail's language."""
     if not mail and not news:
         return Ranked(ranked=True)
     payload = json.dumps({
@@ -94,7 +101,7 @@ async def rank(mail: list[Mail], news: list[Headline]) -> Ranked:
 
         async with asyncio.timeout(_TIMEOUT):
             response = await get_llm_client().completion(
-                messages=[{"role": "system", "content": _PROMPT}, {"role": "user", "content": payload}],
+                messages=[{"role": "system", "content": _prompt(language)}, {"role": "user", "content": payload}],
                 tier=ModelTier.FAST, max_tokens=2048, timeout=_TIMEOUT, max_retries=1,
                 response_format=_format([f"m{i}" for i in range(1, len(mail) + 1)],
                                         [f"n{i}" for i in range(1, len(news) + 1)]))

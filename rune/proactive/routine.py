@@ -65,6 +65,8 @@ def claim_occurrence(job, scheduled_minute: int | None = None) -> tuple[Executio
 
 
 def should_notify(policy: RoutinePolicy, result: dict, previous: dict | None) -> bool:
+    if result.get("nothing_to_tell") is True and result.get("success") is True:
+        return False  # the run looked and found nothing to say: staying quiet is its answer
     if (result.get("status") == "model_budget" and previous is not None
             and previous.get("status") == "model_budget" and previous.get("error") == result.get("error")):
         return False  # the month's model budget is still used up: said once is enough

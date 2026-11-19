@@ -22,6 +22,8 @@ _SPACE = re.compile(r"\s+")
 
 LINK = "[link]"
 NUMBER = "[number]"
+# Zero-width joiners are spelling in Persian and the Indic scripts.
+_JOINERS = "\u200c\u200d"
 
 
 def _numbers(text: str) -> str:
@@ -34,7 +36,17 @@ def visible(text: str) -> str:
     text = _HIDDEN.sub(" ", text)
     text = html.unescape(_TAG.sub(" ", text))
     # Cf holds zero-width and bidirectional controls, which can hide or reorder what is shown.
-    return "".join(c for c in text if unicodedata.category(c) != "Cf")
+    return "".join(c for i, c in enumerate(text) if unicodedata.category(c) != "Cf" or _spells(text, i))
+
+
+def _spells(text: str, i: int) -> bool:
+    """Whether the character at ``i`` is a joiner between two letters of a script that writes with one.
+
+    Beside an ASCII character or a digit it goes like any other format character: there it spells
+    nothing, and could only split a link or a number so that the patterns above miss it.
+    """
+    return (text[i] in _JOINERS and 0 < i < len(text) - 1
+            and all(not c.isascii() and unicodedata.category(c)[0] in "LM" for c in (text[i - 1], text[i + 1])))
 
 
 def clean(text: object, limit: int = 200) -> str:
@@ -51,11 +63,11 @@ def clean(text: object, limit: int = 200) -> str:
 
 
 def sender(value: object) -> str:
-    """A mail's From header as a name and the sender's domain, e.g. "Kim (example.com)".
+    """A mail's From header as a name and the sender's domain, e.g. "Kim (example.com)"; "" without either.
 
     The domain is the part a lookalike can't fake in the display name, so it is always shown."""
     if not isinstance(value, str):
-        return "unknown sender"
+        return ""
     from email.utils import parseaddr
 
     name, address = parseaddr(value)
@@ -65,4 +77,4 @@ def sender(value: object) -> str:
     name = _numbers(_DOMAIN.sub(LINK, _EMAIL.sub(LINK, _URL.sub(LINK, name))))[:60]
     if name and domain:
         return f"{name} ({domain})"
-    return name or domain or "unknown sender"
+    return name or domain

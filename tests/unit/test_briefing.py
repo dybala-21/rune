@@ -42,10 +42,21 @@ def test_text_is_shown_without_hidden_markup_links_or_numbers(raw, shown):
     assert clean(raw) == shown
 
 
+def test_a_joiner_that_spells_a_word_stays_and_one_that_hides_a_link_or_number_goes():
+    joiner = "\u200c"
+    persian, hindi = f"می{joiner}خواهم", "क्\u200dष"
+    assert clean(f"{persian} {hindi}") == f"{persian} {hindi}", "Persian and Hindi are spelled with one"
+    assert sender(f"علی{joiner}رضا <ali@example.ir>") == f"علی{joiner}رضا (example.ir)"
+    assert clean(f"Call 010{joiner}2345{joiner}6789") == "Call [number]"
+    assert clean(f"٠١٠{joiner}٢٣٤٥{joiner}٦٧٨٩") == "[number]", "digits of any script"
+    assert clean(f"Go to kb-bank.exam{joiner}ple/login") == "Go to [link]"
+    assert clean(f"{joiner}می ا{joiner}{joiner}ب") == "می اب", "at an edge or doubled it joins nothing"
+
+
 def test_a_sender_is_shown_with_the_domain_it_really_came_from():
     assert sender('"KB Bank https://kb.example" <alerts@kb-bank-security.example>') == "KB Bank [link] (kb-bank-security.example)"
     assert sender("김철수 <kim@example.co.kr>") == "김철수 (example.co.kr)"
-    assert sender(None) == "unknown sender"
+    assert sender(None) == "", "the briefing names an unknown sender in the owner's language"
 
 
 # -- Facts from the APIs -------------------------------------------------------
@@ -222,24 +233,24 @@ def store(tmp_path, monkeypatch):
 
 
 async def test_one_call_schedules_it_and_another_moves_or_stops_it(store):
-    made = await briefing_tool.briefing_set(briefing_tool.BriefingSetParams(time="7:30"))
+    made = await briefing_tool.briefing_set(briefing_tool.BriefingSetParams(language="en", time="7:30"))
     assert made.success, made.error
     job = cron._row_to_cronjob(store.get_cron_job(made.metadata["id"]))
     assert (job.kind, job.schedule, job.notify_channel, job.policy.notify) == ("briefing", "30 7 * * *", "telegram", "always")
-    moved = await briefing_tool.briefing_set(briefing_tool.BriefingSetParams(time="06:45", days="weekdays"))
+    moved = await briefing_tool.briefing_set(briefing_tool.BriefingSetParams(language="en", time="06:45", days="weekdays"))
     assert moved.metadata["id"] == made.metadata["id"]
     assert store.get_cron_job(made.metadata["id"])["schedule"] == "45 6 * * 1-5"
-    await briefing_tool.briefing_set(briefing_tool.BriefingSetParams(enabled=False))
+    await briefing_tool.briefing_set(briefing_tool.BriefingSetParams(language="en", enabled=False))
     assert not store.get_cron_job(made.metadata["id"])["enabled"]
 
 
 def test_a_time_that_is_not_a_clock_time_is_refused():
     with pytest.raises(ValueError):
-        briefing_tool.BriefingSetParams(time="seven")
+        briefing_tool.BriefingSetParams(language="en", time="seven")
 
 
 async def test_editing_a_briefing_job_keeps_it_a_briefing(store):
-    made = await briefing_tool.briefing_set(briefing_tool.BriefingSetParams())
+    made = await briefing_tool.briefing_set(briefing_tool.BriefingSetParams(language="en"))
     await cron.cron_update(cron.CronUpdateParams(job_id=made.metadata["id"], schedule="0 8 * * *"))
     assert cron._row_to_cronjob(store.get_cron_job(made.metadata["id"])).kind == "briefing"
 
@@ -247,6 +258,7 @@ async def test_editing_a_briefing_job_keeps_it_a_briefing(store):
 async def test_the_scheduled_run_sends_the_briefing_with_its_buttons(store, monkeypatch):
     minute = int(time.time() // 60)
     made = await briefing_tool.briefing_set(briefing_tool.BriefingSetParams(
+        language="en",
         # The machine's local time, as fire() reads the schedule (CI runs in UTC).
         time=f"{datetime.fromtimestamp(minute * 60):%H:%M}"))
     composed = {"status": "completed", "success": True, "verified": True, "output": "Good morning.",

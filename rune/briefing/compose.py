@@ -1,9 +1,14 @@
-"""The briefing as one chat message: facts written by code, the model's gists beside them."""
+"""The briefing as one chat message: facts written by code, the model's gists beside them.
+
+The wording around the facts comes from ``labels`` (the owner's language); a date and a time are
+written as numbers, which read the same in any of them.
+"""
 
 from __future__ import annotations
 
 from datetime import datetime
 
+from rune.briefing.labels import ENGLISH
 from rune.briefing.rank import Ranked
 from rune.briefing.sources import Event, Fetched
 from rune.channels.types import LinkButton
@@ -13,37 +18,44 @@ MAX_MAIL_LINES = 8
 NEWS_BUTTONS = 3
 
 
-def _event(e: Event) -> str:
-    when = "All day" if e.all_day else f"{e.start:%H:%M}–{e.end:%H:%M}"
+def _event(e: Event, t: dict[str, str]) -> str:
+    when = t["all_day"] if e.all_day else f"{e.start:%H:%M}–{e.end:%H:%M}"
     where = f" · {e.location}" if e.location else ""
-    clash = "  (overlaps another event)" if e.conflict else ""
-    return f"• {when} {e.title}{where}{clash}"
+    clash = f"  {t['overlaps']}" if e.conflict else ""
+    return f"• {when} {e.title or t['no_title']}{where}{clash}"
 
 
-def _section(title: str, fetched: Fetched, lines: list[str], empty: str, label: str) -> list[str]:
+def _section(title: str, fetched: Fetched, lines: list[str], empty: str, missing: str, failed: str) -> list[str]:
     if fetched.missing:
-        return [title, f"{label} isn't connected." + (" Connect it with the button below." if fetched.connect_url else "")]
+        return [title, missing]
     if fetched.error:
-        return [title, f"{fetched.error}."]
+        return [title, failed]
     return [title, *(lines or [empty])]
 
 
-def compose(day: datetime, calendar: Fetched, mail: Fetched, ranked: Ranked) -> tuple[str, list[LinkButton]]:
+def _counted(title: str, count: int) -> str:
+    return f"{title} ({count})" if count else title
+
+
+def compose(day: datetime, calendar: Fetched, mail: Fetched, ranked: Ranked,
+            t: dict[str, str] = ENGLISH) -> tuple[str, list[LinkButton]]:
     events: list[Event] = calendar.items
-    parts = [f"Good morning. {day:%A, %d %B}", ""]
-    parts += _section(f"Today ({len(events)})" if events else "Today", calendar, [_event(e) for e in events],
-                      "Nothing on the calendar.", "Calendar")
+    below = f" {t['connect_below']}"
+    parts = [f"{t['greeting']} {day:%Y-%m-%d}", ""]
+    parts += _section(_counted(t["today"], len(events)), calendar, [_event(e, t) for e in events], t["no_events"],
+                      t["calendar_missing"] + (below if calendar.connect_url else ""), t["calendar_failed"])
     parts.append("")
     shown = ranked.mail[:MAX_MAIL_LINES]
-    lines = [f"• {m.sender}: {m.subject}" + (f" — {gist}" if gist else "") for m, gist in shown]
+    lines = [f"• {m.sender or t['unknown_sender']}: {m.subject or t['no_subject']}" + (f" — {gist}" if gist else "")
+             for m, gist in shown]
     if len(ranked.mail) > len(shown):
-        lines.append(f"…and {len(ranked.mail) - len(shown)} more in Gmail.")
-    parts += _section(f"Unread mail ({len(ranked.mail)})" if ranked.mail else "Unread mail", mail, lines,
-                      "No new unread mail.", "Gmail")
+        lines.append(t["more_mail"].format(count=len(ranked.mail) - len(shown)))
+    parts += _section(_counted(t["mail"], len(ranked.mail)), mail, lines, t["no_mail"],
+                      t["mail_missing"] + (below if mail.connect_url else ""), t["mail_failed"])
     if ranked.news:
-        parts += ["", "Headlines", *(f"• {h.title}" + (f" ({h.source})" if h.source else "") for h in ranked.news)]
-    buttons = [LinkButton(f"Connect {label}", f.connect_url)
-               for label, f in (("Calendar", calendar), ("Gmail", mail)) if f.missing and f.connect_url]
+        parts += ["", t["headlines"], *(f"• {h.title}" + (f" ({h.source})" if h.source else "") for h in ranked.news)]
+    buttons = [LinkButton(t[label], f.connect_url)
+               for label, f in (("connect_calendar", calendar), ("connect_mail", mail)) if f.missing and f.connect_url]
     buttons += [LinkButton(_short(h.title), h.url) for h in ranked.news[:NEWS_BUTTONS]]
     return "\n".join(parts).strip(), buttons
 
