@@ -43,6 +43,9 @@ class ClassificationResult:
     needs_web_evidence: bool = False
     needs_current_source: bool = False
     lookup_only: bool = False
+    # Sets up, changes, stops or lists something done later or repeatedly; whatever the goal type,
+    # the scheduling tools are then offered (NativeAgentLoop._select_tools).
+    schedules: bool = False
     source_output: str = "none"  # none / verbatim / derived / summary
     browser_effect: str = "change"  # view / edit / change
     browser_requirements: dict | None = None
@@ -123,6 +126,7 @@ def to_wire(c: ClassificationResult) -> str:
         "needs_web_evidence": c.needs_web_evidence,
         "needs_current_source": c.needs_current_source,
         "lookup_only": c.lookup_only,
+        "schedules": c.schedules,
         "source_output": c.source_output,
         "browser_effect": c.browser_effect,
         "browser_requirements": c.browser_requirements,
@@ -211,6 +215,12 @@ request. A casual concern can use current facts without predicting the future.
 Expressing a worry is not itself a request for prediction or advice.
 Leave it false for requested causal analysis, predictions, recommendations, advice,
 broad comparisons or unclear scope; never set it without needs_web_evidence.
+Assess schedules separately from goal_type: true when the request is about something the
+assistant does later or repeatedly without being asked each time (a reminder, a recurring
+check or report, a daily briefing). That covers setting one up, changing when or how it is
+done, stopping it, and asking which ones are set. False for work to do now, including
+reading a calendar or answering about dates. When that is all the request is, goal_type
+is chat and schedules is still true.
 
 Intent flags may overlap; otherwise use [].
 coding: the requested outcome concerns software implementation, debugging, tests,
@@ -319,6 +329,7 @@ async def classify_tier2(
             needs_web_evidence=data["needs_web_evidence"],
             needs_current_source=data["needs_current_source"],
             lookup_only=data["lookup_only"],
+            schedules=data.get("schedules", False),
             source_output=data["source_output"],
             browser_effect=data["browser_effect"],
             browser_requirements=data.get("browser_requirements"),
