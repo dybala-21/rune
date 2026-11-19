@@ -624,7 +624,10 @@ async def _execute_cron_job(job: CronJob, *, approval_from: str | None = None, r
                 output = result["error"]  # already says what happened and when it starts again
             elif not result.get("verified"):
                 output = f"{result['status']}: {output}"
-            await _send_to_channel(job.notify_channel, job.name, output, result.get("buttons"))
+            # A run may name its own message (the briefing does, in the owner's language).
+            title = result.get("title")
+            await _send_to_channel(job.notify_channel, title if isinstance(title, str) and title else job.name,
+                                   output, result.get("buttons"))
     except (asyncio.CancelledError, Exception) as exc:
         cancelled = isinstance(exc, asyncio.CancelledError)
         if decision == "claimed":

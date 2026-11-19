@@ -60,6 +60,7 @@ class Fetched:
     # The account isn't connected; ``connect_url`` is where the owner connects it, if there is a page.
     missing: bool = False
     connect_url: str = ""
+    # Why it couldn't be read, for the log; the briefing says so in its own words (labels).
     error: str = ""
 
 
@@ -118,7 +119,7 @@ def events_of(answer: Any, zone: tzinfo) -> list[Event]:
         start, end = _when(item.get("start"), zone), _when(item.get("end"), zone)
         if start is None or end is None:
             continue
-        event = Event(title=clean(item.get("summary"), 120) or "(no title)", start=start[0], end=end[0],
+        event = Event(title=clean(item.get("summary"), 120), start=start[0], end=end[0],
                       all_day=start[1], location=clean(item.get("location"), 80))
         found.append((event, item.get("transparency") != "transparent"))
     timed = [e for e, busy in found if busy and not e.all_day]
@@ -141,7 +142,7 @@ def mail_of(answer: Any) -> Mail | None:
         received = datetime.fromtimestamp(int(str(answer.get("internalDate"))) / 1000).astimezone()
     except (TypeError, ValueError):
         pass
-    return Mail(id=answer["id"], sender=sender(headers.get("from")), subject=clean(headers.get("subject"), 120) or "(no subject)",
+    return Mail(id=answer["id"], sender=sender(headers.get("from")), subject=clean(headers.get("subject"), 120),
                 snippet=clean(answer.get("snippet"), 300), important="IMPORTANT" in (answer.get("labelIds") or []),
                 received=received)
 
