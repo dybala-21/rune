@@ -6,7 +6,7 @@ import hashlib
 import json
 import time
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import AwareDatetime, BaseModel, Field, field_validator
 
@@ -60,8 +60,28 @@ def claim_occurrence(job, scheduled_minute: int | None = None) -> tuple[Executio
     store = ExecutionStore(rune_data() / "routine-executions.db")
     minute = int(time.time() // 60) if scheduled_minute is None else scheduled_minute
     occurrence = f"cron:{job.id}:{minute}"
-    decision = store.claim(occurrence, task_fingerprint(job), 1000, resource=f"cron:{job.id}")
+    # A job run by code only reads and reports, so a run of it that stopped part way holds nothing back.
+    decision = store.claim(occurrence, task_fingerprint(job), 1000, resource=f"cron:{job.id}",
+                           rerunnable=bool(job.kind))
     return store, occurrence, decision
+
+
+def error_text(job: Any, exc: BaseException) -> str:
+    """What a failed run says went wrong. A job run by code reads mail and pages, and an error's own
+    wording can repeat them: only the kind of error is said, the rest stays in the log."""
+    return type(exc).__name__ if job.kind else str(exc)
+
+
+def rerunnable(job: Any, result: dict[str, Any]) -> dict[str, Any]:
+    """A run that stopped part way holds its job back until the owner has looked at what it did
+    (ExecutionStore.finish). A job run by code only reads and reports, so there is nothing to look
+    at: it is recorded as failed and runs again at its next time."""
+    if not job.kind or not (result.get("execution_unknown") or result.get("status") == "interrupted"):
+        return result
+    settled = {key: value for key, value in result.items() if key != "execution_unknown"}
+    if settled.get("status") == "interrupted":
+        settled.update(status="failed", error="It stopped before it finished. It runs again at its next scheduled time.")
+    return settled
 
 
 def should_notify(policy: RoutinePolicy, result: dict, previous: dict | None) -> bool:
