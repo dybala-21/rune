@@ -139,7 +139,8 @@ class CronCreateParams(BaseModel):
     command: str = Field(default="", description="Bash command to execute (use 'goal' for agent tasks)")
     goal: str = Field(
         default="",
-        description="Agent goal to execute (e.g., 'Find Steam deals and summarize'). Runs a full agent loop.",
+        description="What one run does, written as a single piece of work to do then (e.g., 'Find Steam deals and "
+                    "summarize'). Leave out when and how often: `schedule` says that. Runs a full agent loop.",
     )
     notify_channel: str = Field(
         default="",
@@ -164,7 +165,7 @@ class CronUpdateParams(BaseModel):
     job_id: str = Field(description="ID of the cron job to update")
     schedule: str | None = Field(default=None, description="New cron schedule expression, in this machine's local time")
     command: str | None = Field(default=None, description="New command to execute")
-    goal: str | None = Field(default=None, description="New agent goal")
+    goal: str | None = Field(default=None, description="New agent goal: what one run does, without when or how often")
     notify_channel: str | None = Field(default=None, description="Change notification channel (telegram/discord/slack/tui)")
     enabled: bool | None = Field(default=None, description="Enable or disable the job")
     policy: RoutinePolicy | None = None
