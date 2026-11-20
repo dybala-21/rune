@@ -471,7 +471,13 @@ async def _execute_cron_job(job: CronJob, *, approval_from: str | None = None, r
     from rune.agent.request_budget import BudgetExceeded
     from rune.agent.timing import capture_timing, timing_snapshot
     from rune.proactive.long_task import can_run, is_task, most_steps, step_brief, token_limit
-    from rune.proactive.routine import claim_occurrence, run_while_current, should_notify
+    from rune.proactive.routine import (
+        claim_occurrence,
+        error_text,
+        rerunnable,
+        run_while_current,
+        should_notify,
+    )
     from rune.proactive.routine_budget import budget_owner
     from rune.proactive.routine_context import continuation
     from rune.proactive.routine_observation import changes, observe, reusable
@@ -602,8 +608,10 @@ async def _execute_cron_job(job: CronJob, *, approval_from: str | None = None, r
                           "execution_unknown": True, "output": "",
                           "error": "The scheduled task exceeded its execution timeout. Inspect its effects before resuming."}
             except Exception as exc:
+                if job.kind:
+                    log.warning("code_job_failed", job_id=job.id, kind=job.kind, error=type(exc).__name__, exc_info=True)
                 result = {"status": "failed", "verified": False, "execution_unknown": True,
-                          "output": "", "error": str(exc)}
+                          "output": "", "error": error_text(job, exc)}
             result["timings"] = timing_snapshot(measured)
             if measured["budget_blocked"] and not result.get("execution_unknown"):
                 result.update(status="budget_exhausted", success=False, verified=False, error=measured["budget_blocked"])
@@ -616,6 +624,7 @@ async def _execute_cron_job(job: CronJob, *, approval_from: str | None = None, r
                          or any(item["state"] != "present" for group in ("inputs", "outputs") for item in after[group].values()))):
                 result.update(status="unverified", success=False, verified=False,
                               error="Tracked files are missing, changed during execution or could not be inspected; the result needs review.")
+        result = rerunnable(job, result)
         claims.finish(occurrence, result)
         if is_task(job.schedule):
             await _settle_task(job, result, occurrence=occurrence)
@@ -634,10 +643,11 @@ async def _execute_cron_job(job: CronJob, *, approval_from: str | None = None, r
         if decision == "claimed":
             stopped = {"status": ("interrupted" if started else "cancelled") if cancelled else "failed",
                        "success": False, "verified": False, "not_started": not started, "execution_unknown": started,
-                       "output": result.get("output", ""), "error": "Task cancelled" if cancelled else str(exc),
+                       "output": result.get("output", ""), "error": "Task cancelled" if cancelled else error_text(job, exc),
                        "workspace": job.policy.workspace, "routine_goal": job.goal, "routine_command": job.command}
             if measured is not None:
                 stopped["timings"] = timing_snapshot(measured)
+            stopped = rerunnable(job, stopped)
             claims.finish(occurrence, stopped)
             if is_task(job.schedule):
                 # Stopped part way: it doesn't go on by itself. Told unless the machine is stopping.
