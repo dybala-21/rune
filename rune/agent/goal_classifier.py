@@ -286,8 +286,13 @@ async def classify_tier2(
     previous_goal_type: str = "",
     browser_state: dict | None = None,
     saved_tasks: list[dict] | None = None,
+    scheduled_run: bool = False,
 ) -> ClassificationResult:
-    """Classify outcome and surface; compare domains when prior goal and type are supplied."""
+    """Classify outcome and surface; compare domains when prior goal and type are supplied.
+
+    ``scheduled_run`` is a fact from the scheduler, not something read from the request: the request
+    is the stored task of a job it is running now.
+    """
     has_previous = bool(previous_goal and previous_goal_type)
     from rune.agent.decision_router import classify_request
     from rune.utils.logger import get_logger
@@ -305,9 +310,17 @@ async def classify_tier2(
                        "Do not inherit its freshness requirement: repeating the SAME previously observed record with "
                        "has_sources=true is chat with needs_web_evidence=false and needs_current_source=false, even "
                        "when the original lookup asked for the latest value. A request for a NEW current observation still needs fresh sources.")
+        if scheduled_run:
+            # A stored task says how often it runs ("every morning, check ..."), which reads as a
+            # request to set one up; a run that takes it that way looks for a scheduling tool
+            # instead of doing the work.
+            system += ("\nscheduled_run means the scheduler is running this request now, as one run of a task that "
+                       "was set up earlier. Its schedule already exists and is not part of the request: classify "
+                       "the work a single run does, as work to do now, with schedules false.")
         import json
         content = json.dumps({
             "request_to_classify": goal,
+            **({"scheduled_run": True} if scheduled_run else {}),
             "previous_request": previous_goal[:200] if has_previous else "",
             "previous_goal_type": previous_goal_type if has_previous else "",
             **({"browser_state": browser_state} if browser_state is not None else {}),
@@ -378,6 +391,7 @@ async def classify_goal(
     previous_goal_type: str = "",
     browser_state: dict | None = None,
     saved_tasks: list[dict] | None = None,
+    scheduled_run: bool = False,
 ) -> ClassificationResult:
     """Classify the request; continuation checks require the previous goal and type."""
     return await classify_tier2(
@@ -386,4 +400,5 @@ async def classify_goal(
         previous_goal_type=previous_goal_type,
         browser_state=browser_state,
         saved_tasks=saved_tasks,
+        scheduled_run=scheduled_run,
     )

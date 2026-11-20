@@ -42,6 +42,21 @@ def current_background_task() -> BackgroundTask | None:
     return _current_task.get()
 
 
+# Told to a run the scheduler starts. Its stored task names its own schedule, and without this the
+# run takes that as something still to arrange.
+SCHEDULED_RUN = (
+    "The scheduler started this run. The request is the stored task of a job the owner set up earlier, "
+    "and this is one run of it: do the work it describes once, now. Its schedule already exists and the "
+    "scheduler starts the next run, so arranging, changing or confirming a schedule is not part of this run."
+)
+
+
+def scheduled_run() -> bool:
+    """Whether the scheduler started the current run from a job's stored task."""
+    task = _current_task.get()
+    return task is not None and task.source == "cron"
+
+
 async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str, Any]:
     from rune.daemon.maintenance import check_storage
     check_storage()
@@ -131,6 +146,8 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
                                                      "completedAction": result.get("approved_action")}, journal.previous)
                 if task.preamble:
                     continuation = f"{task.preamble}\n{continuation}" if continuation else task.preamble
+                if task.source == "cron":
+                    continuation = f"{SCHEDULED_RUN}\n{continuation}" if continuation else SCHEDULED_RUN
                 extra = {"extra_system_context": continuation} if continuation else {}
                 if classification is not None:
                     extra["classification"] = classification

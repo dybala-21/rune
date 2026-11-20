@@ -37,6 +37,30 @@ async def _count_classify_calls(**run_kwargs) -> int:
     return calls["n"]
 
 
+async def test_the_loop_tells_the_router_about_the_scheduler_only_in_a_run_it_started():
+    from rune.agent import background
+
+    seen = []
+
+    async def fake_classify(goal, **kwargs):
+        seen.append(kwargs.get("scheduled_run", False))
+        return _clf()
+
+    async def run():
+        with patch("rune.agent.loop.classify_goal", side_effect=fake_classify), \
+             patch.object(NativeAgentLoop, "_execute_loop", new=AsyncMock(return_value=CompletionTrace(reason="test"))):
+            await NativeAgentLoop().run("Every morning, report the price")
+
+    for source in ("cron", "task"):
+        scope = background._current_task.set(background.BackgroundTask("Every morning, report the price", source))
+        try:
+            await run()
+        finally:
+            background._current_task.reset(scope)
+    await run()
+    assert seen == [True, False, False]
+
+
 class TestClassificationReuse:
     async def test_reuses_passed_classification_single_turn(self):
         # classification supplied + no history -> no redundant classify call.

@@ -1155,6 +1155,7 @@ class NativeAgentLoop(EventEmitter):
                             _prev_goal = msg["content"]
                             break
                 with timing_phase("classification"):
+                    from rune.agent.background import scheduled_run
                     from rune.agent.task_context import routing_context
 
                     classification = await classify_goal(
@@ -1163,6 +1164,7 @@ class NativeAgentLoop(EventEmitter):
                         previous_goal_type=_prev_goal_type,
                         browser_state=browser_state,
                         saved_tasks=routing_context(message_history or []),
+                        **({"scheduled_run": True} if scheduled_run() else {}),
                     )
 
             if not getattr(classification, "available", True):
