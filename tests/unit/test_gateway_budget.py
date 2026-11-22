@@ -58,13 +58,18 @@ def test_it_starts_again_on_the_1st_and_says_so_in_the_owner_s_language():
     found = gateway_budget.BudgetRefusal("budget_exhausted", gateway_budget.next_month(NOV))
     assert found.resumes == datetime(2026, 12, 1, tzinfo=UTC)
     assert gateway_budget.next_month(datetime(2026, 12, 31, 23, 59, tzinfo=UTC)) == datetime(2027, 1, 1, tzinfo=UTC)
-    assert found.message() == ("You've used this month's budget for your Rune's models, so I can't answer right "
-                               "now. It starts again on December 1 (UTC).")
-    assert found.message("ko-KR") == "이번 달 모델 사용 예산을 다 써서 지금은 답할 수 없어요. 12월 1일 09:00(한국 시간)부터 다시 쓸 수 있어요."
+    from zoneinfo import ZoneInfo
+    seoul, new_york = ZoneInfo("Asia/Seoul"), ZoneInfo("America/New_York")
+    assert found.message(zone=UTC) == ("You've used this month's budget for your Rune's models, so I can't answer "
+                                       "right now. It starts again on December 1 at 00:00 (UTC).")
+    assert found.message("ko-KR", seoul) == ("이번 달 모델 사용 예산을 다 써서 지금은 답할 수 없어요. "
+                                             "12월 1일 09:00(한국 시간)부터 다시 쓸 수 있어요.")
+    assert "November 30 at 19:00 (EST)" in found.message("en", new_york), "in the owner's own zone"
+    assert found.message("ja", seoul).startswith("You've used"), "a language without a catalog reads English"
     host = gateway_budget.BudgetRefusal("host_budget_exhausted", found.resumes)
-    assert "This server has reached its shared model budget" in host.message()
-    assert "이 서버의 이번 달 전체" in host.message("ko")
-    assert found.waiting().endswith("This task waits until then and goes on from where it was.")
+    assert "This server has reached its shared model budget" in host.message(zone=UTC)
+    assert "이 서버의 이번 달 전체" in host.message("ko", seoul)
+    assert found.waiting(zone=UTC).endswith("This task waits until then and goes on from where it was.")
     assert found.resume_minute * 60 == int(found.resumes.timestamp())
 
 
