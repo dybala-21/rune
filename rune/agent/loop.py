@@ -1980,6 +1980,8 @@ class NativeAgentLoop(EventEmitter):
             elif cap_name == "web_fetch":
                 evidence.web_fetches += int(web_grounding.observe(cap_name, _last_tool_params, result))
                 self._stall.web_fetch_count += 1
+            elif cap_name == "watch_set":
+                evidence.web_fetches += int(web_grounding.observe(cap_name, _last_tool_params, result))
             elif cap_name == "connector_request":
                 if _last_tool_params.get("method", "GET") == "GET":
                     evidence.reads += int(result.success)

@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from rune.capabilities.registry import CapabilityRegistry
 from rune.capabilities.types import CapabilityDefinition
-from rune.proactive.routine import RoutinePolicy
+from rune.proactive.routine import RoutinePolicy, code_job
 from rune.types import CapabilityResult, Domain, RiskLevel
 from rune.utils.logger import get_logger
 
@@ -40,7 +40,7 @@ class CronJob:
     task: dict | None = field(default=None, compare=False)
     # What a long task's step is told about the task, ahead of everything else (`step_brief`).
     preamble: str = field(default="", compare=False)
-    # Run by code instead of bash or an agent: "briefing" (rune.briefing.job).
+    # Run by code instead of bash or an agent: "briefing" or "watch" (rune.proactive.routine.code_job).
     kind: str = ""
 
     @property
@@ -660,11 +660,7 @@ async def _execute_cron_job(job: CronJob, *, approval_from: str | None = None, r
 
 
 def _executor(job: CronJob):
-    if job.kind == "briefing":
-        from rune.briefing.job import run_briefing
-
-        return run_briefing
-    return _execute_goal_job if job.goal else _execute_bash_job
+    return code_job(job.kind) or (_execute_goal_job if job.goal else _execute_bash_job)
 
 
 async def _execute_bash_job(job: CronJob) -> dict:
@@ -927,15 +923,18 @@ def register_cron_capabilities(registry: CapabilityRegistry) -> None:
     """Register cron capabilities, and the long-task ones (rune.capabilities.task_tools)."""
     from rune.capabilities.briefing import register_briefing_capabilities
     from rune.capabilities.task_tools import register_task_capabilities
+    from rune.capabilities.watch import register_watch_capabilities
 
     register_task_capabilities(registry)
     register_briefing_capabilities(registry)
+    register_watch_capabilities(registry)
     registry.register(CapabilityDefinition(
         name="cron_create",
         description=(
             "Create a scheduled cron job. Use 'goal' for agent tasks "
             "(e.g., 'find Steam deals') and 'notify_channel' to send results "
-            "to Telegram/Discord/Slack. Use 'command' for bash commands."
+            "to Telegram/Discord/Slack. Use 'command' for bash commands. To tell the owner "
+            "when a price on a page changes, use watch_set, not this."
         ),
         domain=Domain.SCHEDULE,
         risk_level=RiskLevel.MEDIUM,

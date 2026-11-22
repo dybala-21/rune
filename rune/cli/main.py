@@ -401,6 +401,8 @@ def _handle_non_interactive(
 
         ctx = await prepare_agent_context(PrepareContextOptions(
             goal=message, channel="cli", conversation_id=conv_id or "",
+            # One attempt of several is handed its message by the run that started it.
+            owner_text=None if _throwaway else message,
         ), conversation_manager=conv_manager)
 
         # Use one goal type for rule injection and learning.
@@ -694,6 +696,7 @@ def _simple_repl(model: str | None = None, provider: str | None = None) -> None:
                 goal=goal,
                 channel="tui",
                 conversation_id=conv_state["id"],
+                owner_text=goal,
             ),
             conversation_manager=conv_manager,
         )

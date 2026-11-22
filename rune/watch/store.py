@@ -82,8 +82,10 @@ class Store:
             watching = self._db.execute("SELECT COUNT(*) FROM items WHERE status = 'watching'").fetchone()[0]
             if watching >= MAX_WATCHING:
                 raise TooMany
+            # The reading it starts from is that day's read: the page is not asked again the same day.
             item = Item(id=0, url=url, fetch_url=fetch_url, host=host, label=label, tell_when=tell_when, below=below,
-                        told=price, told_at=now, renewed_at=now, last_read=price, last_read_at=now)
+                        told=price, told_at=now, renewed_at=now, last_read=price, last_read_at=now,
+                        read_day=now.date())
             columns = ("url", "host", *_SAVED)
             cursor = self._db.execute(
                 f"INSERT INTO items ({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})",
@@ -113,14 +115,31 @@ class Store:
     def save(self, item: Item) -> bool:
         """Write the item back. False when it was saved by someone else since this copy was read
         (the owner changed it while its page was being read): nothing is written, and the copy is stale."""
+        if not self._write(item):
+            return False
+        item.version += 1
+        return True
+
+    def save_all(self, items: list[Item]) -> list[Item]:
+        """Write several items back as one change, so a run's readings are kept whole or not at all.
+        Returns the ones written; an item saved by someone else since is left out, as in ``save``."""
+        self._db.execute("BEGIN IMMEDIATE")
+        try:
+            written = [item for item in items if self._write(item)]
+            self._db.execute("COMMIT")
+        except BaseException:
+            self._db.execute("ROLLBACK")
+            raise
+        for item in written:
+            item.version += 1
+        return written
+
+    def _write(self, item: Item) -> bool:
         assignments = ", ".join(f"{column} = ?" for column in _SAVED)
         cursor = self._db.execute(
             f"UPDATE items SET {assignments}, version = version + 1 WHERE id = ? AND version = ?",
             (*_values(item), item.id, item.version))
-        if cursor.rowcount != 1:
-            return False
-        item.version += 1
-        return True
+        return cursor.rowcount == 1
 
     def observed(self, item_id: int, at: datetime, *, http_status: int = 0, price: Price | None = None,
                  offers: int = 0, source: str = "", failure: str = "") -> None:

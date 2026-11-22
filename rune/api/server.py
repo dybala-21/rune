@@ -544,6 +544,7 @@ def create_app() -> Any:
                     pinned_cwd=workspace,
                     attachments=attachments or [],
                     conversation_id=conv_id or "",
+                    owner_text=goal,
                 ),
                 conversation_manager=conv_manager,
             )
@@ -839,7 +840,7 @@ def create_app() -> Any:
             # 1. Prepare agent context (loads prior turns as history)
             agent_ctx = await prepare_agent_context(
                 PrepareContextOptions(
-                    goal=goal, channel="web", conversation_id=conv_id or "",
+                    goal=goal, channel="web", conversation_id=conv_id or "", owner_text=goal,
                 ),
                 conversation_manager=conv_manager,
             )

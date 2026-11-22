@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from string import Formatter
 from typing import Any
 
@@ -60,6 +61,20 @@ it works for, and about as short as the English. Keep every {placeholder} exactl
 product names (Gmail, Calendar) as they are, and add nothing: no numbers, links or notes."""
 
 
+@dataclass(frozen=True, slots=True)
+class Wording:
+    """One list of fixed labels: its English, what the translator is told about it, and the names
+    its translations are kept and asked for under."""
+
+    english: dict[str, str]
+    prompt: str
+    kept: str
+    schema: str
+
+
+BRIEFING = Wording(ENGLISH, _PROMPT, "labels", "briefing_labels")
+
+
 def tag(value: object) -> str:
     """A language tag in its kept form, or "" when the value isn't one."""
     return value.strip().lower() if isinstance(value, str) and _TAG.fullmatch(value.strip()) else ""
@@ -86,71 +101,73 @@ def set_language(value: str) -> str:
     return chosen
 
 
-def _source() -> str:
-    return hashlib.sha256(json.dumps(ENGLISH, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+def _source(english: dict[str, str]) -> str:
+    return hashlib.sha256(json.dumps(english, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
 def _fields(text: str) -> set[str]:
     return {name for _, name, _, _ in Formatter().parse(text) if name is not None}
 
 
-def checked(data: object) -> dict[str, str]:
+def checked(data: object, english: dict[str, str] = ENGLISH) -> dict[str, str]:
     """The translated labels if every one can stand in for its English label; raises ValueError otherwise."""
-    if not isinstance(data, dict) or set(data) != set(ENGLISH):
+    if not isinstance(data, dict) or set(data) != set(english):
         raise ValueError("keys")
     labels: dict[str, str] = {}
-    for key, english in ENGLISH.items():
+    for key, source in english.items():
         label = clean(data[key], 400)
         try:
             fields = _fields(label)
         except ValueError as exc:
             raise ValueError(key) from exc
         # A label carries no fact: a number, a link or another placeholder in it is the model's own.
-        if (not label or len(label) > max(40, len(english) * 4) or LINK in label or NUMBER in label
-                or fields != _fields(english) or any(c.isdigit() for c in label)):
+        if (not label or len(label) > max(40, len(source) * 4) or LINK in label or NUMBER in label
+                or fields != _fields(source) or any(c.isdigit() for c in label)):
             raise ValueError(key)
         labels[key] = label
     return labels
 
 
-async def _translate(language_tag: str) -> dict[str, str]:
+async def _translate(language_tag: str, wording: Wording) -> dict[str, str]:
     from rune.agent.classification_response import decode_object
     from rune.llm.client import get_llm_client
     from rune.types import ModelTier
 
-    schema: dict[str, Any] = {"type": "object", "additionalProperties": False, "required": list(ENGLISH),
-                              "properties": {key: {"type": "string"} for key in ENGLISH}}
+    english = wording.english
+    schema: dict[str, Any] = {"type": "object", "additionalProperties": False, "required": list(english),
+                              "properties": {key: {"type": "string"} for key in english}}
     async with asyncio.timeout(_TIMEOUT):
         response = await get_llm_client().completion(
-            messages=[{"role": "system", "content": _PROMPT},
-                      {"role": "user", "content": json.dumps({"language": language_tag, "labels": ENGLISH},
+            messages=[{"role": "system", "content": wording.prompt},
+                      {"role": "user", "content": json.dumps({"language": language_tag, "labels": english},
                                                              ensure_ascii=False)}],
             tier=ModelTier.FAST, max_tokens=2048, timeout=_TIMEOUT, max_retries=1,
-            response_format={"type": "json_schema", "json_schema": {"name": "briefing_labels", "strict": True,
+            response_format={"type": "json_schema", "json_schema": {"name": wording.schema, "strict": True,
                                                                     "schema": schema}})
-    return checked(decode_object(response))
+    return checked(decode_object(response), english)
 
 
-async def load(language_tag: str) -> dict[str, str]:
+async def load(language_tag: str, wording: Wording = BRIEFING) -> dict[str, str]:
     """The labels in ``language_tag``; English when it is English, unset, or can't be had."""
     language_tag = tag(language_tag)
     if not language_tag or language_tag.split("-", 1)[0] == "en":
-        return ENGLISH
-    name, source = f"labels-{language_tag}", _source()
+        return wording.english
+    name, source = f"{wording.kept}-{language_tag}", _source(wording.english)
     saved = kept.read(name)
     if saved.get("source") == source:
         try:
-            return checked(saved.get("labels"))
+            return checked(saved.get("labels"), wording.english)
         except ValueError as exc:
-            log.warning("briefing_labels_unusable", language=language_tag, label=str(exc))
+            log.warning("briefing_labels_unusable", labels=wording.kept, language=language_tag, label=str(exc))
     try:
-        labels = await _translate(language_tag)
+        labels = await _translate(language_tag, wording)
     except Exception as exc:
-        # Not kept, so the next briefing asks again.
-        log.warning("briefing_labels_failed", language=language_tag, error=type(exc).__name__, label=str(exc)[:40])
-        return ENGLISH
+        # Not kept, so the next message asks again.
+        log.warning("briefing_labels_failed", labels=wording.kept, language=language_tag,
+                    error=type(exc).__name__, label=str(exc)[:40])
+        return wording.english
     try:
         kept.write(name, {"source": source, "labels": labels})
     except OSError as exc:
-        log.warning("briefing_labels_not_kept", language=language_tag, error=type(exc).__name__)
+        log.warning("briefing_labels_not_kept", labels=wording.kept, language=language_tag, error=type(exc).__name__)
     return labels

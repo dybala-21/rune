@@ -46,7 +46,7 @@ class Item:
     last_read: Price | None = None
     last_read_at: datetime | None = None
     status: str = "watching"  # "watching" | "ended"
-    ended_why: str = ""
+    ended_why: str = ""  # "gone" | "unreadable" | "expired" | "stopped"
     ended_at: datetime | None = None
     # Goes up with every save, so a save from a copy read before another save is refused.
     version: int = 0
