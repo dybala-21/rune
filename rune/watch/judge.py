@@ -80,13 +80,20 @@ def settle(item: Item, now: datetime, read: str, outcome: Price | str) -> list[E
 
 
 def renew(item: Item, now: datetime, price: Price, *, tell_when: str, below: Decimal | None, label: str) -> None:
-    """Start the item again from a reading just shown to the owner: that is now the price they know."""
+    """Start the item again from a reading just shown to the owner: that is now the price they know,
+    and that day's read. ``now`` is in the owner's time zone."""
     item.tell_when, item.below, item.label = tell_when, below, label
     item.told, item.told_at, item.renewed_at = price, now, now
-    item.last_read, item.last_read_at = price, now
+    item.last_read, item.last_read_at, item.read_day = price, now, now.date()
     item.failed_days = item.counted_days = item.gone_days = 0
     item.told_failure = False
     item.status, item.ended_why, item.ended_at = "watching", "", None
+    _drop_candidate(item)
+
+
+def stop(item: Item, now: datetime) -> None:
+    """End the watch because the owner said so. Nothing is told: they know."""
+    item.status, item.ended_why, item.ended_at = "ended", "stopped", now
     _drop_candidate(item)
 
 

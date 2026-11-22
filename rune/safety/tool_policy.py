@@ -86,7 +86,7 @@ def is_mcp_write_operation(cap_name: str) -> bool:
 # Strict mode also asks before network reads and browser navigation.
 _NETWORK_READ_CAPS = frozenset({
     "web_search", "browser_navigate", "browser_observe", "browser_extract",
-    "browser_find", "browser_screenshot", "browser_discover_apis",
+    "browser_find", "browser_screenshot", "browser_discover_apis", "watch_set",
 })
 # Browser input needs approval in strict mode: a click may submit a form.
 _NETWORK_ACT_CAPS = frozenset({

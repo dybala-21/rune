@@ -66,6 +66,19 @@ def claim_occurrence(job, scheduled_minute: int | None = None) -> tuple[Executio
     return store, occurrence, decision
 
 
+def code_job(kind: str) -> Any:
+    """What runs a job marked with ``kind`` in place of an agent or a shell; None when nothing does."""
+    if kind == "briefing":
+        from rune.briefing.job import run_briefing
+
+        return run_briefing
+    if kind == "watch":
+        from rune.watch.job import run_watch
+
+        return run_watch
+    return None
+
+
 def error_text(job: Any, exc: BaseException) -> str:
     """What a failed run says went wrong. A job run by code reads mail and pages, and an error's own
     wording can repeat them: only the kind of error is said, the rest stays in the log."""

@@ -6,7 +6,7 @@ from decimal import Decimal
 import pytest
 
 from rune.watch.item import Ended, Failing, Item, Price, Told
-from rune.watch.judge import due, meets, renew, settle
+from rune.watch.judge import due, meets, renew, settle, stop
 
 START = datetime(2026, 11, 20, 9, 0, tzinfo=UTC)
 
@@ -210,3 +210,12 @@ def test_setting_an_item_again_starts_from_the_price_just_shown():
         won(120), Decimal(100), "코트", 0, at(4))
     # 95 is under the new target and under the 120 the owner was just shown.
     assert page.wake([(at(5), won(95)), (at(5, 10), won(95))]) == [(at(5, 10), [Told(before=won(120), now=won(95))])]
+
+
+def test_a_watch_the_owner_stops_ends_quietly_and_drops_what_was_waiting():
+    page = Page(watch())
+    page.wake([(at(1), won(90))])
+    stop(page.item, at(1, 9, 30))
+    assert (page.item.status, page.item.ended_why, page.item.ended_at, page.item.candidate) == (
+        "ended", "stopped", at(1, 9, 30), None)
+    assert page.wake([(at(1, 10), won(90)), (at(2), won(80))]) == [] and len(page.requests) == 1

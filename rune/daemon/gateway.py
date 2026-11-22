@@ -894,6 +894,7 @@ class ChannelGateway:
                 channel=message.metadata.get("channel_name", "remote"),
                 sender_id=message.sender_id,
                 conversation_id=conv_id,
+                owner_text=text,
             )
             agent_ctx = await prepare_agent_context(
                 context_opts, conversation_manager=conv_manager)

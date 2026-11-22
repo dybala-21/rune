@@ -224,6 +224,7 @@ GPT-6 rates in Rune do not apply, and configured cost limits block unpriced call
 | **Research** | “Compare these sources and explain where they disagree.” | Search results, retrieved pages, and source links |
 | **Browser and apps** | “Open this page and complete the form up to the final submission.” | Browser preview, actions, handoff controls, and app permissions |
 | **Recurring work** | “Every weekday, check these files and report meaningful changes.” | Schedule, run history, outputs, and execution status |
+| **A price to watch** | “Tell me when this gets cheaper: https://…” | The price that was read, when it was read, and a link to the page |
 
 RUNE can read and generate DOCX, XLSX, PPTX, PDF, CSV, and HTML artifacts. Preview and visual checks depend on the format and available rendering tools. MCP servers add tools from other systems.
 
@@ -261,6 +262,12 @@ rune overnight "Fix the failing auth tests" \
 RUNE persists run state, approvals, tool execution records, and recovery information. After an interruption, it can distinguish unfinished work from an action whose effect needs review. An uncertain external action should be inspected before it is retried.
 
 Proactive suggestions and explicitly scheduled work share the runtime, but have separate authorization. Accepting a suggestion is not a blanket grant for later actions. Scheduled routines track relevant inputs and outputs, enforce execution budgets, and can skip work when their tracked state remains unchanged.
+
+### A price to watch
+
+Give RUNE a product page's address and ask to be told when its price drops or changes. Code reads the price the page writes in its structured data once a day and compares it with the price you were last told. A message is sent only when it moved, and only after a second reading about an hour later still shows it. The daily check runs no model.
+
+RUNE reads a page under its own name and only where the site's `robots.txt` allows it. Many large marketplaces refuse programs they don't name; RUNE then says the page can't be watched and does not try another way. The price is the one written for a visitor who is not signed in, so member prices, coupons and shipping are not in it. A watch ends after 90 days unless you renew it. [Fetcher](#fetcher) describes what RUNE sends to a site.
 
 ## Computer
 
@@ -303,6 +310,24 @@ On Korean retrieval (Ko-StrategyQA), recall@10 rises from 0.70 with keywords to 
 The connector broker can keep service credentials outside the command workspace and constrain requests by origin, path, and method. It is infrastructure for configured connectors, not a complete catalog of ready-to-use OAuth integrations.
 
 Local policies are not a VM security boundary. Hosted deployments need authentication and a properly configured TLS endpoint. Mobile access can use a hosted web UI; the execution environment remains on the host.
+
+## Fetcher
+
+When someone asks RUNE to watch a price, RUNE reads that one product page for that one person. This section is for the people who run the sites it reads.
+
+- **Who it says it is.** Requests carry `User-Agent: Mozilla/5.0 (compatible; RUNE/<version>; +https://github.com/dybala-21/rune#fetcher)`. RUNE never sends another program's name and does not use a browser to pass as a visitor.
+- **What it reads.** Only an address its user typed: one `GET` for the page and one for `robots.txt`. It takes the price and the currency from the page's structured data (JSON-LD `Product` and `Offer`, Open Graph price tags) and keeps nothing else from the page. It sends no cookies, signs in nowhere and runs no scripts.
+- **How often.** Once a day for each watched page, and once more about an hour later on a day the price moved. Requests to one host are at least 2 seconds apart, and `Crawl-delay` is honored up to 10 seconds.
+- **What it obeys.** `robots.txt`, read as RFC 9309 says: the group for `RUNE` if there is one, otherwise the group for `*`. A redirect is followed only to an https page, and the rules are checked again there. A `401`, `403` or `429`, for the page or for `robots.txt`, is a refusal: RUNE tells its user the page can't be watched and does not ask again another way.
+
+To keep RUNE out:
+
+```
+User-agent: RUNE
+Disallow: /
+```
+
+On a site that disallows `*`, a group for `RUNE` that allows the product paths lets it read them. For a question or a problem with how it behaves, [open an issue](https://github.com/dybala-21/rune/issues).
 
 ## Validation
 

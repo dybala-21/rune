@@ -34,6 +34,8 @@ class WebGrounding:
     context: SourceContext = field(default_factory=SourceContext)
     reused_sources: int = 0
     review: SourceReview = field(default_factory=SourceReview)
+    # A tool that reads a page by code has answered for it: the reading, or why there is none.
+    settled: bool = False
 
     def restore(self, context: SourceContext) -> None:
         if self.requires_page:
@@ -60,7 +62,16 @@ class WebGrounding:
     def observe(self, name: str, params: dict, result: CapabilityResult) -> bool:
         metadata = result.metadata or {}
         captured_body = name == "browser_discover_apis" and metadata.get("captured_body") is True
-        if name not in _READS and not captured_body and not (name == "connector_request" and params.get("method", "GET").upper() == "GET"):
+        if name == "watch_set":
+            # It reads the page itself, and what it says stands either way: the price it read, or why
+            # the page can't be read. Told to go and retrieve a source after that, a run would ask a
+            # site that refused once more, or look for a way round the refusal.
+            if "watched" not in metadata:
+                return False
+            self.settled = True
+            if not metadata["watched"]:
+                return False
+        elif name not in _READS and not captured_body and not (name == "connector_request" and params.get("method", "GET").upper() == "GET"):
             return False
         if name == "web_fetch" and params.get("method", "GET").upper() != "GET":
             return False
@@ -124,6 +135,8 @@ class WebGrounding:
             self.review = self.records.review(answer)
             if self.review.status == "contradicted":
                 return self.review.detail
+        if self.settled:
+            return None
         if self.requires_page and not self.pages:
             return (
                 "Only search excerpts are available for this time-sensitive lookup. Open a relevant page or API "

@@ -201,6 +201,7 @@ async def _execute_agent(
                 cwd=req.cwd or "",
                 sender_name=req.sender_name or "",
                 conversation_id=session_id,
+                owner_text=req.goal,
             ),
             conversation_manager=conv_manager,
         )

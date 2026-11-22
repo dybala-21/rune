@@ -518,6 +518,7 @@ class AgentLoopController:
         # e.g., suggestion: "커밋 안 한 게 있어요. 커밋할까요?"
         #        user: "어 해줘"
         #        -> goal becomes: "[RUNE suggested: 커밋 안 한 게 있어요...] 어 해줘"
+        typed = goal
         pending = self.consume_pending_suggestion(user_input=goal)
         if pending:
             goal = f"[RUNE이 방금 제안함: \"{pending}\"] {goal}"
@@ -535,7 +536,7 @@ class AgentLoopController:
         self._app.update_status(status="thinking", current_step=0)
         log.info("agent_loop_start", goal=goal[:120])
 
-        self._task = asyncio.create_task(self._run_loop(goal))
+        self._task = asyncio.create_task(self._run_loop(goal, typed))
 
     async def cancel(self) -> None:
         """Request cancellation of the running loop."""
@@ -952,7 +953,7 @@ class AgentLoopController:
             self._app._last_response_text = raw
         self._streaming_buffer.clear()
 
-    async def _run_loop(self, goal: str) -> None:
+    async def _run_loop(self, goal: str, typed: str | None = None) -> None:
         """Run the actual agent loop - delegates to NativeAgentLoop.run()."""
         try:
             # Record user turn for multi-turn context
@@ -974,6 +975,10 @@ class AgentLoopController:
                         goal=goal,
                         channel="tui",
                         conversation_id=self._conversation_id,
+                        # A stored turn here may begin with a suggestion RUNE wrote (start), so
+                        # only what was typed just now counts as the owner's words.
+                        owner_text=typed,
+                        owner_turns=False,
                     ),
                     conversation_manager=self._conv_manager,
                 )

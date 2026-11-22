@@ -126,3 +126,30 @@ def test_the_file_is_the_owners_alone(tmp_path):
     path = tmp_path / "watch.db"
     Store(path).close()
     assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_a_runs_readings_are_written_as_one_change_leaving_out_what_the_owner_changed(tmp_path):
+    path = tmp_path / "watch.db"
+    job, chat = Store(path), Store(path)
+    first, second, third = (job.get(add(job, n).id) for n in range(3))
+    changed = chat.get(second.id)
+    changed.label = "theirs"
+    assert chat.save(changed)
+    for item in (first, second, third):
+        item.failed_days = 2
+    written = job.save_all([first, second, third])
+    assert [item.id for item in written] == [first.id, third.id]
+    assert [chat.get(item.id).failed_days for item in (first, second, third)] == [2, 0, 2]
+    assert chat.get(second.id).label == "theirs" and (first.version, second.version, third.version) == (1, 0, 1)
+    assert job.save(first), "a written copy is the current one"
+
+    def broken(item):
+        raise OSError("disk")
+
+    first.failed_days = third.failed_days = 5
+    job._write, version = broken, first.version
+    with pytest.raises(OSError):
+        job.save_all([first, third])
+    assert first.version == version and chat.get(first.id).failed_days == 2, "all or nothing"
+    job.close()
+    chat.close()
