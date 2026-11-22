@@ -20,6 +20,7 @@ from rune.capabilities.types import CapabilityDefinition
 from rune.types import CapabilityResult, Domain, RiskLevel
 from rune.utils.logger import get_logger
 from rune.watch import answers, job, schedule
+from rune.watch.browse import Browser
 from rune.watch.fetch import Reader, host_of
 from rune.watch.item import Item, Unread
 from rune.watch.judge import renew, stop
@@ -95,8 +96,9 @@ def _wrong(error: str) -> CapabilityResult:
 
 
 async def _read(url: str, now: datetime) -> Observation:
-    async with Reader() as reader:
-        return await job.read(reader, url, registering=True, now=now)
+    # The way a page is read is chosen each time its owner sets the watch: asked for first.
+    async with Reader() as reader, Browser() as browser:
+        return await job.read(reader, url, registering=True, now=now, browser=browser)
 
 
 def _label(given: str | None, kept: str) -> str | None:
@@ -170,7 +172,7 @@ async def _start(store: Store, params: WatchSetParams) -> CapabilityResult:
     at, standing = _settings(store, params)
     try:
         item = store.add(url=url, fetch_url=seen.url, host=host, label=label, tell_when=params.tell_when,
-                         below=params.below, price=seen.reading.price, now=now)
+                         below=params.below, price=seen.reading.price, now=now, via=seen.via)
     except TooMany:
         return _refused("too_many")
     return await _watching(store, item, seen, params.language, at, standing, now, again=False)
@@ -198,7 +200,7 @@ async def _change(store: Store, item: Item, params: WatchSetParams) -> Capabilit
         if current is None:
             break
         renew(current, now, seen.reading.price, tell_when=tell_when, below=below, label=label)
-        current.fetch_url = seen.url
+        current.fetch_url, current.via = seen.url, seen.via
         if store.save(current):
             return await _watching(store, current, seen, params.language, at, standing, now, again=True)
         # The scheduled run saved this item while its page was being read here: the change is made
@@ -310,9 +312,9 @@ def register_watch_capabilities(registry: CapabilityRegistry) -> None:
         description=("Watch the price on a product page the owner gave and tell them when it changes or goes down: "
                      "code reads the page once a day, and a message is sent only then. Use this, not cron_create, "
                      "when they ask to be told about a price on a page (\"tell me when this gets cheaper\"). It "
-                     "needs the page's address as the owner typed it, reads only pages a site lets programs read, "
-                     "and says so plainly when a page can't be watched. Also changes or renews a watch by its item "
-                     "id."),
+                     "needs the page's address as the owner typed it. A page its shop gives to no program is opened "
+                     "in RUNE's own browser where RUNE runs on the owner's machine; one that can't be read either "
+                     "way is said plainly not to be watched. Also changes or renews a watch by its item id."),
         domain=Domain.SCHEDULE,
         risk_level=RiskLevel.MEDIUM,
         group="schedule",

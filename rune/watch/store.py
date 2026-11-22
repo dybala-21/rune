@@ -8,7 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from rune.watch.item import Item, Price
+from rune.watch.item import FETCH, Item, Price
 
 MAX_WATCHING = 20
 KEEP_OBSERVATIONS = 60
@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS items (
     gone_days INTEGER NOT NULL DEFAULT 0, told_failure INTEGER NOT NULL DEFAULT 0,
     last_low TEXT, last_high TEXT, last_read_at TEXT,
     status TEXT NOT NULL DEFAULT 'watching', ended_why TEXT NOT NULL DEFAULT '', ended_at TEXT,
-    version INTEGER NOT NULL DEFAULT 0
+    version INTEGER NOT NULL DEFAULT 0, via TEXT NOT NULL DEFAULT 'fetch'
 );
 CREATE TABLE IF NOT EXISTS observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT, item_id INTEGER NOT NULL, observed_at TEXT NOT NULL,
@@ -38,7 +38,7 @@ CREATE INDEX IF NOT EXISTS observations_item ON observations(item_id, id);
 _SAVED = ("fetch_url", "label", "tell_when", "below", "currency", "told_low", "told_high", "told_at", "renewed_at",
           "candidate_low", "candidate_high", "candidate_at", "confirm_tried", "read_day", "failed_days",
           "counted_days", "gone_days", "told_failure", "last_low", "last_high", "last_read_at", "status",
-          "ended_why", "ended_at")
+          "ended_why", "ended_at", "via")
 
 
 class TooMany(Exception):
@@ -61,6 +61,7 @@ class Store:
         # The chat's tools and the scheduled run both write here.
         self._db.execute("PRAGMA busy_timeout=5000")
         self._db.executescript(_SCHEMA)
+        _keep_way(self._db)
 
     def close(self) -> None:
         self._db.close()
@@ -75,7 +76,7 @@ class Store:
                          (when.replace(second=0, microsecond=0).isoformat(timespec="minutes"),))
 
     def add(self, *, url: str, fetch_url: str, host: str, label: str, tell_when: str, below: Decimal | None,
-            price: Price, now: datetime) -> Item:
+            price: Price, now: datetime, via: str = FETCH) -> Item:
         """Start watching a page from the price just read. Raises ``TooMany`` at the limit."""
         self._db.execute("BEGIN IMMEDIATE")
         try:
@@ -85,7 +86,7 @@ class Store:
             # The reading it starts from is that day's read: the page is not asked again the same day.
             item = Item(id=0, url=url, fetch_url=fetch_url, host=host, label=label, tell_when=tell_when, below=below,
                         told=price, told_at=now, renewed_at=now, last_read=price, last_read_at=now,
-                        read_day=now.date())
+                        read_day=now.date(), via=via)
             columns = ("url", "host", *_SAVED)
             cursor = self._db.execute(
                 f"INSERT INTO items ({', '.join(columns)}) VALUES ({', '.join('?' * len(columns))})",
@@ -183,6 +184,22 @@ class Store:
             raise
 
 
+def _keep_way(db: sqlite3.Connection) -> None:
+    """Give a file kept before pages were opened in a browser the column for the way each is read.
+    Every item in such a file was asked for."""
+    def there() -> bool:
+        return "via" in {row["name"] for row in db.execute("PRAGMA table_info(items)")}
+
+    if there():
+        return
+    try:
+        db.execute("ALTER TABLE items ADD COLUMN via TEXT NOT NULL DEFAULT 'fetch'")
+    except sqlite3.OperationalError:
+        # The chat's tools and the scheduled run opened the file at once: the other one added it.
+        if not there():
+            raise
+
+
 def _text(amount: Decimal) -> str:
     """An amount as plain digits: 56.00 and 56 are kept, and compared, as the same price."""
     return format(amount.normalize(), "f")
@@ -200,7 +217,7 @@ def _values(item: Item) -> tuple[Any, ...]:
             _text(candidate.high) if candidate else None, _when(item.candidate_at), int(item.confirm_tried),
             item.read_day.isoformat() if item.read_day else None, item.failed_days, item.counted_days, item.gone_days,
             int(item.told_failure), _text(last.low) if last else None, _text(last.high) if last else None,
-            _when(item.last_read_at), item.status, item.ended_why, _when(item.ended_at))
+            _when(item.last_read_at), item.status, item.ended_why, _when(item.ended_at), item.via)
 
 
 def _item(row: sqlite3.Row) -> Item:
@@ -223,4 +240,4 @@ def _item(row: sqlite3.Row) -> Item:
         failed_days=row["failed_days"], counted_days=row["counted_days"], gone_days=row["gone_days"],
         told_failure=bool(row["told_failure"]), last_read=price(row["last_low"], row["last_high"]),
         last_read_at=moment(row["last_read_at"]), status=row["status"], ended_why=row["ended_why"],
-        ended_at=moment(row["ended_at"]), version=row["version"])
+        ended_at=moment(row["ended_at"]), via=row["via"], version=row["version"])

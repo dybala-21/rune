@@ -1,7 +1,8 @@
 """Run the watch as a scheduled job: read the pages that are due, judge, and say what changed.
 
-No agent loop, no tools and no model. A wake with nothing due makes no request, and a run with
-nothing to tell sends nothing.
+No agent loop, no tools and no model: a page is asked for, or opened in RUNE's own browser where
+its shop needs one, and code reads it either way. A wake with nothing due makes no request, and a
+run with nothing to tell sends nothing.
 """
 
 from __future__ import annotations
@@ -13,9 +14,10 @@ from typing import Any
 
 from rune.utils.logger import get_logger
 from rune.watch import labels
+from rune.watch.browse import Browser
 from rune.watch.compose import News, compose
 from rune.watch.fetch import Reader
-from rune.watch.item import Event, Item
+from rune.watch.item import FETCH, Event, Item
 from rune.watch.judge import due, settle
 from rune.watch.observe import Observation, observe
 from rune.watch.store import Store
@@ -71,11 +73,12 @@ async def run_watch(job: Any = None) -> dict[str, Any]:
             "buttons": [asdict(button) for button in buttons]}
 
 
-async def read(reader: Reader, url: str, *, registering: bool, now: datetime) -> Observation:
+async def read(reader: Reader, url: str, *, registering: bool, now: datetime,
+               browser: Browser | None = None, via: str = FETCH) -> Observation:
     """One reading for the watch. A read that got no answer on a hosted machine whose web is closed
     is said to be that, since nothing about the page was learned."""
     try:
-        seen = await observe(reader, url, registering=registering, now=now)
+        seen = await observe(reader, url, registering=registering, now=now, browser=browser, via=via)
     except Exception as exc:
         log.warning("watch_read_failed", error=type(exc).__name__)
         return Observation(failure="error")
@@ -107,11 +110,13 @@ async def _look(now: datetime) -> list[News]:
             return []
         read_items: list[tuple[Item, list[Event], datetime]] = []
         stop = asyncio.get_running_loop().time() + DEADLINE
-        async with Reader() as reader:
+        # The browser is started only by the first page that has to be opened in one.
+        async with Reader() as reader, Browser() as browser:
             for item, kind in wanted:
                 try:
                     async with asyncio.timeout_at(stop):
-                        seen = await read(reader, item.fetch_url, registering=False, now=now)
+                        seen = await read(reader, item.fetch_url, registering=False, now=now,
+                                          browser=browser, via=item.via)
                 except TimeoutError:
                     log.info("watch_out_of_time", read=len(read_items), due=len(wanted))
                     break

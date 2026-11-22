@@ -16,6 +16,10 @@ class Price:
     currency: str
 
 
+# The two ways a page is read: asked for under RUNE's name, or opened in RUNE's own browser.
+FETCH, BROWSER = "fetch", "browser"
+
+
 @dataclass(slots=True)
 class Item:
     id: int
@@ -48,6 +52,8 @@ class Item:
     status: str = "watching"  # "watching" | "ended"
     ended_why: str = ""  # "gone" | "unreadable" | "expired" | "stopped"
     ended_at: datetime | None = None
+    # The way its page is read, chosen when its owner set the watch: FETCH or BROWSER.
+    via: str = FETCH
     # Goes up with every save, so a save from a copy read before another save is refused.
     version: int = 0
 

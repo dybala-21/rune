@@ -26,6 +26,8 @@ class Rules:
 
     rules: tuple[tuple[bool, str], ...] = ()
     crawl_delay: float = 0.0
+    # The site wrote a group for RUNE by name: these are rules it meant for RUNE, not for any program.
+    named: bool = False
 
 
 def parse(text: str, token: str = TOKEN) -> Rules:
@@ -58,7 +60,7 @@ def parse(text: str, token: str = TOKEN) -> Rules:
     named = [group for group in groups if token.lower() in group[0]]
     chosen = named or [group for group in groups if "*" in group[0]]
     delays = [delay for group in chosen for delay in group[2] if delay > 0]
-    return Rules(tuple(rule for group in chosen for rule in group[1]), max(delays, default=0.0))
+    return Rules(tuple(rule for group in chosen for rule in group[1]), max(delays, default=0.0), bool(named))
 
 
 def allows(rules: Rules, url: str) -> bool:

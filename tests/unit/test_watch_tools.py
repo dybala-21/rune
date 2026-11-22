@@ -26,7 +26,7 @@ from rune.safety.approval_context import approval_granted
 from rune.safety.tool_policy import _network_approval_request
 from rune.watch import fetch, job, labels, schedule
 from rune.watch.extract import Reading
-from rune.watch.item import Price
+from rune.watch.item import BROWSER, FETCH, Price
 from rune.watch.observe import Observation
 from rune.watch.observe import observe as read_for_real
 from rune.watch.store import MAX_WATCHING, Store
@@ -50,14 +50,19 @@ class Chat:
         self.pages: dict[str, object] = {COAT: won(369000)}
         self.leads_to: dict[str, str] = {}
         self.reads: list[tuple[str, bool]] = []
+        # Addresses whose shop gives the page only to a browser, and what each read was handed to read with.
+        self.browser_only: set[str] = set()
+        self.handed: list[tuple[str, str]] = []
 
-    async def observe(self, reader, url, *, registering, now) -> Observation:
+    async def observe(self, reader, url, *, registering, now, browser, via) -> Observation:
         self.reads.append((url, registering))
+        self.handed.append((type(browser).__name__, via))
         answer = self.pages.get(url, "gone")
+        way = BROWSER if url in self.browser_only else FETCH
         if isinstance(answer, str):
-            return Observation(failure=answer, url=url)
+            return Observation(failure=answer, url=url, via=way)
         reading = answer if isinstance(answer, Reading) else Reading(answer, 1, "jsonld")
-        return Observation(reading=reading, url=self.leads_to.get(url, url), http_status=200)
+        return Observation(reading=reading, url=self.leads_to.get(url, url), http_status=200, via=way)
 
     async def set(self, **given: object):
         return await tool.watch_set(WatchSetParams(**{"language": "en", **given}))
@@ -95,6 +100,22 @@ def chat(tmp_path, monkeypatch):
 
 
 # -- A new page ------------------------------------------------------------------
+
+
+async def test_a_page_its_shop_gives_only_to_a_browser_is_watched_through_runes_own_and_said_to_be(chat):
+    chat.browser_only.add(COAT)
+    made = await chat.set(url=COAT, tell_when="drop")
+    assert ("RUNE opens it in its own browser on this machine each time it is checked: a minimized window that "
+            "carries RUNE's name, in which nothing is clicked or signed in to. Tell the owner so.") in made.output
+    assert chat.items()[0].via == BROWSER and chat.handed == [("Browser", FETCH)]
+    assert "; opened in RUNE's own browser on this machine." in await chat.listed()
+
+    # Set again once the shop gives the page to a program that asks: the way is chosen anew, asked for first.
+    chat.browser_only.clear()
+    again = await chat.set(item=1, tell_when="change")
+    assert again.success and chat.handed[-1] == ("Browser", FETCH)
+    assert chat.items()[0].via == FETCH
+    assert "browser" not in again.output and "browser" not in await chat.listed()
 
 
 async def test_a_page_the_owner_gave_is_read_kept_and_scheduled(chat):
