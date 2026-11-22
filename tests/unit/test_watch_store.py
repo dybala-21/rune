@@ -1,13 +1,14 @@
 """What the watch keeps: items come back as they were saved, and two writers don't undo each other."""
 
+import sqlite3
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 
 import pytest
 
-from rune.watch.item import Price
+from rune.watch.item import BROWSER, FETCH, Price
 from rune.watch.judge import settle
-from rune.watch.store import KEEP_OBSERVATIONS, MAX_WATCHING, Store, TooMany
+from rune.watch.store import KEEP_OBSERVATIONS, MAX_WATCHING, Store, TooMany, _keep_way
 
 NOW = datetime(2026, 11, 20, 9, 0, tzinfo=UTC)
 PRICE = Price(Decimal("369000"), Decimal("369000"), "KRW")
@@ -42,6 +43,58 @@ def test_an_item_comes_back_as_it_was_saved_whatever_state_it_is_in(store):
     back = store.get(item.id)
     assert back == item and (back.status, back.ended_why, back.told) == ("ended", "gone", lower)
     assert store.watching() == [] and [kept.id for kept in store.everything()] == [item.id]
+
+
+def test_the_way_a_page_is_read_is_kept_with_it(store):
+    asked, opened = add(store, 1), add(store, 2, via=BROWSER)
+    assert (store.get(asked.id).via, store.get(opened.id).via) == (FETCH, BROWSER)
+    asked.via = BROWSER
+    assert store.save(asked) and store.get(asked.id).via == BROWSER
+
+
+def test_records_kept_before_pages_were_opened_in_a_browser_are_read_as_asked_for(tmp_path):
+    path = tmp_path / "watch.db"
+    first = Store(path)
+    item = add(first)
+    first.close()
+    # As a version before this one left the file: the items have no way written beside them.
+    old = sqlite3.connect(path)
+    old.execute("ALTER TABLE items DROP COLUMN via")
+    old.commit()
+    old.close()
+
+    kept = Store(path)
+    try:
+        found = kept.get(item.id)
+        assert found.via == FETCH
+        found.via = BROWSER
+        assert kept.save(found) and kept.get(item.id).via == BROWSER
+    finally:
+        kept.close()
+
+
+def test_two_that_open_an_old_file_at_once_do_not_trip_over_each_other(tmp_path):
+    class Late:
+        """A connection that looked before the other one had added the column."""
+
+        def __init__(self, db: sqlite3.Connection) -> None:
+            self.db, self.looked = db, 0
+
+        def execute(self, sql: str):
+            if sql.startswith("PRAGMA"):
+                self.looked += 1
+                if self.looked == 1:
+                    return []
+            return self.db.execute(sql)
+
+    Store(tmp_path / "watch.db").close()
+    db = sqlite3.connect(tmp_path / "watch.db")
+    db.row_factory = sqlite3.Row
+    _keep_way(Late(db))   # the column is there already: adding it again is not an error
+    db.execute("ALTER TABLE items RENAME TO things")
+    with pytest.raises(sqlite3.OperationalError):
+        _keep_way(db)   # but a file it can't be added to is one
+    db.close()
 
 
 def test_amounts_are_kept_as_the_same_price_however_they_were_written(store):

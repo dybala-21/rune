@@ -36,6 +36,12 @@ def test_a_group_that_names_rune_is_obeyed_instead_of_the_one_for_everyone():
     assert allows(parse(named, "claude-user"), "https://shop.example/products/1")
 
 
+def test_rules_say_whether_the_site_wrote_them_for_rune_by_name():
+    assert not parse("User-agent: *\nDisallow: /\n").named and not parse("").named
+    assert parse("User-agent: *\nDisallow: /\n\nUser-agent: rune\nAllow: /p/\n").named
+    assert not parse("User-agent: RuneScapeBot\nDisallow: /\n").named, "another program's name that begins the same"
+
+
 def test_groups_for_the_same_name_are_read_together():
     text = "User-agent: a\nUser-agent: b\nDisallow: /p\n\nUser-agent: a\nAllow: /p/ok\n"
     assert allows(parse(text, "a"), "https://x.example/p/ok")

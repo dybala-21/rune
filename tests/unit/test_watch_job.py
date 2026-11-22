@@ -16,7 +16,7 @@ from rune.memory.store import MemoryStore
 from rune.proactive.routine import RoutinePolicy, should_notify
 from rune.watch import job, schedule
 from rune.watch.extract import Reading
-from rune.watch.item import Item, Price
+from rune.watch.item import BROWSER, FETCH, Item, Price
 from rune.watch.judge import renew
 from rune.watch.observe import Observation
 from rune.watch.store import Store
@@ -40,10 +40,14 @@ class Pages:
     def __init__(self) -> None:
         self.answers: dict[str, object] = {}
         self.reads: list[str] = []
+        self.ways: list[str] = []
+        self.browsers: set[str] = set()
         self.now = at(0)   # set up the day before: the reading a watch starts from is that day's read
 
-    async def observe(self, reader, url, *, registering, now) -> Observation:
+    async def observe(self, reader, url, *, registering, now, browser, via) -> Observation:
         self.reads.append(url)
+        self.ways.append(via)
+        self.browsers.add(type(browser).__name__)
         answer = self.answers[url]
         if callable(answer):
             answer = await answer()
@@ -55,11 +59,12 @@ class Pages:
         return Observation(reading=Reading(answer, 1, "jsonld"), url=url, http_status=200)
 
     def watch(self, url: str = COAT, price: Price | None = None, *, label: str = "", tell_when: str = "drop",
-              below: int | None = None) -> Item:
+              below: int | None = None, via: str = FETCH) -> Item:
         store = Store()
         try:
             return store.add(url=url, fetch_url=url, host="shop.example", label=label, tell_when=tell_when,
-                             below=None if below is None else Decimal(below), price=price or won(100), now=self.now)
+                             below=None if below is None else Decimal(below), price=price or won(100), now=self.now,
+                             via=via)
         finally:
             store.close()
 
@@ -105,6 +110,20 @@ async def test_a_wake_with_nothing_due_asks_no_site_anything(pages, monkeypatch)
     assert quiet(await pages.wake(at(2), coat=won(100))) and pages.reads == [COAT]
     assert quiet(await pages.wake(at(2, 10))) and quiet(await pages.wake(at(2, 23)))
     assert pages.reads == [COAT], "one read a day while nothing moved"
+
+
+async def test_each_page_is_read_the_way_it_was_when_its_watch_was_set_and_a_wake_does_not_change_that(pages):
+    coat, mug = pages.watch(COAT), pages.watch(MUG, via=BROWSER)
+    assert quiet(await pages.wake(at(2), coat=won(100), mug=won(100)))
+    assert sorted(zip(pages.reads, pages.ways, strict=True)) == [(COAT, FETCH), (MUG, BROWSER)]
+    assert (pages.kept(coat).via, pages.kept(mug).via) == (FETCH, BROWSER)
+    assert pages.browsers == {"Browser"}, "every read of the run is handed the run's one browser"
+
+
+async def test_a_wake_with_nothing_due_starts_no_browser(pages, monkeypatch):
+    pages.watch(MUG, via=BROWSER)
+    monkeypatch.setattr(job, "Browser", lambda: pytest.fail("a wake with nothing due made a browser"))
+    assert quiet(await pages.wake(at(1, 8, 59))), "before the owner's time"
 
 
 async def test_a_drop_is_told_after_its_second_reading_with_the_price_the_owner_knew(pages):

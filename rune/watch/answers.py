@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 
 from rune.watch.compose import amount, money, name
 from rune.watch.extract import Reading
-from rune.watch.item import Item
+from rune.watch.item import BROWSER, Item
 from rune.watch.judge import EXPIRES_AFTER
 from rune.watch.schedule import Standing
 from rune.watch.store import MAX_WATCHING
@@ -98,6 +98,10 @@ def watching(item: Item, reading: Reading, *, at: time, job: Standing, zone: str
         other = f"{low} {price.currency}" if low == high else f"{low}–{high} {price.currency}"
         lines.append(f"The page writes {other} as its price and {money(price)} as its sale price; the sale price "
                      "is watched." if reading.source == "og_sale" else f"The page also writes {other} as a list price.")
+    if item.via == BROWSER:
+        lines.append("This shop does not give the page to a program that asks for it, so RUNE opens it in its own "
+                     "browser on this machine each time it is checked: a minimized window that carries RUNE's name, "
+                     "in which nothing is clicked or signed in to. Tell the owner so.")
     late = ", or when this machine is next running after that" if local else ""
     lines.append(f"Checked once a day at {at:%H:%M} ({zone}){late}. A message goes to {job.channel} when "
                  f"{condition(item)}.")
@@ -134,4 +138,6 @@ def line(item: Item, now: datetime, failure: str) -> str:
             state += f"; could not be read on the last {days} it was tried ({_REASONS.get(failure, _OTHER)[0].rstrip('.')})"
         if item.candidate is not None:
             state += f"; {money(item.candidate)} was read once and waits for a second reading"
+    if item.via == BROWSER:
+        parts.append("opened in RUNE's own browser on this machine")
     return f"Item {item.id}: {name(item)}, {shown(item.url)}. {state}; {'; '.join(parts)}."

@@ -1,7 +1,8 @@
 """Read one public page for the watch: under RUNE's own name, and only where the site lets it.
 
-- RUNE says who it is and obeys robots.txt. A refusal is an answer: nothing is asked again under
-  another name, protocol or address.
+- RUNE says who it is and obeys robots.txt. A refusal is this reader's answer: it asks nothing
+  again under another name, protocol or address. Whether the page is then opened in RUNE's own
+  browser (``rune.watch.browse``) is decided in ``rune.watch.observe``, not here.
 - An address is checked before anything is sent to it, and again at every redirect: https, a host
   that resolves only to public addresses, and the connection goes to the address that was checked.
 - An answer that is slow, endless or inflates is cut off. No cookie is kept or sent.
@@ -144,8 +145,20 @@ class Reader:
                 continue
             if answer.status == 200:
                 return Page(url, answer.status, _text(answer))
-            raise Unread(_refusal(answer.status), answer.status)
+            raise Unread(refusal(answer.status), answer.status)
         raise Unread("error" if registering else "moved")  # more redirects than are followed
+
+    async def refuses_by_name(self, url: str) -> bool:
+        """Whether the site's robots.txt has a group for RUNE that keeps it from ``url``. A file that
+        can't be had, or one that only speaks to every program at once, names nobody."""
+        host = host_of(url)
+        if host not in self._rules:
+            try:
+                self._rules[host] = await self._read_robots(host)
+            except Unread:
+                return False  # the host itself can't be reached: opening the page will say so
+        rules = self._rules[host]
+        return isinstance(rules, robots.Rules) and rules.named and not robots.allows(rules, url)
 
     async def _robots(self, host: str) -> robots.Rules:
         if host not in self._rules:
@@ -237,7 +250,8 @@ async def _body(response: httpx.Response, limit: int, cut: bool) -> bytes:
     return bytes(body)
 
 
-def _refusal(status: int) -> str:
+def refusal(status: int) -> str:
+    """What an answer that is not the page means, as the kind of refusal it is."""
     if status in (401, 403, 429):
         return "blocked"
     if status in (404, 410):
