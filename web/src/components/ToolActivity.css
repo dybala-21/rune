@@ -50,3 +50,14 @@
 @media (prefers-reduced-motion: reduce) {
   .tool-activity-summary, .tool-chevron { transition: none; }
 }
+
+.web-activity { container-type: inline-size; }
+@container (max-width: 420px) {
+  .web-activity > summary { display: grid; grid-template-columns: 16px minmax(0, 1fr) 16px; gap: 2px 8px; }
+  .web-activity > summary .tool-activity-symbol { grid-column: 1; grid-row: 1; }
+  .web-activity > summary .tool-summary-body { grid-column: 2; grid-row: 1; flex-direction: column; gap: 0; }
+  .web-activity > summary .tool-heading { max-width: 100%; }
+  .web-activity > summary .tool-target { white-space: normal; }
+  .web-activity > summary .tool-status { grid-column: 2; grid-row: 2; max-width: none; }
+  .web-activity > summary .tool-chevron { grid-column: 3; grid-row: 1 / span 2; }
+}

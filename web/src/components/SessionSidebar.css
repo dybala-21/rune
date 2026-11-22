@@ -1,5 +1,5 @@
 .session-search { position: relative; margin: 0 16px 6px; }
-.session-search input { width: 100%; min-height: 36px; padding: 8px 30px 8px 10px; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 7px; color: var(--text-primary); font: inherit; font-size: 12px; }
+.session-search input { width: 100%; min-height: 36px; padding: 8px 30px 8px 10px; background: transparent; border: 1px solid transparent; border-radius: 8px; color: var(--text-primary); font: inherit; font-size: 12px; }
 .session-search input::placeholder { color: var(--text-muted); }
 .session-search input::-webkit-search-cancel-button { display: none; }
 .session-search button { position: absolute; right: 3px; top: 3px; width: 30px; height: 30px; padding: 0; background: transparent; color: var(--text-muted); border-radius: 5px; font-size: 18px; }

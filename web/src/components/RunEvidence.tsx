@@ -24,6 +24,8 @@ export function RunEvidence({ trust }: { trust: TrustInfo }) {
     ...(trust.tableAcceptance?.unverified ?? []),
   ])];
   const excerptNumbers = trust.sourceReview?.excerptOnlyNumbers ?? [];
+  const unsourcedNumbers = trust.unsourcedNumbers ?? [];
+  const hasSourceFigures = excerptNumbers.length > 0 || unsourcedNumbers.length > 0;
   const unknown = receipts.filter(r => r.tier === 'unknown' && r.tool !== 'ledger').length;
   const rejected = receipts.filter(r => r.tier === 'rejected').length;
   const reported = receipts.filter(r => r.tier === 'acknowledged' && !HTTP_TOOLS.has(r.tool)).length;
@@ -34,11 +36,9 @@ export function RunEvidence({ trust }: { trust: TrustInfo }) {
     ...artifacts.flatMap(receipt => receipt.scope !== 'download' && Object.values(receipt.checks).includes('fail')
       ? [`A document check failed for ${receipt.artifacts.map(a => a.path.split(/[\\/]/).pop()).join(', ')}. See the details before using it.`] : []),
     ...(trust.workspaceWarning?.trim() ? [trust.workspaceWarning.trim()] : []),
-    ...(trust.unsourcedNumbers?.length
-      ? [`Figures not found in retrieved sources: ${trust.unsourcedNumbers.slice(0, 5).join(', ')}. These may be calculated or rounded.`] : []),
   ];
-  const hasDetails = Boolean(receipts.length || artifacts.length || evidence || excerptNumbers.length || trust.tableAcceptance?.required);
-  if (!hasDetails && !notices.length && !unchecked.length) return null;
+  const hasDetails = Boolean(receipts.length || artifacts.length || evidence || trust.tableAcceptance?.required);
+  if (!hasDetails && !hasSourceFigures && !notices.length && !unchecked.length) return null;
 
   return <div style={{ fontSize: 12, lineHeight: 1.6, minWidth: 0, overflowWrap: 'anywhere' }}>
     {notices.map(note => <div key={note} role="note" style={{ marginTop: 8, color: 'var(--text-primary)' }}>{note}</div>)}
@@ -52,9 +52,19 @@ export function RunEvidence({ trust }: { trust: TrustInfo }) {
       <a href={`/api/v1/files/download?sessionId=${encodeURIComponent(receipt.sessionId)}&path=${encodeURIComponent(receipt.path)}`} download>{receipt.name}</a>
       {!receipt.verified && <div>The download copy could not be confirmed.</div>}
     </div> : null)}
+    {hasSourceFigures && <details style={{ marginTop: 8 }}>
+      <summary style={{ cursor: 'pointer', color: 'var(--text-secondary)' }}>
+        {unsourcedNumbers.length ? 'Some figures need a source check' : 'Source figures need review'}
+      </summary>
+      {unsourcedNumbers.length > 0 && <div style={{ marginTop: 8 }}>
+        Figures not found in retrieved sources: {unsourcedNumbers.join(', ')}. These may be calculated or rounded.
+      </div>}
+      {excerptNumbers.length > 0 && <div style={{ marginTop: 8 }}>
+        Found only in search excerpts: {excerptNumbers.join(', ')}. Their use in this answer was not checked.
+      </div>}
+    </details>}
     {hasDetails && <details style={{ marginTop: 8 }}>
       <summary style={{ cursor: 'pointer', color: 'var(--text-secondary)' }}>Task details</summary>
-      {excerptNumbers.length > 0 && <div style={{ marginTop: 8 }}>Numbers found only in search excerpts: {excerptNumbers.join(', ')}.</div>}
       <TableChecks data={trust.tableAcceptance} />
       {artifacts.map(receipt => receipt.scope === 'download' ? <div key={receipt.id} style={{ marginTop: 8 }}>
         <div style={{ fontWeight: 600 }}>{receipt.name}</div>

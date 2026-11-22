@@ -1,6 +1,8 @@
 import { memo, useEffect, useMemo, useRef, type ReactNode } from 'react';
 import { describeTrust, trustColors } from '../utils/trust';
 import { RunEvidence } from './RunEvidence';
+import { presentTool, toolState } from '../utils/toolActivity';
+import { sourceHost, sourceUrl } from '../utils/searchActivity';
 import type {
   ActivitySummary,
   OrchestrationState,
@@ -14,14 +16,12 @@ import {
   computeRunVerdict,
   argString,
   truncate,
-  basename,
-  hostOf,
   type ActivityMode,
 } from '../utils/tooling';
 
 interface ProgressPaneProps {
   toolCalls: ToolCall[];
-  /** Computed once by WorkbenchPanel and shared with the tab bar. */
+  /** Derived by WorkbenchPanel and shared with the tab bar. */
   mode: ActivityMode;
   isRunning: boolean;
   currentStep: StepInfo | null;
@@ -40,33 +40,8 @@ function shortPath(path: string): string {
 }
 
 function callLabel(tc: ToolCall): string {
-  const name = normalizeToolName(tc.toolName);
-  const path = argString(tc.args, 'path', 'file_path', 'file', 'target');
-  switch (name) {
-    case 'bash': {
-      const cmd = argString(tc.args, 'command', 'cmd', 'script');
-      return cmd ? `run ${truncate(cmd, 40)}` : 'run command';
-    }
-    case 'file.read': return path ? `read ${basename(path)}` : 'read file';
-    case 'file.write': return path ? `write ${basename(path)}` : 'write file';
-    case 'file.edit': return path ? `edit ${basename(path)}` : 'edit file';
-    case 'file.delete': return path ? `delete ${basename(path)}` : 'delete file';
-    case 'web.search': {
-      const q = argString(tc.args, 'query', 'q');
-      return q ? `search "${truncate(q, 32)}"` : 'search web';
-    }
-    case 'web.fetch': {
-      const url = argString(tc.args, 'url');
-      return url ? `fetch ${hostOf(url)}` : 'fetch page';
-    }
-    default: {
-      if (isBrowserToolName(name)) {
-        const url = argString(tc.args, 'url');
-        return url ? `browse ${hostOf(url)}` : name.replace('browser.', 'browser ');
-      }
-      return name;
-    }
-  }
+  const view = presentTool(tc);
+  return view.target ? `${view.label}: ${truncate(view.target, 48)}` : view.label;
 }
 
 interface StepSource {
@@ -82,6 +57,9 @@ interface StepGroup {
   run: number;
   summary: string;
   failedCount: number;
+  succeeded: boolean;
+  commandsOnly: boolean;
+  fullSummary: string;
   /** Sources in order of first use. */
   sources: StepSource[];
 }
@@ -92,29 +70,36 @@ interface Derived {
   files: Array<[string, string[]]>;
   /** Latest pending call, falling back to the latest call. */
   nowLabel: string | null;
+  nowCommand: boolean;
 }
 
 function derive(toolCalls: ToolCall[]): Derived {
-  const groups: Array<StepGroup & { labels: Set<string>; extra: number; srcKeys: Set<string> }> = [];
+  const groups: Array<StepGroup & { labels: Set<string>; extra: number; srcKeys: Set<string>; details: string[] }> = [];
   const files = new Map<string, Set<string>>();
-  let pendingLabel: string | null = null;
+  let pending: ToolCall | undefined;
   for (const tc of toolCalls) {
-    const label = callLabel(tc);
-    if (tc.result === undefined) pendingLabel = label;
+    const view = presentTool(tc);
+    const label = view.target ? `${view.label}: ${truncate(view.target, 48)}` : view.label;
+    if (tc.result === undefined && tc.completedAt == null) pending = tc;
 
     const step = tc.step ?? 0;
     const run = tc.run ?? 0;
     let g = groups[groups.length - 1];
     // Step numbers restart each run; group by both run and step.
     if (!g || g.step !== step || g.run !== run) {
-      g = { step, run, summary: '', failedCount: 0, labels: new Set(), extra: 0, sources: [], srcKeys: new Set() };
+      g = { step, run, summary: '', fullSummary: '', failedCount: 0, succeeded: true, commandsOnly: true,
+        labels: new Set(), extra: 0, sources: [], srcKeys: new Set(), details: [] };
       groups.push(g);
     }
     if (!g.labels.has(label)) {
-      if (g.labels.size < 2) g.labels.add(label);
-      else g.extra++;
+      if (g.labels.size < 2) {
+        g.labels.add(label);
+        g.details.push([view.label, view.target].filter(Boolean).join(': '));
+      } else g.extra++;
     }
     if (tc.success === false) g.failedCount++;
+    g.succeeded &&= toolState(tc, false) === 'succeeded';
+    g.commandsOnly &&= view.kind === 'terminal';
 
     const name = normalizeToolName(tc.toolName);
     if (name.startsWith('file.')) {
@@ -130,46 +115,48 @@ function derive(toolCalls: ToolCall[]): Derived {
         g.sources.push({ kind: 'search', label: q, count: 1 });
       }
     } else if (name === 'web.fetch' || isBrowserToolName(name)) {
-      const url = argString(tc.args, 'url');
+      const url = sourceUrl(argString(tc.args, 'url') ?? '');
       if (url) {
-        let key = url;
-        try {
-          const u = new URL(url);
-          key = u.host + u.pathname;
-        } catch { /* non-URL string: group by the raw value */ }
+        const parsed = new URL(url);
+        const key = parsed.host + parsed.pathname;
         const existing = g.sources.find(s => s.kind === 'page' && s.label === key);
         if (existing) existing.count += 1;
         else { g.srcKeys.add(`p:${key}`); g.sources.push({ kind: 'page', label: key, url, count: 1 }); }
       }
     }
   }
-  const last = toolCalls[toolCalls.length - 1];
+  const current = pending ?? toolCalls[toolCalls.length - 1];
   return {
     groups: groups.map(g => ({
       step: g.step,
       run: g.run,
       failedCount: g.failedCount,
+      succeeded: g.succeeded,
+      commandsOnly: g.commandsOnly,
+      fullSummary: g.details.join('\n'),
       summary: [...g.labels].join(' · ') + (g.extra > 0 ? ` +${g.extra}` : ''),
       sources: g.sources,
     })),
     files: [...files.entries()].map(([p, verbs]) => [p, [...verbs]]),
-    nowLabel: pendingLabel ?? (last ? callLabel(last) : null),
+    nowLabel: current ? callLabel(current) : null,
+    nowCommand: current ? presentTool(current).kind === 'terminal' : false,
   };
 }
 
-type Glyph = 'done' | 'failed' | 'running' | 'pending';
+type Glyph = 'done' | 'failed' | 'running' | 'pending' | 'recorded';
 
 function StatusGlyph({ kind }: { kind: Glyph }) {
   if (kind === 'running') {
     return <span className="spinner" style={{ width: 11, height: 11, flexShrink: 0 }} />;
   }
-  const map: Record<Exclude<Glyph, 'running'>, [string, string]> = {
-    done: ['✓', 'var(--success)'],
-    failed: ['✗', 'var(--danger)'],
-    pending: ['○', 'var(--text-muted)'],
+  const map: Record<Exclude<Glyph, 'running'>, [string, string, string]> = {
+    done: ['✓', 'var(--success)', 'Succeeded'],
+    failed: ['✗', 'var(--danger)', 'Failed'],
+    pending: ['○', 'var(--text-muted)', 'Pending'],
+    recorded: ['·', 'var(--text-muted)', 'Activity recorded'],
   };
-  const [glyph, color] = map[kind];
-  return <span style={{ color, flexShrink: 0, width: 14, textAlign: 'center' }}>{glyph}</span>;
+  const [glyph, color, label] = map[kind];
+  return <span role="img" aria-label={label} style={{ color, flexShrink: 0, width: 14, textAlign: 'center' }}>{glyph}</span>;
 }
 
 function SectionTitle({ label, count }: { label: string; count?: number }) {
@@ -202,10 +189,11 @@ interface BandSpec {
 }
 
 /** Show current activity or a result that needs attention. */
-function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trust }: {
+function StatusBand({ isRunning, awaiting, nowLabel, nowCommand, stepNumber, verdictOk, trust }: {
   isRunning: boolean;
   awaiting: 'approval' | 'question' | null;
   nowLabel: string | null;
+  nowCommand: boolean;
   stepNumber: number | null;
   verdictOk: boolean | null;
   trust?: TrustInfo | null;
@@ -224,8 +212,8 @@ function StatusBand({ isRunning, awaiting, nowLabel, stepNumber, verdictOk, trus
     spec = {
       color: 'var(--accent)', bg: 'var(--accent-subtle)',
       glyph: <span className="spinner" style={{ width: 12, height: 12, flexShrink: 0 }} />,
-      title: nowLabel ?? 'working…',
-      titleMono: true,
+      title: nowLabel ?? 'Working…',
+      titleMono: nowCommand,
       note: stepNumber !== null ? `step ${stepNumber}` : undefined,
       live: true,
     };
@@ -306,7 +294,7 @@ export const ProgressPane = memo(function ProgressPane({
   toolCalls, mode, isRunning, currentStep, trust, activitySummary, orchestration, awaiting = null, onOpenFile,
 }: ProgressPaneProps) {
   const verdictOk = computeRunVerdict(trust, activitySummary);
-  const { groups, files, nowLabel } = useMemo(() => derive(toolCalls), [toolCalls]);
+  const { groups, files, nowLabel, nowCommand } = useMemo(() => derive(toolCalls), [toolCalls]);
 
   const listRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -345,6 +333,7 @@ export const ProgressPane = memo(function ProgressPane({
         isRunning={isRunning}
         awaiting={awaiting}
         nowLabel={nowLabel}
+        nowCommand={nowCommand}
         stepNumber={currentStep?.stepNumber ?? null}
         verdictOk={verdictOk}
         trust={trust}
@@ -405,7 +394,7 @@ export const ProgressPane = memo(function ProgressPane({
             const runEndedHere = isLast && !isRunning && awaiting === null && verdictOk === false;
             const kind: Glyph = live
               ? (isRunning ? 'running' : 'pending')
-              : runEndedHere ? 'failed' : 'done';
+              : runEndedHere ? 'failed' : g.succeeded ? 'done' : 'recorded';
             return (
               <div key={`${g.step}-${i}`} style={{
                 position: 'relative',
@@ -429,11 +418,11 @@ export const ProgressPane = memo(function ProgressPane({
                   }}>
                     {i + 1}
                   </span>
-                  <span style={{
-                    color: live ? 'var(--text-primary)' : 'var(--text-muted)',
-                    flex: 1,
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 12,
+                  <span title={g.fullSummary} style={{
+                    color: live ? 'var(--text-primary)' : 'var(--text-secondary)',
+                    flex: 1, minWidth: 0,
+                    fontFamily: g.commandsOnly ? 'var(--font-mono)' : undefined,
+                    fontSize: 12.5,
                   }}>
                     {g.summary}
                   </span>
@@ -444,31 +433,27 @@ export const ProgressPane = memo(function ProgressPane({
                   )}
                 </div>
                 {g.sources.length > 0 && (
-                  <div style={{ paddingLeft: 30, display: 'flex', flexDirection: 'column', gap: 1, marginTop: 1 }}>
-                    {g.sources.map(src => (
-                      <div key={`${src.kind}:${src.label}`} style={{
-                        display: 'flex', gap: 6, alignItems: 'baseline',
-                        fontSize: 12, color: 'var(--text-muted)',
-                      }}>
-                        <span style={{ flexShrink: 0, opacity: 0.8 }}>
-                          {src.kind === 'search' ? '⌕' : '↳'}
-                        </span>
-                        <span
-                          title={src.url ?? src.label}
-                          style={{
-                            flex: 1, wordBreak: 'break-all',
-                            fontFamily: src.kind === 'page' ? 'var(--font-mono)' : undefined,
-                            color: 'var(--text-secondary)',
-                          }}
-                        >
-                          {truncate(src.label, src.kind === 'page' ? 56 : 72)}
-                        </span>
-                        {src.count > 1 && (
-                          <span style={{ flexShrink: 0, opacity: 0.7 }}>×{src.count}</span>
-                        )}
-                      </div>
-                    ))}
-                  </div>
+                  <details style={{ margin: '4px 0 10px 30px', fontSize: 12, color: 'var(--text-muted)' }}>
+                    <summary style={{ cursor: 'pointer', padding: '3px 0' }}>
+                      Sources · {g.sources.length}
+                    </summary>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 5, padding: '6px 0' }}>
+                      {g.sources.map(src => (
+                        <div key={`${src.kind}:${src.label}`} style={{ display: 'flex', gap: 8, alignItems: 'baseline', minWidth: 0 }}>
+                          <span aria-hidden="true" style={{ flexShrink: 0 }}>{src.kind === 'search' ? '⌕' : '↗'}</span>
+                          {src.url ? (
+                            <a href={src.url} target="_blank" rel="noopener noreferrer" title={src.url} aria-label={src.url}
+                              style={{ minWidth: 0, flex: 1, overflowWrap: 'anywhere', color: 'var(--text-secondary)' }}>
+                              {sourceHost(src.url)}
+                            </a>
+                          ) : (
+                            <span style={{ minWidth: 0, flex: 1, overflowWrap: 'anywhere', color: 'var(--text-secondary)' }}>{src.label}</span>
+                          )}
+                          {src.count > 1 && <span style={{ flexShrink: 0 }}>×{src.count}</span>}
+                        </div>
+                      ))}
+                    </div>
+                  </details>
                 )}
               </div>
             );

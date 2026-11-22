@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type ReactNode, type Ref } from 'react';
 import { useFocusTrap } from '../hooks/useFocusTrap';
-import type { AgentState, StepInfo, TokenUsage as TokenUsageType } from '../types';
+import type { AgentState, TokenUsage as TokenUsageType } from '../types';
 import { TokenUsage } from './TokenUsage';
 import { RuneMark } from './RuneMark';
 
@@ -18,12 +18,11 @@ interface StatusBarProps {
   sidebarOpen?: boolean;
   onToggleSidebar?: () => void;
   tokenUsage?: TokenUsageType | null;
-  currentStepInfo?: StepInfo | null;
   currentActivity?: string | null;
   attentionLabel?: string;
   approvalMode?: string;
   activeModel?: { provider: string; model: string; source: 'active' | 'default' } | null;
-  lastRunSuccess?: boolean | null;
+  showRunActivity?: boolean;
   onOpenPalette?: () => void;
 }
 
@@ -40,8 +39,8 @@ function formatTokensCompact(n: number): string {
 export function StatusBar({
   inert, workspaceLabel, onOpenSettings, sidebarTriggerRef, settingsTriggerRef,
   trailing, connected, state, sidebarOpen, onToggleSidebar, tokenUsage,
-  currentStepInfo, currentActivity, attentionLabel, activeModel,
-  approvalMode, lastRunSuccess = null, onOpenPalette, onToggleWorkbench, workbenchOpen,
+  currentActivity, attentionLabel, activeModel,
+  approvalMode, showRunActivity = false, onOpenPalette, onToggleWorkbench, workbenchOpen,
 }: StatusBarProps) {
   const [showTokens, setShowTokens] = useState(false);
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -58,8 +57,7 @@ export function StatusBar({
     return () => document.removeEventListener('mousedown', dismiss);
   }, [showTokens]);
 
-  const markState = !connected ? 'warning' : attentionLabel ? 'warning' : state === 'running' ? 'working' : state !== 'idle' ? 'thinking'
-    : lastRunSuccess === true ? 'passed' : lastRunSuccess === false ? 'failed' : 'idle';
+  const showStatus = state !== 'idle' && (state !== 'running' || !!attentionLabel || showRunActivity);
 
   return <header className="app-toolbar" inert={inert}>
     <div className="toolbar-brand">
@@ -69,8 +67,8 @@ export function StatusBar({
           <rect x="2" y="3" width="14" height="12" rx="2" /><path d="M7 3v12" />
         </svg>
       </button>}
-      <div className="toolbar-logo"><RuneMark state={markState} size={32} title="Rune" /><span className="toolbar-wordmark">rune</span></div>
-      <span className="toolbar-workspace-label" title={workspaceLabel ?? 'Workspace details are loading'}>
+      <div className="toolbar-logo"><RuneMark size={30} title="Rune" /><span className="toolbar-wordmark">rune</span></div>
+      <span className="toolbar-workspace-label" data-connected={connected} title={workspaceLabel ?? 'Workspace details are loading'}>
         <span role="img" aria-label={connected ? 'Connected' : 'Disconnected'}
           className={`status-dot ${connected ? 'status-dot--success' : 'status-dot--danger'}`} />
         <span>{workspaceLabel ?? 'Connecting'}</span>
@@ -114,14 +112,10 @@ export function StatusBar({
       </button>}
     </div>
 
-    {(state !== 'idle' || approvalMode === 'bypass') && <div className="toolbar-status">
-      {state !== 'idle' && <div className="toolbar-activity" data-attention={!!attentionLabel || state !== 'running'}>
-        <span className={`status-dot ${attentionLabel ? 'status-dot--warning' : 'status-dot--pulse'}`} />
-        <span>{attentionLabel || STATE_LABELS[state]}</span>
-        {state === 'running' && !attentionLabel && currentStepInfo && <span className="toolbar-step">
-          Step {currentStepInfo.stepNumber}
-        </span>}
-        {state === 'running' && !attentionLabel && currentActivity && <span className="toolbar-current">{currentActivity}</span>}
+    {(showStatus || approvalMode === 'bypass') && <div className="toolbar-status">
+      {showStatus && <div className="toolbar-activity" data-attention={!!attentionLabel || state !== 'running'}>
+        <span className="status-dot" />
+        <span>{attentionLabel || (state === 'running' ? currentActivity || STATE_LABELS[state] : STATE_LABELS[state])}</span>
       </div>}
       {approvalMode === 'bypass' && <span className="approval-mode-badge"
         title="Rune will not ask before risky commands, MCP writes, or network writes">Approvals off</span>}

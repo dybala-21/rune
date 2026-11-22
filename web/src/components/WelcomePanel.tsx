@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { ConfigInfo } from '../api';
 import { WorkspaceSetupRow } from './WorkspaceSetupRow';
+import { RuneMark } from './RuneMark';
 import './WelcomePanel.css';
 
 const SUGGESTIONS = [
@@ -22,6 +23,7 @@ export function WelcomePanel({ onSuggest, config, connected, onOpenSettings }: W
   const model = config?.activeModel;
 
   return <section className="welcome-panel welcome-start" aria-labelledby="welcome-title">
+    <div className="welcome-wolf" aria-hidden="true"><RuneMark size={72} /></div>
     <h1 id="welcome-title">What’s on your list?</h1>
     <p className="welcome-start-description">Bring a question, a file, or a project.</p>
     <div className="welcome-start-suggestions" aria-label="Task ideas">
