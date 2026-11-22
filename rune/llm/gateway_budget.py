@@ -11,16 +11,35 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, tzinfo
 
-# Korea has kept +09:00 all year since 1988: no tz database needed.
-_SEOUL = timezone(timedelta(hours=9))
 REASON = "gateway_budget_exhausted"
 # A background run's status when its model calls were refused: a long task waits for `resume_at`.
 STATUS = "model_budget"
 CODES = ("budget_exhausted", "host_budget_exhausted")
-# In an error's text, its JSON body as is or encoded once more (\"code\").
+# In an error's text, its JSON body as is or encoded once more (\\"code\\").
 _CODE = re.compile(r'\\?"code\\?"\s*:\s*\\?"((?:host_)?budget_exhausted)\\?"')
+
+
+def owner_zone() -> tzinfo:
+    """The zone the owner's schedules are read in (the briefing's too); the machine's without one."""
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    from rune.daemon.external_schedule import schedule_timezone
+
+    try:
+        name = schedule_timezone()
+        return ZoneInfo(name) if name else (datetime.now().astimezone().tzinfo or UTC)
+    except (ZoneInfoNotFoundError, ValueError):
+        return UTC
+
+
+def zone_name(zone: tzinfo, moment: datetime, locale: str = "en") -> str:
+    """A zone as the owner reads it: the catalog's name for it ("한국 시간"), else its abbreviation."""
+    from rune import i18n
+
+    names = dict(part.split("=", 1) for part in i18n.text("zone_names", locale).split("|") if "=" in part)
+    return names.get(getattr(zone, "key", ""), "") or moment.tzname() or "UTC"
 
 
 @dataclass(frozen=True)
@@ -32,33 +51,33 @@ class BudgetRefusal:
     def resume_minute(self) -> int:
         return int(self.resumes.timestamp()) // 60
 
-    def stopped_midway(self, locale: str = "en") -> str:
-        """For a long task's step refused after it had done things: the owner checks them first."""
-        when = self.message(locale)
-        if locale.split("-", 1)[0] == "ko":
-            return (f"{when} 이번 단계는 하던 중에 멈췄어요. 앱에서 한 일을 확인하고 확인 표시를 한 뒤, "
-                    "그때 다시 켜면 거기서부터 이어서 해요.")
-        return (f"{when} This step stopped part way through. Check what it did in the app and mark it "
-                "checked, then turn the task on again after that to go on from there.")
+    def when(self, locale: str = "en", zone: tzinfo | None = None) -> str:
+        """When it starts again, in the owner's zone and words (rune/locales)."""
+        from rune import i18n
 
-    def waiting(self, locale: str = "en") -> str:
+        local = self.resumes.astimezone(zone or owner_zone())
+        months = i18n.text("month_names", locale).split("|")
+        return i18n.text("when", locale, month=local.month, month_name=months[local.month - 1]
+                         if len(months) == 12 else local.month, day=local.day,
+                         time=f"{local:%H:%M}", zone=zone_name(zone or owner_zone(), local, locale))
+
+    def message(self, locale: str = "en", zone: tzinfo | None = None) -> str:
+        from rune import i18n
+
+        key = "budget.host" if self.code == "host_budget_exhausted" else "budget.owner"
+        return i18n.text(key, locale, when=self.when(locale, zone))
+
+    def waiting(self, locale: str = "en", zone: tzinfo | None = None) -> str:
         """What a long task's owner is told when its step was refused: it waits, and goes on then."""
-        if locale.split("-", 1)[0] == "ko":
-            return f"{self.message(locale)} 이 작업은 그때까지 기다렸다가 멈춘 곳부터 이어서 해요."
-        return f"{self.message(locale)} This task waits until then and goes on from where it was."
+        from rune import i18n
 
-    def message(self, locale: str = "en") -> str:
-        if locale.split("-", 1)[0] == "ko":
-            local = self.resumes.astimezone(_SEOUL)
-            when = f"{local.month}월 {local.day}일 {local.hour:02d}:{local.minute:02d}"
-            if self.code == "host_budget_exhausted":
-                return f"이 서버의 이번 달 전체 모델 사용 한도에 도달해서 지금은 답할 수 없어요. {when}(한국 시간)부터 다시 쓸 수 있어요."
-            return f"이번 달 모델 사용 예산을 다 써서 지금은 답할 수 없어요. {when}(한국 시간)부터 다시 쓸 수 있어요."
-        when = f"{self.resumes:%B} 1 (UTC)"
-        if self.code == "host_budget_exhausted":
-            return f"This server has reached its shared model budget for the month, so I can't answer right now. It starts again on {when}."
-        return f"You've used this month's budget for your Rune's models, so I can't answer right now. It starts again on {when}."
+        return f"{self.message(locale, zone)} {i18n.text('budget.task_waits', locale)}"
 
+    def stopped_midway(self, locale: str = "en", zone: tzinfo | None = None) -> str:
+        """For a long task's step refused after it had changed something: the owner checks it first."""
+        from rune import i18n
+
+        return f"{self.message(locale, zone)} {i18n.text('budget.task_stopped', locale)}"
 
 
 def next_month(now: datetime | None = None) -> datetime:

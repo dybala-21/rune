@@ -1,0 +1,9 @@
+{
+  "budget.owner": "You've used this month's budget for your Rune's models, so I can't answer right now. It starts again on {when}.",
+  "budget.host": "This server has reached its shared model budget for the month, so I can't answer right now. It starts again on {when}.",
+  "budget.task_waits": "This task waits until then and goes on from where it was.",
+  "budget.task_stopped": "This step stopped part way through. Check what it did in the app and mark it checked, then turn the task on again after that to go on from there.",
+  "when": "{month_name} {day} at {time} ({zone})",
+  "month_names": "January|February|March|April|May|June|July|August|September|October|November|December",
+  "zone_names": "UTC=UTC"
+}

@@ -48,7 +48,6 @@ _HONEST_STOP_NOTES = {
     "verification_unavailable": "The result checker was unavailable. Review the observed actions before retrying; a completed action must not be repeated.",
     "verification_inconclusive": "The available evidence does not confirm every requested result. Check the remaining conditions before repeating an action.",
     "task_incomplete": "A requested action did not finish. Review the recorded failure before continuing.",
-    "gateway_budget_exhausted": "The month's model budget is used up; nothing was retried. It starts again on the 1st (UTC).",
     "desktop_blocked": (
         "The desktop task stopped before its result could be confirmed. Review the app or connection error before retrying."
     ),
