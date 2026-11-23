@@ -36,7 +36,8 @@ def remove_retired_extension() -> bool:
 
     That version had its owner load the folder in Chrome. A loaded copy keeps asking this
     machine's ports for a relay and attaches Chrome's debugger for whichever program answers.
-    RUNE no longer runs one; with the folder gone Chrome does not start the extension again.
+    RUNE no longer runs one. With the folder gone Chrome does not start the extension again; a
+    copy that is running goes on until Chrome is next started, which only its owner can cut short.
     """
     folder = rune_home() / "extension" / "rune-browser-bridge"
     try:
@@ -57,7 +58,8 @@ def remove_retired_extension() -> bool:
     except OSError:
         log.debug("retired_extension_folder_kept", folder=str(folder.parent))
     log.warning("retired_extension_removed", folder=str(folder),
-                next='if "RUNE Browser Bridge" is still listed at chrome://extensions, remove it there')
+                next='a copy loaded in Chrome stops when Chrome is next started; to stop it now, remove '
+                     '"RUNE Browser Bridge" at chrome://extensions')
     return True
 
 

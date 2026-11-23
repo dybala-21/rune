@@ -67,14 +67,16 @@ ensure_path() {
 
 # Earlier versions copied a Chrome extension into RUNE's folder and had it loaded in Chrome. A
 # loaded copy keeps asking this machine's ports for a relay that RUNE no longer runs, and obeys
-# whichever program answers. Without its folder Chrome does not start it again.
+# whichever program answers. Without its folder Chrome does not start it again; a copy that is
+# running goes on until Chrome is next started.
 remove_retired_extension() {
     RETIRED="${RUNE_HOME:-${HOME}/.rune}/extension/rune-browser-bridge"
     if [ -f "${RETIRED}/manifest.json" ] && grep -q '"RUNE Browser Bridge"' "${RETIRED}/manifest.json"; then
         rm -rf "${RETIRED}"
         rmdir "${RETIRED%/*}" 2>/dev/null || true
         info "Removed the retired Browser Bridge extension from ${RETIRED}"
-        echo "  If \"RUNE Browser Bridge\" is still listed at chrome://extensions, remove it there."
+        echo "  If you loaded it in Chrome, it stops when Chrome is next started."
+        echo "  To stop it now, remove \"RUNE Browser Bridge\" at chrome://extensions."
     fi
 }
 
