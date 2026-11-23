@@ -44,6 +44,12 @@ _REASONS: dict[str, tuple[str, str]] = {
                  "search or category page cannot."),
     "many_products": ("the page writes several products at different prices, so which one is meant can't be told.",
                       "A page for one product can be watched."),
+    "not_shown": ("that amount is not written in the page RUNE got in a way code can read again.",
+                  "The page RUNE gets can differ from the one the owner sees when they are signed in or hold a "
+                  "coupon. Ask the owner to check the number against the page; do not try other numbers yourself."),
+    "split": ("the places its price was read from now give more than one amount, so which is the price can't be "
+              "told.",
+              "Ask the owner what price the page shows now, then call watch_set with this item and shown_price."),
     "gone": ("the page was not found.", "Check the address with the owner."),
     "moved": ("the address now leads to another site.", ""),
     "incomparable": ("the price is now written in another currency.", ""),
@@ -67,6 +73,18 @@ def refused(kind: str, *, changing: bool = False) -> str:
     return "\n".join([*lines, hint] if hint else lines)
 
 
+def asks() -> str:
+    """What is said of a page that shows a price without writing it as data: the owner has to say
+    what the price is. Nothing from the page is passed on."""
+    return "\n".join([
+        "Not watched yet, and nothing was scheduled: the page shows a price but does not write it as data a "
+        "program can read without guessing, so the owner has to say what price it shows.",
+        "Ask the owner what price the page shows now, and in which currency. RUNE then finds where that amount is "
+        "written in the page and reads the same places each day.",
+        "Do not guess the price or look it up, and do not schedule an agent task instead. When they have answered, "
+        "call watch_set again with the same url, shown_price and currency."])
+
+
 def shown(url: str) -> str:
     """The owner's address without its scheme, and without a query that may be long or private."""
     parts = urlsplit(url)
@@ -87,7 +105,12 @@ def watching(item: Item, reading: Reading, *, at: time, job: Standing, zone: str
     called = f' as "{item.label}"' if item.label else ""
     lines = [f"Watching {shown(item.url)}{called} (item {item.id})" + (", as changed just now." if again else ".")]
     price = reading.price
-    if price.low == price.high:
+    if reading.source == "pointed":
+        count = "1 place" if len(item.places) == 1 else f"{len(item.places)} places"
+        lines.append(f"Read now: {money(price)}, the amount the owner said the page shows. The page does not write "
+                     f"its price as data, so it is read from {count} in the page that hold exactly this amount. If "
+                     "they stop agreeing, the owner is asked for the price again. Tell the owner so.")
+    elif price.low == price.high:
         offers = "1 offer" if reading.offers == 1 else f"{reading.offers} offers, all at this price"
         lines.append(f"Read now: {money(price)}, the price written on the page ({offers}).")
     else:
@@ -140,4 +163,6 @@ def line(item: Item, now: datetime, failure: str) -> str:
             state += f"; {money(item.candidate)} was read once and waits for a second reading"
     if item.via == BROWSER:
         parts.append("opened in RUNE's own browser on this machine")
+    if item.places:
+        parts.append("read from where the amount the owner pointed at is written in the page")
     return f"Item {item.id}: {name(item)}, {shown(item.url)}. {state}; {'; '.join(parts)}."

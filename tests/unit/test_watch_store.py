@@ -8,7 +8,7 @@ import pytest
 
 from rune.watch.item import BROWSER, FETCH, Price
 from rune.watch.judge import settle
-from rune.watch.store import KEEP_OBSERVATIONS, MAX_WATCHING, Store, TooMany, _keep_way
+from rune.watch.store import KEEP_OBSERVATIONS, MAX_WATCHING, Store, TooMany, _keep_up
 
 NOW = datetime(2026, 11, 20, 9, 0, tzinfo=UTC)
 PRICE = Price(Decimal("369000"), Decimal("369000"), "KRW")
@@ -52,23 +52,35 @@ def test_the_way_a_page_is_read_is_kept_with_it(store):
     assert store.save(asked) and store.get(asked.id).via == BROWSER
 
 
-def test_records_kept_before_pages_were_opened_in_a_browser_are_read_as_asked_for(tmp_path):
+def test_the_places_a_price_is_read_from_are_kept_with_its_item(store):
+    plain, pointed = add(store, 1), add(store, 2, places=("key:DcPrice", "meta:eg:saleprice"))
+    assert (store.get(plain.id).places, store.get(pointed.id).places) == ((), ("key:DcPrice", "meta:eg:saleprice"))
+    assert store.get(pointed.id) == pointed
+    pointed.places = ("key:DcPrice",)
+    assert store.save(pointed) and store.get(pointed.id).places == ("key:DcPrice",)
+    odd = add(store, 3, places=('meta:a"b,c', "key:$x"))
+    assert store.get(odd.id).places == ('meta:a"b,c', "key:$x"), "a name is kept whatever is in it"
+
+
+@pytest.mark.parametrize("since", [("via", "places"), ("places",)])
+def test_records_kept_by_an_earlier_version_are_read_as_asked_for_and_from_structured_data(tmp_path, since):
     path = tmp_path / "watch.db"
     first = Store(path)
     item = add(first)
     first.close()
-    # As a version before this one left the file: the items have no way written beside them.
+    # As a version before this one left the file: the items have neither written beside them.
     old = sqlite3.connect(path)
-    old.execute("ALTER TABLE items DROP COLUMN via")
+    for column in since:
+        old.execute(f"ALTER TABLE items DROP COLUMN {column}")
     old.commit()
     old.close()
 
     kept = Store(path)
     try:
         found = kept.get(item.id)
-        assert found.via == FETCH
-        found.via = BROWSER
-        assert kept.save(found) and kept.get(item.id).via == BROWSER
+        assert (found.via, found.places) == (FETCH, ())
+        found.via, found.places = BROWSER, ("key:price",)
+        assert kept.save(found) and (kept.get(item.id).via, kept.get(item.id).places) == (BROWSER, ("key:price",))
     finally:
         kept.close()
 
@@ -90,10 +102,10 @@ def test_two_that_open_an_old_file_at_once_do_not_trip_over_each_other(tmp_path)
     Store(tmp_path / "watch.db").close()
     db = sqlite3.connect(tmp_path / "watch.db")
     db.row_factory = sqlite3.Row
-    _keep_way(Late(db))   # the column is there already: adding it again is not an error
+    _keep_up(Late(db))   # the column is there already: adding it again is not an error
     db.execute("ALTER TABLE items RENAME TO things")
     with pytest.raises(sqlite3.OperationalError):
-        _keep_way(db)   # but a file it can't be added to is one
+        _keep_up(db)   # but a file it can't be added to is one
     db.close()
 
 

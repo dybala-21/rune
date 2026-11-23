@@ -13,7 +13,7 @@ from decimal import Decimal
 
 from rune.channels.types import LinkButton
 from rune.watch.item import Ended, Event, Failing, Item, Price, Told
-from rune.watch.judge import EXPIRES_AFTER
+from rune.watch.judge import ASKS_OWNER, EXPIRES_AFTER
 from rune.watch.labels import ENGLISH, why
 
 # Shown at most; a message with more items still names them all.
@@ -75,6 +75,8 @@ def _lines(entry: News, now: datetime, t: dict[str, str]) -> list[str]:
         return [f"{money(event.before)} → {money(event.now)}",
                 t["told_and_read"].format(told=_day(entry.told_at, now), read=f"{now:%Y-%m-%d %H:%M}")]
     if isinstance(event, Failing):
+        if event.kind == ASKS_OWNER:
+            return [t["split"]]
         return [f"{t['failing'].format(days=event.days)} {t[why(event.kind)]}"]
     return _ended(entry.item, event, now, t)
 

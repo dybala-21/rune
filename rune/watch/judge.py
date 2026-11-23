@@ -22,6 +22,10 @@ END_AFTER_FAILED_DAYS = 14
 END_AFTER_GONE_DAYS = 2
 # A day this machine's web was closed says nothing about the page: it never ends a watch.
 NOT_THE_PAGE = "web_closed"
+# The places a price is read from stopped agreeing (rune.watch.places). Only the owner can say
+# which of the amounts is the price, and a price that just split is often one that just went
+# down, so they are asked the day it happens.
+ASKS_OWNER = "split"
 
 
 def meets(item: Item, price: Price) -> bool:
@@ -125,7 +129,7 @@ def _failed(item: Item, kind: str, now: datetime, events: list[Event]) -> None:
         _end(item, "gone", now, events)
     elif item.counted_days >= END_AFTER_FAILED_DAYS:
         _end(item, "unreadable", now, events)
-    elif item.failed_days >= TELL_FAILURE_ON_DAY and not item.told_failure:
+    elif (item.failed_days >= TELL_FAILURE_ON_DAY or kind == ASKS_OWNER) and not item.told_failure:
         item.told_failure = True
         events.append(Failing(kind=kind, days=item.failed_days))
 

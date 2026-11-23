@@ -21,10 +21,11 @@ from rune.types import CapabilityResult, Domain, RiskLevel
 from rune.utils.logger import get_logger
 from rune.watch import answers, job, schedule
 from rune.watch.browse import Browser
+from rune.watch.extract import CURRENCIES
 from rune.watch.fetch import Reader, host_of
 from rune.watch.item import Item, Unread
 from rune.watch.judge import renew, stop
-from rune.watch.observe import Observation
+from rune.watch.observe import Observation, Pointed
 from rune.watch.store import MAX_WATCHING, Store, TooMany
 
 log = get_logger(__name__)
@@ -49,6 +50,12 @@ class WatchSetParams(BaseModel):
     label: str | None = Field(None, description=(
         "What the owner called the product, copied from their message exactly. Leave out when they gave it no "
         "name; do not make one up or take one from the page"))
+    shown_price: Decimal | None = Field(None, gt=0, lt=10**12, description=(
+        "The price the owner says the page shows now, as a plain number (45500 for \"45,500 won\"): needed where "
+        "watch_set answered that the page writes no price a program can read, or that the places its price was "
+        "read from no longer agree. Only a number the owner stated; never one you worked out or found"))
+    currency: str | None = Field(None, description=(
+        "With shown_price: the currency the owner means, as its ISO 4217 code (KRW for won, USD for dollars)"))
     language: str = Field(description=(
         "The language messages are written in, as a BCP-47 tag such as ko, en or ja: the one the owner's own "
         "messages are written in. It is shared with the morning briefing"))
@@ -64,6 +71,15 @@ class WatchSetParams(BaseModel):
         if not tag(value):
             raise ValueError("Use a language tag such as ko, en or ja")
         return tag(value)
+
+    @field_validator("currency")
+    @classmethod
+    def currency_code(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if value.strip().upper() not in CURRENCIES:
+            raise ValueError("Use an ISO 4217 currency code such as KRW, USD or EUR")
+        return value.strip().upper()
 
     @field_validator("time")
     @classmethod
@@ -95,10 +111,15 @@ def _wrong(error: str) -> CapabilityResult:
     return CapabilityResult(success=False, error=error)
 
 
-async def _read(url: str, now: datetime) -> Observation:
+def _asks() -> CapabilityResult:
+    # Like a refusal, this is the tool's answer: nothing is watched until the owner has said the price.
+    return CapabilityResult(success=True, output=answers.asks(), metadata={"watched": False, "reason": "needs_price"})
+
+
+async def _read(url: str, now: datetime, pointed_at: Pointed) -> Observation:
     # The way a page is read is chosen each time its owner sets the watch: asked for first.
     async with Reader() as reader, Browser() as browser:
-        return await job.read(reader, url, registering=True, now=now, browser=browser)
+        return await job.read(reader, url, registering=True, now=now, browser=browser, pointed_at=pointed_at)
 
 
 def _label(given: str | None, kept: str) -> str | None:
@@ -120,6 +141,8 @@ async def watch_set(params: WatchSetParams) -> CapabilityResult:
         return _wrong("Give url for a new page, or item for one already watched: one of them, not both.")
     if params.below is not None and params.tell_when != "drop":
         return _wrong('below goes with tell_when="drop".')
+    if params.currency is not None and params.shown_price is None:
+        return _wrong("currency goes with shown_price.")
     try:
         store = Store()
     except Exception as exc:
@@ -165,14 +188,18 @@ async def _start(store: Store, params: WatchSetParams) -> CapabilityResult:
         return _refused("address")
     if len(store.watching()) >= MAX_WATCHING:
         return _refused("too_many")
+    if params.shown_price is not None and params.currency is None:
+        return _wrong("shown_price needs its currency: ask the owner which one they mean.")
     now = job.clock()
-    seen = await _read(url, now)
+    seen = await _read(url, now, Pointed(currency=params.currency or "", said=params.shown_price))
     if seen.reading is None:
-        return _refused(seen.failure)
+        # A page that shows a price without writing it as data can still be watched, once its owner
+        # has said what price it shows.
+        return _asks() if seen.failure == "no_price" and params.shown_price is None else _refused(seen.failure)
     at, standing = _settings(store, params)
     try:
         item = store.add(url=url, fetch_url=seen.url, host=host, label=label, tell_when=params.tell_when,
-                         below=params.below, price=seen.reading.price, now=now, via=seen.via)
+                         below=params.below, price=seen.reading.price, now=now, via=seen.via, places=seen.places)
     except TooMany:
         return _refused("too_many")
     return await _watching(store, item, seen, params.language, at, standing, now, again=False)
@@ -191,8 +218,11 @@ async def _change(store: Store, item: Item, params: WatchSetParams) -> Capabilit
     now = job.clock()
     # Read from the owner's address again, as when it was set up: what they are told from here on
     # is judged against the price they are shown now.
-    seen = await _read(item.url, now)
+    seen = await _read(item.url, now, Pointed(item.places, params.currency or item.told.currency, params.shown_price))
     if seen.reading is None:
+        if seen.failure == "no_price" and params.shown_price is None:
+            # Its page stopped writing the price where it was read from: its owner can say it again.
+            return _asks()
         return _refused(seen.failure, changing=True)
     at, standing = _settings(store, params)
     current: Item | None = item
@@ -200,7 +230,7 @@ async def _change(store: Store, item: Item, params: WatchSetParams) -> Capabilit
         if current is None:
             break
         renew(current, now, seen.reading.price, tell_when=tell_when, below=below, label=label)
-        current.fetch_url, current.via = seen.url, seen.via
+        current.fetch_url, current.via, current.places = seen.url, seen.via, seen.places
         if store.save(current):
             return await _watching(store, current, seen, params.language, at, standing, now, again=True)
         # The scheduled run saved this item while its page was being read here: the change is made
@@ -314,7 +344,9 @@ def register_watch_capabilities(registry: CapabilityRegistry) -> None:
                      "when they ask to be told about a price on a page (\"tell me when this gets cheaper\"). It "
                      "needs the page's address as the owner typed it. A page its shop gives to no program is opened "
                      "in RUNE's own browser where RUNE runs on the owner's machine; one that can't be read either "
-                     "way is said plainly not to be watched. Also changes or renews a watch by its item id."),
+                     "way is said plainly not to be watched. Where a page shows its price without writing it as "
+                     "data, the tool says so: ask the owner what price the page shows, then call again with "
+                     "shown_price and currency. Also changes or renews a watch by its item id."),
         domain=Domain.SCHEDULE,
         risk_level=RiskLevel.MEDIUM,
         group="schedule",

@@ -2,6 +2,7 @@
 page can't be watched."""
 
 import json
+from dataclasses import dataclass, replace
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -27,7 +28,7 @@ from rune.safety.tool_policy import _network_approval_request
 from rune.watch import fetch, job, labels, schedule
 from rune.watch.extract import Reading
 from rune.watch.item import BROWSER, FETCH, Price
-from rune.watch.observe import Observation
+from rune.watch.observe import Observation, Pointed
 from rune.watch.observe import observe as read_for_real
 from rune.watch.store import MAX_WATCHING, Store
 from tests.unit.test_watch_fetch import Web
@@ -42,6 +43,30 @@ def won(low: int, high: int | None = None, currency: str = "KRW") -> Price:
     return Price(Decimal(low), Decimal(low if high is None else high), currency)
 
 
+@dataclass
+class Shows:
+    """A page that shows its price without writing it as structured data: the places that hold each
+    amount on it alone."""
+
+    held: dict[int, tuple[str, ...]]
+
+    def read(self, how: Pointed) -> Observation:
+        if how.said is None and not how.places:
+            return Observation(failure="no_price")
+        if how.said is None:
+            now = {amount for amount, places in self.held.items() if set(places) & set(how.places)}
+            if len(now) != 1:
+                return Observation(failure="split" if now else "no_price")
+            return Observation(reading=Reading(won(now.pop(), currency=how.currency), 1, "pointed"),
+                               http_status=200, places=how.places)
+        places = self.held.get(int(how.said), ())
+        places = tuple(place for place in places if place in how.places) or places
+        if not places:
+            return Observation(failure="not_shown")
+        return Observation(reading=Reading(Price(how.said, how.said, how.currency), 1, "pointed"),
+                           http_status=200, places=places)
+
+
 class Chat:
     """A chat the owner typed into: the pages there are to read, the scheduler's jobs, and the time."""
 
@@ -53,12 +78,16 @@ class Chat:
         # Addresses whose shop gives the page only to a browser, and what each read was handed to read with.
         self.browser_only: set[str] = set()
         self.handed: list[tuple[str, str]] = []
+        self.pointed: list[Pointed] = []
 
-    async def observe(self, reader, url, *, registering, now, browser, via) -> Observation:
+    async def observe(self, reader, url, *, registering, now, browser, via, pointed_at) -> Observation:
         self.reads.append((url, registering))
         self.handed.append((type(browser).__name__, via))
+        self.pointed.append(pointed_at)
         answer = self.pages.get(url, "gone")
         way = BROWSER if url in self.browser_only else FETCH
+        if isinstance(answer, Shows):
+            return replace(answer.read(pointed_at), url=url, via=way)
         if isinstance(answer, str):
             return Observation(failure=answer, url=url, via=way)
         reading = answer if isinstance(answer, Reading) else Reading(answer, 1, "jsonld")
@@ -248,7 +277,6 @@ async def test_an_address_that_is_not_a_plain_https_page_is_not_read(chat, typed
     ("robots", "this site's robots.txt does not allow automated reading."),
     ("blocked", "the site refuses automated reading."),
     ("denied", "this site's terms of use forbid automated checking."),
-    ("no_price", "the page does not write a price that can be read without guessing."),
     ("many_products", "several products at different prices"),
     ("private", "does not lead to a public site."),
     ("gone", "the page was not found."),
@@ -559,3 +587,111 @@ async def test_nothing_a_site_wrote_reaches_an_answer_a_message_the_list_or_the_
     finally:
         store.close()
     assert [key for row in kept for key, value in row.items() if marker in str(value)] == ["fetch_url"]
+
+
+# -- A page that only shows its price ---------------------------------------------
+
+SHOWN = Shows(held={45500: ("key:DcPrice", "key:SellPrice"), 3185: ("key:couponAmount",)})
+
+
+async def test_a_page_that_only_shows_its_price_is_watched_once_the_owner_has_said_which_amount_it_is(chat):
+    chat.pages[COAT] = SHOWN
+    asked = await chat.set(url=COAT, tell_when="drop")
+    assert asked.success and asked.metadata == {"watched": False, "reason": "needs_price"}
+    assert asked.output.splitlines() == [
+        "Not watched yet, and nothing was scheduled: the page shows a price but does not write it as data a program "
+        "can read without guessing, so the owner has to say what price it shows.",
+        "Ask the owner what price the page shows now, and in which currency. RUNE then finds where that amount is "
+        "written in the page and reads the same places each day.",
+        "Do not guess the price or look it up, and do not schedule an agent task instead. When they have answered, "
+        "call watch_set again with the same url, shown_price and currency."]
+    assert not any(digit in asked.output for digit in "0123456789"), "no number from the page is passed on"
+    assert chat.items() == [] and chat.watch_job() is None, "nothing is watched on the tool's own word"
+
+    made = await chat.set(url=COAT, tell_when="drop", shown_price=Decimal(45500), currency="krw")
+    assert made.success and made.metadata["watched"] is True
+    assert made.output.splitlines()[1] == (
+        "Read now: 45,500 KRW, the amount the owner said the page shows. The page does not write its price as data, "
+        "so it is read from 2 places in the page that hold exactly this amount. If they stop agreeing, the owner is "
+        "asked for the price again. Tell the owner so.")
+    [item] = chat.items()
+    assert (item.places, item.told) == (("key:DcPrice", "key:SellPrice"), won(45500))
+    assert chat.pointed == [Pointed(), Pointed(currency="KRW", said=Decimal(45500))]
+    assert "; read from where the amount the owner pointed at is written in the page." in await chat.listed()
+
+
+async def test_a_price_held_in_one_place_is_said_to_be_read_from_one(chat):
+    chat.pages[COAT] = Shows(held={45500: ("meta:eg:saleprice",)})
+    made = await chat.set(url=COAT, tell_when="drop", shown_price=Decimal(45500), currency="KRW")
+    assert "it is read from 1 place in the page" in made.output and chat.items()[0].places == ("meta:eg:saleprice",)
+
+
+async def test_an_amount_the_page_does_not_hold_is_not_watched_and_no_other_is_tried(chat):
+    chat.pages[COAT] = SHOWN
+    refused = await chat.set(url=COAT, tell_when="drop", shown_price=Decimal(44000), currency="KRW")
+    assert nothing_happened(chat, refused, "not_shown")
+    assert "that amount is not written in the page RUNE got in a way code can read again." in refused.output
+    assert "do not try other numbers yourself" in refused.output and chat.reads == [(COAT, True)]
+
+
+async def test_the_owners_amount_needs_its_currency_and_a_currency_needs_an_amount(chat):
+    chat.pages[COAT] = SHOWN
+    bare = await chat.set(url=COAT, tell_when="drop", shown_price=Decimal(45500))
+    assert not bare.success and "shown_price needs its currency" in bare.error
+    alone = await chat.set(url=COAT, tell_when="drop", currency="KRW")
+    assert not alone.success and "currency goes with shown_price" in alone.error
+    assert chat.reads == [] and chat.items() == []
+    for wrong in ("won", "₩", "KR"):
+        with pytest.raises(ValueError, match="ISO 4217"):
+            WatchSetParams(language="en", url=COAT, tell_when="drop", shown_price=Decimal(1), currency=wrong)
+    for wrong in (Decimal(0), Decimal(-1), Decimal(10) ** 12):
+        with pytest.raises(ValueError):
+            WatchSetParams(language="en", url=COAT, tell_when="drop", shown_price=wrong, currency="KRW")
+
+
+async def test_a_page_that_writes_its_price_as_data_is_read_from_that_whatever_amount_was_said(chat):
+    made = await chat.set(url=COAT, tell_when="drop", shown_price=Decimal(1000), currency="KRW")
+    assert "Read now: 369,000 KRW, the price written on the page (1 offer)." in made.output
+    assert chat.items()[0].places == () and chat.items()[0].told == won(369000)
+
+
+async def test_places_that_stop_agreeing_are_pointed_at_again_by_the_owner(chat):
+    chat.pages[COAT] = SHOWN
+    await chat.set(url=COAT, tell_when="drop", shown_price=Decimal(45500), currency="KRW")
+    # A discount: one of the two places goes down, the other stays.
+    chat.pages[COAT] = Shows(held={45500: ("key:SellPrice",), 40000: ("key:DcPrice", "key:discountedPrice")})
+    split = await chat.set(item=1)
+    assert split.success and split.metadata == {"watched": False, "reason": "split"}
+    assert split.output.splitlines() == [
+        "Not changed: the places its price was read from now give more than one amount, so which is the price "
+        "can't be told. The watch stays as it was.", "Tell the owner so.",
+        "Ask the owner what price the page shows now, then call watch_set with this item and shown_price."]
+    assert chat.pointed[-1] == Pointed(("key:DcPrice", "key:SellPrice"), "KRW"), "read from the places it kept"
+    assert chat.items()[0].told == won(45500)
+
+    again = await chat.set(item=1, shown_price=Decimal(40000))
+    assert again.success and "Read now: 40,000 KRW, the amount the owner said the page shows." in again.output
+    [item] = chat.items()
+    assert (item.places, item.told) == (("key:DcPrice",), won(40000)), "the place that held the price both times"
+    assert chat.pointed[-1] == Pointed(("key:DcPrice", "key:SellPrice"), "KRW", Decimal(40000)), "in its own currency"
+
+
+async def test_a_page_whose_kept_places_are_all_gone_is_pointed_at_again(chat):
+    chat.pages[COAT] = SHOWN
+    await chat.set(url=COAT, tell_when="drop", shown_price=Decimal(45500), currency="KRW")
+    chat.pages[COAT] = Shows(held={39900: ("key:finalPrice",)})   # the shop rebuilt its page
+    asked = await chat.set(item=1)
+    assert asked.metadata == {"watched": False, "reason": "needs_price"} and chat.items()[0].told == won(45500)
+    made = await chat.set(item=1, shown_price=Decimal(39900))
+    assert made.success and (chat.items()[0].places, chat.items()[0].told) == (("key:finalPrice",), won(39900))
+
+
+async def test_a_watched_page_that_stops_writing_its_price_as_data_can_be_pointed_at(chat):
+    await chat.set(url=COAT, tell_when="drop")
+    chat.pages[COAT] = SHOWN
+    asked = await chat.set(item=1)
+    assert asked.metadata == {"watched": False, "reason": "needs_price"} and "Ask the owner what price" in asked.output
+    assert chat.items()[0].told == won(369000) and chat.items()[0].places == (), "as it was, until they answer"
+    made = await chat.set(item=1, shown_price=Decimal(45500), currency="KRW")
+    assert made.success and chat.items()[0].places == ("key:DcPrice", "key:SellPrice")
+

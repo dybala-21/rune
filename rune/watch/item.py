@@ -54,6 +54,9 @@ class Item:
     ended_at: datetime | None = None
     # The way its page is read, chosen when its owner set the watch: FETCH or BROWSER.
     via: str = FETCH
+    # For a page that writes no structured price: the places in it that held the amount its owner
+    # said it shows, which are read again each day (rune.watch.places). Empty for any other page.
+    places: tuple[str, ...] = ()
     # Goes up with every save, so a save from a copy read before another save is refused.
     version: int = 0
 

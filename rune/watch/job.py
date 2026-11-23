@@ -19,7 +19,7 @@ from rune.watch.compose import News, compose
 from rune.watch.fetch import Reader
 from rune.watch.item import FETCH, Event, Item
 from rune.watch.judge import due, settle
-from rune.watch.observe import Observation, observe
+from rune.watch.observe import Observation, Pointed, observe
 from rune.watch.store import Store
 
 log = get_logger(__name__)
@@ -73,12 +73,13 @@ async def run_watch(job: Any = None) -> dict[str, Any]:
             "buttons": [asdict(button) for button in buttons]}
 
 
-async def read(reader: Reader, url: str, *, registering: bool, now: datetime,
-               browser: Browser | None = None, via: str = FETCH) -> Observation:
+async def read(reader: Reader, url: str, *, registering: bool, now: datetime, browser: Browser | None = None,
+               via: str = FETCH, pointed_at: Pointed | None = None) -> Observation:
     """One reading for the watch. A read that got no answer on a hosted machine whose web is closed
     is said to be that, since nothing about the page was learned."""
     try:
-        seen = await observe(reader, url, registering=registering, now=now, browser=browser, via=via)
+        seen = await observe(reader, url, registering=registering, now=now, browser=browser, via=via,
+                             pointed_at=pointed_at)
     except Exception as exc:
         log.warning("watch_read_failed", error=type(exc).__name__)
         return Observation(failure="error")
@@ -115,8 +116,8 @@ async def _look(now: datetime) -> list[News]:
             for item, kind in wanted:
                 try:
                     async with asyncio.timeout_at(stop):
-                        seen = await read(reader, item.fetch_url, registering=False, now=now,
-                                          browser=browser, via=item.via)
+                        seen = await read(reader, item.fetch_url, registering=False, now=now, browser=browser,
+                                          via=item.via, pointed_at=Pointed(item.places, item.told.currency))
                 except TimeoutError:
                     log.info("watch_out_of_time", read=len(read_items), due=len(wanted))
                     break

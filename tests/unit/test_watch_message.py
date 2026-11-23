@@ -72,6 +72,15 @@ def test_a_page_that_could_not_be_read_is_said_to_be_that_with_no_price_beside_i
         assert len(buttons) == 1
 
 
+def test_places_that_stopped_agreeing_ask_the_owner_for_the_price_and_name_no_amount():
+    text, buttons = compose([News(item(last_read=won(349000), last_read_at=TOLD_AT), Failing("split", 1), TOLD_AT)], NOW)
+    assert text.splitlines() == [
+        "About the pages you asked me to watch:", "", "에어팟 프로 3 (www.apple.com)",
+        "The page now gives more than one amount where its price was read, so I can't tell which is the price. "
+        "Tell me the price it shows now and I will keep watching."]
+    assert "349" not in text and "days" not in text and len(buttons) == 1
+
+
 def test_a_watch_that_ended_says_why_and_an_old_price_carries_its_day():
     gone, _ = compose([News(item(), Ended("gone", won(349000)), TOLD_AT)], NOW)
     assert "The page is gone" in gone and "349" not in gone

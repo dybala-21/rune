@@ -70,6 +70,9 @@ class Page:
     async def content(self) -> str:
         return self.shop.markup
 
+    async def evaluate(self, script: str) -> object:
+        pytest.fail("the page was asked to run something")
+
     async def close(self) -> None:
         pytest.fail("the page being read was closed")
 

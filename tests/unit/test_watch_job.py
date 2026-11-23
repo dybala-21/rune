@@ -18,7 +18,7 @@ from rune.watch import job, schedule
 from rune.watch.extract import Reading
 from rune.watch.item import BROWSER, FETCH, Item, Price
 from rune.watch.judge import renew
-from rune.watch.observe import Observation
+from rune.watch.observe import Observation, Pointed
 from rune.watch.store import Store
 
 SEOUL = ZoneInfo("Asia/Seoul")
@@ -41,12 +41,14 @@ class Pages:
         self.answers: dict[str, object] = {}
         self.reads: list[str] = []
         self.ways: list[str] = []
+        self.pointed: list[Pointed] = []
         self.browsers: set[str] = set()
         self.now = at(0)   # set up the day before: the reading a watch starts from is that day's read
 
-    async def observe(self, reader, url, *, registering, now, browser, via) -> Observation:
+    async def observe(self, reader, url, *, registering, now, browser, via, pointed_at) -> Observation:
         self.reads.append(url)
         self.ways.append(via)
+        self.pointed.append(pointed_at)
         self.browsers.add(type(browser).__name__)
         answer = self.answers[url]
         if callable(answer):
@@ -56,15 +58,16 @@ class Pages:
         if isinstance(answer, str):
             return Observation(failure=answer, url=url, http_status=403 if answer == "blocked" else 0)
         assert isinstance(answer, Price)
-        return Observation(reading=Reading(answer, 1, "jsonld"), url=url, http_status=200)
+        return Observation(reading=Reading(answer, 1, "pointed" if pointed_at.places else "jsonld"), url=url,
+                           http_status=200, places=pointed_at.places)
 
     def watch(self, url: str = COAT, price: Price | None = None, *, label: str = "", tell_when: str = "drop",
-              below: int | None = None, via: str = FETCH) -> Item:
+              below: int | None = None, via: str = FETCH, places: tuple[str, ...] = ()) -> Item:
         store = Store()
         try:
             return store.add(url=url, fetch_url=url, host="shop.example", label=label, tell_when=tell_when,
                              below=None if below is None else Decimal(below), price=price or won(100), now=self.now,
-                             via=via)
+                             via=via, places=places)
         finally:
             store.close()
 
@@ -118,6 +121,23 @@ async def test_each_page_is_read_the_way_it_was_when_its_watch_was_set_and_a_wak
     assert sorted(zip(pages.reads, pages.ways, strict=True)) == [(COAT, FETCH), (MUG, BROWSER)]
     assert (pages.kept(coat).via, pages.kept(mug).via) == (FETCH, BROWSER)
     assert pages.browsers == {"Browser"}, "every read of the run is handed the run's one browser"
+
+
+async def test_a_price_its_owner_pointed_at_is_read_from_its_places_and_they_are_asked_the_day_those_split(pages):
+    coat = pages.watch(COAT, price=won(100, currency="USD"), places=("key:DcPrice", "key:SellPrice"))
+    mug = pages.watch(MUG)
+    assert quiet(await pages.wake(at(2), coat=won(100, currency="USD"), mug=won(100)))
+    assert sorted(zip(pages.reads, pages.pointed, strict=True)) == [
+        (COAT, Pointed(("key:DcPrice", "key:SellPrice"), "USD")), (MUG, Pointed((), "KRW"))]
+    assert pages.kept(coat).places == ("key:DcPrice", "key:SellPrice"), "a wake leaves them as its owner set them"
+
+    told = await pages.wake(at(3), coat="split")
+    assert told["success"] and told["output"].splitlines() == [
+        "About the pages you asked me to watch:", "", "shop.example",
+        "The page now gives more than one amount where its price was read, so I can't tell which is the price. "
+        "Tell me the price it shows now and I will keep watching."]
+    assert quiet(await pages.wake(at(3, 10))) and quiet(await pages.wake(at(4))), "asked once"
+    assert pages.kept(coat).status == "watching" and pages.kept(mug).failed_days == 0
 
 
 async def test_a_wake_with_nothing_due_starts_no_browser(pages, monkeypatch):
