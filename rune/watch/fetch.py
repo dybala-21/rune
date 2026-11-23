@@ -49,6 +49,8 @@ DAILY_HOPS = 3
 ROBOTS_HOPS = 5
 _REDIRECT = (301, 302, 303, 307, 308)
 _CHARSET = re.compile(rb"""<meta[^>]+charset\s*=\s*["']?\s*([A-Za-z0-9_.:-]+)""", re.IGNORECASE)
+# What each part of a host's name is made of, once the name is in its ASCII form.
+_LABEL = re.compile(r"[a-z0-9_-]+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +69,8 @@ class _Answer:
 
 def host_of(url: str) -> str:
     """The host of an address the watch may read, in its ASCII form. Raises ``Unread("address")``
-    for anything else: not https, another port, a login in the address, a bare IP, or too long."""
+    for anything else: not https, another port, a login in the address, a bare IP, a name not
+    written plainly, or too long."""
     if len(url) > MAX_URL:
         raise Unread("address")
     try:
@@ -88,7 +91,10 @@ def host_of(url: str) -> str:
         name = host.encode("idna").decode("ascii").lower()
     except UnicodeError:
         raise Unread("address") from None
-    if not name or "." not in name:
+    # One spelling for one site. A name that ends in a dot, or holds a "%" a browser would turn
+    # into one, is the same site under another name: its robots.txt, its pause and the terms list
+    # would be asked about a site they do not know.
+    if "." not in name or not all(_LABEL.fullmatch(part) for part in name.split(".")):
         raise Unread("address")
     return name
 
