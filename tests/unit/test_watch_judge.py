@@ -72,6 +72,21 @@ def test_a_drop_is_told_once_after_a_second_reading_and_a_failure_on_its_second_
     assert page.most_requests_in_a_day() == 2
 
 
+def test_places_that_stop_agreeing_are_told_the_day_they_do_and_only_once():
+    page = Page(watch())
+    told = page.wake([
+        (at(1), won(100)), (at(2), "split"), (at(2, 10), "split"), (at(3), "split"), (at(4), won(100)),
+        (at(5), "no_price"), (at(6), "split"), (at(7), "split"),
+    ])
+    assert told == [
+        (at(2), [Failing(kind="split", days=1)]),       # not held back a day like any other failed read
+        (at(6), [Failing(kind="split", days=2)]),       # after a good day, said again; once a streak
+    ]
+    assert page.most_requests_in_a_day() == 1, "a split is not read again that day"
+    ended = Page(watch()).wake([(at(day), "split") for day in range(1, 16)])
+    assert [events for _, events in ended] == [[Failing(kind="split", days=1)], [Ended(why="unreadable", last=won(100))]]
+
+
 def test_a_price_that_rose_and_came_back_is_not_a_drop():
     page = Page(watch())
     assert page.wake([(at(1), won(120)), (at(1, 10), won(120)), (at(2), won(100)), (at(2, 10), won(100)),

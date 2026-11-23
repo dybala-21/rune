@@ -56,7 +56,7 @@ class Reading:
 
     price: Price
     offers: int
-    source: str  # "jsonld" | "og_sale" | "og"
+    source: str  # "jsonld" | "og_sale" | "og" | "pointed" (rune.watch.places)
     # Prices the page marks as list prices, or wrote as its price above a sale price it also wrote.
     listed: tuple[Decimal, ...] = ()
 
@@ -225,7 +225,7 @@ def _offer(offer: dict[str, Any]) -> tuple[list[Decimal], str, list[Decimal]]:
     given = offer.get("priceSpecification")
     specs = [spec for spec in (given if isinstance(given, list) else [given]) if isinstance(spec, dict)]
     before = [amount for spec in specs if _price_type(spec) in _LIST_PRICE
-              if (amount := _readable(spec.get("price"))) is not None]
+              if (amount := readable(spec.get("price"))) is not None]
     current = [spec for spec in specs if spec.get("price") is not None and _price_type(spec) in ("", "saleprice")
                # A member's price and a price per unit are not what a visitor is asked to pay.
                and "validForMemberTier" not in spec and "referenceQuantity" not in spec]
@@ -254,13 +254,13 @@ def _price_type(spec: dict[str, Any]) -> str:
 
 
 def _amount(value: Any) -> Decimal:
-    amount = _readable(value)
+    amount = readable(value)
     if amount is None:
         raise Unread("no_price")
     return amount
 
 
-def _readable(value: Any) -> Decimal | None:
+def readable(value: Any) -> Decimal | None:
     """The value as an amount of money when it is written as one: a number, or digits with at most
     four decimals after a point. Nothing else is read, repaired or rounded."""
     if isinstance(value, bool):
@@ -278,7 +278,7 @@ def _readable(value: Any) -> Decimal | None:
 
 
 def _tagged(tags: dict[str, str], key: str, currency: str) -> tuple[Decimal, str] | None:
-    amount = _readable(tags.get(key))
+    amount = readable(tags.get(key))
     return (amount, currency) if amount is not None and currency in CURRENCIES else None
 
 

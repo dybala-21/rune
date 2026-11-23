@@ -19,6 +19,7 @@ class Far:
         self.reached = self.left = 0
         self.port = 0
         self._server: asyncio.Server | None = None
+        self._backs: list[asyncio.StreamWriter] = []
 
     async def __aenter__(self) -> "Far":
         self._server = await asyncio.start_server(self._answer, "127.0.0.1", 0)
@@ -27,9 +28,14 @@ class Far:
 
     async def __aexit__(self, *why: object) -> None:
         self._server.close()
+        # Its connections are ended here, not left for a later test's garbage collection to find.
+        for back in self._backs:
+            back.close()
+        await asyncio.sleep(0)
 
     async def _answer(self, sent: asyncio.StreamReader, back: asyncio.StreamWriter) -> None:
         self.reached += 1
+        self._backs.append(back)
         try:
             while piece := await sent.read(100):
                 back.write(b"far:" + piece)
@@ -237,6 +243,7 @@ async def test_shutting_the_gate_ends_its_tunnels_and_it_listens_no_more(far):
     late = await _plain(out)     # and one that connects just as the gate is shut
     assert status == 200
     began = asyncio.get_running_loop().time()
+    gc.collect()   # what an earlier test left unclosed is not this gate's
     with warnings.catch_warnings(record=True) as left_open:
         warnings.simplefilter("always", ResourceWarning)
         await soon(door.close())

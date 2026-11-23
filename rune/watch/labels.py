@@ -19,6 +19,8 @@ ENGLISH: dict[str, str] = {
     "told_and_read": "Last told {told} · read {read}",
     "as_written": "Prices are as the page writes them for a visitor who is not signed in.",
     "failing": "Could not be read for {days} days in a row.",
+    "split": "The page now gives more than one amount where its price was read, so I can't tell which is the "
+             "price. Tell me the price it shows now and I will keep watching.",
     "ended_gone": "The page is gone, so it is no longer watched.",
     "ended_unreadable": "It could not be read for {days} days in a row, so it is no longer watched.",
     "ended_expired": "It has been watched for {days} days, so the watch ended. Tell me to keep watching and I will.",

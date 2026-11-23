@@ -10,8 +10,8 @@ import pytest
 
 from rune.watch import browse
 from rune.watch.browse import NAME, Browser, Window, open_window
-from rune.watch.item import BROWSER, Unread
-from rune.watch.observe import observe
+from rune.watch.item import BROWSER, Price, Unread
+from rune.watch.observe import Pointed, observe
 from tests.unit.test_watch_fetch import Web
 
 SHOP = "https://shop.example"
@@ -37,6 +37,18 @@ fetch('/sent/fetch').catch(() => {{}}); fetch('http://localhost:{tcp}/api').catc
 const call = new RTCPeerConnection({{iceServers: [{{urls: 'stun:127.0.0.1:{udp}'}}]}});
 call.createDataChannel('x'); call.createOffer().then(offer => call.setLocalDescription(offer));
 </script></body></html>"""
+# A page as a shop that writes no structured price makes it: the price in large type, a list price
+# struck through in larger type above it, a coupon's amount beside it, something hidden, other
+# products' prices further down, and the same amounts in the shop's own script state.
+SHOWS = """<html><head><meta property="eg:salePrice" content="{price}">
+<script>var goods = {{"SellPrice": {price}.0000, "DcPrice": "{discounted}", "couponAmount": 3185,
+                     "related": [{{"price": 12000}}, {{"price": 9900}}]}};</script>
+<style>.price {{font-size: 26px}} .was {{font-size: 30px; text-decoration: line-through}}
+.small {{font-size: 14px}} .hidden {{display: none; font-size: 40px}}</style></head><body>
+<del class="was"><span>65,000</span>원</del> <strong class="price">{shown}</strong><span>원</span>
+<p class="small">쿠폰 <b>3,185</b>원</p><p class="hidden">99,999</p>
+<div style="margin-top: 3000px"><span class="price">12,000</span> <span class="price">9,900</span></div>
+</body></html>"""
 REACHES_OUT = '<html><body><img src="https://open.example:{tcp}/x"></body></html>'
 
 
@@ -78,6 +90,8 @@ class Shop:
     def __init__(self, inside: Inside) -> None:
         self.asked: list[tuple[str, dict[str, str]]] = []
         self.inside = inside
+        # What the page at /p/shows carries as its price, and as its price after the shop's discount.
+        self.price = self.discounted = 45500
 
     async def answer(self, route) -> None:
         ports = {"tcp": self.inside.tcp, "udp": self.inside.udp}
@@ -88,6 +102,9 @@ class Shop:
             await route.fulfill(body=LATE, content_type="text/html", headers={"set-cookie": "visit=1; Path=/"})
         elif path == "/api/price":
             await route.fulfill(body=json.dumps({"price": 100}), content_type="application/json")
+        elif path == "/p/shows":
+            body = SHOWS.format(price=self.price, discounted=self.discounted, shown=f"{self.discounted:,}")
+            await route.fulfill(body=body, content_type="text/html")
         elif path == "/p/sets":
             await route.fulfill(body=SETS, content_type="text/html")
         elif path == "/p/reaches-in":
@@ -195,3 +212,34 @@ async def test_a_shop_that_asks_for_a_person_is_left_unread(shop, browser):
         await browser.page(f"{SHOP}/p/refused", registering=True)
     assert (refusal.value.kind, refusal.value.status) == ("blocked", 403)
     assert [url for url, _ in shop.asked] == [f"{SHOP}/p/refused"], "asked once, and nothing was tried after it"
+
+
+async def test_a_price_a_page_only_shows_is_kept_once_its_owner_said_it_and_read_again(shop, browser):
+    web = Web()
+    web.put("/robots.txt", "User-agent: *\nDisallow: /\n")
+    url, now = f"{SHOP}/p/shows", datetime(2026, 11, 23, tzinfo=UTC)
+    async with web.reader() as reader:
+        first = await observe(reader, url, registering=True, now=now, browser=browser)
+        assert (first.failure, first.via, first.places) == ("no_price", BROWSER, ()), "no amount is picked for its owner"
+        # Not the list price struck through above it, nor another product's further down.
+        for other in (65000, 12000, 9900, 99999):
+            wrong = await observe(reader, url, registering=True, now=now, browser=browser,
+                                  pointed_at=Pointed(currency="KRW", said=Decimal(other)))
+            assert wrong.failure == "not_shown", other
+
+        made = await observe(reader, url, registering=True, now=now, browser=browser,
+                             pointed_at=Pointed(currency="KRW", said=Decimal(45500)))
+        assert made.reading.price == Price(Decimal(45500), Decimal(45500), "KRW") and made.via == BROWSER
+        assert made.places == ("key:DcPrice", "key:SellPrice", "meta:eg:saleprice")
+
+        kept = Pointed(made.places, "KRW")
+        shop.price = shop.discounted = 39900
+        lower = await observe(reader, url, registering=False, now=now, browser=browser, via=BROWSER, pointed_at=kept)
+        assert (lower.reading.price.low, lower.reading.source, lower.places) == (Decimal(39900), "pointed", made.places)
+        shop.discounted = 35000   # a discount the shop writes in one of the places only
+        split = await observe(reader, url, registering=False, now=now, browser=browser, via=BROWSER, pointed_at=kept)
+        assert (split.failure, split.reading) == ("split", None)
+        again = await observe(reader, url, registering=True, now=now, browser=browser, via=BROWSER,
+                              pointed_at=Pointed(made.places, "KRW", Decimal(35000)))
+        assert (again.reading.price.low, again.places) == (Decimal(35000), ("key:DcPrice",))
+
