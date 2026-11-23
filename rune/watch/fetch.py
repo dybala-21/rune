@@ -178,7 +178,10 @@ class Reader:
         url = f"https://{host}/robots.txt"
         for hop in range(ROBOTS_HOPS + 1):
             try:
-                answer = await self._get(host_of(url), url, robots.MAX_BYTES, cut=True)
+                at = host_of(url)
+                if denied(at):
+                    return "robots"  # a redirect into a site that is asked nothing: its file is not had
+                answer = await self._get(at, url, robots.MAX_BYTES, cut=True)
             except Unread as failed:
                 if hop == 0 and failed.kind in ("unreachable", "private"):
                     raise  # the host itself can't be reached: its page can't be either

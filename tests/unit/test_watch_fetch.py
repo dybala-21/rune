@@ -358,6 +358,14 @@ async def test_a_short_link_into_a_site_whose_terms_forbid_it_stops_before_that_
     assert {request.headers["host"] for request in web.requests} == {"naver.me"}
 
 
+async def test_a_robots_txt_that_leads_into_a_site_whose_terms_forbid_it_is_not_followed_there(web):
+    web.redirect("/robots.txt", "https://www.musinsa.com/robots.txt")
+    web.put("/robots.txt", "User-agent: *\nAllow: /\n", host="www.musinsa.com")
+    web.put("/p/1", PRODUCT)
+    assert await refused(web, f"https://{SHOP}/p/1") == "robots"
+    assert {request.headers["host"] for request in web.requests} == {SHOP}
+
+
 @pytest.mark.parametrize("host", ["musinsa.com", "www.musinsa.com", "WWW.Musinsa.COM", "www.musinsa.com.",
                                   "naver.com", "brand.naver.com", "m.smartstore.naver.com."])
 def test_a_listed_site_is_listed_however_its_name_is_spelled(host):
