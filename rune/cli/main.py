@@ -34,8 +34,6 @@ token_app = typer.Typer(help="API token management")
 daemon_app = typer.Typer(help="Background daemon control")
 db_app = typer.Typer(help="Database operations")
 
-browser_app = typer.Typer(help="Browser relay and extension management")
-
 import contextlib
 
 from rune.cli.advisor_cmd import advisor_app
@@ -50,7 +48,6 @@ app.add_typer(env_app, name="env")
 app.add_typer(token_app, name="token")
 app.add_typer(daemon_app, name="daemon")
 app.add_typer(db_app, name="db")
-app.add_typer(browser_app, name="browser")
 app.add_typer(self_app, name="self")
 app.add_typer(memory_app, name="memory")
 app.add_typer(advisor_app, name="advisor")
@@ -1442,167 +1439,6 @@ def _ensure_llm_key() -> bool:
         or os.environ.get("GEMINI_API_KEY")
         or os.environ.get("XAI_API_KEY")
     )
-
-
-# Browser commands
-
-
-def _get_extension_target_dir():
-    """Stable extension path: ~/.rune/extension/rune-browser-bridge/"""
-    from rune.utils.paths import rune_home
-
-    return rune_home() / "extension" / "rune-browser-bridge"
-
-
-def _get_extension_source_dir():
-    """Locate bundled extension inside the installed package."""
-    from pathlib import Path
-
-    src = Path(__file__).resolve().parent.parent.parent / "extension" / "rune-browser-bridge"
-    if (src / "manifest.json").exists():
-        return src
-    return None
-
-
-def _install_extension_to_home():
-    """Copy the bundled browser bridge into the user extension directory."""
-    import shutil
-
-    src = _get_extension_source_dir()
-    if src is None:
-        console.print(
-            "[red]Bundled extension not found.[/red]\n"
-            "[dim]Reinstall RUNE: curl -LsSf .../install.sh | sh[/dim]"
-        )
-        raise typer.Exit(1)
-
-    target = _get_extension_target_dir()
-    if target.exists():
-        shutil.rmtree(target)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(src, target)
-    return target
-
-
-@browser_app.command("setup")
-def browser_setup() -> None:
-    """Extract the Chrome extension to ~/.rune/extension/ for loading in Chrome."""
-    target = _install_extension_to_home()
-    console.print(f"\n[green]Extension installed to:[/green] [cyan]{target}[/cyan]\n")
-    console.print("[bold]Load in Chrome:[/bold]")
-    console.print("  1. Open [cyan]chrome://extensions[/cyan]")
-    console.print("  2. Enable [bold]Developer mode[/bold] (top right)")
-    console.print("  3. Click [bold]Load unpacked[/bold]")
-    console.print(f"  4. Select: [cyan]{target}[/cyan]\n")
-
-
-@browser_app.command("connect")
-def browser_connect(
-    no_open: Annotated[
-        bool, typer.Option("--no-open", help="Don't open chrome://extensions automatically")
-    ] = False,
-) -> None:
-    """Set up the Chrome Extension and start the relay server."""
-    import shutil
-    import subprocess
-
-    # 1. Ensure extension is extracted to ~/.rune/extension/
-    target = _get_extension_target_dir()
-    if not (target / "manifest.json").exists():
-        console.print("[dim]Extracting extension...[/dim]")
-        target = _install_extension_to_home()
-
-    console.print("\n[bold]RUNE Browser Bridge[/bold] — Chrome Extension Setup\n")
-
-    # 2. Copy path to clipboard
-    ext_path_str = str(target)
-    try:
-        if sys.platform == "darwin":
-            subprocess.run(["pbcopy"], input=ext_path_str.encode(), check=True)
-            console.print("[green]Extension path copied to clipboard[/green]")
-        elif shutil.which("xclip"):
-            subprocess.run(["xclip", "-selection", "clipboard"], input=ext_path_str.encode(), check=True)
-            console.print("[green]Extension path copied to clipboard[/green]")
-    except Exception:
-        pass
-
-    console.print(f"  Path: [cyan]{ext_path_str}[/cyan]\n")
-
-    # 3. Instructions
-    console.print("[bold]Installation steps:[/bold]")
-    console.print("  1. Open Chrome → [cyan]chrome://extensions[/cyan]")
-    console.print("  2. Enable [bold]Developer mode[/bold] (top right toggle)")
-    console.print("  3. Click [bold]Load unpacked[/bold]")
-    console.print("  4. Paste the path (already copied) and select the folder\n")
-
-    # 4. Open chrome://extensions
-    if not no_open:
-        try:
-            import webbrowser
-            webbrowser.open("chrome://extensions")
-        except Exception:
-            pass
-
-    # 5. Start relay server and wait for extension
-    console.print("[bold]Starting relay server...[/bold]")
-
-    import asyncio
-
-    async def _run_relay() -> None:
-        from rune.browser.relay_server import RelayServer
-        server = RelayServer()
-        await server.start()
-        console.print(f"  Listening on port [cyan]{server.port}[/cyan]")
-        console.print(f"  Extension endpoint: [cyan]{server.extension_endpoint}[/cyan]\n")
-        console.print("[dim]Waiting for extension connection (up to 2 minutes)...[/dim]")
-
-        connected = await server.wait_for_extension(timeout=120.0)
-        if connected:
-            console.print("\n[green bold]Extension connected![/green bold] RUNE can now control your browser.")
-            console.print("[dim]Press Ctrl+C to stop the relay server.[/dim]\n")
-            try:
-                while True:
-                    await asyncio.sleep(1)
-            except asyncio.CancelledError:
-                pass
-        else:
-            console.print("\n[yellow]Extension did not connect within 2 minutes.[/yellow]")
-            console.print("Make sure the extension is installed and enabled in Chrome.")
-
-        await server.stop()
-
-    try:
-        asyncio.run(_run_relay())
-    except KeyboardInterrupt:
-        console.print("\n[dim]Relay server stopped.[/dim]")
-
-
-@browser_app.command("status")
-def browser_status() -> None:
-    """Check the relay server and extension connection status."""
-    import httpx
-
-    from rune.browser.relay_server import DISCOVERY_PORT_END, DISCOVERY_PORT_START
-
-    found = False
-    for port in range(DISCOVERY_PORT_START, DISCOVERY_PORT_END + 1):
-        try:
-            resp = httpx.get(f"http://127.0.0.1:{port}/health", timeout=0.5)
-            if resp.status_code == 200:
-                data = resp.json()
-                ext_status = (
-                    "[green]Connected[/green]"
-                    if data.get("extensionConnected")
-                    else "[yellow]Not connected[/yellow]"
-                )
-                console.print(f"  Port [cyan]{port}[/cyan]: Relay running — Extension: {ext_status}")
-                found = True
-        except Exception:
-            continue
-
-    if not found:
-        console.print("[dim]No relay server found on ports 19222-19231.[/dim]")
-        console.print("Run [cyan]rune browser connect[/cyan] to start one.")
 
 
 # Entry point

@@ -281,7 +281,7 @@ The walkthrough opens Python documentation and follows the Tutorial link through
 - **Take control:** pause the agent and interact with the preview using clicks, scrolling, and keyboard input. Resume when you are ready.
 - **This Mac:** native application access on macOS through the Rune Computer helper. Accessibility, Screen Recording, and app access must be granted before the relevant operations can run.
 
-The managed browser needs Playwright's Chromium installation. It does not require the legacy Browser Bridge extension. Native app control is macOS-specific; browser automation does not imply support for every desktop app or website.
+The managed browser needs Playwright's Chromium installation. The Browser Bridge extension of earlier versions is gone: nothing in RUNE used it, and a copy loaded in Chrome obeyed whichever program on the machine answered on its port. RUNE deletes the copy it made under `~/.rune/extension` the next time it starts or is updated; if "RUNE Browser Bridge" is still listed at `chrome://extensions`, remove it there. Native app control is macOS-specific; browser automation does not imply support for every desktop app or website.
 
 ## Configuration and execution
 

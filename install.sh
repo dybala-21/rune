@@ -65,6 +65,19 @@ ensure_path() {
     esac
 }
 
+# Earlier versions copied a Chrome extension into RUNE's folder and had it loaded in Chrome. A
+# loaded copy keeps asking this machine's ports for a relay that RUNE no longer runs, and obeys
+# whichever program answers. Without its folder Chrome does not start it again.
+remove_retired_extension() {
+    RETIRED="${RUNE_HOME:-${HOME}/.rune}/extension/rune-browser-bridge"
+    if [ -f "${RETIRED}/manifest.json" ] && grep -q '"RUNE Browser Bridge"' "${RETIRED}/manifest.json"; then
+        rm -rf "${RETIRED}"
+        rmdir "${RETIRED%/*}" 2>/dev/null || true
+        info "Removed the retired Browser Bridge extension from ${RETIRED}"
+        echo "  If \"RUNE Browser Bridge\" is still listed at chrome://extensions, remove it there."
+    fi
+}
+
 # --- Commands ----------------------------------------------------------------
 
 do_install() {
@@ -125,15 +138,8 @@ do_install() {
             ;;
     esac
 
-    # 6. Browser extension (extract to ~/.rune/extension/)
-    ensure_path
-    case "$RUNE_EXTRAS" in
-        *browser*|*full*)
-            info "Setting up browser extension..."
-            rune browser setup 2>/dev/null || \
-                warn "Extension setup skipped — run 'rune browser setup' manually after install"
-            ;;
-    esac
+    # 6. The browser extension earlier versions set up
+    remove_retired_extension
 
     # 7. Verify
     ensure_path
@@ -185,8 +191,7 @@ do_update() {
         NEW_VERSION="$(rune --version 2>/dev/null || echo 'unknown')"
     fi
 
-    # Update browser extension if present
-    rune browser setup 2>/dev/null || true
+    remove_retired_extension
 
     if [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
         success "Already up to date: ${NEW_VERSION}"
