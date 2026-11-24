@@ -257,7 +257,9 @@ async def test_the_browser_is_given_one_way_out_and_it_reaches_public_hosts_only
                 assert status == 200
                 back.close()
             assert far.reached == 2 and desk.looked_up.count("cdn.example") == 1, "found once, reached there"
-            for kept_out in ("lan.example:443", "192.168.0.1:80", "nowhere.example:443", "www.musinsa.com:443"):
+            # A site whose terms forbid it is kept out however the browser writes its name.
+            for kept_out in ("lan.example:443", "192.168.0.1:80", "nowhere.example:443", "www.musinsa.com:443",
+                             "www.musinsa.com.:443", "WWW.MUSINSA.COM:443", "pay.naver.com:443"):
                 status, _, back = await tunnel(out, kept_out)
                 assert status == 403, kept_out
                 back.close()

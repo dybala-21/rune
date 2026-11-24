@@ -31,7 +31,7 @@ _REASONS: dict[str, tuple[str, str]] = {
                  "Stopping one with watch_stop makes room."),
     "address": ("the address has to be an https page on a site's own name, with no port, login or bare IP address "
                 "in it.", ""),
-    "denied": ("this site's terms of use forbid automated checking.", _ELSEWHERE),
+    "denied": ("this site's own terms forbid automated checking.", _ELSEWHERE),
     "private": ("the address does not lead to a public site.", ""),
     "unreachable": ("the site did not answer.", _LATER),
     "web_closed": ("this machine's web access is closed: it holds data from the owner's connected accounts, so it "

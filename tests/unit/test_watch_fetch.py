@@ -4,7 +4,7 @@ import asyncio
 import gzip
 import json
 import socket
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
@@ -12,6 +12,7 @@ import httpx
 import pytest
 
 from rune.watch import fetch
+from rune.watch.denied import DENIED, denied
 from rune.watch.fetch import Reader, host_of
 from rune.watch.item import Unread
 from rune.watch.observe import observe
@@ -325,6 +326,8 @@ async def test_a_page_is_read_in_the_encoding_it_states(web, headers, body):
     "https://user@shop.example/p/1", "https://user:secret@shop.example/p/1", "https://203.0.113.7/p/1",
     "https://[2001:db8::1]/p/1", "https://localhost/p/1", "https:///p/1", "https://shop.example:port/p/1",
     "shop.example/p/1", "", "https://shop.example/" + "a" * 2048,
+    # The same site under another spelling: a closing dot, or a "%" a browser turns into one.
+    "https://shop.example./p/1", "https://shop.example%2e/p/1", "https://shop%20.example/p/1",
 ])
 def test_an_address_the_watch_does_not_read(url):
     with pytest.raises(Unread) as failed:
@@ -342,7 +345,47 @@ def test_a_hosts_name_is_taken_in_one_plain_form():
 async def test_a_site_whose_terms_forbid_it_is_not_asked_at_all(web):
     assert await refused(web, "https://www.musinsa.com/products/7500264", registering=True) == "denied"
     assert await refused(web, "https://musinsa.com/products/7500264") == "denied"
+    for shop in ("brand.naver.com/pam/products/1", "smartstore.naver.com/main/products/1",
+                 "m.smartstore.naver.com/shop/products/1", "search.shopping.naver.com/catalog/1",
+                 "product.29cm.co.kr/catalog/1", "www.soldout.co.kr/trade/detail/1"):
+        assert await refused(web, f"https://{shop}", registering=True) == "denied", shop
     assert web.requests == []
+
+
+async def test_a_short_link_into_a_site_whose_terms_forbid_it_stops_before_that_site(web):
+    web.redirect("/abc", "https://brand.naver.com/pam/products/1", host="naver.me")
+    assert await refused(web, "https://naver.me/abc", registering=True) == "denied"
+    assert {request.headers["host"] for request in web.requests} == {"naver.me"}
+
+
+async def test_a_robots_txt_that_leads_into_a_site_whose_terms_forbid_it_is_not_followed_there(web):
+    web.redirect("/robots.txt", "https://www.musinsa.com/robots.txt")
+    web.put("/robots.txt", "User-agent: *\nAllow: /\n", host="www.musinsa.com")
+    web.put("/p/1", PRODUCT)
+    assert await refused(web, f"https://{SHOP}/p/1") == "robots"
+    assert {request.headers["host"] for request in web.requests} == {SHOP}
+
+
+@pytest.mark.parametrize("host", ["musinsa.com", "www.musinsa.com", "WWW.Musinsa.COM", "www.musinsa.com.",
+                                  "naver.com", "brand.naver.com", "m.smartstore.naver.com."])
+def test_a_listed_site_is_listed_however_its_name_is_spelled(host):
+    assert denied(host)
+
+
+@pytest.mark.parametrize("host", ["notmusinsa.com", "musinsa.com.shop.example", "musinsa.co", "naver.me",
+                                  "navercorp.com", "xn--naver-.com", "com"])
+def test_a_name_that_only_looks_like_a_listed_site_is_not_listed(host):
+    assert not denied(host)
+
+
+def test_every_listed_site_is_written_with_where_its_rule_is_and_when_it_was_read():
+    assert DENIED
+    for site, rule in DENIED.items():
+        assert host_of(f"https://{site}/") == site, "the plain name a site is registered under"
+        assert host_of(rule.where), "an https page"
+        read = date.fromisoformat(rule.read)
+        assert rule.version == "undated" or date.fromisoformat(rule.version) <= read, site
+        assert rule.quote.strip() and rule.says.strip(), site
 
 
 async def test_one_reading_is_a_price_or_the_kind_of_failure_and_never_the_sites_words(web, monkeypatch):

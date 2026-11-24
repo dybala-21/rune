@@ -276,7 +276,7 @@ async def test_an_address_that_is_not_a_plain_https_page_is_not_read(chat, typed
 @pytest.mark.parametrize(("failure", "says"), [
     ("robots", "this site's robots.txt does not allow automated reading."),
     ("blocked", "the site refuses automated reading."),
-    ("denied", "this site's terms of use forbid automated checking."),
+    ("denied", "this site's own terms forbid automated checking."),
     ("many_products", "several products at different prices"),
     ("private", "does not lead to a public site."),
     ("gone", "the page was not found."),
