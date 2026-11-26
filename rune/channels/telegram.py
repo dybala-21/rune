@@ -18,6 +18,7 @@ from rune.channels.types import (
     ChannelAdapter,
     IncomingMessage,
     LinkButton,
+    NotSent,
     OutgoingMessage,
     ResponseFormatter,
     buttons_as_text,
@@ -178,8 +179,8 @@ class TelegramAdapter(ChannelAdapter):
 
     async def send(self, channel_id: str, message: OutgoingMessage) -> str | None:
         if self._bot is None:
-            log.warning("telegram_send_no_bot")
-            return None
+            # Not started, or its start failed: nothing goes out.
+            raise NotSent("Telegram is not connected")
 
         text = self._formatter.format_text(message.text)
         chunks = _split_text(text, _MAX_MESSAGE_LENGTH)
@@ -189,15 +190,16 @@ class TelegramAdapter(ChannelAdapter):
             try:
                 await self._bot.send_message(chat_id=int(channel_id), text=chunk, **extra)
             except Exception as exc:
-                log.error("telegram_send_failed", error=str(exc))
-                if extra:
-                    # Telegram turns down the whole message over one link it won't show; the links go as text.
-                    tail = self._formatter.format_text(buttons_as_text("", message.buttons).strip())
-                    try:
-                        await self._bot.send_message(chat_id=int(channel_id),
-                                                     text=f"{chunk}\n\n{tail}"[:_MAX_MESSAGE_LENGTH])
-                    except Exception as retry_exc:
-                        log.error("telegram_send_failed", error=str(retry_exc), retried=True)
+                if not extra:
+                    raise NotSent(f"Telegram refused the message: {exc}") from exc
+                log.warning("telegram_buttons_refused", error=str(exc))
+                # Telegram turns down the whole message over one link it won't show; the links go as text.
+                tail = self._formatter.format_text(buttons_as_text("", message.buttons).strip())
+                try:
+                    await self._bot.send_message(chat_id=int(channel_id),
+                                                 text=f"{chunk}\n\n{tail}"[:_MAX_MESSAGE_LENGTH])
+                except Exception as retry_exc:
+                    raise NotSent(f"Telegram refused the message: {retry_exc}") from retry_exc
 
         for attachment in message.attachments:
             await self._send_attachment(channel_id, attachment)

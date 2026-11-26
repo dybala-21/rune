@@ -32,6 +32,21 @@ INBOX = "rune:inbox"
 INBOX_TITLE = "From RUNE"
 
 
+def where(channel: str) -> str:
+    """Where RUNE's scheduled messages for ``channel`` go, as the gateway would route one now. Said
+    when a briefing or a watch is set, so the owner is never told of a chat app that won't get them."""
+    from rune.daemon.gateway import get_gateway
+
+    kept = f'kept in the app, in the conversation "{INBOX_TITLE}"'
+    gateway = get_gateway()
+    if gateway is None:
+        # Set from outside the daemon: where a message goes is settled when it is sent.
+        return f"Messages go to {channel} if it reaches the owner when one is sent; if not, they are {kept}."
+    if gateway.reaches(channel):
+        return f"Messages go to {channel}."
+    return f"Messages are {kept}: {channel} does not reach the owner from here now. Once it does, they go there."
+
+
 async def remember(manager: Any, recipient_id: str, text: str) -> None:
     """Keep ``text`` as an assistant turn of the recipient's conversation. Never raises."""
     await _keep(manager, thread_id(recipient_id), recipient_id, text)

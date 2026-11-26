@@ -18,6 +18,7 @@ from rune.agent.run_outcome import explanation_warning, run_outcome
 from rune.api.event_logger import append_event
 from rune.channels.registry import ChannelRegistry
 from rune.channels.types import (
+    ChannelAdapter,
     IncomingMessage,
     LinkButton,
     OutgoingMessage,
@@ -379,17 +380,11 @@ class ChannelGateway:
         delivered = False
 
         for channel_name in channels:
-            adapter = self._registry.get(channel_name)
-            if adapter is None:
+            reach = self._reach(channel_name)
+            if reach is None:
+                log.info("gateway_channel_not_reached", channel=channel_name)
                 continue
-
-            recipient_id = self._default_recipients.get(channel_name)
-            if not recipient_id:
-                log.warning(
-                    "gateway_no_default_recipient",
-                    channel=channel_name,
-                )
-                continue
+            adapter, recipient_id = reach
 
             try:
                 text = f"{notification.title}\n{notification.body}" if notification.body else notification.title
@@ -683,6 +678,21 @@ class ChannelGateway:
     def get_connected_channels(self) -> list[str]:
         """Return the names of all currently registered channels."""
         return self._registry.list()
+
+    def reaches(self, channel_name: str) -> bool:
+        """Whether a notification for this channel is sent there now. What is said of where messages
+        go (rune.daemon.owner_thread.where) and where route_notification sends them are this one test."""
+        return self._reach(channel_name) is not None
+
+    def _reach(self, channel_name: str) -> tuple[ChannelAdapter, str] | None:
+        """The adapter and the owner's chat to send to, or None: the channel is not connected, it failed
+        to connect or lost its connection, or no message from the owner on it has said which chat is
+        theirs."""
+        adapter = self._registry.get(channel_name)
+        recipient_id = self._default_recipients.get(channel_name)
+        if adapter is None or adapter.status == "error" or not recipient_id:
+            return None
+        return adapter, recipient_id
 
     def _save_recipients(self) -> None:
         if self._recipients_path is not None:
@@ -1116,59 +1126,21 @@ class ChannelGateway:
         reply_to: str | None = None,
         channel_name: str = "",
     ) -> None:
-        """Reply on the originating channel, trying other adapters if it is absent or fails."""
-        outgoing = OutgoingMessage(
-            text=response,
-            reply_to=reply_to,
-        )
+        """Reply on the channel the message came from, and only there.
 
-        # Try the originating adapter first
-        if channel_name:
-            adapter = self._registry.get(channel_name)
-            if adapter is not None:
-                try:
-                    await adapter.send(channel_id, outgoing)
-                    _log_event(
-                        f"{channel_id}:{sender_id}",
-                        "response_sent",
-                        {
-                            "channel": channel_name,
-                            "response_length": len(response),
-                        },
-                    )
-                    return
-                except Exception:
-                    log.warning(
-                        "primary_adapter_send_failed",
-                        channel=channel_name,
-                        channel_id=channel_id,
-                    )
-
-        # Fallback: try remaining adapters
-        for name in self._registry.list():
-            if name == channel_name:
-                continue  # already tried
-            adapter = self._registry.get(name)
-            if adapter is not None:
-                try:
-                    await adapter.send(channel_id, outgoing)
-                    _log_event(
-                        f"{channel_id}:{sender_id}",
-                        "response_sent",
-                        {
-                            "channel": name,
-                            "response_length": len(response),
-                        },
-                    )
-                    return
-                except Exception:
-                    continue
-
-        log.warning(
-            "no_adapter_for_channel",
-            channel_id=channel_id,
-            sender_id=sender_id,
-        )
+        The chat id belongs to that platform: sent through another adapter it reaches no one, or
+        someone else whose id happens to match."""
+        adapter = self._registry.get(channel_name) if channel_name else None
+        if adapter is None:
+            log.warning("no_adapter_for_channel", channel=channel_name, channel_id=channel_id, sender_id=sender_id)
+            return
+        try:
+            await adapter.send(channel_id, OutgoingMessage(text=response, reply_to=reply_to))
+        except Exception as exc:
+            log.error("reply_not_sent", channel=channel_name, channel_id=channel_id, error=str(exc))
+            return
+        _log_event(f"{channel_id}:{sender_id}", "response_sent",
+                   {"channel": channel_name, "response_length": len(response)})
 
 
 # Module-level helpers

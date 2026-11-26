@@ -79,6 +79,8 @@ class Chat:
         self.browser_only: set[str] = set()
         self.handed: list[tuple[str, str]] = []
         self.pointed: list[Pointed] = []
+        # The chat apps a message would reach the owner on (rune.daemon.gateway.ChannelGateway.reaches).
+        self.reached = {"telegram", "slack"}
 
     async def observe(self, reader, url, *, registering, now, browser, via, pointed_at) -> Observation:
         self.reads.append((url, registering))
@@ -121,6 +123,8 @@ def chat(tmp_path, monkeypatch):
     chat = Chat(memory)
     monkeypatch.setattr(job, "observe", chat.observe)
     monkeypatch.setattr(job, "clock", lambda: chat.now)
+    monkeypatch.setattr("rune.daemon.gateway.get_gateway",
+                        lambda: SimpleNamespace(reaches=lambda channel: channel in chat.reached))
     monkeypatch.setattr("rune.llm.client.get_llm_client", lambda: pytest.fail("a model was called"))
     owner_words.set_typed([ASKED])
     yield chat
@@ -153,8 +157,8 @@ async def test_a_page_the_owner_gave_is_read_kept_and_scheduled(chat):
     assert made.output.splitlines() == [
         'Watching shop.example/p/coat as "울 코트" (item 1).',
         "Read now: 369,000 KRW, the price written on the page (1 offer).",
-        "Checked once a day at 09:00 (Asia/Seoul), or when this machine is next running after that. A message goes "
-        "to telegram when that price goes down.",
+        "Checked once a day at 09:00 (Asia/Seoul), or when this machine is next running after that. The owner is "
+        "told when that price goes down. Messages go to telegram.",
         "The watch ends on 2027-02-18 unless it is renewed.",
         "Tell the owner the price that was read, so they can check it against the page they see."]
     assert chat.reads == [(COAT, True)]
@@ -203,7 +207,15 @@ async def test_a_machine_of_its_own_wakes_hourly_and_a_hosted_one_twice_a_day(ch
 async def test_messages_go_where_the_briefing_goes_when_there_is_one(chat):
     await briefing_tool.briefing_set(briefing_tool.BriefingSetParams(language="en", notify_channel="slack"))
     made = await chat.set(url=COAT, tell_when="drop")
-    assert chat.watch_job().notify_channel == "slack" and "A message goes to slack" in made.output
+    assert chat.watch_job().notify_channel == "slack" and "Messages go to slack." in made.output
+
+
+async def test_a_chat_app_that_would_not_reach_the_owner_is_not_said_to_be_where_messages_go(chat):
+    chat.reached.clear()
+    made = await chat.set(url=COAT, tell_when="drop")
+    kept = 'Messages are kept in the app, in the conversation "From RUNE": telegram does not reach the owner'
+    assert made.success and kept in made.output and "Messages go to" not in made.output, made.output
+    assert kept in (await chat.listed()).splitlines()[0]
 
 
 async def test_the_wording_is_translated_once_when_the_watch_is_set_from_the_labels_alone(chat, monkeypatch):
@@ -430,7 +442,7 @@ async def test_the_list_says_how_each_watch_stands_and_whether_anything_is_check
     assert await chat.listed() == "No page is being watched."
     await chat.set(url=COAT, tell_when="drop", below=Decimal(300000), label="울 코트")
     assert (await chat.listed()).splitlines() == [
-        "Pages are checked once a day at 09:00 (Asia/Seoul); messages go to telegram.",
+        "Pages are checked once a day at 09:00 (Asia/Seoul). Messages go to telegram.",
         "Item 1: 울 코트 (shop.example), shop.example/p/coat. watching, tells when that price goes down to 300,000 "
         "KRW or less; ends 2027-02-18; told 369,000 KRW on 2026-11-20; last read 369,000 KRW on 2026-11-20 14:30."]
     chat.now, chat.pages[COAT] = NOW + timedelta(days=1), "blocked"
