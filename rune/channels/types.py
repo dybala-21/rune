@@ -131,6 +131,13 @@ _DEFAULT_BASE_RECONNECT_DELAY = 5.0  # seconds
 
 # ChannelAdapter ABC
 
+class NotSent(RuntimeError):
+    """A message the channel did not take: it has no connection now, or the platform refused it.
+
+    ``send`` raises it rather than log and return, so the gateway keeps a notification in the app
+    (rune.daemon.gateway.route_notification) instead of counting it delivered."""
+
+
 class ChannelAdapter(ABC):
     """Abstract base for all channel adapters (TUI, Telegram, Discord, etc.).
 
@@ -183,7 +190,8 @@ class ChannelAdapter(ABC):
     async def send(self, channel_id: str, message: OutgoingMessage) -> str | None:
         """Send a message to a channel.
 
-        Returns the platform message ID if available, or ``None``.
+        Returns the platform message ID if available, or ``None``. Raises ``NotSent`` when the text
+        did not go out.
         """
         ...
 

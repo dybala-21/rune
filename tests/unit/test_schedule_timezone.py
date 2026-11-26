@@ -79,6 +79,7 @@ async def test_creating_a_job_says_which_zone_the_time_is_in(job, zone):  # noqa
 
 class _Adapter:
     name = "telegram"
+    status = "connected"
 
     def __init__(self) -> None:
         self.on_message = None

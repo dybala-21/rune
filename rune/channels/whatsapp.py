@@ -14,6 +14,7 @@ from typing import Any
 from rune.channels.types import (
     ChannelAdapter,
     IncomingMessage,
+    NotSent,
     OutgoingMessage,
     ResponseFormatter,
 )
@@ -216,8 +217,7 @@ class WhatsAppAdapter(ChannelAdapter):
 
     async def send(self, channel_id: str, message: OutgoingMessage) -> str | None:
         if self._http_session is None:
-            log.warning("whatsapp_send_no_session")
-            return None
+            raise NotSent("WhatsApp is not connected")
 
         text = self._formatter.format_text(message.text)
 
@@ -236,9 +236,8 @@ class WhatsAppAdapter(ChannelAdapter):
             if message.reply_to:
                 body["context"] = {"message_id": message.reply_to}
 
-            await self._api_post(
-                f"{_API_BASE}/{self._phone_number_id}/messages", body
-            )
+            if await self._api_post(f"{_API_BASE}/{self._phone_number_id}/messages", body) is None:
+                raise NotSent("WhatsApp refused the message")
 
         # Send media attachments
         for attachment in message.attachments:

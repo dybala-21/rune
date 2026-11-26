@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import datetime, time
 from urllib.parse import urlsplit
 
+from rune.daemon import owner_thread
 from rune.watch.compose import amount, money, name
 from rune.watch.extract import Reading
 from rune.watch.item import BROWSER, Item
@@ -126,8 +127,8 @@ def watching(item: Item, reading: Reading, *, at: time, job: Standing, zone: str
                      "browser on this machine each time it is checked: a minimized window that carries RUNE's name, "
                      "in which nothing is clicked or signed in to. Tell the owner so.")
     late = ", or when this machine is next running after that" if local else ""
-    lines.append(f"Checked once a day at {at:%H:%M} ({zone}){late}. A message goes to {job.channel} when "
-                 f"{condition(item)}.")
+    lines.append(f"Checked once a day at {at:%H:%M} ({zone}){late}. The owner is told when {condition(item)}. "
+                 + owner_thread.where(job.channel))
     if item.below is not None and price.low <= item.below:
         lines.append("It is already at or under that, so the message comes the next time it goes lower.")
     lines.append(f"The watch ends on {(now + EXPIRES_AFTER):%Y-%m-%d} unless it is renewed.")
@@ -137,7 +138,7 @@ def watching(item: Item, reading: Reading, *, at: time, job: Standing, zone: str
 
 def job_line(job: Standing, at: time, zone: str) -> str:
     if job.state == "ok":
-        return f"Pages are checked once a day at {at:%H:%M} ({zone}); messages go to {job.channel}."
+        return f"Pages are checked once a day at {at:%H:%M} ({zone}). " + owner_thread.where(job.channel)
     wrong = {"missing": "is missing", "paused": "is paused", "moved": "is on another schedule"}[job.state]
     return (f"Nothing is being checked now: the scheduled job named Watch {wrong}. "
             "Calling watch_set for any item puts it back.")

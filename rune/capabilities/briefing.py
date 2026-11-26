@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, field_validator
 from rune.capabilities import cron
 from rune.capabilities.registry import CapabilityRegistry
 from rune.capabilities.types import CapabilityDefinition
+from rune.daemon import owner_thread
 from rune.proactive.routine import RoutinePolicy
 from rune.types import CapabilityResult, Domain, RiskLevel
 from rune.utils.logger import get_logger
@@ -104,9 +105,10 @@ async def briefing_set(params: BriefingSetParams) -> CapabilityResult:
     if not params.enabled:
         return CapabilityResult(success=True, output="The morning briefing is stopped.", metadata={"id": job_id})
     return CapabilityResult(success=True, output=(
-        f"The morning briefing is set for {_when(schedule)} ({cron._zone_label()}), sent to {channel}, written in "
-        f"the owner's language ({params.language}). It lists today's calendar, unread mail and headlines; an account "
-        "that isn't connected comes with a button to connect it. On a day with nothing to report, nothing is sent."),
+        f"The morning briefing is set for {_when(schedule)} ({cron._zone_label()}), written in the owner's language "
+        f"({params.language}). {owner_thread.where(channel)} It lists today's calendar, unread mail and headlines; an "
+        "account that isn't connected comes with a button to connect it. On a day with nothing to report, nothing "
+        "is sent."),
         metadata={"id": job_id, "schedule": schedule})
 
 

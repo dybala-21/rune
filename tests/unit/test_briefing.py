@@ -232,9 +232,13 @@ def store(tmp_path, monkeypatch):
     memory.close()
 
 
-async def test_one_call_schedules_it_and_another_moves_or_stops_it(store):
+async def test_one_call_schedules_it_and_another_moves_or_stops_it(store, monkeypatch):
+    monkeypatch.setattr("rune.daemon.gateway.get_gateway",
+                        lambda: SimpleNamespace(reaches=lambda channel: False))
     made = await briefing_tool.briefing_set(briefing_tool.BriefingSetParams(language="en", time="7:30"))
     assert made.success, made.error
+    # Telegram is where it is sent, but nothing there reaches the owner: it is not said to go there.
+    assert 'Messages are kept in the app, in the conversation "From RUNE": telegram does not' in made.output
     job = cron._row_to_cronjob(store.get_cron_job(made.metadata["id"]))
     assert (job.kind, job.schedule, job.notify_channel, job.policy.notify) == ("briefing", "30 7 * * *", "telegram", "always")
     moved = await briefing_tool.briefing_set(briefing_tool.BriefingSetParams(language="en", time="06:45", days="weekdays"))

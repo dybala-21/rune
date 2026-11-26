@@ -8,6 +8,7 @@ from rune.api import conversation_wiring
 from rune.channels.registry import ChannelRegistry
 from rune.channels.types import ChannelAdapter, OutgoingMessage
 from rune.daemon import gateway as gateway_module
+from rune.daemon import owner_thread
 from rune.daemon.gateway import ChannelGateway, GatewayNotification
 
 
@@ -118,3 +119,30 @@ async def test_the_kept_turn_has_the_links_the_chat_showed_as_buttons(owner):
         buttons=[LinkButton("Connect Gmail", "https://approve.example/connect/gmail-read")]))
     conv = await conversation_wiring.get_conv_manager()._store.load("777:777")
     assert conv.turns[-1].content == "Briefing\ntoday\n\nConnect Gmail: https://approve.example/connect/gmail-read"
+
+
+@pytest.mark.parametrize("state", ["reaches", "no-recipient", "not-connected", "failed-to-connect"])
+async def test_where_messages_go_is_said_as_the_gateway_then_routes_one(owner, state):
+    """Said when a briefing or a watch is set: a chat app is named only if a message would reach it."""
+    gateway, chat = owner
+    if state == "no-recipient":
+        gateway._default_recipients.clear()
+    elif state == "not-connected":
+        gateway._registry.unregister("telegram")
+    elif state == "failed-to-connect":
+        # As Telegram's adapter is when its start or its polling failed: a send then does nothing.
+        chat._status = "error"
+    said = owner_thread.where("telegram")
+    await gateway.route_notification(GatewayNotification(title="Watch", body="went down", channel="telegram",
+                                                         source="cron"))
+    inbox = await conversation_wiring.get_conv_manager()._store.load("rune:inbox")
+    assert (said == "Messages go to telegram.") is bool(chat.sent) is (inbox is None), said
+    if inbox is not None:
+        assert said.startswith('Messages are kept in the app, in the conversation "From RUNE"'), said
+        assert inbox.turns[-1].content == "Watch\nwent down"
+
+
+def test_set_with_no_gateway_running_where_messages_go_is_left_to_when_one_is_sent(monkeypatch):
+    monkeypatch.setattr(gateway_module, "get_gateway", lambda: None)
+    assert owner_thread.where("telegram") == ("Messages go to telegram if it reaches the owner when one is sent; if "
+                                              'not, they are kept in the app, in the conversation "From RUNE".')

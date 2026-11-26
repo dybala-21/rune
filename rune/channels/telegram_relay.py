@@ -30,6 +30,7 @@ from rune.channels.types import (
     ChannelAdapter,
     IncomingMessage,
     LinkButton,
+    NotSent,
     OutgoingMessage,
     buttons_as_text,
     shown_buttons,
@@ -217,6 +218,9 @@ class RelayTelegramAdapter(ChannelAdapter):
                 params = {"chat_id": int(channel_id), "text": f"{chunk}\n\n{tail}"[:_MAX_MESSAGE_LENGTH],
                           "parse_mode": "HTML"}
                 sent = await self._try("sendMessage", params)
+            if sent is None:
+                # _try logged why: the relay is unreachable or refused, or Telegram refused the message.
+                raise NotSent("The relay did not send the message")
         if message.attachments:
             # Files don't go through the relay yet.
             await self._try("sendMessage", {"chat_id": int(channel_id),

@@ -14,6 +14,7 @@ from rune.channels.types import (
     ApprovalDecision,
     ChannelAdapter,
     IncomingMessage,
+    NotSent,
     OutgoingMessage,
     ResponseFormatter,
     not_allowed,
@@ -136,8 +137,7 @@ class SlackAdapter(ChannelAdapter):
 
     async def send(self, channel_id: str, message: OutgoingMessage) -> str | None:
         if self._web_client is None:
-            log.warning("slack_send_no_client")
-            return None
+            raise NotSent("Slack is not connected")
 
         text = self._formatter.format_text(message.text)
 
@@ -157,7 +157,7 @@ class SlackAdapter(ChannelAdapter):
         try:
             await self._web_client.chat_postMessage(**kwargs)
         except Exception as exc:
-            log.error("slack_send_failed", error=str(exc))
+            raise NotSent(f"Slack refused the message: {exc}") from exc
 
         # Send attachments as file uploads
         for attachment in message.attachments:
