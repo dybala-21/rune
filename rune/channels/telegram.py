@@ -21,6 +21,7 @@ from rune.channels.types import (
     OutgoingMessage,
     ResponseFormatter,
     buttons_as_text,
+    not_allowed,
     shown_buttons,
 )
 from rune.utils.logger import get_logger
@@ -243,11 +244,13 @@ class TelegramAdapter(ChannelAdapter):
                 user_id=sender_id,
                 username=username,
             )
-            with contextlib.suppress(Exception):
+            try:
                 await self._bot.send_message(
                     chat_id=message.chat.id,
-                    text="⛔ 이 봇은 승인된 사용자만 사용할 수 있습니다.",
+                    text=not_allowed("Telegram", sender_id, "RUNE_TELEGRAM_ALLOWED_USERS"),
                 )
+            except Exception as exc:
+                log.debug("telegram_refusal_not_sent", user_id=sender_id, error=str(exc))
             return
 
         text = message.text or message.caption or ""

@@ -17,6 +17,7 @@ from rune.channels.types import (
     IncomingMessage,
     OutgoingMessage,
     ResponseFormatter,
+    not_allowed,
 )
 from rune.utils.logger import get_logger
 
@@ -216,9 +217,10 @@ class DiscordAdapter(ChannelAdapter):
         if not self.check_authorization(sender_id):
             log.warning("discord_unauthorized_user", user_id=sender_id,
                         username=str(getattr(message.author, "name", "unknown")))
-            with contextlib.suppress(Exception):
-                await message.channel.send(
-                    "⛔ This bot only responds to approved users.")
+            try:
+                await message.channel.send(not_allowed("Discord", sender_id, "RUNE_DISCORD_ALLOWED_USERS"))
+            except Exception as exc:
+                log.debug("discord_refusal_not_sent", user_id=sender_id, error=str(exc))
             return
 
         attachments = [

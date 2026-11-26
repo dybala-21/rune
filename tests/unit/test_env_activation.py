@@ -31,7 +31,8 @@ def test_known_model_inputs_are_read_for_new_runs(key, provider):
 
 
 @pytest.mark.parametrize("key", ["GOOGLE_APPLICATION_CREDENTIALS", "BRAVE_API_KEY", "RUNE_LOG_LEVEL",
-                                 "RUNE_LOG_FILE", "TELEGRAM_BOT_TOKEN", "SLACK_BOT_TOKEN"])
+                                 "RUNE_LOG_FILE", "TELEGRAM_BOT_TOKEN", "SLACK_BOT_TOKEN",
+                                 "RUNE_TELEGRAM_ALLOWED_USERS"])
 def test_cached_consumers_require_restart(key):
     assert env_activation(key).state == "restart_required"
 

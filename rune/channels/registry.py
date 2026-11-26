@@ -105,9 +105,12 @@ def auto_discover_channels() -> list[str]:
     """Discover and register channel adapters based on environment variables.
 
     Checks for:
-        - RUNE_TELEGRAM_TOKEN  → TelegramAdapter
-        - RUNE_DISCORD_TOKEN   → DiscordAdapter
-        - RUNE_SLACK_BOT_TOKEN → SlackAdapter
+        - RUNE_TELEGRAM_TOKEN or TELEGRAM_BOT_TOKEN → TelegramAdapter
+        - RUNE_DISCORD_TOKEN or DISCORD_BOT_TOKEN   → DiscordAdapter
+        - RUNE_SLACK_BOT_TOKEN or SLACK_BOT_TOKEN   → SlackAdapter
+
+    The second names are the ones a token saved with credential_save goes under
+    (rune.capabilities.credential.KNOWN_CREDENTIALS) and the adapters read themselves.
 
     Returns the list of discovered channel names.
     """
@@ -116,7 +119,7 @@ def auto_discover_channels() -> list[str]:
 
     from rune.channels.telegram_relay import RelayTelegramAdapter, relay_url
 
-    telegram_token = os.environ.get("RUNE_TELEGRAM_TOKEN")
+    telegram_token = os.environ.get("RUNE_TELEGRAM_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN")
     if relay := relay_url():
         # A hosted machine: the host holds the owner's bot. A token here would poll the same bot,
         # which Telegram refuses while the host's webhook is set.
@@ -132,11 +135,11 @@ def auto_discover_channels() -> list[str]:
             allowed_users_raw = os.environ.get("RUNE_TELEGRAM_ALLOWED_USERS", "")
             allowed_users: list[int] | None = None
             if allowed_users_raw.strip():
-                allowed_users = [
-                    int(uid.strip())
-                    for uid in allowed_users_raw.split(",")
-                    if uid.strip().lstrip("-").isdigit()
-                ]
+                entries = [uid.strip() for uid in allowed_users_raw.split(",") if uid.strip()]
+                allowed_users = [int(uid) for uid in entries if uid.lstrip("-").isdigit()]
+                if skipped := [uid for uid in entries if not uid.lstrip("-").isdigit()]:
+                    # Telegram checks numeric user ids; a @name here would allow no one.
+                    log.warning("telegram_allowed_users_not_ids", entries=skipped)
 
             adapter = TelegramAdapter(
                 token=telegram_token,
@@ -147,7 +150,7 @@ def auto_discover_channels() -> list[str]:
         except Exception as exc:
             log.error("telegram_discovery_failed", error=str(exc))
 
-    discord_token = os.environ.get("RUNE_DISCORD_TOKEN")
+    discord_token = os.environ.get("RUNE_DISCORD_TOKEN") or os.environ.get("DISCORD_BOT_TOKEN")
     if discord_token:
         try:
             from rune.channels.discord import DiscordAdapter
@@ -162,8 +165,8 @@ def auto_discover_channels() -> list[str]:
         except Exception as exc:
             log.error("discord_discovery_failed", error=str(exc))
 
-    slack_bot_token = os.environ.get("RUNE_SLACK_BOT_TOKEN")
-    slack_app_token = os.environ.get("RUNE_SLACK_APP_TOKEN", "")
+    slack_bot_token = os.environ.get("RUNE_SLACK_BOT_TOKEN") or os.environ.get("SLACK_BOT_TOKEN")
+    slack_app_token = os.environ.get("RUNE_SLACK_APP_TOKEN") or os.environ.get("SLACK_APP_TOKEN", "")
     if slack_bot_token:
         try:
             from rune.channels.slack import SlackAdapter
