@@ -101,6 +101,13 @@ def buttons_as_text(text: str, buttons: list[LinkButton]) -> str:
     return "\n".join([text, "", *lines]) if lines else text
 
 
+def not_allowed(platform: str, sender_id: str, setting: str) -> str:
+    """What a sender the owner has not allowed is told: their id, which the allow-list takes and
+    Telegram shows no one, and the setting it goes in."""
+    return (f"RUNE answers only the {platform} users its owner allows. Your user id is {sender_id}: "
+            f"to allow it, the owner adds it to {setting} and restarts RUNE.")
+
+
 @dataclass(slots=True)
 class Notification:
     """A lightweight notification from a channel."""
@@ -233,15 +240,15 @@ class ChannelAdapter(ABC):
     # -- Authorization (common) ---------------------------------------------
 
     def check_authorization(self, sender_id: str) -> bool:
-        """Check if a user is authorized.
+        """Whether this sender may talk to RUNE here: only the ids in ``allowed_users``.
 
-        Returns True if no allowed_users configured (open access)
-        or if the sender_id is in the allowed list.
+        With no list nobody may. A bot token alone would let anyone who finds the bot run the
+        owner's agent, and the first to write would become where RUNE's scheduled messages go
+        (rune.daemon.gateway._handle_incoming). Hermes Agent denies everyone when its allow-list
+        is unset, and OpenClaw does not process an unknown sender's DM until the owner approves it.
         Subclasses can override for platform-specific logic.
         """
-        if not self._allowed_users:
-            return True
-        return sender_id in self._allowed_users
+        return sender_id in (self._allowed_users or ())
 
     # -- Approval flow (common) ---------------------------------------------
 
