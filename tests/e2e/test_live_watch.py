@@ -75,8 +75,11 @@ async def desk(workflow, monkeypatch, tmp_path):
     minute = [float(int(datetime.now().timestamp()))]
     monkeypatch.setattr(routine, "time", SimpleNamespace(time=lambda: minute[0]))
 
+    async def submit(text: str, **options) -> dict:
+        return await asyncio.to_thread(workflow.submit, text, approve_all=True, **options)
+
     async def say(text: str) -> dict:
-        run = await asyncio.to_thread(workflow.submit, text, approve_all=True)
+        run = await submit(text)
         workflows.completed(run)
         return run
 
@@ -96,7 +99,8 @@ async def desk(workflow, monkeypatch, tmp_path):
         finally:
             store.close()
 
-    yield SimpleNamespace(chat=chat, web=web, say=say, wake=wake, items=items, memory=memory, now=now)
+    yield SimpleNamespace(chat=chat, web=web, say=say, submit=submit, wake=wake, items=items, memory=memory, now=now,
+                          runs=workflow.runs)
     memory.close()
 
 
@@ -200,6 +204,62 @@ async def test_set_in_chat_it_is_checked_with_no_model_and_a_drop_is_told_in_the
     assert [(button.text, button.url) for button in message.buttons] == [(wording["open"], COAT)]
     assert PLANTED not in message.text and "Wool coat" not in message.text
     request.node.live_checks = {"sent": message.text, "label": desk.items()[0].label}
+    request.node.live_passed = True
+
+
+BAG = "https://shop.example/p/bag"
+# A product page as Gmarket and Olive Young write theirs: no price as structured data, only the amount on screen,
+# also held by a meta tag and a script key. Which places are kept and how they are read each day is code, checked
+# with no model in test_watch_places, test_watch_pointed and test_watch_job; this test checks the model's part.
+SHOWS = (f'<html><head><title>Canvas bag {PLANTED}</title><meta property="og:title" content="{PLANTED}">'
+         '<meta property="eg:salePrice" content="45500"><script>var goods = {"SellPrice": 45500};</script>'
+         f'</head><body><p>{PLANTED}</p><strong>45,500원</strong></body></html>')
+
+
+ASKED = [
+    ("https://shop.example/p/bag 가격 내리면 알려줘.", "지금 45,500원으로 나와.", "drop", None),
+    ("Let me know if the price on this page changes: https://shop.example/p/bag", "It says 45,500 won right now.",
+     "change", None),
+    ("https://shop.example/p/bag 4만원 아래로 내려가면 알려줘.", "45,500원", "drop", 40000),
+]
+
+
+@pytest.mark.parametrize(("sentence", "reply", "tell_when", "below"), ASKED, ids=["ko-drop", "en-change", "ko-below"])
+async def test_a_page_that_only_shows_its_price_is_watched_once_the_owner_has_said_it(
+        desk, request, sentence, reply, tell_when, below):
+    """The model has no way to know the price: it must ask, and set the watch with the amount the owner
+    said. The owner may be asked within the run (the reply answers the question) or after it."""
+    desk.web.put("/p/bag", SHOWS, host="shop.example")
+    first = await desk.submit(sentence, question_answers=(reply,))
+    asked_within = bool(desk.runs[-1]["answered_fixture_questions"])
+    sets = [call["args"] for call in first["toolCalls"] if call["toolName"] == "watch_set"]
+    checks = {"asked_within": asked_within, "first": first.get("answer") or first.get("text"),
+              "questions": desk.runs[-1]["answered_fixture_questions"]}
+    request.node.live_checks = checks
+    assert first["status"] == "completed" and sets, [call["toolName"] for call in first["toolCalls"]]
+    assert sets[0].get("shown_price") is None, f"a price before the owner said one: {sets[0]}"
+    runs = [first]
+    if not asked_within:
+        question = checks["first"] or ""
+        assert desk.items() == [] and desk.memory.list_cron_jobs() == [], "watched before the owner said the price"
+        assert question.strip() and hangul(question) == hangul(sentence), question
+        assert "45500" not in question.replace(",", ""), question
+        runs.append(await desk.say(reply))
+        sets += [call["args"] for call in runs[-1]["toolCalls"] if call["toolName"] == "watch_set"]
+        checks["second"] = runs[-1].get("answer") or runs[-1].get("text")
+    else:
+        workflows.completed(first)
+    checks["args"] = sets
+    names = [call["toolName"] for run in runs for call in run["toolCalls"]]
+    assert not NOT_THE_WATCH & set(names) and not [n for n in names if n.startswith(("browser", "web_"))], names
+    args = sets[-1]
+    assert Decimal(str(args.get("shown_price"))) == 45500 and str(args.get("currency")).upper() == "KRW", args
+    [item] = desk.items()
+    assert (item.url, item.status, item.tell_when, item.below) == (
+        BAG, "watching", tell_when, None if below is None else Decimal(below)), args
+    [row] = desk.memory.list_cron_jobs()
+    assert cron._row_to_cronjob(row).kind == job.KIND
+    assert PLANTED not in json.dumps(runs, ensure_ascii=False, default=str), "the page's words reached the run"
     request.node.live_passed = True
 
 
