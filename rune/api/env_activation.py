@@ -36,6 +36,8 @@ _RESTART_KEYS = frozenset({
     "RUNE_HOME", "RUNE_LOG_LEVEL", "RUNE_LOG_JSON", "RUNE_LOG_FILE",
     "TELEGRAM_BOT_TOKEN", "RUNE_TELEGRAM_TOKEN", "DISCORD_BOT_TOKEN", "RUNE_DISCORD_TOKEN",
     "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "RUNE_SLACK_BOT_TOKEN", "RUNE_SLACK_APP_TOKEN",
+    # Who a channel answers is read with its token, when the engine starts (rune.channels.registry).
+    "RUNE_TELEGRAM_ALLOWED_USERS", "RUNE_DISCORD_ALLOWED_USERS", "RUNE_SLACK_ALLOWED_USERS",
 })
 
 

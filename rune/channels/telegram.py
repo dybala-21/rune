@@ -17,8 +17,13 @@ from rune.channels.types import (
     ApprovalDecision,
     ChannelAdapter,
     IncomingMessage,
+    LinkButton,
+    NotSent,
     OutgoingMessage,
     ResponseFormatter,
+    buttons_as_text,
+    not_allowed,
+    shown_buttons,
 )
 from rune.utils.logger import get_logger
 
@@ -77,6 +82,8 @@ class TelegramAdapter(ChannelAdapter):
         self._dispatcher: Any = None
         self._polling_task: asyncio.Task[None] | None = None
         self._formatter = TelegramResponseFormatter()
+
+    link_buttons = True
 
     @property
     def name(self) -> str:
@@ -173,16 +180,27 @@ class TelegramAdapter(ChannelAdapter):
 
     async def send(self, channel_id: str, message: OutgoingMessage) -> str | None:
         if self._bot is None:
-            log.warning("telegram_send_no_bot")
-            return None
+            # Not started, or its start failed: nothing goes out.
+            raise NotSent("Telegram is not connected")
 
         text = self._formatter.format_text(message.text)
         chunks = _split_text(text, _MAX_MESSAGE_LENGTH)
-        for chunk in chunks:
+        markup = _link_markup(message.buttons)
+        for i, chunk in enumerate(chunks):
+            extra = {"reply_markup": markup} if markup is not None and i == len(chunks) - 1 else {}
             try:
-                await self._bot.send_message(chat_id=int(channel_id), text=chunk)
+                await self._bot.send_message(chat_id=int(channel_id), text=chunk, **extra)
             except Exception as exc:
-                log.error("telegram_send_failed", error=str(exc))
+                if not extra:
+                    raise NotSent(f"Telegram refused the message: {exc}") from exc
+                log.warning("telegram_buttons_refused", error=str(exc))
+                # Telegram turns down the whole message over one link it won't show; the links go as text.
+                tail = self._formatter.format_text(buttons_as_text("", message.buttons).strip())
+                try:
+                    await self._bot.send_message(chat_id=int(channel_id),
+                                                 text=f"{chunk}\n\n{tail}"[:_MAX_MESSAGE_LENGTH])
+                except Exception as retry_exc:
+                    raise NotSent(f"Telegram refused the message: {retry_exc}") from retry_exc
 
         for attachment in message.attachments:
             await self._send_attachment(channel_id, attachment)
@@ -228,11 +246,13 @@ class TelegramAdapter(ChannelAdapter):
                 user_id=sender_id,
                 username=username,
             )
-            with contextlib.suppress(Exception):
+            try:
                 await self._bot.send_message(
                     chat_id=message.chat.id,
-                    text="⛔ 이 봇은 승인된 사용자만 사용할 수 있습니다.",
+                    text=not_allowed("Telegram", sender_id, "RUNE_TELEGRAM_ALLOWED_USERS"),
                 )
+            except Exception as exc:
+                log.debug("telegram_refusal_not_sent", user_id=sender_id, error=str(exc))
             return
 
         text = message.text or message.caption or ""
@@ -433,8 +453,19 @@ class TelegramAdapter(ChannelAdapter):
             else:
                 decision = ApprovalDecision.DENY
 
-            # Use base-class resolver
-            self._resolve_approval(approval_id, decision)
+            if not self._resolve_approval(approval_id, decision):
+                # Answered already, timed out, or from before a restart: nothing is waiting on it.
+                try:
+                    await callback_query.answer(text="This request is no longer waiting")
+                    if callback_query.message and self._bot is not None:
+                        await self._bot.edit_message_reply_markup(
+                            chat_id=callback_query.message.chat.id,
+                            message_id=callback_query.message.message_id,
+                            reply_markup=None,
+                        )
+                except Exception as exc:
+                    log.warning("telegram_approval_update_failed", error=str(exc))
+                return
 
             # Update message with result
             if decision != ApprovalDecision.DENY:
@@ -459,6 +490,16 @@ class TelegramAdapter(ChannelAdapter):
         else:
             with contextlib.suppress(Exception):
                 await callback_query.answer()
+
+
+def _link_markup(buttons: list[LinkButton]) -> Any:
+    """An aiogram inline keyboard of link buttons, one to a row, or None."""
+    kept = shown_buttons(buttons)
+    if not kept:
+        return None
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=b.text, url=b.url)] for b in kept])
 
 
 def _split_text(text: str, max_length: int) -> list[str]:

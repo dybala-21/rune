@@ -178,7 +178,6 @@ class RuneDaemon:
         self._environment_sensor: Any = None
 
         # Browser subsystem references
-        self._relay_server: Any = None
         self._browser_page_pool: Any = None
 
         # Process lock path
@@ -367,8 +366,9 @@ class RuneDaemon:
             raise
 
         await self._cleanup_orphaned_runs()
-        from rune.daemon.maintenance import recover_spend
+        from rune.daemon.maintenance import recover_spend, remove_retired_extension
         await recover_spend()
+        await asyncio.to_thread(remove_retired_extension)
 
         try:
             from rune.proactive.reflexion import get_reflexion_learner
@@ -494,7 +494,6 @@ class RuneDaemon:
 
     async def _init_browser_subsystems(self) -> None:
         """Start the browser search pool; agent runs own their browser sessions."""
-        # Leave the unauthenticated legacy relay disabled; start only the search page pool.
         try:
             from rune.capabilities.search.browser_page_pool import BrowserPagePool
             from rune.capabilities.web import build_search_provider, set_search_provider
@@ -514,7 +513,7 @@ class RuneDaemon:
             log.warning("browser_page_pool_init_failed", error=str(exc))
 
     async def _shutdown_browser_subsystems(self) -> None:
-        """Stop relay server and destroy page pool."""
+        """Destroy the search page pool."""
         if self._browser_page_pool is not None:
             try:
                 await self._browser_page_pool.destroy()
@@ -522,14 +521,6 @@ class RuneDaemon:
             except Exception as exc:
                 log.warning("browser_page_pool_shutdown_failed", error=str(exc))
             self._browser_page_pool = None
-
-        if self._relay_server is not None:
-            try:
-                await self._relay_server.stop()
-                log.info("subsystem_shutdown", name="relay_server")
-            except Exception as exc:
-                log.warning("relay_server_shutdown_failed", error=str(exc))
-            self._relay_server = None
 
     # orphaned run cleanup
 

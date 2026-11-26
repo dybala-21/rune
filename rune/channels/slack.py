@@ -7,7 +7,6 @@ for real-time messaging and Block Kit formatting.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
 from typing import Any
 
@@ -15,8 +14,10 @@ from rune.channels.types import (
     ApprovalDecision,
     ChannelAdapter,
     IncomingMessage,
+    NotSent,
     OutgoingMessage,
     ResponseFormatter,
+    not_allowed,
 )
 from rune.utils.logger import get_logger
 
@@ -136,8 +137,7 @@ class SlackAdapter(ChannelAdapter):
 
     async def send(self, channel_id: str, message: OutgoingMessage) -> str | None:
         if self._web_client is None:
-            log.warning("slack_send_no_client")
-            return None
+            raise NotSent("Slack is not connected")
 
         text = self._formatter.format_text(message.text)
 
@@ -157,7 +157,7 @@ class SlackAdapter(ChannelAdapter):
         try:
             await self._web_client.chat_postMessage(**kwargs)
         except Exception as exc:
-            log.error("slack_send_failed", error=str(exc))
+            raise NotSent(f"Slack refused the message: {exc}") from exc
 
         # Send attachments as file uploads
         for attachment in message.attachments:
@@ -228,10 +228,12 @@ class SlackAdapter(ChannelAdapter):
         sender_id = event.get("user", "")
         if not self.check_authorization(sender_id):
             log.warning("slack_unauthorized_user", user_id=sender_id)
-            with contextlib.suppress(Exception):
+            try:
                 await self._web_client.chat_postMessage(
                     channel=event.get("channel", ""),
-                    text="⛔ This bot only responds to approved users.")
+                    text=not_allowed("Slack", sender_id, "RUNE_SLACK_ALLOWED_USERS"))
+            except Exception as exc:
+                log.debug("slack_refusal_not_sent", user_id=sender_id, error=str(exc))
             return
 
         attachments = self._extract_attachments(event)

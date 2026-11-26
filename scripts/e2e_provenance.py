@@ -11,7 +11,7 @@ from pathlib import Path
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE_PATHS = ("rune", "tests", "scripts", "web", "extension", "pyproject.toml", "uv.lock")
+SOURCE_PATHS = ("rune", "tests", "scripts", "web", "pyproject.toml", "uv.lock")
 
 
 def digest(value) -> str:

@@ -16,6 +16,7 @@ from rune.channels.types import (
     ApprovalDecision,
     ChannelAdapter,
     IncomingMessage,
+    NotSent,
     OutgoingMessage,
     ResponseFormatter,
 )
@@ -197,8 +198,7 @@ class LINEAdapter(ChannelAdapter):
     async def send(self, channel_id: str, message: OutgoingMessage) -> str | None:
         """Send a push message to a user/group/room."""
         if self._http_session is None:
-            log.warning("line_send_no_session")
-            return None
+            raise NotSent("LINE is not connected")
 
         text = self._formatter.format_text(message.text)
 
@@ -210,7 +210,8 @@ class LINEAdapter(ChannelAdapter):
         if flex is not None:
             messages = [{"type": "flex", "altText": text[:400], "contents": flex}]
 
-        await self._push_message(channel_id, messages)
+        if not await self._push_message(channel_id, messages):
+            raise NotSent("LINE refused the message")
 
         # Send media attachments
         for attachment in message.attachments:
@@ -265,15 +266,14 @@ class LINEAdapter(ChannelAdapter):
 
     async def _push_message(
         self, to: str, messages: list[dict[str, Any]]
-    ) -> None:
-        """Send a push message to a user/group/room."""
+    ) -> bool:
+        """Send a push message to a user/group/room; whether every batch went (_api_post logs why not)."""
         # LINE allows max 5 messages per request
         for i in range(0, len(messages), 5):
             batch = messages[i : i + 5]
-            await self._api_post(
-                f"{_API_BASE}/message/push",
-                {"to": to, "messages": batch},
-            )
+            if await self._api_post(f"{_API_BASE}/message/push", {"to": to, "messages": batch}) is None:
+                return False
+        return True
 
     async def _handle_webhook(self, request: Any) -> Any:
         """Handle an incoming LINE webhook event."""

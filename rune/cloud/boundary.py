@@ -13,7 +13,7 @@ _TOOLS = frozenset({
     "bash_execute", "web_search", "web_fetch", "connector_list", "connector_request", "connect_account",
     "browser_navigate", "browser_login", "browser_open", "browser_observe", "browser_act", "browser_batch", "browser_extract",
     "browser_find", "browser_screenshot", "browser_discover_apis", "browser_workflow",
-    "memory_search", "memory_save", "memory_tune", "conversation_search", "cron_create", "cron_list", "cron_update", "cron_delete",
+    "memory_search", "memory_save", "memory_tune", "conversation_search", "cron_create", "cron_list", "cron_update", "cron_delete", "task_start", "task_park",
 })
 
 

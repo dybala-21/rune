@@ -18,7 +18,9 @@ from rune.agent.run_outcome import explanation_warning, run_outcome
 from rune.api.event_logger import append_event
 from rune.channels.registry import ChannelRegistry
 from rune.channels.types import (
+    ChannelAdapter,
     IncomingMessage,
+    LinkButton,
     OutgoingMessage,
 )
 from rune.daemon import recipients
@@ -45,6 +47,7 @@ class GatewayNotification:
     priority: NotificationPriority = "medium"
     source: str = ""
     channel: str = ""
+    buttons: list[LinkButton] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -371,27 +374,31 @@ class ChannelGateway:
             )
             # TUI-only: emit event for local consumption
             self._emit("notification", notification)
+            await self._keep_in_app(notification)
             return
 
         delivered = False
 
         for channel_name in channels:
-            adapter = self._registry.get(channel_name)
-            if adapter is None:
+            reach = self._reach(channel_name)
+            if reach is None:
+                log.info("gateway_channel_not_reached", channel=channel_name)
                 continue
-
-            recipient_id = self._default_recipients.get(channel_name)
-            if not recipient_id:
-                log.warning(
-                    "gateway_no_default_recipient",
-                    channel=channel_name,
-                )
-                continue
+            adapter, recipient_id = reach
 
             try:
                 text = f"{notification.title}\n{notification.body}" if notification.body else notification.title
-                await adapter.send_notification(recipient_id, text)
+                if notification.buttons:
+                    await adapter.send_notification(recipient_id, text, notification.buttons)
+                else:
+                    await adapter.send_notification(recipient_id, text)
                 delivered = True
+                from rune.channels.types import buttons_as_text
+                from rune.daemon import owner_thread
+
+                # With the links written out: the app shows the turn without the chat's buttons.
+                await owner_thread.remember(await self._get_conv_manager(), recipient_id,
+                                            buttons_as_text(text, notification.buttons))
                 log.info(
                     "gateway_notification_delivered",
                     channel=channel_name,
@@ -408,6 +415,19 @@ class ChannelGateway:
         if not delivered:
             # No channel accepted the notification - emit for TUI fallback
             self._emit("notification", notification)
+            await self._keep_in_app(notification)
+
+    async def _keep_in_app(self, notification: GatewayNotification) -> None:
+        """What reached no chat app is kept in the app's RUNE conversation (rune.daemon.owner_thread)."""
+        from rune.channels.types import buttons_as_text
+        from rune.daemon import owner_thread
+
+        if notification.source != "cron":
+            # Only a scheduled result has nowhere else to go: a suggestion already shows as a card
+            # in the app (suggestion_created), and a plan's progress is for whoever watches it run.
+            return
+        text = f"{notification.title}\n{notification.body}" if notification.body else notification.title
+        await owner_thread.remember_in_app(await self._get_conv_manager(), buttons_as_text(text, notification.buttons))
 
     # Orchestrator event relay
 
@@ -550,15 +570,6 @@ class ChannelGateway:
         if adapter is None:
             return ApprovalResponse(decision="deny", approved=False, timed_out=False)
 
-        # Try native adapter approval first
-        try:
-            approval_id = f"approval:{session_key}:{int(time.monotonic() * 1000)}"
-            await adapter.send_approval(recipient_id, command, approval_id)
-            # Native approval still resolves through the pending-response pipeline.
-        except NotImplementedError:
-            pass  # Fall through to text prompt
-
-        # Text-based approval fallback
         loop = asyncio.get_running_loop()
         future: asyncio.Future[ApprovalResponse] = loop.create_future()
 
@@ -568,11 +579,44 @@ class ChannelGateway:
                 RuntimeError("Replaced by a newer approval request")
             )
 
-        self._pending_approvals[session_key] = _PendingApproval(
+        pending = _PendingApproval(
             command=command,
             future=future,
             expires_at=time.monotonic() + timeout,
         )
+        self._pending_approvals[session_key] = pending
+
+        # Buttons answer the same request as a typed reply. The id stays short: Telegram keeps
+        # at most 64 bytes of a button's callback data.
+        approval_id = uuid4().hex[:16]
+        pressed = adapter.expect_approval(approval_id)
+
+        def _on_press(done: asyncio.Future[Any]) -> None:
+            if done.cancelled() or future.done():
+                return
+            answer = done.result()
+            if self._pending_approvals.get(session_key) is pending:
+                self._pending_approvals.pop(session_key, None)
+            future.set_result(ApprovalResponse(decision=str(answer.decision), approved=answer.approved,
+                                               timed_out=answer.timed_out))
+            log.info("gateway_approval_resolved", session_key=session_key, decision=str(answer.decision),
+                     via="button")
+
+        pressed.add_done_callback(_on_press)
+        try:
+            return await self._await_approval(adapter, recipient_id, session_key, future, command=command,
+                                              risk_level=risk_level, reason=reason, suggestions=suggestions,
+                                              timeout=timeout, approval_id=approval_id)
+        finally:
+            adapter.forget_approval(approval_id)
+
+    async def _await_approval(self, adapter: Any, recipient_id: str, session_key: str,
+                              future: asyncio.Future[ApprovalResponse], *, command: str, risk_level: str,
+                              reason: str, suggestions: list[str] | None, timeout: float,
+                              approval_id: str) -> ApprovalResponse:
+        """Show the request (buttons where the channel has them, and numbered choices) and wait."""
+        with contextlib.suppress(NotImplementedError):
+            await adapter.send_approval(recipient_id, command, approval_id)
 
         prompt = _build_approval_prompt(
             command=command,
@@ -634,6 +678,21 @@ class ChannelGateway:
     def get_connected_channels(self) -> list[str]:
         """Return the names of all currently registered channels."""
         return self._registry.list()
+
+    def reaches(self, channel_name: str) -> bool:
+        """Whether a notification for this channel is sent there now. What is said of where messages
+        go (rune.daemon.owner_thread.where) and where route_notification sends them are this one test."""
+        return self._reach(channel_name) is not None
+
+    def _reach(self, channel_name: str) -> tuple[ChannelAdapter, str] | None:
+        """The adapter and the owner's chat to send to, or None: the channel is not connected, it failed
+        to connect or lost its connection, or no message from the owner on it has said which chat is
+        theirs."""
+        adapter = self._registry.get(channel_name)
+        recipient_id = self._default_recipients.get(channel_name)
+        if adapter is None or adapter.status == "error" or not recipient_id:
+            return None
+        return adapter, recipient_id
 
     def _save_recipients(self) -> None:
         if self._recipients_path is not None:
@@ -845,6 +904,7 @@ class ChannelGateway:
                 channel=message.metadata.get("channel_name", "remote"),
                 sender_id=message.sender_id,
                 conversation_id=conv_id,
+                owner_text=text,
             )
             agent_ctx = await prepare_agent_context(
                 context_opts, conversation_manager=conv_manager)
@@ -1025,13 +1085,11 @@ class ChannelGateway:
         if self._conv_manager is not None:
             return self._conv_manager
         try:
+            # The app's manager: a channel conversation the app opens is then the same object,
+            # not a second copy whose save would drop the other's turns.
+            from rune.api.conversation_wiring import get_conv_manager
 
-            from rune.conversation.manager import ConversationManager
-            from rune.conversation.store import ConversationStore
-            from rune.utils.paths import conversations_db_path
-
-            store = ConversationStore(conversations_db_path())
-            self._conv_manager = ConversationManager(store)
+            self._conv_manager = get_conv_manager()
         except Exception as exc:
             log.debug("gateway_conv_manager_init_failed", error=str(exc)[:100])
             self._conv_manager = None
@@ -1068,59 +1126,21 @@ class ChannelGateway:
         reply_to: str | None = None,
         channel_name: str = "",
     ) -> None:
-        """Reply on the originating channel, trying other adapters if it is absent or fails."""
-        outgoing = OutgoingMessage(
-            text=response,
-            reply_to=reply_to,
-        )
+        """Reply on the channel the message came from, and only there.
 
-        # Try the originating adapter first
-        if channel_name:
-            adapter = self._registry.get(channel_name)
-            if adapter is not None:
-                try:
-                    await adapter.send(channel_id, outgoing)
-                    _log_event(
-                        f"{channel_id}:{sender_id}",
-                        "response_sent",
-                        {
-                            "channel": channel_name,
-                            "response_length": len(response),
-                        },
-                    )
-                    return
-                except Exception:
-                    log.warning(
-                        "primary_adapter_send_failed",
-                        channel=channel_name,
-                        channel_id=channel_id,
-                    )
-
-        # Fallback: try remaining adapters
-        for name in self._registry.list():
-            if name == channel_name:
-                continue  # already tried
-            adapter = self._registry.get(name)
-            if adapter is not None:
-                try:
-                    await adapter.send(channel_id, outgoing)
-                    _log_event(
-                        f"{channel_id}:{sender_id}",
-                        "response_sent",
-                        {
-                            "channel": name,
-                            "response_length": len(response),
-                        },
-                    )
-                    return
-                except Exception:
-                    continue
-
-        log.warning(
-            "no_adapter_for_channel",
-            channel_id=channel_id,
-            sender_id=sender_id,
-        )
+        The chat id belongs to that platform: sent through another adapter it reaches no one, or
+        someone else whose id happens to match."""
+        adapter = self._registry.get(channel_name) if channel_name else None
+        if adapter is None:
+            log.warning("no_adapter_for_channel", channel=channel_name, channel_id=channel_id, sender_id=sender_id)
+            return
+        try:
+            await adapter.send(channel_id, OutgoingMessage(text=response, reply_to=reply_to))
+        except Exception as exc:
+            log.error("reply_not_sent", channel=channel_name, channel_id=channel_id, error=str(exc))
+            return
+        _log_event(f"{channel_id}:{sender_id}", "response_sent",
+                   {"channel": channel_name, "response_length": len(response)})
 
 
 # Module-level helpers
@@ -1235,6 +1255,7 @@ _USER_FRIENDLY_REASON: dict[str, str] = {
     "max_iterations": "I've reached my step limit. Here's what I found so far.",
     "token_budget_exhausted": "I ran out of processing budget. Please try a simpler request.",
     "request_budget_exhausted": "The configured model budget stopped further requests. Some work may be unfinished.",
+    "gateway_budget_exhausted": "This month's model budget is used up. It starts again on the 1st (UTC).",
 }
 
 

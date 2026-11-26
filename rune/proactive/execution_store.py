@@ -9,6 +9,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+# Operations this process claimed and has not finished. A claim an earlier process left under the
+# same pid (a machine that boots into the same one) is not here.
+_claimed_here: set[str] = set()
+
 
 class ExecutionStore:
     def __init__(self, path: Path | None = None) -> None:
@@ -109,15 +113,24 @@ class ExecutionStore:
         row = self._db.execute("SELECT result, owner_pid FROM operations WHERE id = ?", (operation_id,)).fetchone()
         return self._state(json.loads(row[0]) if row[0] else None, row[1]) if row else "unavailable"
 
-    def claim(self, operation_id: str, fingerprint: str, limit: int, *, resource: str = "") -> str:
-        """Reserve the operation ID and hourly budget in one transaction."""
+    def claim(self, operation_id: str, fingerprint: str, limit: int, *, resource: str = "",
+              rerunnable: bool = False) -> str:
+        """Reserve the operation ID and hourly budget in one transaction.
+
+        ``rerunnable`` is for work that only reads and reports (a job run by code): a run of it that
+        stopped part way left nothing to inspect, so the hold it left does not keep the next one out.
+        """
         self._db.execute("BEGIN IMMEDIATE")
         try:
+            held = self._db.execute(
+                "SELECT operation_id FROM resources WHERE resource = ?", (resource,),
+            ).fetchone() if resource else None
+            if held and rerunnable and held[0] != operation_id and self._left_behind(held[0]):
+                self._db.execute("DELETE FROM resources WHERE resource = ?", (resource,))
+                held = None
             if self.get(operation_id) is not None:
                 decision = "exists"
-            elif resource and self._db.execute(
-                "SELECT 1 FROM resources WHERE resource = ?", (resource,),
-            ).fetchone():
+            elif held:
                 decision = "busy"
             elif self.started_since(time.time() - 3600) >= limit:
                 decision = "rate_limited"
@@ -130,12 +143,42 @@ class ExecutionStore:
                     self._db.execute("INSERT INTO resources VALUES (?, ?)", (resource, operation_id))
                 decision = "claimed"
             self._db.execute("COMMIT")
+            if decision == "claimed":
+                _claimed_here.add(operation_id)
             return decision
         except BaseException:
             self._db.execute("ROLLBACK")
             raise
 
+    def _left_behind(self, operation_id: str) -> bool:
+        """Whether the run holding a resource is over, however it ended. Call inside a transaction."""
+        row = self._db.execute("SELECT result, owner_pid FROM operations WHERE id = ?", (operation_id,)).fetchone()
+        if row is None:
+            return True
+        if row[0] is not None:
+            # Recorded as stopped part way. One waiting for the owner's approval is still theirs to decide.
+            return bool(json.loads(row[0]).get("status") != "needs_approval")
+        if row[1] is None:
+            return False  # nothing says who ran it
+        if row[1] == os.getpid():
+            if operation_id in _claimed_here:
+                return False
+        else:
+            try:
+                os.kill(row[1], 0)
+                return False
+            except ProcessLookupError:
+                pass
+            except OSError:
+                return False  # it exists and isn't ours to signal
+        # Its process ended before it wrote a result.
+        self._db.execute("UPDATE operations SET result = ? WHERE id = ? AND result IS NULL", (json.dumps(
+            {"status": "failed", "success": False, "verified": False, "output": "",
+             "error": "The process running it ended before it finished."}), operation_id))
+        return True
+
     def finish(self, operation_id: str, result: dict[str, Any]) -> None:
+        _claimed_here.discard(operation_id)
         self._db.execute("BEGIN IMMEDIATE")
         try:
             changed = self._db.execute(

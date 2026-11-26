@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
+from rune.agent import owner_words
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -28,6 +29,11 @@ class PrepareContextOptions:
     conversation_id: str = ""
     pinned_cwd: str | None = None
     attachments: list[dict[str, Any]] = field(default_factory=list)
+    # What a person typed for this turn, when a person did: not a model, a schedule or a sub-run.
+    # Tools that act only on the owner's own words read it (rune.agent.owner_words).
+    owner_text: str | None = None
+    # Whether the conversation's stored user turns are a person's typing too, and nothing else.
+    owner_turns: bool = True
 
 
 @dataclass(slots=True)
@@ -215,12 +221,28 @@ def _expand_at_references(goal: str, cwd: str) -> tuple[str, list[str]]:
     return expanded, ref_paths
 
 
+def _typed_by_owner(options: PrepareContextOptions, conversation_manager: Any | None) -> list[str] | None:
+    """This turn as a person typed it, with the conversation's earlier user turns. None when no
+    person typed this turn: what an earlier turn said gives a later run no words of its own."""
+    if options.owner_text is None:
+        return None
+    texts = [options.owner_text]
+    if options.owner_turns and conversation_manager is not None and options.conversation_id:
+        conversation = getattr(conversation_manager, "_active", {}).get(options.conversation_id)
+        turns = getattr(conversation, "turns", None)
+        # Turns set aside by compaction count too: they are kept as they were typed.
+        texts += [turn.content for turn in turns if turn.role == "user"] if isinstance(turns, list) else []
+    return texts
+
+
 async def prepare_agent_context(
     options: PrepareContextOptions,
     conversation_manager: Any | None = None,
 ) -> AgentContext:
     """Resolve the workspace, references, conversation history and saved tasks for a run."""
     sanitized_goal = _sanitize_goal_input(options.goal)
+    # Set either way, so a run that no person typed never keeps the words of the one before it.
+    owner_words.set_typed(_typed_by_owner(options, conversation_manager))
 
     workspace_root = await _resolve_workspace_cwd_for_turn(
         sanitized_goal,

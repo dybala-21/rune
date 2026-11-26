@@ -37,7 +37,7 @@ TOOL_GROUPS: dict[str, list[str]] = {
                  "browser_workflow", "browser_screenshot", "browser_profile", "browser_stay_evidence"],
     "web": ["web_search", "web_fetch", "connector_list", "connector_request", "connect_account", "service_connect", "service_status",
             "service_list", "service_disconnect", "service_reconnect"],
-    "schedule": ["cron_create", "cron_list", "cron_delete", "cron_update"],
+    "schedule": ["cron_create", "cron_list", "cron_delete", "cron_update", "task_start"],
     "safe": ["think", "ask_user", "memory_search", "memory_save",
              "safety_tune", "task_create", "task_update", "task_list"],
     "delegate": ["delegate_task", "delegate_orchestrate"],

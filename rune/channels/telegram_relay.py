@@ -25,7 +25,16 @@ from typing import Any
 import httpx
 
 from rune.channels.telegram import _MAX_MESSAGE_LENGTH, TelegramResponseFormatter, _split_text
-from rune.channels.types import ApprovalDecision, ChannelAdapter, IncomingMessage, OutgoingMessage
+from rune.channels.types import (
+    ApprovalDecision,
+    ChannelAdapter,
+    IncomingMessage,
+    LinkButton,
+    NotSent,
+    OutgoingMessage,
+    buttons_as_text,
+    shown_buttons,
+)
 from rune.utils.logger import get_logger
 
 log = get_logger(__name__)
@@ -33,6 +42,8 @@ log = get_logger(__name__)
 RELAY_URL = "RUNE_CHANNEL_RELAY_URL"
 _SEEN = 1000
 _SIGNED_FOR = 45
+# A button pressed on a request nothing waits for any more.
+_NOT_WAITING = "This request is no longer waiting"
 
 
 class RelayUnavailable(RuntimeError):
@@ -53,6 +64,8 @@ class RelayTelegramAdapter(ChannelAdapter):
         self._formatter = TelegramResponseFormatter()
         self._seen: OrderedDict[int, None] = OrderedDict()
         self._tasks: set[asyncio.Task[None]] = set()
+
+    link_buttons = True
 
     @property
     def name(self) -> str:
@@ -170,11 +183,17 @@ class RelayTelegramAdapter(ChannelAdapter):
         action, approval_id = parts[1], parts[2]
         decision = {"allow": ApprovalDecision.APPROVE_ONCE, "allow_once": ApprovalDecision.APPROVE_ONCE,
                     "allow_always": ApprovalDecision.APPROVE_ALWAYS}.get(action, ApprovalDecision.DENY)
-        self._resolve_approval(approval_id, decision)
-        text = "Denied" if decision == ApprovalDecision.DENY else "Approved"
-        await self._try("answerCallbackQuery", {"callback_query_id": query_id, "text": f"{text}!"})
         message = query.get("message") or {}
         chat_id = (message.get("chat") or {}).get("id")
+        if not self._resolve_approval(approval_id, decision):
+            # Answered already, timed out, or from before a restart: nothing is waiting on it.
+            await self._try("answerCallbackQuery", {"callback_query_id": query_id, "text": _NOT_WAITING})
+            if isinstance(chat_id, int) and "message_id" in message:
+                await self._try("editMessageReplyMarkup", {"chat_id": chat_id, "message_id": message["message_id"],
+                                                           "reply_markup": {"inline_keyboard": []}})
+            return
+        text = "Denied" if decision == ApprovalDecision.DENY else "Approved"
+        await self._try("answerCallbackQuery", {"callback_query_id": query_id, "text": f"{text}!"})
         if isinstance(chat_id, int) and "message_id" in message:
             name = (query.get("from") or {}).get("username") or "someone"
             await self._try("editMessageText", {"chat_id": chat_id, "message_id": message["message_id"],
@@ -184,9 +203,24 @@ class RelayTelegramAdapter(ChannelAdapter):
 
     async def send(self, channel_id: str, message: OutgoingMessage) -> str | None:
         text = self._formatter.format_text(message.text)
+        chunks = _split_text(text, _MAX_MESSAGE_LENGTH)
+        markup = link_keyboard(message.buttons)
         sent = None
-        for chunk in _split_text(text, _MAX_MESSAGE_LENGTH):
-            sent = await self._try("sendMessage", {"chat_id": int(channel_id), "text": chunk, "parse_mode": "HTML"})
+        for i, chunk in enumerate(chunks):
+            params: dict[str, Any] = {"chat_id": int(channel_id), "text": chunk, "parse_mode": "HTML"}
+            if markup and i == len(chunks) - 1:
+                params["reply_markup"] = markup
+            sent = await self._try("sendMessage", params)
+            if sent is None and "reply_markup" in params:
+                # Telegram turns down the whole message over one link it won't show; the links go as text.
+                log.warning("telegram_link_buttons_refused")
+                tail = self._formatter.format_text(buttons_as_text("", message.buttons).strip())
+                params = {"chat_id": int(channel_id), "text": f"{chunk}\n\n{tail}"[:_MAX_MESSAGE_LENGTH],
+                          "parse_mode": "HTML"}
+                sent = await self._try("sendMessage", params)
+            if sent is None:
+                # _try logged why: the relay is unreachable or refused, or Telegram refused the message.
+                raise NotSent("The relay did not send the message")
         if message.attachments:
             # Files don't go through the relay yet.
             await self._try("sendMessage", {"chat_id": int(channel_id),
@@ -226,6 +260,12 @@ class RelayTelegramAdapter(ChannelAdapter):
         ]]}
         await self._try("sendMessage", {"chat_id": int(channel_id), "text": f"Approval required\n\n{shown}",
                                         "reply_markup": keyboard})
+
+
+def link_keyboard(buttons: list[LinkButton]) -> dict[str, Any] | None:
+    """Telegram's inline keyboard for link buttons, one to a row."""
+    kept = shown_buttons(buttons)
+    return {"inline_keyboard": [[{"text": b.text, "url": b.url}] for b in kept]} if kept else None
 
 
 def _attachments(message: dict[str, Any]) -> list[dict[str, Any]]:

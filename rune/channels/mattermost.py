@@ -15,6 +15,7 @@ from rune.channels.types import (
     ApprovalDecision,
     ChannelAdapter,
     IncomingMessage,
+    NotSent,
     OutgoingMessage,
     ResponseFormatter,
 )
@@ -244,8 +245,7 @@ class MattermostAdapter(ChannelAdapter):
 
     async def send(self, channel_id: str, message: OutgoingMessage) -> str | None:
         if self._http_session is None:
-            log.warning("mattermost_send_no_session")
-            return None
+            raise NotSent("Mattermost is not connected")
 
         text = self._formatter.format_text(message.text)
 
@@ -270,7 +270,8 @@ class MattermostAdapter(ChannelAdapter):
             if i > 0:
                 # Only the first chunk keeps the root_id for thread routing
                 post_body.pop("props", None)
-            await self._api_post("/api/v4/posts", post_body)
+            if await self._api_post("/api/v4/posts", post_body) is None:
+                raise NotSent("Mattermost refused the message")
 
         # Send file attachments
         for attachment in message.attachments:

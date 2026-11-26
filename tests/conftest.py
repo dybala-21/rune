@@ -42,6 +42,12 @@ def mock_home(tmp_dir, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_watch_browser(monkeypatch):
+    """The watch starts no browser in a test that did not ask for one."""
+    monkeypatch.setenv("RUNE_WATCH_BROWSER", "0")
+
+
+@pytest.fixture(autouse=True)
 def reset_singletons():
     """Reset module-level singletons between tests."""
     yield

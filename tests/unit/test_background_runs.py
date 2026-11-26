@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from rune.agent.background import BackgroundTask, run_background
+from rune.agent.background import SCHEDULED_RUN, BackgroundTask, run_background, scheduled_run
 from rune.agent.run_control import current_control
 from rune.safety.approval_context import approval_granted, was_approved
 from rune.types import CompletionTrace
@@ -75,6 +75,23 @@ async def test_background_approval_and_timeout_are_not_success():
     result = await run_background(BackgroundTask("Report", "test", timeout_seconds=.01), loop_factory=lambda **kw: loop)
     assert result["execution_unknown"]
     assert not result["verified"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source,told", [("cron", True), ("test", False)])
+async def test_a_run_the_scheduler_starts_from_a_stored_task_is_told_it_is_one_run(source, told):
+    seen = {}
+
+    class Told(Loop):
+        async def run(self, goal, **kwargs):
+            seen.update(context=kwargs.get("extra_system_context") or "", scheduled=scheduled_run())
+            return await super().run(goal, **kwargs)
+
+    await run_background(BackgroundTask("Every morning, report the price", source, preamble="Step 2 of 5."),
+                         loop_factory=lambda **kw: Told(CompletionTrace(reason="completed")))
+    assert seen["scheduled"] is told and not scheduled_run()
+    # Ahead of whatever else the run is told.
+    assert seen["context"] == (f"{SCHEDULED_RUN}\nStep 2 of 5." if told else "Step 2 of 5.")
 
 
 @pytest.mark.asyncio

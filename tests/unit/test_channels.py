@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from unittest.mock import patch
 
+import pytest
+
 import rune.channels.registry as registry_mod
 from rune.channels.registry import ChannelRegistry
 from rune.channels.types import (
@@ -74,10 +76,11 @@ class TestChannelRegistry:
             clean_env = {
                 k: v for k, v in os.environ.items()
                 if k not in (
-                    "RUNE_TELEGRAM_TOKEN",
-                    "RUNE_DISCORD_TOKEN",
-                    "RUNE_SLACK_BOT_TOKEN",
-                    "RUNE_SLACK_APP_TOKEN",
+                    "RUNE_TELEGRAM_TOKEN", "TELEGRAM_BOT_TOKEN",
+                    "RUNE_DISCORD_TOKEN", "DISCORD_BOT_TOKEN",
+                    "RUNE_SLACK_BOT_TOKEN", "SLACK_BOT_TOKEN",
+                    "RUNE_SLACK_APP_TOKEN", "SLACK_APP_TOKEN",
+                    "RUNE_CHANNEL_RELAY_URL",
                 )
             }
             with patch.dict(os.environ, clean_env, clear=True):
@@ -86,6 +89,19 @@ class TestChannelRegistry:
                 assert len(discovered) == 0
         finally:
             registry_mod._registry = old_registry
+
+
+@pytest.mark.parametrize("channel", ["telegram", "discord", "slack"])
+def test_a_token_saved_with_credential_save_starts_its_channel(monkeypatch, channel):
+    """credential_save keeps "telegram" under the name it maps it to; the engine has to start from that name."""
+    from rune.capabilities.credential import _resolve_env_key
+
+    for name in ("RUNE_TELEGRAM_TOKEN", "TELEGRAM_BOT_TOKEN", "RUNE_DISCORD_TOKEN", "DISCORD_BOT_TOKEN",
+                 "RUNE_SLACK_BOT_TOKEN", "SLACK_BOT_TOKEN", "RUNE_CHANNEL_RELAY_URL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(registry_mod, "_registry", None)
+    monkeypatch.setenv(_resolve_env_key(channel), "123:abc")
+    assert registry_mod.auto_discover_channels() == [channel]
 
 
 class TestParseSlashCommand:

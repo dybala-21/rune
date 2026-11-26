@@ -10,6 +10,7 @@ from rune.channels.types import (
     ApprovalDecision,
     ChannelAdapter,
     IncomingMessage,
+    NotSent,
     OutgoingMessage,
     ResponseFormatter,
 )
@@ -67,7 +68,7 @@ class TUIChannelAdapter(ChannelAdapter):
     async def send(self, channel_id: str, message: OutgoingMessage) -> str | None:
         """Send an outgoing message by emitting a UI event."""
         if not self._running:
-            return None
+            raise NotSent("The terminal UI is not running")
 
         formatted = self._formatter.format_text(message.text)
         await self._emitter.emit(

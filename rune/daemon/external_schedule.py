@@ -6,6 +6,11 @@ local dispatcher from firing jobs; approval continuations still run locally. A r
 for a connector approval waits on the host's approval page, and the control plane continues it
 with ``connector.decided`` once the owner decides.
 
+A long task (``rune.proactive.long_task``) has no schedule: ``cron.list`` gives its next step's
+minute as ``wakeAt``, and the control plane fires that minute like any other, however late. A
+control plane that gives up starting one says so with ``task.stalled``; the task then ends and its
+owner is told (``rune.capabilities.cron.task_stalled``).
+
 Scheduled minutes are interpreted in this machine's local time zone, exactly like the
 local dispatcher. A hosted machine runs in its owner's zone (``TZ``), so "0 7 * * *" means 7 am
 where the owner is; ``cron.list`` reports that zone (``schedule_timezone``) and the control plane
@@ -136,9 +141,14 @@ async def fire(job_id: object, minute: object) -> dict[str, Any]:
     now = int(time.time() // 60)
     if minute > now:
         raise ValueError("scheduledMinute is in the future; fire occurrences when they are due")
-    if now - minute > config.misfire_grace_seconds // 60:
+    from rune.proactive.long_task import is_task
+    if is_task(job.schedule):
+        # A long task's next step: its wake minute, however late the host fires it.
+        if job.wake_at != minute:
+            raise ValueError("scheduledMinute is not this task's next step (its wakeAt)")
+    elif now - minute > config.misfire_grace_seconds // 60:
         raise ValueError("The occurrence is past its misfire grace period and will not run")
-    if not HeartbeatScheduler._matches_cron(job.schedule, datetime.fromtimestamp(minute * 60)):
+    elif not HeartbeatScheduler._matches_cron(job.schedule, datetime.fromtimestamp(minute * 60)):
         raise ValueError("scheduledMinute is not on this job's schedule")
 
     from rune.capabilities.cron import execute_cron_job

@@ -57,6 +57,7 @@ class ConfigGetResponse(BaseModel):
     memory_tuning: dict[str, Any] | None = Field(None, alias="memoryTuning")
     safety_tuning: dict[str, Any] | None = Field(None, alias="safetyTuning")
     advisor_enabled: bool = Field(False, alias="advisorEnabled")
+    locale: str = "en"
     # Let the UI show when approvals are disabled.
     approval_mode: str = Field("standard", alias="approvalMode")
     # The active model's capabilities determine which reasoning controls are shown.
@@ -88,6 +89,9 @@ class ConfigPatchRequest(BaseModel):
     safety_tuning: dict[str, Any] | None = Field(None, alias="safetyTuning")
     advisor_enabled: bool | None = Field(None, alias="advisorEnabled")
     decision_routing: DecisionRoutingConfig | None = Field(None, alias="decisionRouting")
+    # The owner's language (BCP-47) for the core's fixed wording (rune.i18n); a hosted owner's is set
+    # by their host, which keeps it with the owner.
+    locale: str | None = Field(None, min_length=2, max_length=35)
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -278,6 +282,7 @@ async def get_config_endpoint() -> ConfigGetResponse:
         maxConcurrency=3,
         version=VERSION,
         advisorEnabled=is_advisor_enabled(),
+        locale=cfg.general.locale,
         approvalMode=approval_mode(),
         # The active selection takes precedence over provider defaults.
         activeModel={
@@ -351,6 +356,13 @@ async def patch_config(req: ConfigPatchRequest) -> ConfigPatchResponse:
         except ModelCompatibilityError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    locale = None
+    if req.locale is not None:
+        from rune.briefing.labels import tag
+        locale = tag(req.locale)
+        if not locale:
+            raise HTTPException(status_code=400, detail="locale must be a language tag such as en or ko-KR")
+
     memory_plan: list[tuple[str, Any]] = []
     if req.memory_tuning is not None:
         memory_plan = _plan_memory_tuning(req.memory_tuning)
@@ -408,6 +420,8 @@ async def patch_config(req: ConfigPatchRequest) -> ConfigPatchResponse:
                 to_persist[f"llm.decisionRouting.{key}"] = value
     if req.proactive_enabled is not None:
         to_persist["proactive.enabled"] = req.proactive_enabled
+    if locale is not None:
+        to_persist.update({"general.locale": locale, "general.language": None})
     if provider:
         to_persist.update({"llm.defaultProvider": provider, "llm.activeProvider": provider})
     if model:
@@ -449,6 +463,10 @@ async def patch_config(req: ConfigPatchRequest) -> ConfigPatchResponse:
     if req.proactive_enabled is not None:
         cfg.proactive.enabled = req.proactive_enabled
         log.info("config_patch", field="proactiveEnabled", value=req.proactive_enabled)
+        updated = True
+    if locale is not None and cfg.general.locale != locale:
+        cfg.general.locale = locale
+        log.info("config_patch", field="locale", value=locale)
         updated = True
 
     if provider:

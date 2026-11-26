@@ -137,6 +137,51 @@ async def test_invalid_optional_browser_plan_defers_to_executor_without_reroutin
     assert stub.completion.await_count == 1
 
 
+@pytest.mark.parametrize("route", ["chat", "web", "research", "browser", "full"])
+async def test_a_request_about_a_schedule_gets_the_scheduling_tools_however_else_it_reads(monkeypatch, route):
+    from rune.agent.loop import NativeAgentLoop
+    from rune.agent.tool_catalog import deferred_for_task
+
+    scheduling = {"briefing_set", "cron_create", "cron_list", "cron_update", "cron_delete", "task_start"}
+    client(monkeypatch, response(verdict(goal_type=route, schedules=True)),
+           response(verdict(goal_type=route, schedules=False)), response(verdict(goal_type=route)))
+    loop = NativeAgentLoop()
+    loop._auto_skill = False
+    asked = await classify_goal("Send me a briefing every morning at 8")
+    assert asked.schedules and from_wire(to_wire(asked)) == asked
+    tools = loop._select_tools(asked)
+    assert scheduling <= set(tools) and "task_park" not in set(tools) - set(loop._select_tools(await classify_goal("Hi")))
+    assert not scheduling & deferred_for_task(tools, asked), "there to call, not to search for"
+    # A backend that doesn't say (rune.llm.system_one) reads as a request that isn't about one.
+    unsaid = await classify_goal("Hi")
+    assert unsaid.available and not unsaid.schedules
+    if route != "full":
+        assert not scheduling & set(loop._select_tools(unsaid))
+
+
+async def test_the_router_is_told_when_the_scheduler_is_running_the_request(monkeypatch):
+    stub = client(monkeypatch, response(verdict(goal_type="web")), response(verdict(goal_type="chat", schedules=True)))
+    stored = "Every morning, read the price on the product page and say when it has changed"
+
+    def asked():
+        system, *_, request = stub.completion.call_args.kwargs["messages"]
+        return system["content"], json.loads(request["content"])
+
+    assert not (await classify_goal(stored, scheduled_run=True)).schedules
+    rules, request = asked()
+    assert request["scheduled_run"] is True and request["request_to_classify"] == stored
+    assert "scheduled_run means the scheduler is running this request now" in rules
+    # Said in chat, the same words are a request to set one up, and nothing is told about a scheduler.
+    assert (await classify_goal(stored)).schedules
+    rules, request = asked()
+    assert "scheduled_run" not in request and "scheduled_run" not in rules
+
+
+async def test_a_schedules_answer_that_is_not_a_boolean_is_refused(monkeypatch):
+    client(monkeypatch, response(verdict(schedules="yes")), response(verdict(schedules="yes")))
+    assert not (await classify_goal("Send me a briefing every morning at 8")).available
+
+
 @pytest.mark.parametrize("route,requirement", [("chat", "read"), ("artifact", "write"),
                                                ("code_modify", "write"), ("execution", "execute")])
 async def test_source_requirement_preserves_the_requested_outcome(monkeypatch, route, requirement):

@@ -390,6 +390,7 @@ class RuneApp:
                                 goal=msg.text,
                                 channel=channel_name,
                                 sender_id=msg.sender_id,
+                                owner_text=msg.text,
                             )
                         )
                         agent_loop = NativeAgentLoop()

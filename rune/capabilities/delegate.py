@@ -76,13 +76,16 @@ async def delegate_task(params: DelegateTaskParams) -> CapabilityResult:
         # Attempt to use the agent loop for execution
         try:
             from rune.agent.loop import create_agent_loop
+            from rune.proactive.long_task import outside_step
 
             agent = create_agent_loop(
                 role=role_id,
                 max_iterations=role.max_iterations,
                 timeout_seconds=role.timeout_seconds,
             )
-            result = await agent.run(params.goal)
+            # A subagent does part of the step; only the step itself parks a long task.
+            with outside_step():
+                result = await agent.run(params.goal)
 
             return CapabilityResult(
                 success=True,

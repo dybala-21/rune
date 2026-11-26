@@ -346,7 +346,9 @@ async def test_background_waits_after_approval_without_granting_permission(routi
     job_id = create(routine, total_model_requests=10)
     await tick(routine, job_id)
     await tick(routine, job_id)
-    assert seen == [""]
+    # Told that the scheduler started it, and nothing carried over from the run that waited.
+    from rune.agent.background import SCHEDULED_RUN
+    assert seen == [SCHEDULED_RUN]
     saved = records(routine)
     try:
         result = saved.latest_result(f"cron:{job_id}:")

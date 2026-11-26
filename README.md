@@ -224,6 +224,7 @@ GPT-6 rates in Rune do not apply, and configured cost limits block unpriced call
 | **Research** | “Compare these sources and explain where they disagree.” | Search results, retrieved pages, and source links |
 | **Browser and apps** | “Open this page and complete the form up to the final submission.” | Browser preview, actions, handoff controls, and app permissions |
 | **Recurring work** | “Every weekday, check these files and report meaningful changes.” | Schedule, run history, outputs, and execution status |
+| **A price to watch** | “Tell me when this gets cheaper: https://…” | The price that was read, when it was read, and a link to the page |
 
 RUNE can read and generate DOCX, XLSX, PPTX, PDF, CSV, and HTML artifacts. Preview and visual checks depend on the format and available rendering tools. MCP servers add tools from other systems.
 
@@ -262,6 +263,12 @@ RUNE persists run state, approvals, tool execution records, and recovery informa
 
 Proactive suggestions and explicitly scheduled work share the runtime, but have separate authorization. Accepting a suggestion is not a blanket grant for later actions. Scheduled routines track relevant inputs and outputs, enforce execution budgets, and can skip work when their tracked state remains unchanged.
 
+### A price to watch
+
+Give RUNE a product page's address and ask to be told when its price drops or changes. Code reads the price the page writes in its structured data once a day and compares it with the price you were last told. A message is sent only when it moved, and only after a second reading about an hour later still shows it. The daily check runs no model.
+
+RUNE asks for a page under its own name first. Many shops give a page to no program they don't name, or write the price in only once the page's scripts have run. On your own machine RUNE then opens the page in its own browser, in a minimized window that carries RUNE's name too, and reads the same structured data; it tells you when a watch is read that way. That browser reaches public sites only: its connections go through RUNE, so a page can't send it to your own machine or network. A shop that turns away a browser a program drives can't be watched, and RUNE says so: it does not hide what it is or answer a check that asks for a person. Nor can a shop whose own terms forbid checking it by automated means, where that rule has been read: RUNE asks nothing of it and tells you why. The price is the one the shop writes into the page's data for a visitor who is not signed in: usually its discounted price, on some shops a price after benefits not every buyer gets. RUNE tells you the number when you set the watch, so check it is the one you mean; your own member prices, coupons and shipping are not in it. Some shops show a price without writing it as data at all. RUNE then asks you what price the page shows, finds where that amount is written in the page, and reads the same places each day; when those places stop agreeing, which often means a discount began or ended, it asks you again instead of guessing. A watch ends after 90 days unless you renew it. [Fetcher](#fetcher) describes what RUNE sends to a site.
+
 ## Computer
 
 <p align="center">
@@ -274,7 +281,7 @@ The walkthrough opens Python documentation and follows the Tutorial link through
 - **Take control:** pause the agent and interact with the preview using clicks, scrolling, and keyboard input. Resume when you are ready.
 - **This Mac:** native application access on macOS through the Rune Computer helper. Accessibility, Screen Recording, and app access must be granted before the relevant operations can run.
 
-The managed browser needs Playwright's Chromium installation. It does not require the legacy Browser Bridge extension. Native app control is macOS-specific; browser automation does not imply support for every desktop app or website.
+The managed browser needs Playwright's Chromium installation. The Browser Bridge extension of earlier versions is gone: nothing in RUNE used it, and a copy loaded in Chrome obeyed whichever program on the machine answered on its port. RUNE deletes the copy it made under `~/.rune/extension` the next time it starts or is updated, and Chrome then leaves the extension off from its next start. To stop it at once, remove "RUNE Browser Bridge" at `chrome://extensions`. Native app control is macOS-specific; browser automation does not imply support for every desktop app or website.
 
 ## Configuration and execution
 
@@ -303,6 +310,25 @@ On Korean retrieval (Ko-StrategyQA), recall@10 rises from 0.70 with keywords to 
 The connector broker can keep service credentials outside the command workspace and constrain requests by origin, path, and method. It is infrastructure for configured connectors, not a complete catalog of ready-to-use OAuth integrations.
 
 Local policies are not a VM security boundary. Hosted deployments need authentication and a properly configured TLS endpoint. Mobile access can use a hosted web UI; the execution environment remains on the host.
+
+## Fetcher
+
+When someone asks RUNE to watch a price, RUNE reads that one product page for that one person. This section is for the people who run the sites it reads.
+
+- **Who it says it is.** Requests carry `User-Agent: Mozilla/5.0 (compatible; RUNE/<version>; +https://github.com/dybala-21/rune#fetcher)`. Where RUNE opens a page in a browser, the browser's own `User-Agent` ends in `RUNE/<version> (+https://github.com/dybala-21/rune#fetcher)` and `navigator.webdriver` stays `true`. RUNE never sends another program's name and never hides that a program is reading.
+- **What it reads.** Only an address its user typed. It asks first: one `GET` for the page and one for `robots.txt`, with no cookies and no scripts. If that is refused, or the page has no price until its scripts have run, RUNE on its user's own machine opens the page in a Chromium window there. The page's scripts run as for any visitor; nothing is clicked, typed or signed in to, and cookies are dropped after each page. Either way it takes the price and the currency from the page's structured data (JSON-LD `Product` and `Offer`, Open Graph price tags) and keeps nothing else from the page. Where a page writes no price there, its user says what price the page shows, and RUNE reads that amount from the meta tags and inline script values that hold it: numbers only, as before. The hosted service only asks; it opens no browser.
+- **How often.** Once a day for each watched page, and once more about an hour later on a day the price moved. Requests to one host are at least 2 seconds apart, and a plain request honors `Crawl-delay` up to 10 seconds.
+- **What it obeys.** `robots.txt`, read as RFC 9309 says: the group for `RUNE` if there is one, otherwise the group for `*`. A group for `RUNE` is obeyed whichever way the page would be read. A group for `*` decides the plain request only: a page one person asked RUNE to watch is still opened in the browser on that person's machine. A redirect is followed only to an https page, and a plain request checks the rules again there. A `401`, `403` or `429` to the browser, or a check that asks for a person, is a refusal: RUNE tells its user the page can't be watched, and does not change its name, its address or its browser to get past it.
+- **Terms it has read.** A site whose own terms forbid reading it by automated means is not read either way, and nothing is asked of it. A site is listed only once that rule has been read where the site publishes it; the list, with the page and the words of each rule, is [`rune/watch/denied.py`](rune/watch/denied.py). It is short, and it says nothing about a site that is not on it.
+
+To keep RUNE out, both ways:
+
+```
+User-agent: RUNE
+Disallow: /
+```
+
+On a site that disallows `*`, a group for `RUNE` that allows the product paths lets it read them with a plain request, and no browser is opened. For a question or a problem with how it behaves, [open an issue](https://github.com/dybala-21/rune/issues).
 
 ## Validation
 

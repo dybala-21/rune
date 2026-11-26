@@ -15,8 +15,10 @@ from rune.channels.types import (
     ApprovalDecision,
     ChannelAdapter,
     IncomingMessage,
+    NotSent,
     OutgoingMessage,
     ResponseFormatter,
+    not_allowed,
 )
 from rune.utils.logger import get_logger
 
@@ -119,16 +121,14 @@ class DiscordAdapter(ChannelAdapter):
 
     async def send(self, channel_id: str, message: OutgoingMessage) -> str | None:
         if self._client is None:
-            log.warning("discord_send_no_client")
-            return None
+            raise NotSent("Discord is not connected")
 
         channel = self._client.get_channel(int(channel_id))
         if channel is None:
             try:
                 channel = await self._client.fetch_channel(int(channel_id))
             except Exception as exc:
-                log.error("discord_channel_not_found", channel_id=channel_id, error=str(exc))
-                return None
+                raise NotSent(f"Discord channel {channel_id} was not found: {exc}") from exc
 
         text = self._formatter.format_text(message.text)
 
@@ -152,7 +152,7 @@ class DiscordAdapter(ChannelAdapter):
                 sent_message = await channel.send(**kwargs)
                 last_message_id = str(sent_message.id)
             except Exception as exc:
-                log.error("discord_send_failed", error=str(exc))
+                raise NotSent(f"Discord refused the message: {exc}") from exc
 
         # Send attachments as files
         for attachment in message.attachments:
@@ -216,9 +216,10 @@ class DiscordAdapter(ChannelAdapter):
         if not self.check_authorization(sender_id):
             log.warning("discord_unauthorized_user", user_id=sender_id,
                         username=str(getattr(message.author, "name", "unknown")))
-            with contextlib.suppress(Exception):
-                await message.channel.send(
-                    "⛔ This bot only responds to approved users.")
+            try:
+                await message.channel.send(not_allowed("Discord", sender_id, "RUNE_DISCORD_ALLOWED_USERS"))
+            except Exception as exc:
+                log.debug("discord_refusal_not_sent", user_id=sender_id, error=str(exc))
             return
 
         attachments = [

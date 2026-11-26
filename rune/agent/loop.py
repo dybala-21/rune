@@ -638,6 +638,7 @@ class NativeAgentLoop(EventEmitter):
         # Requirement-Adherence Gate (opt-in via RUNE_REQUIREMENT_GATE); None when off.
         self._requirement_gate_obj: RequirementGate | None = None
         self._last_answer_text: str = ""  # latest final-answer text, for the gate's artifact
+        self._gateway_budget = None  # the hosted gateway's budget refusal that stopped this run
         self._task_evidence = None
         self._source_context = None
         self._citation_urls: set[str] = set()
@@ -726,6 +727,7 @@ class NativeAgentLoop(EventEmitter):
         self._step_start_time = 0.0
         self._last_activity = 0.0
         self._last_answer_text = ""
+        self._gateway_budget = None
         self._task_evidence = None
         self._source_context = None
         self._citation_urls.clear()
@@ -1153,6 +1155,7 @@ class NativeAgentLoop(EventEmitter):
                             _prev_goal = msg["content"]
                             break
                 with timing_phase("classification"):
+                    from rune.agent.background import scheduled_run
                     from rune.agent.task_context import routing_context
 
                     classification = await classify_goal(
@@ -1161,6 +1164,7 @@ class NativeAgentLoop(EventEmitter):
                         previous_goal_type=_prev_goal_type,
                         browser_state=browser_state,
                         saved_tasks=routing_context(message_history or []),
+                        **({"scheduled_run": True} if scheduled_run() else {}),
                     )
 
             if not getattr(classification, "available", True):
@@ -1379,6 +1383,11 @@ class NativeAgentLoop(EventEmitter):
                                     artifact_receipts=list(self._artifact_receipts))
             if isinstance(exc, BudgetExceeded):
                 trace.completion_check = {"name": "Model budget", "detail": str(exc)}
+            elif await self._stop_for_gateway_budget(exc, trace):
+                self._finalize_browser_answer(trace)
+                mark_interrupted(self, "interrupted")
+                await self.emit("completed", trace)
+                return trace
             self._finalize_browser_answer(trace)
             mark_interrupted(self, "interrupted")
             log.error("agent_loop_error", error=str(exc))
@@ -1386,6 +1395,26 @@ class NativeAgentLoop(EventEmitter):
             return trace
         finally:
             self._running = False
+
+    async def _stop_for_gateway_budget(self, exc: BaseException, trace) -> bool:
+        """The hosted gateway refused for the month's budget: say so, and when it starts again,
+        instead of an error. Retrying or another model can't help (rune.llm.gateway_budget)."""
+        from rune.config import get_config
+        from rune.llm.gateway_budget import REASON, refusal
+
+        found = refusal(exc)
+        if found is None:
+            return False
+        message = found.message(get_config().general.locale)
+        log.info("gateway_budget_exhausted", code=found.code, resumes=found.resumes.isoformat())
+        self._record_completion_block("Model budget", message)
+        self._gateway_budget = found
+        self._last_answer_text = message
+        await self.emit("text_delta", message)
+        trace.reason = REASON
+        trace.final_step = self._step
+        trace.completion_check = {"name": "Model budget", "detail": message}
+        return True
 
     async def cancel(self) -> None:
         """Request cancellation of the running loop."""
@@ -1430,7 +1459,17 @@ class NativeAgentLoop(EventEmitter):
         elif "document_read" in tools and kind != "calculation":
             tools = list(dict.fromkeys([*tools, "document_preview"]))
         from rune.connectors.client import hosted_approval
+        from rune.proactive.long_task import in_step
 
+        if in_step():
+            # A long task's step ends by parking until the next one.
+            tools = list(dict.fromkeys([*tools, "task_park"]))
+        from rune.agent.tool_catalog import asks_to_schedule, schedule_tools
+
+        if asks_to_schedule(classification):
+            # However the request reads otherwise (most read as chat): without these the model can
+            # only answer that it has no way to schedule anything.
+            tools = list(dict.fromkeys([*tools, *schedule_tools()]))
         if "browser_navigate" in tools and hosted_approval():
             tools = list(dict.fromkeys([*tools, "browser_login"]))
         if broker_available() and kind != "calculation":
@@ -1814,6 +1853,8 @@ class NativeAgentLoop(EventEmitter):
             self._change_receipts.record(cap_name, _last_tool_params, result, expected_edit=_expected_edit.get(),
                                          call_id=_CALL_ID.get(""))
             task_evidence.observe(cap_name, result, _last_tool_params)
+            if result.success and cap_name in _schedule_tools:
+                _schedule_calls.append(cap_name)
             evidence.browser_writes = task_evidence.browser_actions
             if result.success and cap_name in {"bash_execute", "file_read"}:
                 for path in file_outcomes.reconcile():
@@ -1939,6 +1980,8 @@ class NativeAgentLoop(EventEmitter):
             elif cap_name == "web_fetch":
                 evidence.web_fetches += int(web_grounding.observe(cap_name, _last_tool_params, result))
                 self._stall.web_fetch_count += 1
+            elif cap_name == "watch_set":
+                evidence.web_fetches += int(web_grounding.observe(cap_name, _last_tool_params, result))
             elif cap_name == "connector_request":
                 if _last_tool_params.get("method", "GET") == "GET":
                     evidence.reads += int(result.success)
@@ -2272,6 +2315,13 @@ class NativeAgentLoop(EventEmitter):
         _prev_evidence_total = 0
         _no_new_evidence_steps = 0
         _gate_blocked_count = 0
+        # For a request about a schedule: the scheduling tools that went through in this run.
+        from rune.agent.tool_catalog import asks_to_schedule, schedule_tools
+
+        _asks_to_schedule = asks_to_schedule(classification)
+        _schedule_tools = set(schedule_tools()) if _asks_to_schedule else set()
+        _schedule_calls: list[str] = []
+        _schedule_reminded = False
 
         # Last advisor raw text — fed back into reconcile requests
         _last_advisor_raw: str = ""
@@ -3025,6 +3075,25 @@ class NativeAgentLoop(EventEmitter):
                     task_evidence.recovery_requested = True
                     messages = self._inject_system_message(messages, "[Completion Gate] " + blocker)
                     continue
+                if _asks_to_schedule and not _schedule_calls and output_text and output_text.strip():
+                    # Only a scheduling tool sets, changes, stops or lists one. Without a call that
+                    # went through, an answer that says it did is the model's word alone: it is
+                    # told so once, and if it still answers without one the run says what is true.
+                    self._record_completion_block(
+                        "Schedule", "No scheduling tool ran in this turn, so nothing was set, changed or stopped.")
+                    if _schedule_reminded:
+                        trace.reason = "completed_gate_warnings"
+                        trace.final_step = self._step
+                        trace.completion_check = self._completion_check
+                        break
+                    _schedule_reminded = True
+                    messages = self._inject_system_message(
+                        messages,
+                        "[Completion Gate] No scheduling tool has run in this turn, so nothing has been set, changed "
+                        "or stopped. Call the tool the request needs now. If you can't yet, tell the user plainly "
+                        "that nothing was changed and what you need from them.",
+                    )
+                    continue
                 needs_action = (intent_contract.tool_requirement in {"write", "execute"}
                                 and intent_contract.kind != "browser_write"
                                 and "desktop" not in classification.intent_categories)
@@ -3514,6 +3583,8 @@ class NativeAgentLoop(EventEmitter):
                     await self.emit("text_delta", self._last_answer_text)
                     trace.reason = "desktop_blocked"
                     trace.final_step = self._step
+                    break
+                if await self._stop_for_gateway_budget(exc, trace):
                     break
                 error_text = str(exc) or type(exc).__name__
                 if isinstance(exc, TimeoutError) and request_timeout is not None and request_timeout.expired():

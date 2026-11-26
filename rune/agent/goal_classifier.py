@@ -43,6 +43,9 @@ class ClassificationResult:
     needs_web_evidence: bool = False
     needs_current_source: bool = False
     lookup_only: bool = False
+    # Sets up, changes, stops or lists something done later or repeatedly; whatever the goal type,
+    # the scheduling tools are then offered (NativeAgentLoop._select_tools).
+    schedules: bool = False
     source_output: str = "none"  # none / verbatim / derived / summary
     browser_effect: str = "change"  # view / edit / change
     browser_requirements: dict | None = None
@@ -123,6 +126,7 @@ def to_wire(c: ClassificationResult) -> str:
         "needs_web_evidence": c.needs_web_evidence,
         "needs_current_source": c.needs_current_source,
         "lookup_only": c.lookup_only,
+        "schedules": c.schedules,
         "source_output": c.source_output,
         "browser_effect": c.browser_effect,
         "browser_requirements": c.browser_requirements,
@@ -211,6 +215,12 @@ request. A casual concern can use current facts without predicting the future.
 Expressing a worry is not itself a request for prediction or advice.
 Leave it false for requested causal analysis, predictions, recommendations, advice,
 broad comparisons or unclear scope; never set it without needs_web_evidence.
+Assess schedules separately from goal_type: true when the request is about something the
+assistant does later or repeatedly without being asked each time (a reminder, a recurring
+check or report, a daily briefing). That covers setting one up, changing when or how it is
+done, stopping it, and asking which ones are set. False for work to do now, including
+reading a calendar or answering about dates. When that is all the request is, goal_type
+is chat and schedules is still true.
 
 Intent flags may overlap; otherwise use [].
 coding: the requested outcome concerns software implementation, debugging, tests,
@@ -276,8 +286,13 @@ async def classify_tier2(
     previous_goal_type: str = "",
     browser_state: dict | None = None,
     saved_tasks: list[dict] | None = None,
+    scheduled_run: bool = False,
 ) -> ClassificationResult:
-    """Classify outcome and surface; compare domains when prior goal and type are supplied."""
+    """Classify outcome and surface; compare domains when prior goal and type are supplied.
+
+    ``scheduled_run`` is a fact from the scheduler, not something read from the request: the request
+    is the stored task of a job it is running now.
+    """
     has_previous = bool(previous_goal and previous_goal_type)
     from rune.agent.decision_router import classify_request
     from rune.utils.logger import get_logger
@@ -295,9 +310,17 @@ async def classify_tier2(
                        "Do not inherit its freshness requirement: repeating the SAME previously observed record with "
                        "has_sources=true is chat with needs_web_evidence=false and needs_current_source=false, even "
                        "when the original lookup asked for the latest value. A request for a NEW current observation still needs fresh sources.")
+        if scheduled_run:
+            # A stored task says how often it runs ("every morning, check ..."), which reads as a
+            # request to set one up; a run that takes it that way looks for a scheduling tool
+            # instead of doing the work.
+            system += ("\nscheduled_run means the scheduler is running this request now, as one run of a task that "
+                       "was set up earlier. Its schedule already exists and is not part of the request: classify "
+                       "the work a single run does, as work to do now, with schedules false.")
         import json
         content = json.dumps({
             "request_to_classify": goal,
+            **({"scheduled_run": True} if scheduled_run else {}),
             "previous_request": previous_goal[:200] if has_previous else "",
             "previous_goal_type": previous_goal_type if has_previous else "",
             **({"browser_state": browser_state} if browser_state is not None else {}),
@@ -319,6 +342,7 @@ async def classify_tier2(
             needs_web_evidence=data["needs_web_evidence"],
             needs_current_source=data["needs_current_source"],
             lookup_only=data["lookup_only"],
+            schedules=data.get("schedules", False),
             source_output=data["source_output"],
             browser_effect=data["browser_effect"],
             browser_requirements=data.get("browser_requirements"),
@@ -344,6 +368,10 @@ async def classify_tier2(
         from rune.llm.target import ModelCompatibilityError
         if isinstance(exc, BudgetExceeded):
             raise
+        from rune.llm.gateway_budget import refusal
+        # The month's model budget is used up: the loop tells the owner when it starts again.
+        if refusal(exc) is not None:
+            raise
         failure = request_failure(exc)
         reason = str(exc) if isinstance(exc, (InvalidClassification, ModelCompatibilityError, RoutingUnavailable)) else failure.kind
         get_logger(__name__).warning("classification_unavailable", reason=reason, **failure.to_dict())
@@ -363,6 +391,7 @@ async def classify_goal(
     previous_goal_type: str = "",
     browser_state: dict | None = None,
     saved_tasks: list[dict] | None = None,
+    scheduled_run: bool = False,
 ) -> ClassificationResult:
     """Classify the request; continuation checks require the previous goal and type."""
     return await classify_tier2(
@@ -371,4 +400,5 @@ async def classify_goal(
         previous_goal_type=previous_goal_type,
         browser_state=browser_state,
         saved_tasks=saved_tasks,
+        scheduled_run=scheduled_run,
     )

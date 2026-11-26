@@ -14,6 +14,7 @@ from rune.channels.types import (
     ApprovalDecision,
     ChannelAdapter,
     IncomingMessage,
+    NotSent,
     OutgoingMessage,
     ResponseFormatter,
 )
@@ -229,8 +230,7 @@ class GoogleChatAdapter(ChannelAdapter):
 
     async def send(self, channel_id: str, message: OutgoingMessage) -> str | None:
         if self._chat_service is None:
-            log.warning("google_chat_send_no_service")
-            return None
+            raise NotSent("Google Chat is not connected")
 
         text = self._formatter.format_text(message.text)
 
@@ -261,7 +261,7 @@ class GoogleChatAdapter(ChannelAdapter):
                 .execute(),
             )
         except Exception as exc:
-            log.error("google_chat_send_failed", error=str(exc))
+            raise NotSent(f"Google Chat refused the message: {exc}") from exc
 
         return None
 

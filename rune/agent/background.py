@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from rune.agent.run_control import RunControl, control_scope
 from rune.agent.run_outcome import run_outcome
+from rune.llm import gateway_budget
 from rune.memory.provenance import run_sources
 from rune.safety.approval_context import approval_required, parking_scope
 from rune.safety.execution_environment import environment_scope
@@ -26,6 +27,8 @@ class BackgroundTask:
     timeout_seconds: float = 120
     token_budget: int = 50_000
     continuation: str = ""
+    # Always told first, ahead of the continuation or the recovery context (a long task's step brief).
+    preamble: str = ""
     approved_action: dict | None = None
     file_changes: dict | None = None
     routing: dict | None = None
@@ -37,6 +40,21 @@ _current_task: ContextVar[BackgroundTask | None] = ContextVar("background_task",
 
 def current_background_task() -> BackgroundTask | None:
     return _current_task.get()
+
+
+# Told to a run the scheduler starts. Its stored task names its own schedule, and without this the
+# run takes that as something still to arrange.
+SCHEDULED_RUN = (
+    "The scheduler started this run. The request is the stored task of a job the owner set up earlier, "
+    "and this is one run of it: do the work it describes once, now. Its schedule already exists and the "
+    "scheduler starts the next run, so arranging, changing or confirming a schedule is not part of this run."
+)
+
+
+def scheduled_run() -> bool:
+    """Whether the scheduler started the current run from a job's stored task."""
+    task = _current_task.get()
+    return task is not None and task.source == "cron"
 
 
 async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str, Any]:
@@ -87,6 +105,8 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
         "verified": False, "status": "unverified", "output": "", "error": None,
     }
     scope = _current_task.set(task)
+    from rune.proactive.long_task import park_slot, parked_result, release_slot
+    slot, slot_token = park_slot(control) if task.source == "task" else (None, None)
     try:
         # One source scope for the approved action and the run that continues it.
         with control_scope(control), approval_required(), parking_scope(needs_approval), environment_scope(workspace), \
@@ -99,8 +119,15 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
                 async def remember_routing(value):
                     if saved := snapshot(key, value, task.goal):
                         result["routing"] = saved
+                changes: list[str] = []  # calls that could change something (rune.agent.action_receipts)
+
+                def note_call(event):
+                    from rune.agent.action_receipts import may_change
+                    if isinstance(event, dict) and may_change(str(event.get("name")), event.get("params") or {}):
+                        changes.append(str(event.get("name")))
                 if on := getattr(loop, "on", None):
                     on("goal_classified", remember_routing)
+                    on("tool_call", note_call)
                 validate = None
                 if task.verification:
                     from rune.agent.goal_validate import make_validate_fn
@@ -117,6 +144,10 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
                     context["recovery_written_files"] = recovery_written_files(journal.previous)
                     continuation = recovery_context({"runId": journal.run_id, "fileChanges": task.file_changes,
                                                      "completedAction": result.get("approved_action")}, journal.previous)
+                if task.preamble:
+                    continuation = f"{task.preamble}\n{continuation}" if continuation else task.preamble
+                if task.source == "cron":
+                    continuation = f"{SCHEDULED_RUN}\n{continuation}" if continuation else SCHEDULED_RUN
                 extra = {"extra_system_context": continuation} if continuation else {}
                 if classification is not None:
                     extra["classification"] = classification
@@ -136,6 +167,18 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
                     output=getattr(trace, "answer", "") or getattr(loop, "_last_answer_text", ""),
                     error=getattr(trace, "error", None),
                 )
+                if outcome.reason == gateway_budget.REASON and (refused := getattr(loop, "_gateway_budget", None)):
+                    from rune.config import get_config
+                    locale = get_config().general.locale
+                    if changes:
+                        # It had changed things before the refusal: they may not be repeated blindly.
+                        result.update(status="interrupted", success=False, verified=False, execution_unknown=True,
+                                      error=refused.stopped_midway(locale), resume_at=refused.resume_minute)
+                    else:
+                        # Nothing was changed: the step that goes on reads what the one before it left.
+                        result.update(status=gateway_budget.STATUS, success=False, verified=False, output="",
+                                      not_started=True, error=refused.waiting(locale),
+                                      resume_at=refused.resume_minute)
                 if outcome.reason == "request_budget_exhausted":
                     detail = (getattr(trace, "completion_check", None) or {}).get("detail")
                     result.update(status="budget_exhausted", error=detail or "The model request exceeded the remaining budget.")
@@ -149,6 +192,8 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
         result["status"] = "interrupted"
     finally:
         _current_task.reset(scope)
+        if slot_token is not None:
+            release_slot(slot_token)
         control.stop()
         result["duration_ms"] = round((time.monotonic() - started) * 1000, 1)
         result["timings"] = getattr(loop, "_last_run_timings", {})
@@ -158,4 +203,6 @@ async def run_background(task: BackgroundTask, *, loop_factory=None) -> dict[str
                           pending_approval=pending)
             if "outcome" in result:
                 result["outcome"].update(completionStatus="incomplete", reason="approval_required")
+        # A long task's step that parked: the loop ended because task_park stopped it.
+        parked_result(result, slot)
     return result

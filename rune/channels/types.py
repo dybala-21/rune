@@ -67,6 +67,14 @@ class IncomingMessage:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True, slots=True)
+class LinkButton:
+    """A button that opens ``url``. Only https links are shown."""
+
+    text: str
+    url: str
+
+
 @dataclass(slots=True)
 class OutgoingMessage:
     """A message to be sent to a channel."""
@@ -75,6 +83,29 @@ class OutgoingMessage:
     attachments: list[dict[str, Any]] = field(default_factory=list)
     reply_to: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Under the message where the channel has buttons; as "text: url" lines where it hasn't.
+    buttons: list[LinkButton] = field(default_factory=list)
+
+
+def shown_buttons(buttons: list[LinkButton]) -> list[LinkButton]:
+    """The buttons that may be shown: an https link and a label, nothing else."""
+    kept = [b for b in buttons if b.text.strip() and b.url.startswith("https://")]
+    if len(kept) != len(buttons):
+        log.warning("link_buttons_dropped", dropped=len(buttons) - len(kept))
+    return kept
+
+
+def buttons_as_text(text: str, buttons: list[LinkButton]) -> str:
+    """For a channel without buttons: the links written out under the text."""
+    lines = [f"{b.text}: {b.url}" for b in shown_buttons(buttons)]
+    return "\n".join([text, "", *lines]) if lines else text
+
+
+def not_allowed(platform: str, sender_id: str, setting: str) -> str:
+    """What a sender the owner has not allowed is told: their id, which the allow-list takes and
+    Telegram shows no one, and the setting it goes in."""
+    return (f"RUNE answers only the {platform} users its owner allows. Your user id is {sender_id}: "
+            f"to allow it, the owner adds it to {setting} and restarts RUNE.")
 
 
 @dataclass(slots=True)
@@ -99,6 +130,13 @@ _DEFAULT_BASE_RECONNECT_DELAY = 5.0  # seconds
 
 
 # ChannelAdapter ABC
+
+class NotSent(RuntimeError):
+    """A message the channel did not take: it has no connection now, or the platform refused it.
+
+    ``send`` raises it rather than log and return, so the gateway keeps a notification in the app
+    (rune.daemon.gateway.route_notification) instead of counting it delivered."""
+
 
 class ChannelAdapter(ABC):
     """Abstract base for all channel adapters (TUI, Telegram, Discord, etc.).
@@ -152,7 +190,8 @@ class ChannelAdapter(ABC):
     async def send(self, channel_id: str, message: OutgoingMessage) -> str | None:
         """Send a message to a channel.
 
-        Returns the platform message ID if available, or ``None``.
+        Returns the platform message ID if available, or ``None``. Raises ``NotSent`` when the text
+        did not go out.
         """
         ...
 
@@ -195,8 +234,13 @@ class ChannelAdapter(ABC):
             f"{self.name} does not support message deletion"
         )
 
-    async def send_notification(self, channel_id: str, text: str) -> None:
-        await self.send(channel_id, OutgoingMessage(text=text))
+    # True where ``send`` shows ``OutgoingMessage.buttons`` as buttons.
+    link_buttons: bool = False
+
+    async def send_notification(self, channel_id: str, text: str, buttons: list[LinkButton] | None = None) -> None:
+        if buttons and not self.link_buttons:
+            text, buttons = buttons_as_text(text, buttons), None
+        await self.send(channel_id, OutgoingMessage(text=text, buttons=list(buttons or [])))
 
     async def send_typing_indicator(self, channel_id: str) -> None:
         pass
@@ -204,15 +248,15 @@ class ChannelAdapter(ABC):
     # -- Authorization (common) ---------------------------------------------
 
     def check_authorization(self, sender_id: str) -> bool:
-        """Check if a user is authorized.
+        """Whether this sender may talk to RUNE here: only the ids in ``allowed_users``.
 
-        Returns True if no allowed_users configured (open access)
-        or if the sender_id is in the allowed list.
+        With no list nobody may. A bot token alone would let anyone who finds the bot run the
+        owner's agent, and the first to write would become where RUNE's scheduled messages go
+        (rune.daemon.gateway._handle_incoming). Hermes Agent denies everyone when its allow-list
+        is unset, and OpenClaw does not process an unknown sender's DM until the owner approves it.
         Subclasses can override for platform-specific logic.
         """
-        if not self._allowed_users:
-            return True
-        return sender_id in self._allowed_users
+        return sender_id in (self._allowed_users or ())
 
     # -- Approval flow (common) ---------------------------------------------
 
@@ -244,6 +288,22 @@ class ChannelAdapter(ABC):
                 approved=False,
                 timed_out=True,
             )
+
+    def expect_approval(self, approval_id: str) -> asyncio.Future[ApprovalResponse]:
+        """Register ``approval_id`` so a button press for it resolves the returned Future.
+
+        For a caller that waits on more than the buttons (the gateway also takes a typed
+        answer); it removes the id with ``forget_approval`` once it has its answer.
+        """
+        future: asyncio.Future[ApprovalResponse] = asyncio.get_running_loop().create_future()
+        self._pending_approvals[approval_id] = future
+        return future
+
+    def forget_approval(self, approval_id: str) -> None:
+        """Stop waiting for a button press on ``approval_id``; a later press resolves nothing."""
+        future = self._pending_approvals.pop(approval_id, None)
+        if future is not None and not future.done():
+            future.cancel()
 
     def _resolve_approval(
         self,

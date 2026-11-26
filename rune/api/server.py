@@ -544,6 +544,7 @@ def create_app() -> Any:
                     pinned_cwd=workspace,
                     attachments=attachments or [],
                     conversation_id=conv_id or "",
+                    owner_text=goal,
                 ),
                 conversation_manager=conv_manager,
             )
@@ -839,7 +840,7 @@ def create_app() -> Any:
             # 1. Prepare agent context (loads prior turns as history)
             agent_ctx = await prepare_agent_context(
                 PrepareContextOptions(
-                    goal=goal, channel="web", conversation_id=conv_id or "",
+                    goal=goal, channel="web", conversation_id=conv_id or "", owner_text=goal,
                 ),
                 conversation_manager=conv_manager,
             )
@@ -1743,6 +1744,9 @@ def create_app() -> Any:
                 except ValueError as exc:
                     return _err("invalid_params", str(exc))
                 manager = conversation_wiring.get_conv_manager()
+                from rune.daemon.owner_thread import listed_owners
+
+                _owners = set(listed_owners())
                 sessions = []
                 for c in convs:
                     turn_count = 0
@@ -1756,7 +1760,8 @@ def create_app() -> Any:
                         "userId": c.user_id,
                         "title": c.title or "",
                         "status": c.status,
-                        "channel": "web",
+                        # The owner's Telegram chat, with what RUNE sent there (rune.daemon.owner_thread).
+                        "channel": "telegram" if c.user_id in _owners else "web",
                         "turnCount": turn_count,
                         "createdAt": c.created_at.isoformat(),
                         "updatedAt": c.updated_at.isoformat(),
@@ -2052,6 +2057,11 @@ def create_app() -> Any:
                 return _ok(result)
 
             # cron
+            elif method == "task.stalled":
+                # The control plane gave up starting a long task's step (rune.proactive.long_task).
+                from rune.capabilities.cron import task_stalled
+                return _ok(await task_stalled(params.get("jobId"), params.get("scheduledMinute")))
+
             elif method == "cron.list":
                 from rune.api.handlers.cron import list_cron_jobs
                 result = await list_cron_jobs()
@@ -2124,6 +2134,14 @@ def create_app() -> Any:
                 result = await list_channels()
                 return _ok(result)
 
+            elif method == "briefing.news":
+                # Headlines the host fetched for the briefing (rune.briefing.news); replaces the last set.
+                from rune.briefing import news as _news
+
+                try:
+                    return _ok({"stored": await asyncio.to_thread(_news.store, params.get("items"))})
+                except ValueError as exc:
+                    return _err("invalid", str(exc))
             elif method == "channel.deliver":
                 # Updates the host's rune-relay stored for this machine's channel (rune-bot control).
                 from rune.channels.registry import get_channel_registry
