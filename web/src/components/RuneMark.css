@@ -1,46 +1,35 @@
 .rune-mark {
-  --wolf-body: #d7d3c9;
-  --wolf-cream: #343536;
-  --wolf-ink: #f4f0e7;
   display: block;
   flex-shrink: 0;
-  overflow: visible;
+  color: var(--text-primary);
 }
-:root[data-theme="light"] .rune-mark {
-  --wolf-body: #686965;
-  --wolf-cream: #f4f0e7;
-  --wolf-ink: #30322f;
+
+.rune-wolf-head {
+  transform-box: fill-box;
+  transform-origin: 50% 92%;
 }
-.rune-wolf-body { fill: var(--wolf-body); }
-.rune-wolf-cream { fill: var(--wolf-cream); }
-.rune-wolf-ink { fill: var(--wolf-ink); }
-.rune-wolf-head { transform-origin: 50px 63px; }
-.rune-wolf-tail { transform-origin: 48px 86px; }
-.rune-wolf-eyes { transform-origin: 52px 51px; }
-.rune-mark[data-state="thinking"] .rune-wolf-head {
-  animation: wolf-listen 3.6s ease-in-out infinite;
+
+.rune-wolf-eye {
+  transform-box: fill-box;
+  transform-origin: center;
 }
-.rune-mark[data-state="thinking"] .rune-wolf-eyes,
-.rune-mark[data-state="working"] .rune-wolf-eyes {
-  animation: wolf-blink 4.8s ease-in-out infinite;
+
+@media (prefers-reduced-motion: no-preference) {
+  .rune-mark[data-state="thinking"] .rune-wolf-head {
+    animation: wolf-listen 3.6s ease-in-out infinite;
+  }
+
+  .rune-mark:is([data-state="thinking"], [data-state="working"]) .rune-wolf-eye {
+    animation: wolf-blink 4.8s ease-in-out infinite;
+  }
 }
-.rune-mark[data-state="working"] .rune-wolf-tail {
-  animation: wolf-tail 2.8s ease-in-out infinite;
-}
+
 @keyframes wolf-listen {
-  0%, 100% { transform: rotate(0deg); }
-  45%, 65% { transform: rotate(-4deg); }
+  0%, 100% { transform: rotate(0); }
+  45%, 65% { transform: rotate(-5deg); }
 }
+
 @keyframes wolf-blink {
   0%, 44%, 49%, 100% { transform: scaleY(1); }
   46%, 47% { transform: scaleY(.15); }
-}
-@keyframes wolf-tail {
-  0%, 100% { transform: rotate(0deg); }
-  50% { transform: rotate(3deg); }
-}
-@media (prefers-reduced-motion: reduce) {
-  .rune-mark .rune-wolf-head,
-  .rune-mark .rune-wolf-eyes,
-  .rune-mark .rune-wolf-tail { animation: none; }
 }

@@ -28,6 +28,9 @@
       "browser-host.js",
       "browser-shield.js"
     ],
+    "extraResources": [
+      { "from": "build/icon.png", "to": "icon.png" }
+    ],
     "directories": {
       "output": "release",
       "buildResources": "build"

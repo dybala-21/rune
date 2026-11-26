@@ -11,7 +11,9 @@ const { readEndpoint } = require('./endpoint');
 const os = require('node:os');
 const path = require('node:path');
 
-const ICON_PATH = path.join(__dirname, 'build', 'icon.png');
+const ICON_PATH = app.isPackaged
+  ? path.join(process.resourcesPath, 'icon.png')
+  : path.join(__dirname, 'build', 'icon.png');
 // Use the app name in the menu bar and dock during development too.
 app.setName('RUNE');
 
@@ -265,7 +267,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(async () => {
     // Dev run: set the dock icon explicitly (packaging bakes it from build/).
-    if (process.platform === 'darwin' && app.dock) {
+    if (process.platform === 'darwin' && !app.isPackaged && app.dock) {
       try { app.dock.setIcon(ICON_PATH); } catch { /* non-fatal */ }
     }
     hardenSession();
