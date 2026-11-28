@@ -199,7 +199,7 @@ async def test_set_in_chat_it_is_checked_with_no_model_and_a_drop_is_told_in_the
     await desk.wake(nine.replace(hour=10) + timedelta(days=3))
     [message] = desk.chat.sent
     lines = message.text.split("\n")
-    assert lines[0] == f"🔔 [{wording['title']}]" and lines[1] == wording["went_down"], lines
+    assert lines[0] == wording["title"] and lines[1] == wording["went_down"], lines
     assert "369,000 KRW → 349,000 KRW" in lines and "shop.example" in message.text
     assert [(button.text, button.url) for button in message.buttons] == [(wording["open"], COAT)]
     assert PLANTED not in message.text and "Wool coat" not in message.text

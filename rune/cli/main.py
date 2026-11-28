@@ -224,14 +224,14 @@ def _handle_voice_mode(
         stt_name = type(voice_svc._stt).__name__ if voice_svc._stt else "none"
         tts_name = type(voice_svc._tts).__name__ if voice_svc._tts else "text only"
         console.print(
-            f"[bold green]🎤 Voice mode active.[/bold green]\n"
+            f"[bold green]Voice mode active.[/bold green]\n"
             f"  STT: {stt_name}  |  TTS: {tts_name}\n"
             f"  Speak to interact. Ctrl+C to exit.\n"
         )
 
         while True:
             try:
-                console.print("[dim]🎤 Listening...[/dim]")
+                console.print("[dim]Listening...[/dim]")
                 text = await voice_svc.listen_and_transcribe()
 
                 if not text:
@@ -453,7 +453,7 @@ def _handle_non_interactive(
         if output_parts:
             print()
         if note := explanation_warning(trace):
-            console.print(f"[yellow]⚠ {note}[/yellow]")
+            console.print(f"[yellow]{note}[/yellow]")
         if not run_outcome(trace).success:
             from rune.agent.escalation import (
                 escalation_hint,
@@ -465,7 +465,7 @@ def _handle_non_interactive(
             # Explain incomplete status and the available escalation path.
             _note = honest_failure_note(trace.reason, run_was_verifiable(trace))
             if _note:
-                console.print(f"[yellow]⚠ {_note}[/yellow]")
+                console.print(f"[yellow]{_note}[/yellow]")
             else:
                 console.print(f"[dim]({trace.reason})[/dim]")
             _hint = escalation_hint(trace.reason)
@@ -726,7 +726,7 @@ def _simple_repl(model: str | None = None, provider: str | None = None) -> None:
             print()
         console.print(f"[dim]({trace.reason}, step {trace.final_step or '?'})[/dim]\n")
         if note := explanation_warning(trace):
-            console.print(f"[yellow]⚠ {note}[/yellow]")
+            console.print(f"[yellow]{note}[/yellow]")
 
         with contextlib.suppress(Exception):
             await post_process_agent_result(PostProcessInput(

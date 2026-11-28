@@ -509,7 +509,7 @@ export function WorkbenchPanel({ sessionId, workspacePath, active = true, toolCa
             background: verdictColors.background,
             fontSize: 12,
           }}>
-            <span aria-hidden="true">{trustView?.glyph ?? (verdictOk ? '✓' : '⚠')}</span>
+            <span aria-hidden="true">{trustView?.glyph ?? (verdictOk ? '✓' : '◐')}</span>
             <span style={{ color: 'var(--text-primary)', fontWeight: 600 }}>
               {verdictTitle}
             </span>

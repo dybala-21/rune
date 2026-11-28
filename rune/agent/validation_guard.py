@@ -261,13 +261,13 @@ def restoration_note(report: RestoreReport) -> str:
         lines.append("note: the test inventory is incomplete; unrecorded files were left in place because their creation could not be established.")
     if report.restored:
         lines.append(
-            f"⚠ the agent modified {len(report.restored)} pre-existing test "
+            f"warning: the agent modified {len(report.restored)} pre-existing test "
             f"file(s) during this run; canonical copies were restored before "
             f"verification: {_shown(report.restored)}"
         )
     if report.quarantined:
         lines.append(
-            f"⚠ the agent created new conftest.py file(s) that could alter "
+            f"warning: the agent created new conftest.py file(s) that could alter "
             f"test collection; quarantined before verification: "
             f"{_shown(report.quarantined)}"
         )

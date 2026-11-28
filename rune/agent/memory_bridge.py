@@ -399,7 +399,7 @@ def format_applied_rules_note(mem_ctx: str) -> str | None:
         return None
     head = ", ".join(keys[:3])
     more = f" (+{len(keys) - 3} more)" if len(keys) > 3 else ""
-    return f"🧠 applying {len(keys)} learned rule(s): {head}{more}"
+    return f"applying {len(keys)} learned rule(s): {head}{more}"
 
 
 def format_learned_rules_note(keys: list[str]) -> str | None:
@@ -408,7 +408,7 @@ def format_learned_rules_note(keys: list[str]) -> str | None:
         return None
     head = ", ".join(keys[:3])
     more = f" (+{len(keys) - 3} more)" if len(keys) > 3 else ""
-    return f"📚 learned {len(keys)} new rule(s): {head}{more}"
+    return f"learned {len(keys)} new rule(s): {head}{more}"
 
 
 def _select_crisp_signal(

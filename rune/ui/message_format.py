@@ -136,7 +136,7 @@ def format_assistant_plain(content: str) -> RenderableType:
 def format_system_message(content: str) -> RenderableType:
     """Format system info message with subtle styling."""
     text = Text()
-    text.append(" ⚠ ", style=f"bold {_GOLDEN}")
+    text.append(" ○ ", style=f"bold {_GOLDEN}")
     text.append(content, style=_SYSTEM_COLOR)
     return Padding(text, (0, 0, 0, 1))
 
@@ -149,7 +149,7 @@ def format_proactive_suggestion(
     """Format a proactive suggestion as inline conversational text.
 
     Designed to feel like RUNE is talking, not issuing a system alert:
-    - 💬 prefix (not ❯ or ⚠)
+    - "rune:" prefix (not ❯ or ○)
     - Teal color (not golden)
     - Inline text (not Panel)
     - No buttons - user responds naturally in the next prompt
@@ -157,7 +157,7 @@ def format_proactive_suggestion(
     text = Text()
 
     if intensity == "nudge":
-        text.append("  💬 rune: ", style=f"dim {_PROACTIVE_DIM}")
+        text.append("  rune: ", style=f"dim {_PROACTIVE_DIM}")
         text.append(body, style=f"dim {_PROACTIVE_DIM}")
         return Padding(text, (0, 0, 0, 1))
 
@@ -165,7 +165,7 @@ def format_proactive_suggestion(
     if intensity == "intervene":
         accent = "#61AFEF"
 
-    text.append("💬 rune: ", style=f"bold {accent}")
+    text.append("rune: ", style=f"bold {accent}")
     text.append(body, style="#B0B0B0")
 
     return Padding(text, (1, 0, 0, 1))
@@ -174,7 +174,7 @@ def format_proactive_suggestion(
 def format_thinking(content: str) -> RenderableType:
     """Format thinking block with dim italic styling."""
     text = Text()
-    text.append("  💭 ", style=_THINKING_COLOR)
+    text.append("  ◐ ", style=_THINKING_COLOR)
     text.append(content, style=f"italic {_THINKING_COLOR}")
     return Panel(
         text,

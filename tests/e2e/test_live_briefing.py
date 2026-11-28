@@ -187,7 +187,7 @@ async def test_asked_for_in_korean_it_arrives_in_korean_and_keeps_quiet_on_an_em
     wording = await labels.load("ko")
     assert wording is not labels.ENGLISH, "the model's labels passed the check"
     assert all(hangul(wording[key]) for key in ("title", "greeting", "today", "mail", "overlaps", "nothing")), wording
-    assert title == f"🔔 [{wording['title']}]" and greeting == f"{wording['greeting']} {datetime.now(SEOUL):%Y-%m-%d}"
+    assert title == wording['title'] and greeting == f"{wording['greeting']} {datetime.now(SEOUL):%Y-%m-%d}"
     # The facts are the accounts' own, whatever the language around them.
     assert f"{wording['today']} (2)" in lines and f"{wording['mail']} (2)" in lines
     assert f"• 10:00–11:00 주간 회의 · 회의실 A  {wording['overlaps']}" in lines
@@ -230,7 +230,7 @@ async def test_changing_one_thing_in_chat_leaves_the_rest(desk, request):
     desk.google.events = [event("Dentist", (15, 0))]
     await desk.fire()
     [message] = desk.chat.sent
-    assert message.text.split("\n")[:4] == ["🔔 [Morning briefing]", f"Good morning. {datetime.now(SEOUL):%Y-%m-%d}",
+    assert message.text.split("\n")[:4] == ["Morning briefing", f"Good morning. {datetime.now(SEOUL):%Y-%m-%d}",
                                             "", "Today (1)"]
 
     asked_for(await desk.say("브리핑 이제 그만 보내줘."))
