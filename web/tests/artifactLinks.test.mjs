@@ -86,3 +86,16 @@ test('bundle files keep their session and unpublished downloads remain unconfirm
     { path: '/Desktop/report.pdf', sessionId: 'native', state: 'unknown' },
   ]);
 });
+
+
+test('a web address written out in a message is a link, without the punctuation after it', () => {
+  const html = (content) => renderToStaticMarkup(createElement(Markdown, { content }));
+  const alert = html('Open the page: https://www.apple.com/kr/shop/buy-airpods/airpods-pro-3');
+  assert.match(alert, /<a href="https:\/\/www\.apple\.com\/kr\/shop\/buy-airpods\/airpods-pro-3" target="_blank" rel="noopener noreferrer">/);
+  assert.match(html('See https://example.com/a.'), /href="https:\/\/example\.com\/a"[^>]*>https:\/\/example\.com\/a<\/a>\./);
+  assert.match(html('(https://example.com/a)'), /href="https:\/\/example\.com\/a"[^>]*>[^<]*<\/a>\)/);
+  assert.match(html('https://en.wikipedia.org/wiki/Foo_(bar)'), /href="https:\/\/en\.wikipedia\.org\/wiki\/Foo_\(bar\)"/);
+  assert.match(html('**https://example.com/b**'), /<strong[^>]*><span><a href="https:\/\/example\.com\/b"/);
+  assert.doesNotMatch(html('`https://example.com/c`'), /href=/);
+  assert.doesNotMatch(html('javascript:alert(1) and ftp://example.com'), /href=/);
+});

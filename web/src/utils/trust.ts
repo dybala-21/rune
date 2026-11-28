@@ -62,7 +62,7 @@ function describeCompletion(trust: TrustInfo): TrustPresentation {
     return { ...base, title: 'Run failed', note: trust.honestNote || 'An execution error interrupted this run.', tone: 'danger', glyph: '✗', ok: false };
   }
   if (verification === 'failed') {
-    return { ...base, title: 'Checks failed', note: trust.honestNote || 'A recorded check failed. Review the evidence before using this result.', tone: 'warning', glyph: '⚠', ok: false };
+    return { ...base, title: 'Checks failed', note: trust.honestNote || 'A recorded check failed. Review the evidence before using this result.', tone: 'warning', glyph: '◐', ok: false };
   }
   const fetched = resultReadback(trust.requirementAcceptance);
   if (fetched && fetched.status !== 'pass'
@@ -80,14 +80,14 @@ function describeCompletion(trust: TrustInfo): TrustPresentation {
   }
   if (verification === 'unavailable') {
     return {
-      ...base, title: 'Verification unavailable', tone: 'warning', glyph: '⚠', ok: false,
+      ...base, title: 'Verification unavailable', tone: 'warning', glyph: '◐', ok: false,
       canEscalate: false,
       note: trust.honestNote || 'A required check could not run. The result is unconfirmed; no mismatch was established.',
     };
   }
   if (completion === 'unknown' && trust.reason === 'verification_inconclusive') {
     return {
-      ...base, title: 'Result unconfirmed', tone: 'warning', glyph: '⚠', ok: false,
+      ...base, title: 'Result unconfirmed', tone: 'warning', glyph: '◐', ok: false,
       canEscalate: false,
       note: trust.honestNote || 'Some requested results could not be confirmed. Review the evidence before repeating an action.',
     };
@@ -97,28 +97,28 @@ function describeCompletion(trust: TrustInfo): TrustPresentation {
       && trust.completionCheck?.name === 'Test result claims'
       && trust.explanationReview?.status === 'unavailable') {
       return {
-        ...base, title: 'Tests passed · summary unchecked', tone: 'warning', glyph: '⚠', ok: false,
+        ...base, title: 'Tests passed · summary unchecked', tone: 'warning', glyph: '◐', ok: false,
         canEscalate: false,
         note: 'The recorded tests passed. The explanation review was unavailable; the full task is not marked complete.',
       };
     }
     if (trust.reason === 'desktop_blocked') {
       return {
-        ...base, title: 'Desktop task stopped', tone: 'warning', glyph: '⚠', ok: false,
+        ...base, title: 'Desktop task stopped', tone: 'warning', glyph: '◐', ok: false,
         canEscalate: false,
         note: trust.completionCheck?.detail || trust.honestNote || 'The desktop result could not be confirmed.',
       };
     }
     if (trust.reason === 'completed_gate_warnings' && !trust.budgetExhausted) {
       return {
-        ...base, title: 'Review needed', tone: 'warning', glyph: '⚠', ok: false,
+        ...base, title: 'Review needed', tone: 'warning', glyph: '◐', ok: false,
         note: trust.completionCheck?.detail
           ? `The response was returned, but this check remains unresolved: ${trust.completionCheck.name}.`
           : 'The response was returned, but completion checks remain unresolved. The specific check was not recorded.',
       };
     }
     return {
-      ...base, title: 'Incomplete', tone: 'warning', glyph: '⚠', ok: false,
+      ...base, title: 'Incomplete', tone: 'warning', glyph: '◐', ok: false,
       note: trust.budgetExhausted
         ? 'The tool limit was reached; some requested work may be unfinished.'
         : trust.honestNote || 'This run stopped before completing the request.',
@@ -135,7 +135,7 @@ function describeCompletion(trust: TrustInfo): TrustPresentation {
         ? 'The result was delivered, but some requested conditions could not be confirmed.'
         : trust.tableAcceptance?.unverified.length
         ? 'Some requested data conditions could not be checked. See the details below.'
-        : 'The latest changes still need a passing check.', tone: 'warning', glyph: '⚠', ok: false,
+        : 'The latest changes still need a passing check.', tone: 'warning', glyph: '◐', ok: false,
     };
   }
   if (completion === 'unknown') {

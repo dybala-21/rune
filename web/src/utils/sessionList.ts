@@ -1,6 +1,6 @@
 import type { SessionInfo } from '../api';
 
-const PAGE_SIZE = 50;
+export const PAGE_SIZE = 50;
 type Page = { sessions: SessionInfo[]; total: number };
 type ReadPage = (params: { limit: number; offset: number; query: string }) => Promise<Page>;
 export interface SessionListState {

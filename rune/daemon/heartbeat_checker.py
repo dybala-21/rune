@@ -144,6 +144,12 @@ def should_run(item: CheckItem, now: datetime) -> bool:
     return elapsed >= item.interval_minutes
 
 
+# When each check last ran, by its command and schedule. The file is read again at every wake and its
+# items are new each time, so without this an "Every 30 minutes" check ran at every wake (each
+# minute). A restart runs each check once.
+_last_runs: dict[tuple[str, int, int, int], datetime] = {}
+
+
 async def run_heartbeat_checks() -> list[dict[str, Any]]:
     """Run all due heartbeat checks and return results.
 
@@ -157,12 +163,14 @@ async def run_heartbeat_checks() -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
 
     for item in items:
+        key = (item.command, item.interval_minutes, item.daily_hour, item.daily_minute)
+        item.last_run = _last_runs.get(key)
         if not should_run(item, now):
             continue
         if not item.command:
             continue  # No backtick command — skip
 
-        item.last_run = now
+        item.last_run = _last_runs[key] = now
         log.debug("heartbeat_check_running", command=item.command[:80])
 
         try:
@@ -181,6 +189,21 @@ async def run_heartbeat_checks() -> list[dict[str, Any]]:
             log.warning("heartbeat_check_failed", command=item.command[:50], error=str(exc)[:200])
 
     return results
+
+
+def to_tell(results: list[dict[str, Any]], failing: set[str]) -> list[dict[str, Any]]:
+    """The results to tell the owner: checks that need attention now and did not at their last run.
+
+    ``failing`` holds the commands that needed attention at their last run, and is updated. A check
+    that keeps failing is told once, and again only after it has passed in between."""
+    told = []
+    for result in results:
+        if not result["needs_attention"]:
+            failing.discard(result["command"])
+        elif result["command"] not in failing:
+            failing.add(result["command"])
+            told.append(result)
+    return told
 
 
 async def _execute_check(command: str) -> tuple[str, int]:
@@ -218,7 +241,10 @@ async def _execute_check(command: str) -> tuple[str, int]:
 
 
 def create_default_heartbeat() -> Path:
-    """Create a default HEARTBEAT.md template if it doesn't exist."""
+    """Create the HEARTBEAT.md template if it doesn't exist: how to write checks, and none to run.
+
+    The owner adds the checks. A command RUNE runs on its own, in whatever folder the daemon
+    started in, is not one the owner asked for."""
     path = _get_heartbeat_path()
     if path.exists():
         return path
@@ -226,16 +252,14 @@ def create_default_heartbeat() -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "# HEARTBEAT.md\n"
-        "# RUNE runs commands in backticks periodically.\n"
-        "# Exit code != 0 triggers a notification.\n"
-        "# Edit freely — add, remove, or comment out items.\n"
-        "# Delete this file to disable heartbeat checks.\n\n"
-        "## Every 30 minutes\n"
-        "- [ ] `git status --short` — uncommitted changes\n\n"
-        "## Every 1 hour\n"
-        "- [ ] `ruff check . 2>&1 | tail -3` — lint errors\n\n"
+        "# RUNE runs the command in backticks on each item, on the schedule above it.\n"
+        "# A command that exits with a code other than 0 is told to you, with what it printed:\n"
+        "# once, and again only after it has passed in between.\n"
+        "# Nothing runs until you add an item. Remove the leading '# ' of an example to use it.\n\n"
+        "# ## Every 30 minutes\n"
+        "# - [ ] `git -C ~/project diff --quiet` — uncommitted changes in ~/project\n\n"
         "# ## Daily at 09:00\n"
-        "# - [ ] `git log --oneline -5` — recent commits\n",
+        "# - [ ] `df -P ~ | awk 'NR==2 {exit ($5+0 > 90)}'` — the disk your home is on is over 90% full\n",
         encoding="utf-8",
     )
     log.info("heartbeat_md_created", path=str(path))

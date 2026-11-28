@@ -56,12 +56,16 @@ export function useSessionHistory() {
   // Guards against a slow load for session A overwriting a later-selected B.
   const reqRef = useRef(0);
   const requestRef = useRef<AbortController | null>(null);
+  const viewingRef = useRef<string | null>(null);
+  const shownRef = useRef<SessionHistoryState | null>(null);
+  shownRef.current = historyState;
   useEffect(() => () => { requestRef.current?.abort(); reqRef.current++; }, []);
 
   const loadSession = useCallback(async (sessionId: string | null) => {
     const reqId = ++reqRef.current;
     requestRef.current?.abort();
     setHistoryState(null);
+    viewingRef.current = sessionId;
     if (!sessionId) {
       setViewingSessionId(null);
       setLoading(false);
@@ -93,10 +97,26 @@ export function useSessionHistory() {
     }
   }, []);
 
+  /** Loads the open chat again when it holds fewer messages than ``messages``, keeping what is
+   * shown until the new turns arrive. A chat is otherwise loaded once, when it is opened, so a
+   * message RUNE wrote while it was open would not show. */
+  const refresh = useCallback(async (sessionId: string, messages: number) => {
+    const shown = shownRef.current;
+    if (viewingRef.current !== sessionId || !shown || shown.messages.length >= messages) return;
+    const reqId = reqRef.current;
+    try {
+      const result = await fetchSessionTurns(sessionId);
+      if (reqId === reqRef.current) setHistoryState(hydrateTurns(result.turns, result.run));
+    } catch (error) {
+      console.warn('Could not load the new messages of the open chat', error);
+    }
+  }, []);
+
   return {
     viewingSessionId,
     historyState,
     loading,
     loadSession,
+    refresh,
   };
 }

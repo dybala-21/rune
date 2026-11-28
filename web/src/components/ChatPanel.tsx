@@ -41,6 +41,8 @@ interface ChatPanelProps {
   /** Re-anchor scrolling when the shown conversation changes. */
   conversationKey: string;
   historical?: boolean;
+  /** A saved chat that opens at its latest message, like the live one ("From RUNE"). */
+  openAtLatest?: boolean;
   messages: ChatMessage[];
   toolCalls: ToolCall[];
   thinkingBlocks: ThinkingBlock[];
@@ -70,6 +72,7 @@ export function ChatPanel({
   onOpenSettings,
   conversationKey,
   historical = false,
+  openAtLatest = false,
   messages,
   toolCalls,
   thinkingBlocks,
@@ -165,17 +168,17 @@ export function ChatPanel({
     return () => cancelAnimationFrame(timer);
   }, [messages, toolCalls, thinkingBlocks, delegateEvents, compactionEvents, pendingApproval, pendingQuestion, isEmpty, scrollToLatest]);
 
-  // Open live chat at the latest turn and history at the start.
+  // Open live chat at the latest turn and history at the start, unless it opens at its latest.
   useEffect(() => {
     const container = scrollContainerRef.current;
     if (!container) return;
-    const isLive = !historical;
-    atBottomRef.current = isLive;
+    const atLatest = !historical || openAtLatest;
+    atBottomRef.current = atLatest;
     const timer = requestAnimationFrame(() => {
-      container.scrollTop = isLive && !isEmpty ? container.scrollHeight : 0;
+      container.scrollTop = atLatest && !isEmpty ? container.scrollHeight : 0;
     });
     return () => cancelAnimationFrame(timer);
-  }, [conversationKey, isEmpty, historical]);
+  }, [conversationKey, isEmpty, historical, openAtLatest]);
 
   useEffect(() => {
     const container = scrollContainerRef.current;

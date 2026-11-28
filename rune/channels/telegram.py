@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import html
 import os
 from typing import Any
 
@@ -56,7 +57,7 @@ class TelegramResponseFormatter(ResponseFormatter):
 
     def format_error(self, error: str) -> str:
         error = error.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        return f"❌ <b>Error:</b> {error}"
+        return f"<b>Error:</b> {error}"
 
 
 class TelegramAdapter(ChannelAdapter):
@@ -409,15 +410,15 @@ class TelegramAdapter(ChannelAdapter):
                 inline_keyboard=[
                     [
                         InlineKeyboardButton(
-                            text="✅ 허용",
+                            text="Approve",
                             callback_data=f"approval:allow_once:{approval_id}",
                         ),
                         InlineKeyboardButton(
-                            text="🔒 항상 허용",
+                            text="Always approve",
                             callback_data=f"approval:allow_always:{approval_id}",
                         ),
                         InlineKeyboardButton(
-                            text="❌ 거부",
+                            text="Deny",
                             callback_data=f"approval:deny:{approval_id}",
                         ),
                     ]
@@ -425,7 +426,7 @@ class TelegramAdapter(ChannelAdapter):
             )
             await self._bot.send_message(
                 chat_id=int(channel_id),
-                text=f"🔐 *Approval Required*\n\n{desc_display}",
+                text=f"<b>Approval required</b>\n\n{html.escape(desc_display, quote=False)}",
                 reply_markup=keyboard,
             )
         except Exception as exc:
@@ -469,10 +470,8 @@ class TelegramAdapter(ChannelAdapter):
 
             # Update message with result
             if decision != ApprovalDecision.DENY:
-                status_emoji = "✅"
                 status_text = "Approved"
             else:
-                status_emoji = "❌"
                 status_text = "Denied"
 
             user_name = getattr(callback_query.from_user, "username", None) or "someone"
@@ -482,7 +481,7 @@ class TelegramAdapter(ChannelAdapter):
                     await self._bot.edit_message_text(
                         chat_id=callback_query.message.chat.id,
                         message_id=callback_query.message.message_id,
-                        text=f"{status_emoji} {status_text} by {user_name}",
+                        text=f"{status_text} by {html.escape(user_name, quote=False)}",
                         reply_markup=None,
                     )
             except Exception as exc:

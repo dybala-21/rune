@@ -379,7 +379,7 @@ class RuneApp:
                     if adapter:
                         from rune.channels.types import OutgoingMessage
                         await adapter.send(msg.channel_id, OutgoingMessage(
-                            text="⏳ Processing previous request. Please wait.",
+                            text="Processing the previous request. Please wait.",
                         ))
 
                 async with _channel_semaphore:
@@ -776,25 +776,25 @@ class RuneApp:
             if lower == "on":
                 set_advisor_enabled(True)
                 self.console.print(
-                    "  [#56B6C2]🧭 Advisor enabled.[/#56B6C2]"
+                    "  [#56B6C2]Advisor enabled.[/#56B6C2]"
                 )
                 if not os.environ.get("RUNE_ADVISOR_MODEL", "").strip():
                     self.console.print(
-                        "  [#E5C07B]⚠  RUNE_ADVISOR_MODEL not set — "
+                        "  [#E5C07B]RUNE_ADVISOR_MODEL not set — "
                         "advisor won't fire until you configure a model.[/#E5C07B]"
                     )
                 return
             if lower == "off":
                 set_advisor_enabled(False)
                 self.console.print(
-                    "  [#888888]🧭 Advisor disabled.[/#888888]"
+                    "  [#888888]Advisor disabled.[/#888888]"
                 )
                 return
 
             status = "on" if is_advisor_enabled() else "off"
             model = os.environ.get("RUNE_ADVISOR_MODEL", "").strip()
             self.console.print(
-                f"  [#888888]🧭 Advisor toggle: {status}[/#888888]"
+                f"  [#888888]Advisor toggle: {status}[/#888888]"
             )
             if model:
                 self.console.print(
@@ -825,7 +825,7 @@ class RuneApp:
                 "  [#888888]   usage: /advisor on | /advisor off[/#888888]"
             )
         except Exception:
-            self.console.print("  [#888888]🧭 Advisor setting unavailable.[/#888888]")
+            self.console.print("  [#888888]Advisor setting unavailable.[/#888888]")
 
     def _handle_learning_command(self, arg: str) -> None:
         """Handle /learning on|off slash command."""
@@ -836,20 +836,20 @@ class RuneApp:
             if lower == "on":
                 set_learning_enabled(True)
                 self.console.print(
-                    "  [#56B6C2]📝 Learning enabled.[/#56B6C2]"
+                    "  [#56B6C2]Learning enabled.[/#56B6C2]"
                 )
             elif lower == "off":
                 set_learning_enabled(False)
                 self.console.print(
-                    "  [#888888]📝 Learning disabled.[/#888888]"
+                    "  [#888888]Learning disabled.[/#888888]"
                 )
             else:
                 status = "on" if is_consolidation_enabled() else "off"
                 self.console.print(
-                    f"  [#888888]📝 Learning is {status}. Usage: /learning on | /learning off[/#888888]"
+                    f"  [#888888]Learning is {status}. Usage: /learning on | /learning off[/#888888]"
                 )
         except Exception:
-            self.console.print("  [#888888]📝 Learning setting unavailable.[/#888888]")
+            self.console.print("  [#888888]Learning setting unavailable.[/#888888]")
 
     def _show_learned_stats(self) -> None:
         """Show learning statistics via /learned command."""
@@ -914,7 +914,7 @@ class RuneApp:
 
             self.console.print()
             self.console.print(
-                "  [#56B6C2]📝 Learning enabled — RUNE will remember past work.[/#56B6C2]"
+                "  [#56B6C2]Learning enabled — RUNE will remember past work.[/#56B6C2]"
             )
             self.console.print(
                 "  [#888888]Small cost per conversation (~$0.003).[/#888888]"
@@ -1594,7 +1594,7 @@ class RuneApp:
         table.add_row("Input tokens", format_tokens(self._total_input_tokens))
         table.add_row("Output tokens", format_tokens(self._total_output_tokens))
         table.add_row("Est. token cost", f"[bold #D4A017]{cost_str}[/bold #D4A017]")
-        self.console.print(Panel(table, title="[bold #D4A017]💰 Cost[/bold #D4A017]", title_align="left", border_style="#333333", padding=(0, 1)))
+        self.console.print(Panel(table, title="[bold #D4A017]Cost[/bold #D4A017]", title_align="left", border_style="#333333", padding=(0, 1)))
 
     def _show_stats(self) -> None:
         """Show session stats."""
@@ -1615,7 +1615,7 @@ class RuneApp:
         if self._file_tracker:
             changed = self._file_tracker.get_changed_files()
             table.add_row("Files changed", f"{len(changed)}")
-        self.console.print(Panel(table, title="[bold #D4A017]📊 Stats[/bold #D4A017]", title_align="left", border_style="#333333", padding=(0, 1)))
+        self.console.print(Panel(table, title="[bold #D4A017]Stats[/bold #D4A017]", title_align="left", border_style="#333333", padding=(0, 1)))
 
     async def _do_save_session(self, name: str | None = None) -> None:
         """Save the current session."""
@@ -1668,7 +1668,7 @@ class RuneApp:
             preview = msg[:100] + ("…" if len(msg) > 100 else "")
             results.append(f"  #{idx}", style="bold #D4A017")
             results.append(f"  {preview}\n", style="#CCCCCC")
-        self.console.print(Panel(results, title=f"[bold #D4A017]🔍 '{query}' ({len(matches)} matches)[/bold #D4A017]", title_align="left", border_style="#333333", padding=(0, 1)))
+        self.console.print(Panel(results, title=f"[bold #D4A017]'{query}' ({len(matches)} matches)[/bold #D4A017]", title_align="left", border_style="#333333", padding=(0, 1)))
 
     async def _do_export(self, fmt: str) -> None:
         """Export conversation to file."""
@@ -1701,7 +1701,7 @@ class RuneApp:
         table.add_row("Messages", str(len(self._user_message_history)))
         agent_status = "[#98C379]connected[/#98C379]" if self._agent_controller else "[dim]disconnected[/dim]"
         table.add_row("Agent", agent_status)
-        self.console.print(Panel(table, title="[bold #D4A017]📋 Session[/bold #D4A017]", title_align="left", border_style="#333333", padding=(0, 1)))
+        self.console.print(Panel(table, title="[bold #D4A017]Session[/bold #D4A017]", title_align="left", border_style="#333333", padding=(0, 1)))
 
     def _show_agent_status(self) -> None:
         """Show agent status."""
@@ -1719,7 +1719,7 @@ class RuneApp:
                 table.add_row("Steps", str(ctrl._step_count))
             if hasattr(ctrl, "_tool_count") and ctrl._tool_count > 0:
                 table.add_row("Tools", str(ctrl._tool_count))
-        self.console.print(Panel(table, title="[bold #D4A017]🤖 Agent[/bold #D4A017]", title_align="left", border_style="#333333", padding=(0, 1)))
+        self.console.print(Panel(table, title="[bold #D4A017]Agent[/bold #D4A017]", title_align="left", border_style="#333333", padding=(0, 1)))
 
     def _show_config(self) -> None:
         """Show current RUNE configuration."""
@@ -1764,7 +1764,7 @@ class RuneApp:
             if item.preview:
                 name_display += f"  [dim]{item.preview[:40]}[/dim]"
             table.add_row(str(i), item.id, name_display, str(item.message_count))
-        self.console.print(Panel(table, title="[bold #D4A017]💾 Sessions[/bold #D4A017]", title_align="left", border_style="#333333", padding=(0, 1)))
+        self.console.print(Panel(table, title="[bold #D4A017]Sessions[/bold #D4A017]", title_align="left", border_style="#333333", padding=(0, 1)))
         self.console.print("[dim]  Use /load <id> to restore a session.[/dim]")
 
     async def _interactive_load_session(self) -> None:

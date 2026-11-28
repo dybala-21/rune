@@ -22,6 +22,7 @@
   color: var(--text-secondary);
   font-size: 12px;
 }
+.conversation-heading-note { flex-shrink: 0; color: var(--text-muted); font-size: 12px; }
 .composer-input-row { position: relative; }
 .composer-input-row textarea { display: block; width: 100%; }
 .composer-footer { display: flex; align-items: center; gap: 4px; padding: 0 10px 8px; }

@@ -147,3 +147,66 @@ class TestShouldRun:
         )
         now = datetime(2026, 3, 25, 9, 0, 30)  # same day
         assert should_run(item, now) is False
+
+
+class TestTheTemplate:
+    """The file RUNE writes on first start explains the format and runs nothing the owner did not add."""
+
+    @pytest.fixture
+    def template(self, tmp_dir, monkeypatch):
+        from rune.daemon import heartbeat_checker
+
+        monkeypatch.setattr(heartbeat_checker, "_HEARTBEAT_PATH", tmp_dir / "HEARTBEAT.md")
+        return heartbeat_checker.create_default_heartbeat()
+
+    def test_it_schedules_no_command(self, template):
+        assert parse_heartbeat_md(template) == []
+
+    def test_each_example_once_uncommented_is_a_check_with_its_command(self, template):
+        uncommented = "".join(line.removeprefix("# ") + "\n" for line in template.read_text().splitlines()
+                              if line.startswith(("# ## ", "# - [ ]")))
+        template.write_text(uncommented)
+        assert [(item.command, item.interval_minutes) for item in parse_heartbeat_md(template)] == [
+            ("git -C ~/project diff --quiet", 30),
+            ("df -P ~ | awk 'NR==2 {exit ($5+0 > 90)}'", 0),
+        ]
+
+
+async def test_a_check_that_needs_attention_is_kept_where_the_owner_sees_it(tmp_path, monkeypatch):
+    """It went to gateway.broadcast_text, which the gateway never had: every alert was lost."""
+    from rune.api import conversation_wiring
+    from rune.channels.registry import ChannelRegistry
+    from rune.daemon import gateway as gateway_module
+    from rune.daemon.main import RuneDaemon
+
+    monkeypatch.setenv("RUNE_HOME", str(tmp_path))
+    monkeypatch.setattr(conversation_wiring, "_conv_manager", None)
+    monkeypatch.setattr(conversation_wiring, "_conv_manager_failed", False)
+    monkeypatch.setattr(gateway_module, "_gateway_instance", gateway_module.ChannelGateway(ChannelRegistry()))
+    await RuneDaemon.__new__(RuneDaemon)._tell_owner("`df -P ~` — the disk is over 90% full", "Capacity 93%")
+    inbox = await conversation_wiring.get_conv_manager()._store.load("rune:inbox")
+    assert inbox.turns[-1].content == "`df -P ~` — the disk is over 90% full\nCapacity 93%"
+
+
+async def test_a_check_every_30_minutes_runs_once_across_wakes_a_minute_apart(tmp_dir, monkeypatch):
+    """The file is read again at every wake; its items used to forget their last run and ran each minute."""
+    from rune.daemon import heartbeat_checker
+
+    path = tmp_dir / "HEARTBEAT.md"
+    path.write_text(f"## Every 30 minutes\n- [ ] `echo ran >> {tmp_dir / 'runs'}` — count\n")
+    monkeypatch.setattr(heartbeat_checker, "_HEARTBEAT_PATH", path)
+    monkeypatch.setattr(heartbeat_checker, "_last_runs", {})
+    assert len(await heartbeat_checker.run_heartbeat_checks()) == 1
+    assert await heartbeat_checker.run_heartbeat_checks() == []
+    assert (tmp_dir / "runs").read_text() == "ran\n"
+
+
+def test_a_failing_check_is_told_once_and_again_after_it_passed():
+    from rune.daemon.heartbeat_checker import to_tell
+
+    failing: set[str] = set()
+
+    def run(attention: bool) -> int:
+        return len(to_tell([{"item": "disk", "command": "df", "output": "", "needs_attention": attention}], failing))
+
+    assert [run(True), run(True), run(True), run(False), run(True)] == [1, 0, 0, 0, 1]

@@ -185,7 +185,7 @@ class _LiveDisplay:
         if self.current_step > 0:
             text.append(f"  ⟐ {self.current_step}", style=f"bold {_MUTED}")
 
-        text.append(f"  ⏱ {elapsed}", style=_MUTED)
+        text.append(f"  {elapsed}", style=_MUTED)
         text.append("  ", style=_MUTED)
         text.append("^C", style=f"bold {_GOLDEN}")
         text.append(" abort", style=_MUTED)

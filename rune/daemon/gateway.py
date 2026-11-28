@@ -295,7 +295,7 @@ class ChannelGateway:
                 for suggestion in suggestions:
                     formatted_body = format_for_channel(suggestion, "gateway")
                     notification = GatewayNotification(
-                        title="💬 rune",
+                        title="RUNE",
                         body=formatted_body,
                         priority=_confidence_to_priority(suggestion.confidence),
                         source=suggestion.id,

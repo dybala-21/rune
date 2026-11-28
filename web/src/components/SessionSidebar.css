@@ -10,6 +10,10 @@
 .new-task-button:disabled { cursor: default; opacity: .55; }
 .session-create-hint { margin: 8px 2px 0; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
 .session-live-status[data-active] { color: var(--accent); }
+.session-item[data-unread] .session-title { color: var(--text-primary); font-weight: 600; }
+.session-unread { color: var(--accent); font-weight: 600; }
+/* Its count is shown, not only read out: the meta of a quiet row is otherwise visually hidden. */
+.session-item[data-unread] .session-meta--quiet { position: static; width: auto; height: auto; margin: 6px 0 0; overflow: visible; clip-path: none; }
 .session-return-live { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; width: calc(100% - 32px); margin: 8px 16px; padding: 9px 8px; border-radius: 6px; background: transparent; color: var(--accent); text-align: left; font-size: 12px; }
 .session-return-live:hover { background: var(--bg-hover); }
 .session-return-live span { color: var(--text-muted); font-size: 11px; }

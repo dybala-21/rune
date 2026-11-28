@@ -1,11 +1,11 @@
-import { createContext, useContext, type ReactNode } from 'react';
+import { createContext, Fragment, useContext, type ReactNode } from 'react';
 import { artifactHref } from '../utils/artifactLinks';
 import { HighlightedCode } from './Code';
 import { CopyButton } from './CopyButton';
 
 // Lightweight markdown renderer shared by chat messages and the file preview.
 // Handles fenced code (syntax-highlighted), headers (h1–h3), ordered/unordered
-// lists, and inline bold/italic/code/links. Deliberately small — enough to read
+// lists, and inline bold/italic/code/links, written or bare. Deliberately small — enough to read
 // assistant output and .md files at a glance, not a full CommonMark engine.
 
 const ArtifactSession = createContext<string | undefined>(undefined);
@@ -230,7 +230,32 @@ function InlineFormatted({ text }: { text: string }) {
             ? <a key={i} href={href} target="_blank" rel="noopener noreferrer">{linkMatch[1]}</a>
             : <span key={i}>{linkMatch[1]}</span>;
         }
-        return <span key={i}>{part}</span>;
+        return <span key={i}><Linked text={part} /></span>;
+      })}
+    </>
+  );
+}
+
+// A web address written out in the text, read the way GFM's autolink extension reads one: it ends at
+// a space, and punctuation that closes the sentence after it, or a ")" it did not open, is not part of
+// it. RUNE's own messages write links this way ("Open the page: https://…").
+const BARE_URL_RE = /(https?:\/\/[^\s<>]+)/g;
+
+function Linked({ text }: { text: string }) {
+  const pieces = text.split(BARE_URL_RE);
+  if (pieces.length === 1) return <>{text}</>;
+  return (
+    <>
+      {pieces.map((piece, i) => {
+        if (i % 2 === 0) return piece;
+        let url = piece;
+        while (/[.,:;!?'"\]]$/.test(url)
+          || (url.endsWith(')') && url.split('(').length < url.split(')').length)) url = url.slice(0, -1);
+        return (
+          <Fragment key={i}>
+            <a href={url} target="_blank" rel="noopener noreferrer">{url}</a>{piece.slice(url.length)}
+          </Fragment>
+        );
       })}
     </>
   );

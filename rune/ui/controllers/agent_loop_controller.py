@@ -283,7 +283,7 @@ class AgentLoopController:
                             log.info("cron_goal_result", name=j.name, has_result=bool(result))
                             if result:
                                 fmt = FormattedSuggestion(
-                                    body=f"🔔 [{j.name}]\n{result}",
+                                    body=f"{j.name}\n{result}",
                                     confidence=1.0,
                                     source="cron",
                                     intensity="intervene",
@@ -321,13 +321,13 @@ class AgentLoopController:
                     text = getattr(result, "answer", None) or getattr(result, "reason", str(result))
                 return text
             except TimeoutError:
-                return f"⏱ Timed out: {job.goal[:80]}"
+                return f"Timed out: {job.goal[:80]}"
             except Exception as exc:
-                return f"❌ Failed: {str(exc)[:200]}"
+                return f"Failed: {str(exc)[:200]}"
         elif job.command:
             from rune.capabilities.bash import BashParams, bash_execute
             result = await bash_execute(BashParams(command=job.command))
-            return result.output if result.success else f"❌ {result.error}"
+            return result.output if result.success else f"Failed: {result.error}"
         return None
 
     def _flush_proactive_queue(self) -> None:
@@ -701,7 +701,7 @@ class AgentLoopController:
         _note = honest_failure_note(reason, run_was_verifiable(trace))
         if _note:
             with contextlib.suppress(Exception):
-                self._renderer.print_system_message(f"⚠ {_note}")
+                self._renderer.print_system_message(_note)
         _hint = escalation_hint(reason)
         if _hint:
             with contextlib.suppress(Exception):

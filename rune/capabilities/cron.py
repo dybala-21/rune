@@ -288,7 +288,7 @@ async def cron_create(params: CronCreateParams) -> CapabilityResult:
             output_parts.append(f"Description: {params.description}")
         if params.goal:
             output_parts.append(
-                "⚠️ Each execution runs a full agent loop (LLM API cost applies per run)."
+                "Note: each execution runs a full agent loop (LLM API cost applies per run)."
             )
 
         return CapabilityResult(
@@ -887,7 +887,7 @@ async def _send_to_channel(channel_name: str, job_name: str, text: str, buttons:
             return
 
         notification = GatewayNotification(
-            title=f"🔔 [{job_name}]",
+            title=job_name,
             body=text,
             priority="high" if channel_name else "medium",
             source="cron",

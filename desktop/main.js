@@ -54,6 +54,17 @@ ipcMain.handle('rune:browser-layout', (event, payload) => {
     height: Math.max(1, Math.min(height - y, Math.round(bounds.height * zoom))) };
   return browserHost.mount(sessionId, box);
 });
+// What RUNE wrote in "From RUNE" since the owner last read it, on the dock icon. macOS refuses an
+// unsigned build notifications (it answered this app's request with an error), yet shows its badge.
+ipcMain.on('rune:unread', (event, count) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame
+      || !Number.isInteger(count) || count < 0) {
+    console.warn('[rune-desktop] ignored an unread count that is not from the app window or not a count');
+    return;
+  }
+  if (process.platform === 'darwin') app.dock?.setBadge(count ? String(count) : '');
+  else app.setBadgeCount(count);
+});
 ipcMain.on('rune:browser-takeover', event => {
   if (browserHost && event.sender === browserHost.shield.webContents) void browserHost.takeover();
 });
