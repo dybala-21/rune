@@ -43,30 +43,10 @@ class ConversationCategory(StrEnum):
     """'That commit was solid - caught a nice edge case.'"""
 
 
-# Trigger types
+# Priority and response
 
-TriggerType = Literal["time", "pattern", "milestone", "memory", "idle", "schedule"]
 Priority = Literal["low", "medium", "high"]
 ResponseType = Literal["accepted", "dismissed", "ignored", "annoyed"]
-
-
-# Conversation opportunity
-
-@dataclass(slots=True)
-class ConversationOpportunity:
-    """A proactive conversation the ConversationInitiator wants to fire."""
-
-    id: str
-    category: ConversationCategory
-    trigger: TriggerType
-    priority: Priority
-    topic: str
-    draft_message: str
-    context_data: dict[str, Any] = field(default_factory=dict)
-    confidence: float = 0.5
-    expires_at: datetime = field(default_factory=datetime.now)
-    suppression_key: str = ""
-    """Dedup key ``"category:topic_hash"`` - suppress within 24 h."""
 
 
 # Engagement metrics (persisted to SQLite)

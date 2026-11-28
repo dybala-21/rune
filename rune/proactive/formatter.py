@@ -72,4 +72,4 @@ def format_suggestion(suggestion: Suggestion) -> FormattedSuggestion:
 def format_for_channel(suggestion: Suggestion, channel: str) -> str:
     """Format a suggestion as plain text for external channels."""
     fmt = format_suggestion(suggestion)
-    return f"🤖 RUNE: {fmt.body}"
+    return fmt.body

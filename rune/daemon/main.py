@@ -174,8 +174,6 @@ class RuneDaemon:
 
         # Proactive subsystem references (initialised in _init_proactive_subsystems)
         self._engagement_tracker: Any = None
-        self._conversation_initiator: Any = None
-        self._environment_sensor: Any = None
 
         # Browser subsystem references
         self._browser_page_pool: Any = None
@@ -462,10 +460,6 @@ class RuneDaemon:
             await cleanup.run("executor_state", self._persist_executor_state)
         await cleanup.run("browser", self._shutdown_browser_subsystems)
         await cleanup.run("mcp", self._shutdown_mcp_bridge)
-        if self._environment_sensor is not None:
-            await cleanup.run("environment_sensor", self._environment_sensor.stop)
-            self._environment_sensor = None
-        self._conversation_initiator = None
 
         if self._engagement_tracker is not None:
             if self._proactive_engine is not None and self._memory_store is not None:
@@ -595,82 +589,6 @@ class RuneDaemon:
             log.info("subsystem_initialised", name="engagement_tracker")
         except Exception as exc:
             log.warning("engagement_tracker_init_failed", error=str(exc))
-
-        # ConversationInitiator
-        try:
-            from rune.proactive.conversation_initiator import ConversationInitiator
-
-            self._conversation_initiator = ConversationInitiator()
-
-            # Schedule conversation-initiation checks every five minutes.
-            if self._heartbeat_scheduler is not None:
-                async def _conversation_check() -> None:
-                    """Periodic check for conversation opportunities."""
-                    if not _configured_proactive_enabled():
-                        return
-                    try:
-                        from rune.proactive.context import ContextGatherer
-                        gatherer = ContextGatherer()
-                        ctx = await gatherer.gather()
-                        metrics = (
-                            self._engagement_tracker.get_metrics()
-                            if self._engagement_tracker is not None
-                            else None
-                        )
-                        if metrics is None:
-                            from rune.proactive.types import EngagementMetrics
-                            metrics = EngagementMetrics()
-
-                        if self._conversation_initiator.should_initiate(ctx, metrics):
-                            suggestion = self._conversation_initiator.create_initiative(
-                                "followup", ctx,
-                            )
-                            engine.add_suggestion(suggestion)
-                            log.info(
-                                "conversation_opportunity_delivered",
-                                title=suggestion.title,
-                            )
-                    except Exception as exc:
-                        log.debug("conversation_check_failed", error=str(exc))
-
-                self._heartbeat_scheduler.add_task(
-                    "conversation_initiator",  # gated inside _conversation_check
-                    "*/5 * * * *",  # every 5 minutes
-                    _conversation_check,
-                )
-
-            log.info("subsystem_initialised", name="conversation_initiator")
-        except Exception as exc:
-            log.warning("conversation_initiator_init_failed", error=str(exc))
-
-        # EnvironmentSensor
-        try:
-            from rune.proactive.sensor import EnvironmentSensor
-
-            workspace = os.environ.get("RUNE_WORKSPACE", os.getcwd())
-            self._environment_sensor = EnvironmentSensor(workspace_root=workspace)
-            await self._environment_sensor.start()
-
-            # Forward sensor events to the proactive engine as suggestions
-            async def _on_sensor_event(event: Any) -> None:
-                try:
-                    from rune.proactive.types import Suggestion
-
-                    suggestion = Suggestion(
-                        type="insight",
-                        title=f"Environment: {event.type}",
-                        description=str(event.data),
-                        confidence=0.3,
-                        source="environment_sensor",
-                    )
-                    engine.add_suggestion(suggestion)
-                except Exception as exc:
-                    log.debug("sensor_event_forward_failed", error=str(exc))
-
-            self._environment_sensor.on("sensor_event", _on_sensor_event)
-            log.info("subsystem_initialised", name="environment_sensor", workspace=workspace)
-        except Exception as exc:
-            log.warning("environment_sensor_init_failed", error=str(exc))
 
         # Connect proactive execution and feedback.
         try:
@@ -982,24 +900,15 @@ class RuneDaemon:
                 from rune.daemon.heartbeat_checker import (
                     create_default_heartbeat,
                     run_heartbeat_checks,
+                    to_tell,
                 )
                 create_default_heartbeat()
+                failing: set[str] = set()
 
                 async def _heartbeat_md_check() -> None:
-                    results = await run_heartbeat_checks()
-                    for r in results:
-                        if r["needs_attention"]:
-                            log.info(
-                                "heartbeat_alert",
-                                item=r["item"][:80],
-                                output=r["output"][:200],
-                            )
-                            # Broadcast to connected channels
-                            try:
-                                msg = f"⚡ {r['item']}\n{r['output'][:300]}"
-                                await self._broadcast_notification(msg)
-                            except Exception:
-                                pass
+                    for r in to_tell(await run_heartbeat_checks(), failing):
+                        log.info("heartbeat_alert", item=r["item"][:80], output=r["output"][:200])
+                        await self._tell_owner(r["item"], r["output"][:300])
 
                 self._heartbeat_scheduler.add_task(
                     "heartbeat_md_checker",
@@ -1027,16 +936,19 @@ class RuneDaemon:
         # Start a simple file-based heartbeat indicator
         self._heartbeat_task = asyncio.create_task(self._heartbeat_file_loop())
 
-    async def _broadcast_notification(self, message: str) -> None:
-        """Deliver a notification through the gateway singleton, best-effort."""
-        try:
-            from rune.daemon.gateway import get_gateway
+    async def _tell_owner(self, title: str, body: str) -> None:
+        """A check's result for the owner, sent as a scheduled job's is: to their chat app, or kept in
+        the app's "From RUNE" conversation when none reaches them (rune.daemon.gateway)."""
+        from rune.daemon.gateway import GatewayNotification, get_gateway
 
-            gateway = get_gateway()
-            if gateway is not None:
-                await gateway.broadcast_text(message)
+        gateway = get_gateway()
+        if gateway is None:
+            log.warning("owner_not_told", title=title[:80], reason="the channel gateway is not running")
+            return
+        try:
+            await gateway.route_notification(GatewayNotification(title=title, body=body, source="cron"))
         except Exception as exc:
-            log.debug("notification_broadcast_failed", error=str(exc)[:120])
+            log.warning("owner_not_told", title=title[:80], error=str(exc)[:200])
 
     async def _skill_eval_tick(self) -> None:
         """Start an opt-in skill evaluation task without blocking or overlapping prior work."""
@@ -1209,8 +1121,6 @@ class RuneDaemon:
                 "pattern_learner": self._pattern_learner is not None,
                 "proactive_engine": self._proactive_engine is not None,
                 "engagement_tracker": self._engagement_tracker is not None,
-                "conversation_initiator": self._conversation_initiator is not None,
-                "environment_sensor": self._environment_sensor is not None,
                 "mcp_bridge": self._mcp_bridge is not None,
                 "autonomous_executor": self._autonomous_executor is not None,
                 "channel_adapters": self._channel_registry is not None,
