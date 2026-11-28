@@ -633,6 +633,8 @@ a:focus-visible,
 .md-p { margin: 8px 0; line-height: 1.7; }
 .md-p:first-child { margin-top: 0; }
 .md-p:last-child { margin-bottom: 0; }
+/* The accent is close to the text's own color: a link in a message is told by its underline. */
+:is(.md-p, .md-list, .md-quote, .md-table, .md-h) a { text-decoration: underline; text-underline-offset: 2px; }
 .md-h { margin: 18px 0 8px; color: var(--text-primary); line-height: 1.35; }
 .md-h:first-child { margin-top: 2px; }
 .md-hr {
