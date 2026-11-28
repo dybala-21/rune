@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('rune', {
   },
   browserLayout: payload => ipcRenderer.invoke('rune:browser-layout', payload),
   retryConnection: () => ipcRenderer.invoke('rune:retry-backend'),
+  setUnread: count => ipcRenderer.send('rune:unread', count),
   onResume: callback => {
     const listener = () => callback();
     ipcRenderer.on('rune:resume', listener);

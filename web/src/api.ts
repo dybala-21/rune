@@ -218,7 +218,7 @@ export interface ComputerState {
 
 declare global {
   interface Window {
-    rune?: { desktop: boolean; onResume?: (callback: () => void) => () => void;
+    rune?: { desktop: boolean; onResume?: (callback: () => void) => () => void; setUnread?: (count: number) => void;
       browserLayout?: (value: { sessionId: string; bounds: { x: number; y: number; width: number; height: number } } | null) => Promise<boolean> };
   }
 }

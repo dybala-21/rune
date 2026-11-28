@@ -5,6 +5,7 @@ import { mergeConversationList, rememberLiveConversation, type ConversationListI
 import type { AgentState } from '../types';
 import './SessionSidebar.css';
 import { fetchSessions, getLiveSessionId } from '../api';
+import { INBOX_ID, inboxMessages as countInbox, loadSeen, markSeen, unread } from '../utils/unread';
 
 interface SessionSidebarProps {
   currentSessionId: string | null;
@@ -22,6 +23,8 @@ interface SessionSidebarProps {
   onOpenSchedule?: () => void;
   onSelectTask?: (id: string) => void;
   taskSelectionDisabled?: boolean;
+  /** How many messages "From RUNE" holds, each time the list is read. */
+  onInboxMessages?: (messages: number | undefined) => void;
 }
 
 type DateGroup = 'Today' | 'Yesterday' | 'Previous 7 days' | 'Earlier';
@@ -48,16 +51,18 @@ function dateLabel(iso: string): string {
 
 export function SessionSidebar({ currentSessionId, onSelectSession, onNewChat, newChatDisabled, newChatDisabledReason,
   liveTitle, liveState = 'idle', liveMessageCount, liveUpdatedAt, retainLive = true, suggestionCount = 0, onOpenSuggestions,
-  onOpenSchedule, onSelectTask, taskSelectionDisabled }: SessionSidebarProps) {
+  onOpenSchedule, onSelectTask, taskSelectionDisabled, onInboxMessages }: SessionSidebarProps) {
   const [search, setSearch] = useState('');
   const [list, setList] = useState(emptySessionList);
   const [loader] = useState(() => new SessionListLoader(fetchSessions, setList));
   const [recentLive, setRecentLive] = useState<ConversationListItem[]>([]);
+  const [seen, setSeen] = useState(() => loadSeen());
   const newChatHintId = useId();
   const { sessions, loading, loadingMore, hasMore, error } = list;
   const liveSessionId = getLiveSessionId();
   const liveCreatedAt = useMemo(() => Date.now(), [liveSessionId]);
   const persistedLive = sessions.find(session => session.id === liveSessionId);
+  const inboxMessages = countInbox(sessions, loading, !!search.trim());
   const live = useMemo<ConversationListItem>(() => ({
     id: liveSessionId,
     title: liveTitle?.trim() || persistedLive?.title || 'New chat',
@@ -76,6 +81,22 @@ export function SessionSidebar({ currentSessionId, onSelectSession, onNewChat, n
   useEffect(() => {
     setRecentLive(previous => rememberLiveConversation(previous, live, retainLive));
   }, [live, retainLive]);
+
+  useEffect(() => {
+    // Open, it is being read: what arrives while it is open is not new. A count of 0 is "not on the
+    // list's first page", not "read up to 0".
+    if (currentSessionId === INBOX_ID && inboxMessages) {
+      setSeen(previous => markSeen(previous, INBOX_ID, inboxMessages));
+    }
+  }, [currentSessionId, inboxMessages]);
+
+  useEffect(() => { onInboxMessages?.(inboxMessages); }, [onInboxMessages, inboxMessages]);
+  useEffect(() => {
+    // The desktop app shows what is new in "From RUNE" on its dock icon too (desktop/main.js); kept
+    // as it was while the list loads or is searched.
+    if (inboxMessages === undefined) return;
+    window.rune?.setUnread?.(currentSessionId === INBOX_ID ? 0 : unread(seen, INBOX_ID, inboxMessages));
+  }, [currentSessionId, seen, inboxMessages]);
 
   useEffect(() => {
     // Refresh on chat changes, not streaming text.
@@ -117,12 +138,14 @@ export function SessionSidebar({ currentSessionId, onSelectSession, onNewChat, n
           {items.map(session => {
             const isLive = session.id === liveSessionId;
             const selected = isLive ? currentSessionId === null : currentSessionId === session.id;
+            const fresh = selected ? 0 : unread(seen, session.id, session.turnCount);
             return <button type="button" className="session-item" key={session.id}
-              aria-current={selected ? 'page' : undefined}
+              aria-current={selected ? 'page' : undefined} data-unread={fresh || undefined}
               onClick={() => onSelectSession(isLive ? null : session.id)} title={`${session.title || 'Untitled chat'} · ${session.turnCount} messages · ${dateLabel(session.updatedAt)}`}>
               <span className="session-title">{session.title || 'Untitled chat'}</span>
               <span className={`session-meta${isLive && liveState !== 'idle' ? '' : ' session-meta--quiet'}`}>
                 {isLive ? <span className="session-live-status" data-active={liveState !== 'idle' || undefined}>{LIVE_STATUS[liveState]}</span>
+                  : fresh ? <span className="session-unread">{fresh} new</span>
                   : <span>{session.turnCount} {session.turnCount === 1 ? 'message' : 'messages'}</span>}
                 <time dateTime={session.updatedAt}>{dateLabel(session.updatedAt)}</time>
               </span>

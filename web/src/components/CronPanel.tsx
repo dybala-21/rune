@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { InboxNoticeSwitch } from './InboxNoticeSwitch';
 import {
   fetchCronJobs,
   createCronJob,
@@ -251,6 +252,7 @@ export function CronPanel({ onClose }: CronPanelProps) {
             {heartbeatActive ? 'Scheduler connected' : 'Runs while Rune is running'}
           </span>
           <div style={{ flex: 1 }} />
+          <InboxNoticeSwitch buttonStyle={secondaryButtonStyle} />
           <button
             onClick={() => loadJobs()}
             disabled={loading}

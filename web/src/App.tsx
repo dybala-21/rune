@@ -4,6 +4,10 @@ import { toast } from './utils/toast';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAgent } from './hooks/useAgent';
 import { useSessionHistory } from './hooks/useSessionHistory';
+import { useInboxNotice } from './hooks/useInboxNotice';
+import { InboxNoticeSwitch } from './components/InboxNoticeSwitch';
+import { INBOX_ID } from './utils/unread';
+import { INBOX_TITLE } from './utils/inboxNotice';
 import { ChatPanel } from './components/ChatPanel';
 import { SessionSidebar } from './components/SessionSidebar';
 import { SettingsSidebar } from './components/SettingsSidebar';
@@ -112,6 +116,8 @@ export function App() {
   useEffect(() => { setCurrentWorkspacePath(null); }, [liveWorkbench.sessionId]);
 
   const isViewingHistory = history.viewingSessionId !== null;
+  const viewingInbox = history.viewingSessionId === INBOX_ID;
+  const [inboxMessages, setInboxMessages] = useState<number>();
   const openComputer = useCallback(() => {
     if (isViewingHistory) return;
     setComputerRequest(value => value + 1);
@@ -253,6 +259,13 @@ export function App() {
     if (window.matchMedia('(max-width: 820px)').matches) setSidebarOpen(false);
   };
 
+  useInboxNotice(inboxMessages, viewingInbox, () => handleSelectSession(INBOX_ID));
+  const refreshHistory = history.refresh;
+  useEffect(() => {
+    // What RUNE wrote in "From RUNE" while it is open shows there once the chat list counts it.
+    if (inboxMessages !== undefined) void refreshHistory(INBOX_ID, inboxMessages);
+  }, [refreshHistory, inboxMessages]);
+
   const startNewChat = () => {
     if (newChatBlockedReason) { toast.info(newChatBlockedReason); return; }
     if (!agent.resetLiveConversation()) return;
@@ -386,6 +399,7 @@ export function App() {
                 onOpenSuggestions={openSuggestions}
                 onOpenSchedule={() => setCronPanelOpen(true)}
                 taskSelectionDisabled={agent.state !== 'idle' || agent.loadingConversation}
+                onInboxMessages={setInboxMessages}
                 onSelectTask={id => {
                   inputAreaRef.current?.setDraft(`Continue saved task ${id}.`);
                   if (compact) setSidebarOpen(false);
@@ -404,7 +418,8 @@ export function App() {
           position: 'relative',
         }}>
           {isViewingHistory && <header className="conversation-heading">
-            <h1 title={taskTitle}>{history.loading ? 'Opening chat…' : taskTitle || 'Saved chat'}</h1>
+            <h1 title={taskTitle}>{history.loading ? 'Opening chat…' : viewingInbox ? INBOX_TITLE : taskTitle || 'Saved chat'}</h1>
+            {viewingInbox && <InboxNoticeSwitch />}
             {['queued', 'running', 'waiting_input', 'waiting_approval'].includes(history.historyState?.run?.status ?? '') && <button type="button"
               disabled={!agent.connected || history.loading || agent.loadingConversation || agent.state !== 'idle' || agent.savedDraft.available}
               onClick={() => { void continueHistory().catch(error => toast.error(error instanceof Error ? error.message : 'Could not open this task.')); }}>
@@ -547,6 +562,7 @@ export function App() {
                 onOpenSettings={openSettings}
                 conversationKey={history.viewingSessionId ?? getLiveSessionId()}
                 historical={isViewingHistory}
+                openAtLatest={viewingInbox}
                 messages={displayMessages}
                 toolCalls={displayToolCalls}
                 thinkingBlocks={displayThinkingBlocks}
